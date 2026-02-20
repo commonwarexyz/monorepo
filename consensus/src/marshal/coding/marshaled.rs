@@ -132,7 +132,7 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -165,7 +165,7 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -292,7 +292,7 @@ where
     /// extract its embedded context.
     fn deferred_verify(
         &mut self,
-        context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
@@ -305,15 +305,18 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("deferred_verify")
-            .with_attribute("round", context.round)
+            .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                let round = context.round;
+                let round = consensus_context.round;
 
                 // Fetch parent block
-                let (parent_view, parent_commitment) = context.parent;
+                let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    Some(Round::new(context.epoch(), parent_view)),
+                    // We are guaranteed that the parent round for any `consensus_context` is
+                    // in the same epoch (recall, the boundary block of the previous epoch
+                    // is the genesis block of the current epoch).
+                    Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                     cached_genesis,
@@ -372,7 +375,7 @@ where
                     &epocher,
                     &block,
                     &parent,
-                    &context,
+                    &consensus_context,
                     commitment,
                     parent_commitment,
                 ) {
@@ -397,7 +400,10 @@ where
                     [block.clone().into_inner(), parent.into_inner()],
                 );
                 let validity_request = application.verify(
-                    (runtime_context.with_label("app_verify"), context.clone()),
+                    (
+                        runtime_context.with_label("app_verify"),
+                        consensus_context.clone(),
+                    ),
                     ancestry_stream,
                 );
 
@@ -517,6 +523,9 @@ where
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
+                    // We are guaranteed that the parent round for any `consensus_context` is
+                    // in the same epoch (recall, the boundary block of the previous epoch
+                    // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -629,12 +638,12 @@ where
     /// start block verification early (hidden behind shard validity and network latency).
     async fn verify(
         &mut self,
-        context: Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
-        let Some(scheme) = self.scheme_provider.scoped(context.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
             let (_, rx) = oneshot::channel();
             return rx;
         };
@@ -642,28 +651,28 @@ where
         let n_participants =
             u16::try_from(scheme.participants().len()).expect("too many participants");
         let coding_config = coding_config_for_participants(n_participants);
-        let is_reproposal = payload == context.parent.1;
+        let is_reproposal = payload == consensus_context.parent.1;
 
         // Validate proposal-level invariants:
         // - coding config must match active participant set
         // - context hash must match unless this is a re-proposal
-        let proposal_context = (!is_reproposal).then_some(&context);
+        let proposal_context = (!is_reproposal).then_some(&consensus_context);
         if let Err(err) = validate_coded_proposal::<H, _>(payload, coding_config, proposal_context)
         {
             match err {
                 CodedProposalValidationError::CodingConfig => {
                     warn!(
-                        round = %context.round,
+                        round = %consensus_context.round,
                         got = ?payload.config(),
                         expected = ?coding_config,
                         "rejected proposal with unexpected coding configuration"
                     );
                 }
                 CodedProposalValidationError::ContextHash => {
-                    let expected = hash_context::<H, _>(&context);
+                    let expected = hash_context::<H, _>(&consensus_context);
                     let got = payload.context::<H::Digest>();
                     warn!(
-                        round = %context.round,
+                        round = %consensus_context.round,
                         expected = ?expected,
                         got = ?got,
                         "rejected proposal with mismatched context digest"
@@ -689,11 +698,11 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(Some(context.round), payload)
+                .subscribe_by_commitment(Some(consensus_context.round), payload)
                 .await;
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
-            let round = context.round;
+            let round = consensus_context.round;
             let verification_tasks = self.verification_tasks.clone();
 
             // Register a verification task synchronously before spawning work so
@@ -749,13 +758,17 @@ where
 
         // Inform the shard engine of an externally proposed commitment.
         self.shards
-            .discovered(payload, context.leader.clone(), context.round)
+            .discovered(
+                payload,
+                consensus_context.leader.clone(),
+                consensus_context.round,
+            )
             .await;
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
-        let round = context.round;
-        let task = self.deferred_verify(context, payload, None);
+        let round = consensus_context.round;
+        let task = self.deferred_verify(consensus_context, payload, None);
         self.verification_tasks.insert(round, payload, task);
 
         match scheme.me() {
@@ -977,6 +990,9 @@ where
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
 /// the parent block's availability.
 ///
+/// `parent_round` is an optional resolver hint. Callers should only provide a hint when
+/// the source context is trusted/validated. Untrusted paths should pass `None`.
+///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]
 async fn fetch_parent<E, S, A, B, C, H>(
@@ -990,7 +1006,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
     A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
 {

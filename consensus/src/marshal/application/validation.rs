@@ -7,7 +7,7 @@
 use crate::{
     marshal::coding::types::hash_context,
     types::{coding::Commitment, Epoch, Epocher, Height, Round},
-    CertifiableBlock, Epochable,
+    Block, CertifiableBlock, Epochable,
 };
 use commonware_codec::{EncodeSize, Write};
 use commonware_coding::Config as CodingConfig;
@@ -157,7 +157,7 @@ pub(crate) fn validate_standard_block_for_verification<B>(
     parent_digest: B::Digest,
 ) -> Result<(), StandardBlockVerificationError>
 where
-    B: CertifiableBlock,
+    B: Block,
 {
     if block.parent() != parent.digest() {
         return Err(StandardBlockVerificationError::ParentDigest);
@@ -378,6 +378,65 @@ mod tests {
             parent_commitment,
             config,
         }
+    }
+
+    #[test]
+    fn test_validate_coded_block_for_verification_ok() {
+        // Baseline fixture is internally consistent and should pass all checks.
+        let fixture = baseline_fixture();
+        assert_eq!(
+            validate_coded_block_for_verification::<Sha256, _, _>(
+                &fixture.epocher,
+                &fixture.block,
+                &fixture.parent,
+                &fixture.context,
+                fixture.commitment,
+                fixture.parent_commitment,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_standard_block_for_verification_ok() {
+        // Baseline fixture has contiguous height and matching parent digest.
+        let fixture = baseline_fixture();
+        assert_eq!(
+            validate_standard_block_for_verification(
+                &fixture.block,
+                &fixture.parent,
+                fixture.parent.digest(),
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_coded_proposal_ok() {
+        // Baseline fixture commitment carries the expected coding config/context hash.
+        let fixture = baseline_fixture();
+        assert_eq!(
+            validate_coded_proposal::<Sha256, _>(
+                fixture.commitment,
+                fixture.config,
+                Some(&fixture.context)
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_reconstruction_ok() {
+        // Baseline fixture commitment and block context are consistent.
+        let fixture = baseline_fixture();
+        assert_eq!(
+            validate_reconstruction::<Sha256, _>(
+                &fixture.block,
+                fixture.config,
+                fixture.commitment
+            ),
+            Ok(())
+        );
     }
 
     #[test]

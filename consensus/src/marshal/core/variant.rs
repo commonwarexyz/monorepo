@@ -12,7 +12,7 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
-use crate::{types::Round, CertifiableBlock};
+use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::channel::oneshot;
@@ -23,17 +23,17 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
-    type Block: CertifiableBlock<Digest = <Self::ApplicationBlock as Digestible>::Digest>
+    type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>
         + Clone;
 
     /// The application block type.
-    type ApplicationBlock: CertifiableBlock + Clone;
+    type ApplicationBlock: Block + Clone;
 
     /// The type of block stored in the archive.
     ///
     /// Must be convertible back to the working block type via `Into`.
-    type StoredBlock: CertifiableBlock<Digest = <Self::Block as Digestible>::Digest>
+    type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
         + Clone
         + Codec<Cfg = <Self::Block as Read>::Cfg>;
@@ -44,10 +44,20 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Computes the consensus commitment for a block.
     ///
     /// The commitment is what validators sign over during consensus.
+    ///
+    /// Together with [`Variant::commitment_to_inner`], implementations must satisfy:
+    /// `commitment_to_inner(commitment(block)) == block.digest()`.
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.
+    ///
+    /// For blocks/certificates accepted by marshal in this variant instance, the digest
+    /// must uniquely determine the commitment. In other words, there should not be two accepted
+    /// commitments with the same inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
+
+    /// Returns the parent commitment referenced by `block`.
+    fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Converts a working block to an application block.
     ///

@@ -1426,6 +1426,92 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_certify_propagates_application_verify_failure() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // 1) Set up a single validator marshal stack.
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            // 2) Force application verification to fail in deferred verification.
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::with_verify_result(genesis.clone(), false);
+
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_context = CodingCtx {
+                round: parent_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            // 3) Publish a valid child so optimistic verify can succeed.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = CodingCtx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_commitment),
+            };
+            let block =
+                make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.clone().proposed(round, coded_block).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let optimistic = marshaled.verify(verify_context, commitment).await;
+            assert!(
+                optimistic.await.expect("verify result missing"),
+                "optimistic verify should pass pre-checks and schedule deferred verification"
+            );
+
+            // 4) Certify must observe the deferred application failure and return false.
+            let certify = marshaled.certify(round, commitment).await;
+            assert!(
+                !certify.await.expect("certify result missing"),
+                "certify should propagate deferred application verify failure"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
         // Regression: when backfilling by Request::Block(digest), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
@@ -1514,7 +1600,8 @@ mod tests {
             // Report finalization to v0. v0 doesn't have the block:
             //   - it fetches Request::Block(digest)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
-            //   - deliver path must reject because cached finalization expects commitment_a
+            //   - finalization lookup is digest-indexed, so deliver path must still
+            //     reject because cached finalization expects commitment_a
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.

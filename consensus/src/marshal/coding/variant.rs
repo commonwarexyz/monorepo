@@ -6,6 +6,7 @@ use crate::{
         },
         core::{Buffer, Variant},
     },
+    simplex::types::Context,
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
@@ -19,22 +20,38 @@ use std::sync::Arc;
 /// This variant distributes blocks as erasure-coded shards, allowing reconstruction
 /// from a subset of shards. This reduces bandwidth requirements for block propagation.
 #[derive(Default, Clone, Copy)]
-pub struct Coding<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey>(
-    std::marker::PhantomData<(B, C, H, P)>,
-);
+pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
+where
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey;
 
-impl<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey> Variant for Coding<B, C, H, P> {
+impl<B, C, H, P> Variant for Coding<B, C, H, P>
+where
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C, H>;
     type StoredBlock = StoredCodedBlock<B, C, H>;
     type Commitment = Commitment;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
+        // Commitment is deterministic from the coded block contents.
         block.commitment()
     }
 
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
+        // The inner digest is embedded in the coding commitment.
         commitment.block()
+    }
+
+    fn parent_commitment(block: &Self::Block) -> Self::Commitment {
+        // Parent commitment is embedded in the consensus context.
+        block.context().parent.1
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
@@ -44,7 +61,7 @@ impl<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey> Variant for 
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,

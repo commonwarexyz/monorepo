@@ -695,12 +695,17 @@ pub use commonware_utils::Participant;
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
+        //! Types and utilities for working with [`Commitment`]s.
+
         use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
-        use commonware_utils::{Array, Span};
-        use core::ops::{Deref, Range};
+        use commonware_utils::{Array, Span, NZU16};
+        use core::{
+            num::NonZeroU16,
+            ops::{Deref, Range},
+        };
         use rand_core::CryptoRngCore;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
@@ -768,7 +773,17 @@ commonware_macros::stability_scope!(ALPHA {
         impl Random for Commitment {
             fn random(mut rng: impl CryptoRngCore) -> Self {
                 let mut buf = [0u8; Self::SIZE];
-                rng.fill_bytes(&mut buf);
+                rng.fill_bytes(&mut buf[..Self::CONFIG_OFFSET]);
+
+                let one = NZU16!(1);
+                let shards = rng.next_u32();
+                let config = CodingConfig {
+                    minimum_shards: NonZeroU16::new(shards as u16).unwrap_or(one),
+                    extra_shards: NonZeroU16::new((shards >> 16) as u16).unwrap_or(one),
+                };
+                let mut cfg_buf = &mut buf[Self::CONFIG_OFFSET..];
+                config.write(&mut cfg_buf);
+
                 Self(buf)
             }
         }

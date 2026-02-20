@@ -8,8 +8,10 @@
 //! # Components
 //!
 //! - [`Standard`]: The variant marker type that configures marshal for full-block broadcast.
-//! - [`Marshaled`]: Wraps an [`crate::Application`] implementation to enforce epoch boundaries
-//!   and coordinate with the marshal actor.
+//! - [`Deferred`]: Deferred-verification wrapper that enforces epoch boundaries and
+//!   coordinates with the marshal actor.
+//! - [`Inline`]: Inline-verification wrapper for applications whose blocks do not
+//!   implement [`crate::CertifiableBlock`].
 //!
 //! # Usage
 //!
@@ -24,8 +26,13 @@
 //! and want to avoid encoding / decoding overhead.
 
 commonware_macros::stability_scope!(ALPHA {
-    mod marshaled;
-    pub use marshaled::Marshaled;
+    mod deferred;
+    pub use deferred::Deferred;
+
+    mod inline;
+    pub use inline::Inline;
+
+    mod verification;
 });
 
 mod variant;
@@ -33,20 +40,21 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
+    use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
+            core::Mailbox,
             mocks::{
                 harness::{
-                    self, default_leader, make_raw_block, setup_network, Ctx, StandardHarness,
-                    TestHarness, B, BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, S,
-                    UNRELIABLE_LINK, V,
+                    self, default_leader, make_raw_block, setup_network, Ctx, DeferredHarness,
+                    InlineHarness, StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK,
+                    NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
-            standard::Marshaled,
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-        types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
+        types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
     use commonware_cryptography::{
@@ -54,743 +62,668 @@ mod tests {
         sha256::Sha256,
         Digestible, Hasher as _,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::channel::oneshot;
     use std::time::Duration;
+
+    fn assert_finalize_deterministic<H: TestHarness>(
+        seed: u64,
+        link: commonware_p2p::simulated::Link,
+        quorum_sees_finalization: bool,
+    ) {
+        let r1 = harness::finalize::<H>(seed, link.clone(), quorum_sees_finalization);
+        let r2 = harness::finalize::<H>(seed, link, quorum_sees_finalization);
+        assert_eq!(r1, r2);
+    }
+
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links() {
         for seed in 0..5 {
-            let r1 = harness::finalize::<StandardHarness>(seed, LINK, false);
-            let r2 = harness::finalize::<StandardHarness>(seed, LINK, false);
-            assert_eq!(r1, r2);
+            assert_finalize_deterministic::<InlineHarness>(seed, LINK, false);
+            assert_finalize_deterministic::<DeferredHarness>(seed, LINK, false);
         }
     }
 
     #[test_traced("WARN")]
     fn test_standard_finalize_bad_links() {
         for seed in 0..5 {
-            let r1 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, false);
-            let r2 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, false);
-            assert_eq!(r1, r2);
+            assert_finalize_deterministic::<InlineHarness>(seed, UNRELIABLE_LINK, false);
+            assert_finalize_deterministic::<DeferredHarness>(seed, UNRELIABLE_LINK, false);
         }
     }
 
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links_quorum_sees_finalization() {
         for seed in 0..5 {
-            let r1 = harness::finalize::<StandardHarness>(seed, LINK, true);
-            let r2 = harness::finalize::<StandardHarness>(seed, LINK, true);
-            assert_eq!(r1, r2);
+            assert_finalize_deterministic::<InlineHarness>(seed, LINK, true);
+            assert_finalize_deterministic::<DeferredHarness>(seed, LINK, true);
         }
     }
 
     #[test_traced("WARN")]
     fn test_standard_finalize_bad_links_quorum_sees_finalization() {
         for seed in 0..5 {
-            let r1 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, true);
-            let r2 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, true);
-            assert_eq!(r1, r2);
+            assert_finalize_deterministic::<InlineHarness>(seed, UNRELIABLE_LINK, true);
+            assert_finalize_deterministic::<DeferredHarness>(seed, UNRELIABLE_LINK, true);
         }
     }
 
     #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog() {
-        harness::ack_pipeline_backlog::<StandardHarness>();
+        harness::ack_pipeline_backlog::<InlineHarness>();
+        harness::ack_pipeline_backlog::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog_persists_on_restart() {
-        harness::ack_pipeline_backlog_persists_on_restart::<StandardHarness>();
+        harness::ack_pipeline_backlog_persists_on_restart::<InlineHarness>();
+        harness::ack_pipeline_backlog_persists_on_restart::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_sync_height_floor() {
-        harness::sync_height_floor::<StandardHarness>();
+        harness::sync_height_floor::<InlineHarness>();
+        harness::sync_height_floor::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_reject_stale_block_delivery_after_floor_update() {
-        harness::reject_stale_block_delivery_after_floor_update::<StandardHarness>();
+        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_prune_finalized_archives() {
-        harness::prune_finalized_archives::<StandardHarness>();
+        harness::prune_finalized_archives::<InlineHarness>();
+        harness::prune_finalized_archives::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_subscribe_basic_block_delivery() {
-        harness::subscribe_basic_block_delivery::<StandardHarness>();
+        harness::subscribe_basic_block_delivery::<InlineHarness>();
+        harness::subscribe_basic_block_delivery::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_subscribe_multiple_subscriptions() {
-        harness::subscribe_multiple_subscriptions::<StandardHarness>();
+        harness::subscribe_multiple_subscriptions::<InlineHarness>();
+        harness::subscribe_multiple_subscriptions::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_subscribe_canceled_subscriptions() {
-        harness::subscribe_canceled_subscriptions::<StandardHarness>();
+        harness::subscribe_canceled_subscriptions::<InlineHarness>();
+        harness::subscribe_canceled_subscriptions::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_subscribe_blocks_from_different_sources() {
-        harness::subscribe_blocks_from_different_sources::<StandardHarness>();
+        harness::subscribe_blocks_from_different_sources::<InlineHarness>();
+        harness::subscribe_blocks_from_different_sources::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_get_info_basic_queries_present_and_missing() {
-        harness::get_info_basic_queries_present_and_missing::<StandardHarness>();
+        harness::get_info_basic_queries_present_and_missing::<InlineHarness>();
+        harness::get_info_basic_queries_present_and_missing::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_get_info_latest_progression_multiple_finalizations() {
-        harness::get_info_latest_progression_multiple_finalizations::<StandardHarness>();
+        harness::get_info_latest_progression_multiple_finalizations::<InlineHarness>();
+        harness::get_info_latest_progression_multiple_finalizations::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_get_block_by_height_and_latest() {
-        harness::get_block_by_height_and_latest::<StandardHarness>();
+        harness::get_block_by_height_and_latest::<InlineHarness>();
+        harness::get_block_by_height_and_latest::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_get_block_by_commitment_from_sources_and_missing() {
-        harness::get_block_by_commitment_from_sources_and_missing::<StandardHarness>();
+        harness::get_block_by_commitment_from_sources_and_missing::<InlineHarness>();
+        harness::get_block_by_commitment_from_sources_and_missing::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_get_finalization_by_height() {
-        harness::get_finalization_by_height::<StandardHarness>();
+        harness::get_finalization_by_height::<InlineHarness>();
+        harness::get_finalization_by_height::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_hint_finalized_triggers_fetch() {
-        harness::hint_finalized_triggers_fetch::<StandardHarness>();
+        harness::hint_finalized_triggers_fetch::<InlineHarness>();
+        harness::hint_finalized_triggers_fetch::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_ancestry_stream() {
-        harness::ancestry_stream::<StandardHarness>();
+        harness::ancestry_stream::<InlineHarness>();
+        harness::ancestry_stream::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_finalize_same_height_different_views() {
-        harness::finalize_same_height_different_views::<StandardHarness>();
+        harness::finalize_same_height_different_views::<InlineHarness>();
+        harness::finalize_same_height_different_views::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_init_processed_height() {
-        harness::init_processed_height::<StandardHarness>();
+        harness::init_processed_height::<InlineHarness>();
+        harness::init_processed_height::<DeferredHarness>();
     }
 
     #[test_traced("INFO")]
     fn test_standard_broadcast_caches_block() {
-        harness::broadcast_caches_block::<StandardHarness>();
+        harness::broadcast_caches_block::<InlineHarness>();
+        harness::broadcast_caches_block::<DeferredHarness>();
     }
 
     #[test_traced("INFO")]
     fn test_standard_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<StandardHarness>();
+        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
-    #[test_traced("INFO")]
-    fn test_certify_lower_view_after_higher_view() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum WrapperKind {
+        Inline,
+        Deferred,
+    }
 
-            let me = participants[0].clone();
+    fn wrapper_kinds() -> [WrapperKind; 2] {
+        [WrapperKind::Inline, WrapperKind::Deferred]
+    }
 
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
+    type Runtime = deterministic::Context;
+    type App = MockVerifyingApp<B, S>;
+    type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher>;
+    type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher>;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+    enum Wrapper {
+        Inline(InlineWrapper),
+        Deferred(DeferredWrapper),
+    }
 
-            let mut marshaled = Marshaled::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            // Create parent block at height 1
-            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let parent_digest = parent.digest();
-            marshal
-                .clone()
-                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
-                .await;
-
-            // Block A at view 5 (height 2)
-            let round_a = Round::new(Epoch::new(0), View::new(5));
-            let context_a = Ctx {
-                round: round_a,
-                leader: me.clone(),
-                parent: (View::new(1), parent_digest),
-            };
-            let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
-            let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a.clone()).await;
-
-            // Block B at view 10 (height 2, different block same height)
-            let round_b = Round::new(Epoch::new(0), View::new(10));
-            let context_b = Ctx {
-                round: round_b,
-                leader: me.clone(),
-                parent: (View::new(1), parent_digest),
-            };
-            let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
-            let commitment_b = block_b.digest();
-            marshal.clone().proposed(round_b, block_b.clone()).await;
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Step 1: Verify block A at view 5
-            let _ = marshaled.verify(context_a, commitment_a).await.await;
-
-            // Step 2: Verify block B at view 10
-            let _ = marshaled.verify(context_b, commitment_b).await.await;
-
-            // Step 3: Certify block B at view 10 FIRST
-            let certify_b = marshaled.certify(round_b, commitment_b).await;
-            assert!(
-                certify_b.await.unwrap(),
-                "Block B certification should succeed"
-            );
-
-            // Step 4: Certify block A at view 5 - should succeed
-            let certify_a = marshaled.certify(round_a, commitment_a).await;
-
-            select! {
-                result = certify_a => {
-                    assert!(result.unwrap(), "Block A certification should succeed");
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("Block A certification timed out");
-                },
+    impl Wrapper {
+        fn new(
+            kind: WrapperKind,
+            context: Runtime,
+            app: App,
+            marshal: Mailbox<S, Standard<B>>,
+        ) -> Self {
+            match kind {
+                WrapperKind::Inline => Self::Inline(Inline::new(
+                    context,
+                    app,
+                    marshal,
+                    FixedEpocher::new(BLOCKS_PER_EPOCH),
+                )),
+                WrapperKind::Deferred => Self::Deferred(Deferred::new(
+                    context,
+                    app,
+                    marshal,
+                    FixedEpocher::new(BLOCKS_PER_EPOCH),
+                )),
             }
-        })
+        }
+
+        fn kind(&self) -> WrapperKind {
+            match self {
+                Self::Inline(_) => WrapperKind::Inline,
+                Self::Deferred(_) => WrapperKind::Deferred,
+            }
+        }
+
+        async fn propose(&mut self, context: Ctx) -> oneshot::Receiver<D> {
+            match self {
+                Self::Inline(inline) => inline.propose(context).await,
+                Self::Deferred(deferred) => deferred.propose(context).await,
+            }
+        }
+
+        async fn verify(&mut self, context: Ctx, digest: D) -> oneshot::Receiver<bool> {
+            match self {
+                Self::Inline(inline) => inline.verify(context, digest).await,
+                Self::Deferred(deferred) => deferred.verify(context, digest).await,
+            }
+        }
+
+        async fn certify(&mut self, round: Round, digest: D) -> oneshot::Receiver<bool> {
+            match self {
+                Self::Inline(inline) => inline.certify(round, digest).await,
+                Self::Deferred(deferred) => deferred.certify(round, digest).await,
+            }
+        }
     }
 
-    #[test_traced("INFO")]
-    fn test_marshaled_reproposal_validation() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+    #[test_traced("WARN")]
+    fn test_propose_paths() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let mut oracle = setup_network(context.clone(), None);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
 
-            let me = participants[0].clone();
+                let setup = StandardHarness::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
 
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-
-            let mut marshaled = Marshaled::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
-            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
-            let mut parent = genesis.digest();
-            let mut last_view = View::zero();
-            for i in 1..BLOCKS_PER_EPOCH.get() {
-                let round = Round::new(Epoch::new(0), View::new(i));
-                let ctx = Ctx {
-                    round,
+                // Non-boundary propose should drop the response because mock app cannot build.
+                let non_boundary_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(1)),
                     leader: me.clone(),
-                    parent: (last_view, parent),
+                    parent: (View::zero(), genesis.digest()),
                 };
-                let block = B::new::<Sha256>(ctx.clone(), parent, Height::new(i), i * 100);
-                marshal.clone().verified(round, block.clone()).await;
-                parent = block.digest();
-                last_view = View::new(i);
-            }
+                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                assert!(
+                    proposal_rx.await.is_err(),
+                    "{kind:?}: proposal should be dropped when application returns no block"
+                );
 
-            // Create the epoch boundary block (height 19, last block in epoch 0)
-            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
-            let boundary_context = Ctx {
-                round: boundary_round,
-                leader: me.clone(),
-                parent: (last_view, parent),
-            };
-            let boundary_block = B::new::<Sha256>(
-                boundary_context.clone(),
-                parent,
-                boundary_height,
-                boundary_height.get() * 100,
-            );
-            let boundary_commitment = boundary_block.digest();
-            marshal
-                .clone()
-                .verified(boundary_round, boundary_block.clone())
-                .await;
+                // Boundary propose should re-propose the parent block even if the app cannot build.
+                let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+                let boundary_block = B::new::<Sha256>(
+                    Ctx {
+                        round: boundary_round,
+                        leader: default_leader(),
+                        parent: (View::zero(), genesis.digest()),
+                    },
+                    genesis.digest(),
+                    boundary_height,
+                    1900,
+                );
+                let boundary_digest = boundary_block.digest();
+                marshal
+                    .clone()
+                    .proposed(boundary_round, boundary_block.clone())
+                    .await;
 
-            // Make the boundary block available for subscription
-            marshal
-                .clone()
-                .proposed(boundary_round, boundary_block.clone())
-                .await;
+                context.sleep(Duration::from_millis(10)).await;
 
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Test 1: Valid re-proposal at epoch boundary should be accepted
-            // Re-proposal context: parent commitment equals the block being verified
-            // Re-proposals happen within the same epoch when the parent is the last block
-            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
-            let reproposal_context = Ctx {
-                round: reproposal_round,
-                leader: me.clone(),
-                parent: (View::new(boundary_height.get()), boundary_commitment),
-            };
-
-            // Call verify (which calls optimistic_verify internally via Automaton trait)
-            let verify_result = marshaled
-                .verify(reproposal_context.clone(), boundary_commitment)
-                .await
-                .await;
-            assert!(
-                verify_result.unwrap(),
-                "Valid re-proposal at epoch boundary should be accepted"
-            );
-
-            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
-            // Create a block at height 10 (not at epoch boundary)
-            let non_boundary_height = Height::new(10);
-            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
-            let non_boundary_context = Ctx {
-                round: non_boundary_round,
-                leader: me.clone(),
-                parent: (View::new(9), parent),
-            };
-            let non_boundary_block = B::new::<Sha256>(
-                non_boundary_context.clone(),
-                parent,
-                non_boundary_height,
-                1000,
-            );
-            let non_boundary_commitment = non_boundary_block.digest();
-
-            // Make the non-boundary block available
-            marshal
-                .clone()
-                .proposed(non_boundary_round, non_boundary_block.clone())
-                .await;
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Attempt to re-propose the non-boundary block
-            let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
-            let invalid_reproposal_context = Ctx {
-                round: invalid_reproposal_round,
-                leader: me.clone(),
-                parent: (View::new(10), non_boundary_commitment),
-            };
-
-            let verify_result = marshaled
-                .verify(invalid_reproposal_context, non_boundary_commitment)
-                .await
-                .await;
-            assert!(
-                !verify_result.unwrap(),
-                "Invalid re-proposal (not at epoch boundary) should be rejected"
-            );
-
-            // Test 3: Re-proposal with mismatched epoch should be rejected
-            // This is a regression test - re-proposals must be in the same epoch as the block.
-            let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
-            let cross_epoch_reproposal_context = Ctx {
-                round: cross_epoch_reproposal_round,
-                leader: me.clone(),
-                parent: (View::new(boundary_height.get()), boundary_commitment),
-            };
-
-            let verify_result = marshaled
-                .verify(cross_epoch_reproposal_context, boundary_commitment)
-                .await
-                .await;
-            assert!(
-                !verify_result.unwrap(),
-                "Re-proposal with mismatched epoch should be rejected"
-            );
-
-            // Test 4: Certify-only path for re-proposal (no prior verify call)
-            // This tests the crash recovery scenario where a validator needs to certify
-            // a re-proposal without having called verify first.
-            let certify_only_round = Round::new(Epoch::new(0), View::new(21));
-            let certify_result = marshaled
-                .certify(certify_only_round, boundary_commitment)
-                .await
-                .await;
-            assert!(
-                certify_result.unwrap(),
-                "Certify-only path for re-proposal should succeed"
-            );
-        })
+                let reproposal_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(boundary_height.get() + 1)),
+                    leader: me,
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                let reproposal_rx = wrapper.propose(reproposal_context).await;
+                assert_eq!(
+                    reproposal_rx.await.expect("reproposal result missing"),
+                    boundary_digest,
+                    "{kind:?}: epoch-boundary proposal should re-propose parent digest"
+                );
+            });
+        }
     }
 
     #[test_traced("WARN")]
-    fn test_marshaled_rejects_unsupported_epoch() {
-        #[derive(Clone)]
-        struct LimitedEpocher {
-            inner: FixedEpocher,
-            max_epoch: u64,
-        }
+    fn test_verify_reproposal_validation() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let mut oracle = setup_network(context.clone(), None);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
 
-        impl Epocher for LimitedEpocher {
-            fn containing(&self, height: Height) -> Option<crate::types::EpochInfo> {
-                let bounds = self.inner.containing(height)?;
-                if bounds.epoch().get() > self.max_epoch {
-                    None
-                } else {
-                    Some(bounds)
-                }
-            }
-
-            fn first(&self, epoch: Epoch) -> Option<Height> {
-                if epoch.get() > self.max_epoch {
-                    None
-                } else {
-                    self.inner.first(epoch)
-                }
-            }
-
-            fn last(&self, epoch: Epoch) -> Option<Height> {
-                if epoch.get() > self.max_epoch {
-                    None
-                } else {
-                    self.inner.last(epoch)
-                }
-            }
-        }
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let me = participants[0].clone();
-
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-            let limited_epocher = LimitedEpocher {
-                inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                max_epoch: 0,
-            };
-
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
-
-            // Create a parent block at height 19 (last block in epoch 0, which is supported)
-            let parent_ctx = Ctx {
-                round: Round::new(Epoch::zero(), View::new(19)),
-                leader: default_leader(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let parent =
-                B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
-            let parent_digest = parent.digest();
-            marshal
-                .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
-                .await;
-
-            // Create a block at height 20 (first block in epoch 1, which is NOT supported)
-            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
-            let unsupported_context = Ctx {
-                round: unsupported_round,
-                leader: me.clone(),
-                parent: (View::new(19), parent_digest),
-            };
-            let block = B::new::<Sha256>(
-                unsupported_context.clone(),
-                parent_digest,
-                Height::new(20),
-                2000,
-            );
-            let block_commitment = block.digest();
-            marshal
-                .clone()
-                .proposed(unsupported_round, block.clone())
-                .await;
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Call verify and wait for the result (verify returns optimistic result,
-            // but also spawns deferred verification)
-            let verify_result = marshaled
-                .verify(unsupported_context, block_commitment)
-                .await;
-            // Wait for optimistic verify to complete so the verification task is registered
-            let optimistic_result = verify_result.await;
-
-            // The optimistic verify should return false because the block is in an unsupported epoch
-            assert!(
-                !optimistic_result.unwrap(),
-                "Optimistic verify should reject block in unsupported epoch"
-            );
-        })
-    }
-
-    #[test_traced("WARN")]
-    fn test_marshaled_rejects_invalid_ancestry() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let me = participants[0].clone();
-
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-
-            let mut marshaled = Marshaled::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            // Test case 1: Non-contiguous height
-            //
-            // We need both blocks in the same epoch.
-            // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
-            //
-            // Store honest parent at height 21 (epoch 1)
-            let honest_parent = make_raw_block(
-                genesis.digest(),
-                Height::new(BLOCKS_PER_EPOCH.get() + 1),
-                1000,
-            );
-            let parent_commitment = honest_parent.digest();
-            let parent_round = Round::new(Epoch::new(1), View::new(21));
-            marshal
-                .clone()
-                .verified(parent_round, honest_parent.clone())
-                .await;
-
-            // Byzantine proposer broadcasts malicious block at height 35
-            let malicious_block = make_raw_block(
-                parent_commitment,
-                Height::new(BLOCKS_PER_EPOCH.get() + 15),
-                2000,
-            );
-            let malicious_commitment = malicious_block.digest();
-            marshal
-                .clone()
-                .proposed(
-                    Round::new(Epoch::new(1), View::new(35)),
-                    malicious_block.clone(),
+                let setup = StandardHarness::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
                 )
                 .await;
+                let marshal = setup.mailbox;
 
-            // Small delay to ensure broadcast is processed
-            context.sleep(Duration::from_millis(10)).await;
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
-            // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 35
-            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
-            let byzantine_context = Ctx {
-                round: byzantine_round,
-                leader: me.clone(),
-                parent: (View::new(21), parent_commitment),
-            };
+                let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+                let boundary_block = B::new::<Sha256>(
+                    Ctx {
+                        round: boundary_round,
+                        leader: default_leader(),
+                        parent: (View::zero(), genesis.digest()),
+                    },
+                    genesis.digest(),
+                    boundary_height,
+                    1900,
+                );
+                let boundary_digest = boundary_block.digest();
+                marshal
+                    .clone()
+                    .proposed(boundary_round, boundary_block)
+                    .await;
 
-            // Marshaled.certify() should reject the malicious block
-            let _ = marshaled
-                .verify(byzantine_context, malicious_commitment)
-                .await
-                .await;
-            let verify = marshaled
-                .certify(byzantine_round, malicious_commitment)
-                .await;
+                context.sleep(Duration::from_millis(10)).await;
 
-            assert!(
-                !verify.await.unwrap(),
-                "Byzantine block with non-contiguous heights should be rejected"
-            );
+                // Valid re-proposal: boundary block in the same epoch.
+                let valid_reproposal_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(boundary_height.get() + 1)),
+                    leader: me.clone(),
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                assert!(
+                    wrapper
+                        .verify(valid_reproposal_context, boundary_digest)
+                        .await
+                        .await
+                        .expect("verify result missing"),
+                    "{kind:?}: boundary re-proposal should be accepted"
+                );
 
-            // Test case 2: Mismatched parent commitment
-            //
-            // Create another malicious block with correct height but invalid parent commitment
-            let malicious_block = make_raw_block(
-                genesis.digest(),
-                Height::new(BLOCKS_PER_EPOCH.get() + 2),
-                3000,
-            );
-            let malicious_commitment = malicious_block.digest();
-            marshal
-                .clone()
-                .proposed(
-                    Round::new(Epoch::new(1), View::new(22)),
-                    malicious_block.clone(),
-                )
-                .await;
+                // Invalid re-proposal: non-boundary block.
+                let non_boundary_height = Height::new(10);
+                let non_boundary_round =
+                    Round::new(Epoch::zero(), View::new(non_boundary_height.get()));
+                let non_boundary_block = B::new::<Sha256>(
+                    Ctx {
+                        round: non_boundary_round,
+                        leader: default_leader(),
+                        parent: (View::zero(), genesis.digest()),
+                    },
+                    genesis.digest(),
+                    non_boundary_height,
+                    1000,
+                );
+                let non_boundary_digest = non_boundary_block.digest();
+                marshal
+                    .clone()
+                    .proposed(non_boundary_round, non_boundary_block)
+                    .await;
 
-            // Small delay to ensure broadcast is processed
-            context.sleep(Duration::from_millis(10)).await;
+                context.sleep(Duration::from_millis(10)).await;
 
-            // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 22
-            let byzantine_round = Round::new(Epoch::new(1), View::new(22));
-            let byzantine_context = Ctx {
-                round: byzantine_round,
-                leader: me.clone(),
-                parent: (View::new(21), parent_commitment),
-            };
+                // Attempt to re-propose a non-boundary block.
+                let invalid_reproposal_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(15)),
+                    leader: me.clone(),
+                    parent: (View::new(non_boundary_height.get()), non_boundary_digest),
+                };
+                assert!(
+                    !wrapper
+                        .verify(invalid_reproposal_context, non_boundary_digest)
+                        .await
+                        .await
+                        .expect("verify result missing"),
+                    "{kind:?}: non-boundary re-proposal should be rejected"
+                );
 
-            // Marshaled.certify() should reject the malicious block
-            let _ = marshaled
-                .verify(byzantine_context, malicious_commitment)
-                .await
-                .await;
-            let verify = marshaled
-                .certify(byzantine_round, malicious_commitment)
-                .await;
+                // Invalid re-proposal: cross-epoch context.
+                let cross_epoch_context = Ctx {
+                    round: Round::new(Epoch::new(1), View::new(boundary_height.get() + 1)),
+                    leader: me,
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                assert!(
+                    !wrapper
+                        .verify(cross_epoch_context, boundary_digest)
+                        .await
+                        .await
+                        .expect("verify result missing"),
+                    "{kind:?}: cross-epoch re-proposal should be rejected"
+                );
 
-            assert!(
-                !verify.await.unwrap(),
-                "Byzantine block with mismatched parent commitment should be rejected"
-            );
-        })
-    }
-
-    /// Test that marshaled rejects blocks when consensus context doesn't match block's embedded context.
-    ///
-    /// This tests that when verify() is called with a context that doesn't match what's embedded
-    /// in the block, the verification should fail. A Byzantine proposer could broadcast a block
-    /// with one embedded context but consensus could call verify() with a different context.
-    #[test_traced("WARN")]
-    fn test_marshaled_rejects_mismatched_context() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let me = participants[0].clone();
-
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
-
-            let mut marshaled = Marshaled::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            // Create parent block at height 1 so the commitment is well-formed.
-            let parent_ctx = Ctx {
-                round: Round::new(Epoch::zero(), View::new(1)),
-                leader: default_leader(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_commitment = parent.digest();
-            marshal
-                .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
-                .await;
-
-            // Build a block with context A (embedded in the block).
-            let round_a = Round::new(Epoch::zero(), View::new(2));
-            let context_a = Ctx {
-                round: round_a,
-                leader: me.clone(),
-                parent: (View::new(1), parent_commitment),
-            };
-            let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
-            let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a).await;
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Verify using a different consensus context B (hash mismatch).
-            let round_b = Round::new(Epoch::zero(), View::new(3));
-            let context_b = Ctx {
-                round: round_b,
-                leader: participants[1].clone(),
-                parent: (View::new(1), parent_commitment),
-            };
-
-            let verify_rx = marshaled.verify(context_b, commitment_a).await;
-            select! {
-                result = verify_rx => {
+                if wrapper.kind() == WrapperKind::Deferred {
+                    // Deferred-only crash-recovery path: certify without prior verify.
+                    let certify_only_round = Round::new(Epoch::zero(), View::new(21));
+                    let certify_result = wrapper
+                        .certify(certify_only_round, boundary_digest)
+                        .await
+                        .await;
                     assert!(
-                        !result.unwrap(),
-                        "mismatched context hash should be rejected"
+                        certify_result.expect("certify result missing"),
+                        "deferred certify-only path for re-proposal should succeed"
                     );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("verify should reject mismatched context hash promptly");
-                },
-            }
-        })
+                }
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_verify_rejects_invalid_ancestry() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let mut oracle = setup_network(context.clone(), None);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+
+                let setup = StandardHarness::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+
+                // Test case 1: non-contiguous height.
+                // Malformed block: parent is genesis but height skips from 0 to 2.
+                let malformed_round = Round::new(Epoch::zero(), View::new(2));
+                let malformed_context = Ctx {
+                    round: malformed_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let malformed_block = B::new::<Sha256>(
+                    malformed_context.clone(),
+                    genesis.digest(),
+                    Height::new(2),
+                    200,
+                );
+                let malformed_digest = malformed_block.digest();
+                marshal
+                    .clone()
+                    .proposed(malformed_round, malformed_block)
+                    .await;
+
+                context.sleep(Duration::from_millis(10)).await;
+
+                let malformed_verify = wrapper
+                    .verify(malformed_context.clone(), malformed_digest)
+                    .await
+                    .await
+                    .expect("verify result missing");
+                if kind == WrapperKind::Inline {
+                    // Inline verifies fully in `verify`.
+                    assert!(
+                        !malformed_verify,
+                        "inline verify should reject non-contiguous ancestry"
+                    );
+                } else {
+                    // Deferred verify is optimistic; final verdict is observed in `certify`.
+                    assert!(
+                        malformed_verify,
+                        "deferred verify should optimistically pass pre-checks"
+                    );
+                    let certify = wrapper.certify(malformed_round, malformed_digest).await;
+                    assert!(
+                        !certify.await.expect("certify result missing"),
+                        "deferred certify should reject non-contiguous ancestry"
+                    );
+                }
+
+                // Test case 2: mismatched parent commitment with contiguous heights.
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_context = Ctx {
+                    round: parent_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let parent =
+                    B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
+                let parent_digest = parent.digest();
+                marshal.clone().proposed(parent_round, parent).await;
+
+                let mismatch_round = Round::new(Epoch::zero(), View::new(3));
+                let mismatched_context = Ctx {
+                    round: mismatch_round,
+                    leader: me,
+                    parent: (View::new(1), parent_digest),
+                };
+                let mismatched_block = B::new::<Sha256>(
+                    mismatched_context.clone(),
+                    genesis.digest(),
+                    Height::new(2),
+                    400,
+                );
+                let mismatched_digest = mismatched_block.digest();
+                marshal
+                    .clone()
+                    .proposed(mismatch_round, mismatched_block)
+                    .await;
+
+                context.sleep(Duration::from_millis(10)).await;
+
+                let mismatch_verify = wrapper
+                    .verify(mismatched_context, mismatched_digest)
+                    .await
+                    .await
+                    .expect("verify result missing");
+                if kind == WrapperKind::Inline {
+                    // Inline returns the full verification result directly.
+                    assert!(
+                        !mismatch_verify,
+                        "inline verify should reject mismatched parent digest"
+                    );
+                } else {
+                    // Deferred reports optimistic success and relies on `certify`.
+                    assert!(
+                        mismatch_verify,
+                        "deferred verify should optimistically pass pre-checks"
+                    );
+                    let certify = wrapper.certify(mismatch_round, mismatched_digest).await;
+                    assert!(
+                        !certify.await.expect("certify result missing"),
+                        "deferred certify should reject mismatched parent digest"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_application_verify_failure() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let mut oracle = setup_network(context.clone(), None);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } =
+                    bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let me = participants[0].clone();
+
+                let setup = StandardHarness::setup_validator(
+                    context.with_label("validator_0"),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> =
+                    MockVerifyingApp::with_verify_result(genesis.clone(), false);
+                let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
+
+                // 1) Set up a valid parent so structural checks can pass.
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_context = Ctx {
+                    round: parent_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
+                let parent_digest = parent.digest();
+                marshal.clone().proposed(parent_round, parent).await;
+
+                // 2) Publish a valid child; only application-level verification should fail.
+                let round = Round::new(Epoch::zero(), View::new(2));
+                let verify_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::new(1), parent_digest),
+                };
+                let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+                let digest = block.digest();
+                marshal.clone().proposed(round, block).await;
+
+                context.sleep(Duration::from_millis(10)).await;
+
+                // 3) Compare wrapper behavior:
+                //    - Inline fails in `verify`.
+                //    - Deferred returns optimistic success and fails in `certify`.
+                let verify_result = wrapper
+                    .verify(verify_context, digest)
+                    .await
+                    .await
+                    .expect("verify result missing");
+                if kind == WrapperKind::Inline {
+                    assert!(
+                        !verify_result,
+                        "inline verify should return application-level failure"
+                    );
+                } else {
+                    assert!(
+                        verify_result,
+                        "deferred verify should pass pre-checks and schedule deferred verification"
+                    );
+                    let certify = wrapper.certify(round, digest).await;
+                    assert!(
+                        !certify.await.expect("certify result missing"),
+                        "deferred certify should propagate deferred application verification failure"
+                    );
+                }
+            });
+        }
     }
 }

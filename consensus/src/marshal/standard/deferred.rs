@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Marshaled`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
+//! [`Deferred`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -14,7 +14,7 @@
 //!
 //! # Deferred Verification
 //!
-//! Before casting a notarize vote, [`Marshaled`] waits for the block to become available and
+//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and
 //! then verifies that the block's embedded context matches the consensus context. However, it does not
 //! wait for the application to finish verifying the block contents before voting. This enables verification
 //! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
@@ -23,11 +23,11 @@
 //!
 //! # Usage
 //!
-//! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
+//! Wrap your [`Application`] implementation with [`Deferred::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = Marshaled::new(
+//! let application = Deferred::new(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
@@ -74,14 +74,16 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::{
-            validation::{
-                is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
-                is_valid_reproposal_at_verify, validate_standard_block_for_verification, LastBuilt,
-            },
+            validation::{is_inferred_reproposal_at_certify, LastBuilt},
             verification_tasks::VerificationTasks,
         },
         core::Mailbox,
-        standard::Standard,
+        standard::{
+            verification::{
+                fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
+            },
+            Standard,
+        },
         Update,
     },
     simplex::types::Context,
@@ -96,13 +98,9 @@ use commonware_runtime::{
     Clock, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{
-        fallible::OneshotExt,
-        oneshot::{self, error::RecvError},
-    },
+    channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -116,7 +114,7 @@ use tracing::{debug, warn};
 ///
 /// # Ancestry Validation
 ///
-/// Applications wrapped by [`Marshaled`] can rely on the following ancestry checks being
+/// Applications wrapped by [`Deferred`] can rely on the following ancestry checks being
 /// performed automatically during verification:
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
@@ -136,7 +134,7 @@ use tracing::{debug, warn};
 /// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting._
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B, ES>
+pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -154,7 +152,7 @@ where
     build_duration: Timed<E>,
 }
 
-impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -167,7 +165,7 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    /// Creates a new [`Marshaled`] wrapper.
+    /// Creates a new [`Deferred`] wrapper.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
@@ -213,74 +211,27 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_digest) = context.parent;
-                let parent_request = fetch_parent(
-                    parent_digest,
-                    Some(Round::new(context.epoch(), parent_view)),
+                // Shared non-reproposal verification:
+                // - fetch parent (using trusted round hint from consensus context)
+                // - validate standard ancestry invariants
+                // - run application verification over ancestry
+                //
+                // The helper preserves the prior early-exit behavior and returns
+                // `None` when work should stop (for example receiver dropped or
+                // parent unavailable).
+                let application_valid = match verify_with_parent(
+                    runtime_context,
+                    context,
+                    block,
                     &mut application,
                     &mut marshal,
+                    &mut tx,
                 )
-                .await;
-
-                // If consensus drops the receiver, we can stop work early.
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                reason = "failed to fetch parent or block",
-                                "skipping verification"
-                            );
-                            return;
-                        }
-                    },
-                };
-
-                if let Err(err) =
-                    validate_standard_block_for_verification(&block, &parent, parent_digest)
+                .await
                 {
-                    debug!(
-                        ?err,
-                        expected_parent = %parent.digest(),
-                        block_parent = %block.parent(),
-                        parent_height = %parent.height(),
-                        block_height = %block.height(),
-                        "block failed standard invariant validation"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Request verification from the application.
-                let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
-                let validity_request = application.verify(
-                    (runtime_context.with_label("app_verify"), context.clone()),
-                    ancestry_stream,
-                );
-
-                // If consensus drops the receiver, we can stop work early.
-                let application_valid = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    valid = validity_request => valid,
+                    Some(valid) => valid,
+                    None => return,
                 };
-
-                // Handle the verification result.
-                if application_valid {
-                    marshal.verified(context.round, block).await;
-                }
                 tx.send_lossy(application_valid);
             });
 
@@ -288,7 +239,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -362,6 +313,9 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
+                    // We are guaranteed that the parent round for any `consensus_context` is
+                    // in the same epoch (recall, the boundary block of the previous epoch
+                    // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -460,7 +414,7 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        let marshal = self.marshal.clone();
+        let mut marshal = self.marshal.clone();
         let mut marshaled = self.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -490,45 +444,37 @@ where
                     },
                 };
 
-                // Blocks are invalid if they are not within the current epoch and they aren't
-                // a re-proposal of the boundary block.
-                if !is_block_in_expected_epoch(&marshaled.epocher, block.height(), context.epoch()) {
-                    debug!(
-                        height = %block.height(),
-                        "block height not in any known epoch"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Re-proposal detection: consensus signals a re-proposal by setting
-                // context.parent to the block being verified (digest == context.parent.1).
+                // Shared pre-checks enforce:
+                // - Block epoch membership.
+                // - Re-proposal detection via `digest == context.parent.1`.
                 //
-                // Re-proposals skip normal verification because:
-                // 1. The block was already verified when originally proposed
-                // 2. The parent-child height check would fail (parent IS the block)
-                let is_reproposal = digest == context.parent.1;
-                if is_reproposal {
-                    if !is_valid_reproposal_at_verify(&marshaled.epocher, block.height(), context.epoch()) {
-                        debug!(
-                            height = %block.height(),
-                            "re-proposal is not at epoch boundary"
-                        );
-                        tx.send_lossy(false);
+                // Re-proposals return early and skip normal parent/height checks
+                // because they were already verified when originally proposed and
+                // parent-child checks would fail by construction when parent == block.
+                let block = match precheck_epoch_and_reproposal(
+                    &marshaled.epocher,
+                    &mut marshal,
+                    &context,
+                    digest,
+                    block,
+                )
+                .await
+                {
+                    Decision::Complete(valid) => {
+                        if valid {
+                            // Valid re-proposal. Create a completed verification task for `certify`.
+                            let round = context.round;
+                            let (task_tx, task_rx) = oneshot::channel();
+                            task_tx.send_lossy(true);
+                            marshaled.verification_tasks.insert(round, digest, task_rx);
+                        }
+                        // `Complete` means either immediate rejection or successful
+                        // re-proposal handling with no further ancestry validation.
+                        tx.send_lossy(valid);
                         return;
                     }
-
-                    // Valid re-proposal. Create a completed verification task for `certify`
-                    let round = context.round;
-                    marshal.verified(round, block).await;
-
-                    let (task_tx, task_rx) = oneshot::channel();
-                    task_tx.send_lossy(true);
-                    marshaled.verification_tasks.insert(round, digest, task_rx);
-
-                    tx.send_lossy(true);
-                    return;
-                }
+                    Decision::Continue(block) => block,
+                };
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
@@ -559,7 +505,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -650,7 +596,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -690,7 +636,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -711,35 +657,320 @@ where
     }
 }
 
-/// Fetches the parent block given its digest and optional round.
-///
-/// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent digest matches the genesis block, it returns the genesis block
-/// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
-/// the parent block's availability.
-///
-/// Returns an error if the marshal subscription is cancelled.
-#[inline]
-async fn fetch_parent<E, S, A, B>(
-    parent_digest: B::Digest,
-    parent_round: Option<Round>,
-    application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: CertifiableBlock,
-{
-    let genesis = application.genesis().await;
-    if parent_digest == genesis.digest() {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        Either::Right(
+#[cfg(test)]
+mod tests {
+    use super::Deferred;
+    use crate::{
+        marshal::mocks::{
+            harness::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
+                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+            },
+            verifying::MockVerifyingApp,
+        },
+        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
+        Automaton, CertifiableAutomaton,
+    };
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider},
+        sha256::Sha256,
+        Digestible, Hasher as _,
+    };
+    use commonware_macros::{select, test_traced};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use std::time::Duration;
+
+    #[test_traced("INFO")]
+    fn test_certify_lower_view_after_higher_view() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+
+            let mut marshaled = Deferred::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Create parent block at height 1
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
             marshal
-                .subscribe_by_digest(parent_round, parent_digest)
-                .await,
-        )
+                .clone()
+                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
+                .await;
+
+            // Block A at view 5 (height 2)
+            let round_a = Round::new(Epoch::new(0), View::new(5));
+            let context_a = Ctx {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
+            let commitment_a = block_a.digest();
+            marshal.clone().proposed(round_a, block_a.clone()).await;
+
+            // Block B at view 10 (height 2, different block same height)
+            let round_b = Round::new(Epoch::new(0), View::new(10));
+            let context_b = Ctx {
+                round: round_b,
+                leader: me.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
+            let commitment_b = block_b.digest();
+            marshal.clone().proposed(round_b, block_b.clone()).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Step 1: Verify block A at view 5
+            let _ = marshaled.verify(context_a, commitment_a).await.await;
+
+            // Step 2: Verify block B at view 10
+            let _ = marshaled.verify(context_b, commitment_b).await.await;
+
+            // Step 3: Certify block B at view 10 FIRST
+            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            assert!(
+                certify_b.await.unwrap(),
+                "Block B certification should succeed"
+            );
+
+            // Step 4: Certify block A at view 5 - should succeed
+            let certify_a = marshaled.certify(round_a, commitment_a).await;
+
+            select! {
+                result = certify_a => {
+                    assert!(result.unwrap(), "Block A certification should succeed");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Block A certification timed out");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_unsupported_epoch() {
+        #[derive(Clone)]
+        struct LimitedEpocher {
+            inner: FixedEpocher,
+            max_epoch: u64,
+        }
+
+        impl Epocher for LimitedEpocher {
+            fn containing(&self, height: Height) -> Option<crate::types::EpochInfo> {
+                let bounds = self.inner.containing(height)?;
+                if bounds.epoch().get() > self.max_epoch {
+                    None
+                } else {
+                    Some(bounds)
+                }
+            }
+
+            fn first(&self, epoch: Epoch) -> Option<Height> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.first(epoch)
+                }
+            }
+
+            fn last(&self, epoch: Epoch) -> Option<Height> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.last(epoch)
+                }
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let limited_epocher = LimitedEpocher {
+                inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                max_epoch: 0,
+            };
+
+            let mut marshaled =
+                Deferred::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+
+            // Create a parent block at height 19 (last block in epoch 0, which is supported)
+            let parent_ctx = Ctx {
+                round: Round::new(Epoch::zero(), View::new(19)),
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent =
+                B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
+            let parent_digest = parent.digest();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
+                .await;
+
+            // Create a block at height 20 (first block in epoch 1, which is NOT supported)
+            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
+            let unsupported_context = Ctx {
+                round: unsupported_round,
+                leader: me.clone(),
+                parent: (View::new(19), parent_digest),
+            };
+            let block = B::new::<Sha256>(
+                unsupported_context.clone(),
+                parent_digest,
+                Height::new(20),
+                2000,
+            );
+            let block_commitment = block.digest();
+            marshal
+                .clone()
+                .proposed(unsupported_round, block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Call verify and wait for the result (verify returns optimistic result,
+            // but also spawns deferred verification)
+            let verify_result = marshaled
+                .verify(unsupported_context, block_commitment)
+                .await;
+            // Wait for optimistic verify to complete so the verification task is registered
+            let optimistic_result = verify_result.await;
+
+            // The optimistic verify should return false because the block is in an unsupported epoch
+            assert!(
+                !optimistic_result.unwrap(),
+                "Optimistic verify should reject block in unsupported epoch"
+            );
+        })
+    }
+
+    /// Test that marshaled rejects blocks when consensus context doesn't match block's embedded context.
+    ///
+    /// This tests that when verify() is called with a context that doesn't match what's embedded
+    /// in the block, the verification should fail. A Byzantine proposer could broadcast a block
+    /// with one embedded context but consensus could call verify() with a different context.
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_mismatched_context() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+
+            let mut marshaled = Deferred::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Create parent block at height 1 so the commitment is well-formed.
+            let parent_ctx = Ctx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_commitment = parent.digest();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
+                .await;
+
+            // Build a block with context A (embedded in the block).
+            let round_a = Round::new(Epoch::zero(), View::new(2));
+            let context_a = Ctx {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
+            let commitment_a = block_a.digest();
+            marshal.clone().proposed(round_a, block_a).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify using a different consensus context B (hash mismatch).
+            let round_b = Round::new(Epoch::zero(), View::new(3));
+            let context_b = Ctx {
+                round: round_b,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        !result.unwrap(),
+                        "mismatched context hash should be rejected"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject mismatched context hash promptly");
+                },
+            }
+        })
     }
 }

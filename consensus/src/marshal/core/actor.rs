@@ -11,10 +11,10 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Context, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, CertifiableBlock, Epochable, Heightable, Reporter,
+    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
@@ -201,9 +201,6 @@ pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    V::Block: CertifiableBlock<
-        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
-    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -269,9 +266,6 @@ impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    V::Block: CertifiableBlock<
-        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
-    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -682,10 +676,15 @@ where
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
 
+                        // Prune data in the finalized archives below the new floor.
                         if let Err(err) = self.prune_finalized_archives(height).await {
                             error!(?err, %height, "failed to prune finalized archives");
                             return;
                         }
+
+                        // Intentionally keep existing block subscriptions alive. Canceling
+                        // waiters can have catastrophic consequences (nodes can get stuck in
+                        // different views) as actors do not retry subscriptions on failed channels.
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
@@ -699,6 +698,10 @@ where
                             error!(?err, %height, "failed to prune finalized archives");
                             return;
                         }
+
+                        // Intentionally keep existing block subscriptions alive. Canceling
+                        // waiters can have catastrophic consequences (nodes can get stuck in
+                        // different views) as actors do not retry subscriptions on failed channels.
                     }
                 }
             },
@@ -1115,6 +1118,8 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
+                        // SAFETY: `digest` identifies a unique `commitment`, so this
+                        // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
                             .store_finalization(
                                 height,
@@ -1367,6 +1372,9 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
     ) -> bool {
+        // Blocks below the last processed height are not useful to us, so we ignore them (this
+        // has the nice byproduct of ensuring we don't call a backing store with a block below the
+        // pruning boundary)
         if height <= self.last_processed_height {
             debug!(
                 %height,
@@ -1376,26 +1384,10 @@ where
             );
             return false;
         }
-
         self.notify_subscribers(&block);
 
         // Convert block to storage format
         let commitment = V::commitment(&block);
-        let finalization = finalization.and_then(|finalization| {
-            let payload = finalization.proposal.payload;
-            if payload == commitment {
-                Some(finalization)
-            } else {
-                warn!(
-                    %height,
-                    ?digest,
-                    block_commitment = ?commitment,
-                    finalization_commitment = ?payload,
-                    "dropping finalization with mismatched commitment"
-                );
-                None
-            }
-        });
         let stored: V::StoredBlock = block.into();
         let round = finalization.as_ref().map(|f| f.round());
 
@@ -1420,16 +1412,13 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and application
+        // Update metrics, buffer, and application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
-
-        // Notify buffer that block is finalized (for cache eviction).
         buffer.finalized(commitment).await;
-
         self.try_dispatch_blocks(application).await;
 
         true
@@ -1560,8 +1549,8 @@ where
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
-                let (_, parent_commitment) = cursor.context().parent;
                 let parent_digest = cursor.parent();
+                let parent_commitment = V::parent_commitment(&cursor);
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
@@ -1580,11 +1569,11 @@ where
                     debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {
-                    // Request the next missing block digest
+                    // Request the next missing commitment.
                     //
-                    // SAFETY: We can rely on the parent commitment from the embedded context of the block
-                    // because the block is provably a member of the finalized chain due to the end boundary
-                    // of the gap being finalized.
+                    // SAFETY: We can rely on this derived parent commitment because
+                    // the block is provably a member of the finalized chain due to the end
+                    // boundary of the gap being finalized.
                     resolver
                         .fetch(Request::<V::Commitment>::Block(parent_commitment))
                         .await;
