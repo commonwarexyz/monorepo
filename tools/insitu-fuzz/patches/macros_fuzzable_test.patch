@@ -1,0 +1,83 @@
+diff --git a/macros/src/lib.rs b/macros/src/lib.rs
+index 3873ca69..55d29f73 100644
+--- a/macros/src/lib.rs
++++ b/macros/src/lib.rs
+@@ -651,3 +651,78 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
+     }
+     .into()
+ }
++
++/// Make a test function fuzzable by converting test attributes to conditional.
++///
++/// This macro automatically:
++/// - Makes the function public
++/// - Converts `#[test]`, `#[test_traced]`, `#[tokio::test]` to `#[cfg_attr(test, ...)]`
++/// - This allows the function to be a regular public function during fuzzing
++///   but a test function during normal testing
++///
++/// # Example
++/// ```ignore
++/// use commonware_macros::fuzzable_test;
++///
++/// #[test_traced]
++/// #[fuzzable_test]
++/// fn test_example() {
++///     assert_eq!(2 + 2, 4);
++/// }
++///
++/// #[tokio::test]
++/// #[fuzzable_test]
++/// async fn test_async_example() {
++///     assert_eq!(2 + 2, 4);
++/// }
++/// ```
++#[proc_macro_attribute]
++pub fn fuzzable_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
++    let input = parse_macro_input!(item as ItemFn);
++
++    let sig = &input.sig;
++    let block = &input.block;
++
++    // Convert test attributes to cfg_attr(test, ...)
++    let converted_attrs: Vec<_> = input
++        .attrs
++        .iter()
++        .map(|attr| {
++            // Check if this is a test attribute that needs conversion
++            let is_test_attr = attr.path().is_ident("test")
++                || attr.path().is_ident("test_traced")
++                || attr.path().is_ident("test_async");
++
++            // Check for tokio::test (2-segment path)
++            let is_tokio_test = attr.path().segments.len() == 2
++                && attr
++                    .path()
++                    .segments
++                    .first()
++                    .map(|s| s.ident == "tokio")
++                    .unwrap_or(false)
++                && attr
++                    .path()
++                    .segments
++                    .last()
++                    .map(|s| s.ident == "test")
++                    .unwrap_or(false);
++
++            if is_test_attr || is_tokio_test {
++                // Convert to cfg_attr(test, original_attr)
++                let meta = &attr.meta;
++                quote! { #[cfg_attr(test, #meta)] }
++            } else {
++                // Preserve non-test attributes as-is
++                quote! { #attr }
++            }
++        })
++        .collect();
++
++    let output = quote! {
++        #(#converted_attrs)*
++        pub #sig #block
++    };
++
++    output.into()
++}

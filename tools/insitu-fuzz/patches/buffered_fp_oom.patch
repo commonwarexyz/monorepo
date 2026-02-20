@@ -1,0 +1,23 @@
+diff --git a/broadcast/src/buffered/mod.rs b/broadcast/src/buffered/mod.rs
+index a821c0a3..3051c8b1 100644
+--- a/broadcast/src/buffered/mod.rs
++++ b/broadcast/src/buffered/mod.rs
+@@ -52,6 +52,9 @@ mod tests {
+     // Number of messages to cache per sender
+     const CACHE_SIZE: usize = 10;
+
++    // Maximum message length for codec (10 MB)
++    const MAX_LEN: usize = 10_485_760;
++
+     // Enough time to receive a cached message. Cannot be instantaneous as the test runtime
+     // requires some time to switch context.
+     const A_JIFFY: Duration = Duration::from_millis(10);
+@@ -123,7 +126,7 @@ mod tests {
+                 mailbox_size: 1024,
+                 deque_size: CACHE_SIZE,
+                 priority: false,
+-                codec_config: RangeCfg::from(..),
++                codec_config: RangeCfg::from(..=MAX_LEN),
+             };
+             let (engine, engine_mailbox) =
+                 Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
