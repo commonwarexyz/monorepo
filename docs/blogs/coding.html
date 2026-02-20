@@ -126,7 +126,7 @@
 
         <h2>Deferred Verification, Even Without Coding</h2>
 
-        <p>There is a second win: <code>certify</code> gives us deferred verification as a first-class pattern in the standard path. We can start verification early, hide it behind vote propagation latency, and require the result at certification time. This is already used in the standard marshal path (see <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/marshaled.rs">standard::Marshaled</a></code>), without erasure coding. In a global deployment of <code>alto</code> with a simulated 500ms verification duration, we saw view latency drop by 105ms on average with this feature enabled.</p>
+        <p>There is a second win: <code>certify</code> gives us deferred verification as a first-class pattern in the standard path. We can start verification early, hide it behind vote propagation latency, and require the result at certification time. This is already used in the standard marshal path (see <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/deferred.rs">standard::Deferred</a></code>), without erasure coding. In a global deployment of <code>alto</code> with a simulated 500ms verification duration, we saw view latency drop by 105ms on average with this feature enabled.</p>
         <p>Application developers can opt-in to this change by implementing the <code>CertifiableBlock</code> trait on their block type, which requires storing the consensus context within their blocks. The <code>inline</code> path is retained for applications that want to make no changes.</p>
 
         <h2>Out-of-the-Box Performance</h2>
