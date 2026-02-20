@@ -1265,10 +1265,8 @@ mod tests {
                 .expect("Failed to re-initialize journal");
 
             // Make sure reading an item that resides in the corrupted page fails.
-            let err = journal
-                .read(40 * ITEMS_PER_BLOB.get() + 1)
-                .await
-                .unwrap_err();
+            // Offset 1 is in the first page, so item 0 in this blob always intersects it.
+            let err = journal.read(40 * ITEMS_PER_BLOB.get()).await.unwrap_err();
             assert!(matches!(err, Error::Runtime(_)));
 
             // Replay all items.
@@ -1814,7 +1812,7 @@ mod tests {
     /// Test recovery when blob is truncated to a page boundary with item size not dividing page size.
     ///
     /// This tests the scenario where:
-    /// 1. Items (32 bytes) don't divide evenly into page size (44 bytes)
+    /// 1. Items are 32 bytes and logical page size is 32 bytes with this config
     /// 2. Data spans multiple pages
     /// 3. Blob is truncated to a page boundary (simulating crash before last page was written)
     /// 4. Journal should recover correctly on reopen
@@ -1828,13 +1826,12 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
 
-            // Item size is 32 bytes (Digest), page size is 44 bytes.
-            // 32 doesn't divide 44, so items will cross page boundaries.
-            // Physical page size = 44 + 12 (CRC) = 56 bytes.
+            // Item size is 32 bytes (Digest), and PAGE_SIZE is the physical page size (44 bytes).
+            // Logical page size is 32 bytes (44 - 12 bytes of checksum records).
             //
             // Write enough items to span multiple pages:
             // - 10 items = 320 logical bytes
-            // - This spans ceil(320/44) = 8 logical pages
+            // - This spans 10 logical pages at 32 bytes each
             for i in 0u64..10 {
                 journal
                     .append(test_digest(i))
@@ -1846,8 +1843,8 @@ mod tests {
             drop(journal);
 
             // Open the blob directly and truncate to a page boundary.
-            // Physical page size = PAGE_SIZE + CHECKSUM_SIZE = 44 + 12 = 56
-            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
+            let physical_page_size = PAGE_SIZE.get() as u64;
+            let logical_page_size = physical_page_size - 12;
             let (blob, size) = context
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
@@ -1869,10 +1866,10 @@ mod tests {
                 .expect("Failed to re-initialize journal after page truncation");
 
             // The journal should have fewer items now (those that fit in the remaining pages).
-            // With logical page size 44 and item size 32:
-            // - After truncating to (full_pages-1) physical pages, we have (full_pages-1)*44 logical bytes
+            // After truncating to (full_pages - 1) physical pages, we have
+            // (full_pages - 1) * logical_page_size logical bytes.
             // - Number of complete items = floor(logical_bytes / 32)
-            let remaining_logical_bytes = (full_pages - 1) * PAGE_SIZE.get() as u64;
+            let remaining_logical_bytes = (full_pages - 1) * logical_page_size;
             let expected_items = remaining_logical_bytes / 32; // 32 = Digest::SIZE
             assert_eq!(
                 journal.size().await,
