@@ -1495,28 +1495,10 @@ where
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
-            let block = block.into_block();
-            if V::commitment(&block) == commitment {
-                return Some(block);
-            }
-            debug!(
-                ?commitment,
-                actual_commitment = ?V::commitment(&block),
-                "buffer returned block with mismatched commitment"
-            );
+            return Some(block.into_block());
         }
-        let block = self
-            .find_block_in_storage(V::commitment_to_inner(commitment))
-            .await?;
-        if V::commitment(&block) == commitment {
-            return Some(block);
-        }
-        debug!(
-            ?commitment,
-            actual_commitment = ?V::commitment(&block),
-            "storage returned block with mismatched commitment"
-        );
-        None
+        self.find_block_in_storage(V::commitment_to_inner(commitment))
+            .await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
