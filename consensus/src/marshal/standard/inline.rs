@@ -203,9 +203,9 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = verification::fetch_parent(
                     parent_digest,
-                    // This context is produced by simplex for the active epoch, so
-                    // `(consensus_context.epoch(), parent_view)` is a trusted hint
-                    // for parent lookup.
+                    // We are guaranteed that the parent round for any `consensus_context` is
+                    // in the same epoch (recall, the boundary block of the previous epoch
+                    // is the genesis block of the current epoch).
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
