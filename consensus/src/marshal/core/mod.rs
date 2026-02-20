@@ -34,8 +34,9 @@
 //! ```
 //!
 //! For standard mode, use [`crate::marshal::standard::Standard`] as the variant and
-//! `buffered::Mailbox` as the buffer. For coding mode, use
-//! [`crate::marshal::coding::Coding`] as the variant and `shards::Mailbox` as the buffer.
+//! [`commonware_broadcast::buffered::Mailbox`] as the buffer. For coding mode, use
+//! [`crate::marshal::coding::Coding`] as the variant and
+//! [`crate::marshal::coding::shards::Mailbox`] as the buffer.
 
 mod actor;
 pub use actor::Actor;
