@@ -1118,7 +1118,7 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        // Invariant: `digest` identifies a unique `commitment`, so this
+                        // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
                             .store_finalization(
@@ -1551,11 +1551,6 @@ where
             while cursor.height() > gap_start {
                 let parent_digest = cursor.parent();
                 let parent_commitment = V::parent_commitment(&cursor);
-                assert_eq!(
-                    V::commitment_to_inner(parent_commitment),
-                    parent_digest,
-                    "variant parent commitment must map to block parent digest"
-                );
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
@@ -1574,9 +1569,9 @@ where
                     debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {
-                    // Request the next missing block digest
+                    // Request the next missing commitment.
                     //
-                    // SAFETY: We can rely on this variant-derived parent commitment because
+                    // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
                     resolver
