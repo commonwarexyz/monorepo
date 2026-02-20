@@ -275,7 +275,8 @@ pub struct Op {
 ///
 /// Blocking follows an arm-and-recheck protocol:
 /// - The loop first verifies `submitted_seq == processed_seq`, then arms sleep intent.
-/// - Before entering `submit_and_wait`, it re-checks `submitted_seq`.
+/// - `arm()` returns a submission-sequence snapshot from the same atomic state transition.
+/// - The loop blocks only if that post-arm snapshot still equals `processed_seq`.
 /// - Submitters ring `eventfd` only when they observe sleep intent armed.
 ///
 /// This makes submissions racing with the sleep transition observable either by
@@ -392,12 +393,15 @@ impl Waker {
     /// After this point, any successful submission that races with sleep will
     /// observe sleep intent and ring eventfd.
     ///
-    /// The loop always performs a submission-sequence recheck after arming.
-    /// If sequence changed, it skips blocking and disarms immediately.
-    fn arm(&self) {
-        self.inner
+    /// Returns the current submitted sequence snapshot from the same atomic
+    /// operation that arms sleep intent. If this differs from loop-local
+    /// `processed_seq`, the loop skips blocking and disarms immediately.
+    fn arm(&self) -> u64 {
+        let prev = self
+            .inner
             .state
             .fetch_or(SLEEP_INTENT_BIT, Ordering::AcqRel);
+        (prev >> 1) & SUBMISSION_SEQ_MASK
     }
 
     /// Disarm sleep intent after we resume running.
@@ -602,12 +606,11 @@ impl IoUringLoop {
 
             // Idle path. No pending submissions are visible.
             //
-            // Arm sleep intent, re-check sequence, and block only if still idle.
-            // Any submission that arrives after `arm()` observes sleep intent and
-            // rings eventfd, so the loop is woken instead of sleeping through newly
-            // published work.
-            self.waker.arm();
-            if self.waker.submitted() == self.processed_seq {
+            // Arm sleep intent and capture a post-arm sequence snapshot from the
+            // same atomic operation. Block only if still idle. Any submission that
+            // arrives after `arm()` observes sleep intent and rings eventfd, so the
+            // loop is woken instead of sleeping through newly published work.
+            if self.waker.arm() == self.processed_seq {
                 self.submit_and_wait(&mut ring, 1, None)
                     .expect("unable to submit to ring");
             }
