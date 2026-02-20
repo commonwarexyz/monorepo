@@ -290,7 +290,8 @@ fn fuzz(input: FuzzInput) {
                                             &root
                                         ));
                                     }
-                                    Err(Error::ElementPruned(_)) => {}
+                                    Err(Error::ElementPruned(_)) =>
+                                         assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap())),
                                     Err(err) => panic!(
                                         "unexpected clean historical_range_proof error: {err:?}"
                                     ),
@@ -324,10 +325,7 @@ fn fuzz(input: FuzzInput) {
                                                     &root
                                                 ));
                                             }
-                                            // Retrying after merkleization can still fail if the
-                                            // requested historical proof depends on nodes that are
-                                            // already pruned in persistent storage.
-                                            Err(Error::ElementPruned(_)) => {}
+                                            Err(Error::ElementPruned(_)) => panic!("shouldn't get pruned error on retry"),
                                             Err(err) => panic!(
                                                 "unexpected dirty retry historical_range_proof error: {err:?}"
                                             ),
@@ -345,7 +343,10 @@ fn fuzz(input: FuzzInput) {
                                         ));
                                         MmrState::Clean(clean)
                                     }
-                                    Err(Error::ElementPruned(_)) => MmrState::Dirty(mmr),
+                                    Err(Error::ElementPruned(_)) => {
+                                        assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap()));
+                                        MmrState::Dirty(mmr)
+                                    }
                                     Err(err) => panic!(
                                         "unexpected dirty historical_range_proof error: {err:?}"
                                     ),

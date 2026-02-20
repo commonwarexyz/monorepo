@@ -76,9 +76,8 @@ pub use verify::{
 };
 
 /// Trait for valid merkleization state types used by QMDB.
-pub trait MerkleizationState<D: Digest>: MmrState<D> + JournaledMmrState<D> {}
-
-impl<D: Digest, S: MmrState<D> + JournaledMmrState<D>> MerkleizationState<D> for S {}
+pub trait MerkleizationState<D: Digest>: MmrState<D> + JournaledMmrState<D> + Send + Sync {}
+impl<D: Digest, S: MmrState<D> + JournaledMmrState<D> + Send + Sync> MerkleizationState<D> for S {}
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
