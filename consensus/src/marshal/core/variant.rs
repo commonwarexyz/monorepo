@@ -6,26 +6,11 @@
 //! - [`Variant`]: Describes the types used by a marshal variant
 //! - [`Buffer`]: Abstracts over block dissemination strategies
 //!
-//! Marshal relies on a commitment mapping invariant provided by [`Variant`]:
-//!
-//! 1. `commitment_to_inner(commitment(block)) == block.digest()`
-//! 2. For blocks accepted by marshal in the same variant instance, equal digests imply
-//!    equal commitments.
-//!
-//! Existing variants satisfy this as follows:
-//! - Standard: commitment is exactly the block digest.
-//! - Coding: commitment embeds the block digest plus deterministic coding metadata
-//!   derived from the same block.
-//!
-//! "Accepted by marshal" means the proposal/certificate passed the variant's verification
-//! invariants for this marshal instance (for example, coding config/context checks).
-//!
-//! This allows digest-keyed caches (for example, cached finalizations) to safely recover the
-//! unique commitment for a block.
-//!
-//! Note that this invariant is separate from [`crate::CertifiableBlock`].
-//! Deferred verification wrappers may require `CertifiableBlock` to recover consensus
-//! context, but core marshal only requires block ancestry and digest semantics.
+//! The [`Variant`] trait expects a 1:1 mapping between the [`Variant::Commitment`] and the
+//! block digest, with the commitment being a superset of the digest. The commitment may
+//! contain extra information that can be used for optimized retrieval or variant-specific
+//! mechanisms, though it is required that the digest can be extracted from the commitment
+//! for lookup purposes.
 
 use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
@@ -67,16 +52,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Extracts the block digest from a consensus commitment.
     ///
     /// For blocks/certificates accepted by marshal in this variant instance, the digest
-    /// must uniquely determine the commitment.
-    /// In other words, there should not be two accepted commitments with the same
-    /// inner digest.
+    /// must uniquely determine the commitment. In other words, there should not be two accepted
+    /// commitments with the same inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Returns the parent commitment referenced by `block`.
-    ///
-    /// This allows core marshal to repair finalized ancestry using only variant-level
-    /// commitment semantics, without assuming that blocks expose an embedded consensus
-    /// context.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Converts a working block to an application block.
