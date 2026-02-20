@@ -492,7 +492,10 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
             debug!(?epoch, ?dealer, "restored committed dealer message");
         }
 
-        Some(Player { player: crypto_player, acks })
+        Some(Player {
+            player: crypto_player,
+            acks,
+        })
     }
 }
 
