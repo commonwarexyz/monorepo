@@ -144,7 +144,7 @@
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
 //! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
-//! recover the shared secret/form a signature (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
+//! recover the shared secret (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
 //! first consider that in any successful round there must exist `2f + 1` commitments with at most `f` reveals. This implies
 //! that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments (allowing
 //! them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
@@ -156,20 +156,21 @@
 //!
 //! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
 //! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
-//! the shared secret/form a signature. To see how this could be, consider a network where `f` honest participants are in one partition
+//! the shared secret. To see how this could be, consider a network where `f` honest participants are in one partition
 //! and (`f + 1` honest and `f` Byzantine participants) are in another. All `f` Byzantine players acknowledge dealings from the `f + 1`
 //! honest dealers. Participants in the second partition will complete a round and all the reveals will belong to the same set of `f`
 //! honest players (that are in the first partition). A colluding Byzantine adversary will then have access to their acknowledged `f`
 //! shares and the revealed `f` shares (requiring only the participation of a single honest player that was in their partition to recover the shared
-//! secret/form a signature). If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
+//! secret). If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
 //! that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` public shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover
-//! the shared secret/form a signature.**
+//! the shared secret.**
 //!
-//! Why care if the secret isn't revealed? When used in consensus, a secret with more than `f` shares held by Byzantine players (say that
-//! `h` shares assigned to honest players are revealed) can no longer guarantee safety. Consider an equivocating leader (one of the `f` Byzantine players)
-//! that sends one block `B_1` to `f` honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible
-//! to create one quorum of `2f + 1` (for `B_2`), however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
+//! Why care if the secret isn't revealed? When used in consensus, a secret with more than `f` revealed shares (say that `f` shares
+//! revealed by Byzantine players during/after a round and `h` shares for honest players revealed) no longer guarantees safety (when used
+//! to generate threshold certificates). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
+//! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1`
+//! (for `B_2`), however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
 //! #### Future Work: Dropping the Synchrony Assumption?
 //!
