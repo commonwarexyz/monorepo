@@ -145,10 +145,14 @@
 
         <p>For global <a href="https://alto.commonware.xyz">alto</a> benchmarks, we deploy 50 validators uniformly across <code>ap-northeast-1</code>, <code>ap-nor theast-2</code>, <code>ap-south-1</code>, <code>ap-southeast-2</code>, <code>eu- central-1</code>, <code>eu-north-1</code>, <code>eu-west-1</code>, <code>sa-east -1</code>, <code>us-east-1</code>, and <code>us-west-1</code>. Each validator runs on a <code>c8g.2xlarge</code> instance (8 vcpus, 4 dedicated to <code>tokio</code> and 4 dedicated to a <code>rayon</code> thread pool used for parallel hashing and signature verification).</p>
 
+        // TODO: describe first experiment
+
         <div class="image-container">
             <img src="/imgs/alto_coding_4.png" alt="Alto coding benchmarks (4 MiB blocks)" />
             <div class="image-caption">Figure 5: Global Alto cluster, using <code><a href="https://docs.rs/commonware-coding/latest/commonware_coding/struct.ReedSolomon.html">coding::reed_solomon</a></code> and <code><a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/blake3/struct.Blake3.html">cryptography::blake3</a></code>, achieving ~14Mb/s throughput and ~300ms view latency with statically sized 4MiB blocks.</div>
         </div>
+
+        // TODO: describe second experiment
 
         <div class="image-container">
             <img src="/imgs/alto_coding_8.png" alt="Alto coding benchmarks (8 MiB blocks)" />
@@ -157,7 +161,7 @@
 
         <h2>What Comes Next</h2>
 
-        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="/blogs/is-it-ready-yet.html">in ALPHA</a>, and will be included in the upcoming release.</p>
+        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="/blogs/is-it-ready-yet.html">in ALPHA</a>, and will be included in our next release.</p>
 
         <p><i>commonware-constantinople is coming soon.</i></p>
     </div>
