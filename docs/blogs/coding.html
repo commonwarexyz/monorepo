@@ -88,7 +88,7 @@
 
         <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator (taking hundreds of milliseconds just to distribute a block on a 10Gbps link). What if we made the distributed block bigger (and sent less to each)?</p>
 
-        <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-encoded block, validators relay verified shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> advances on the same commitment.</p>
+        <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators relay verified shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> advances on the same commitment.</p>
 
         <h2>Certification: A Second Decision Point</h2>
 
@@ -112,18 +112,18 @@
             <div class="image-caption">Figure 2: Coding Commitment Construction</div>
         </div>
 
-        <p>This is closest in spirit to <i>DispersedSimplex</i>: vote on a commitment first, then gate finalization on local certification. We differ from other three-round protocols that employ erasure-encoded broadcast such as <a href="https://arxiv.org/abs/2502.20692">MonadBFT</a> and <a href="https://drive.google.com/file/d/1Rlr3PdHsBmPahOInP6-Pl0bMzdayltdV/view">Alpenglow</a>, which wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
+        <p>This is closest in spirit to <i>DispersedSimplex</i>: vote on a commitment first, then gate finalization on local certification. We differ from other three-round protocols that employ erasure-coded broadcast such as <a href="https://arxiv.org/abs/2502.20692">MonadBFT</a> and <a href="https://drive.google.com/file/d/1Rlr3PdHsBmPahOInP6-Pl0bMzdayltdV/view">Alpenglow</a>, which wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
 
         <div class="image-container">
-            <img src="/imgs/coding_dissemination.png" alt="Erasure Coded Block dissemination" />
+            <img src="/imgs/coding_dissemination.png" alt="Erasure-coded Block dissemination" />
             <div class="image-caption">Figure 3: Block Dissemination Lifecycle.</div>
         </div>
 
         <p>After notarization, <code>certify</code> is where we resolve new information: we reconstruct the block, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
 
         <div class="image-container">
-            <img src="/imgs/coding_chain.png" alt="Erasure Coded Block dissemination and chain diagram" />
-            <div class="image-caption">Figure 4: Erasure Coded Chain Structure.</div>
+            <img src="/imgs/coding_chain.png" alt="Erasure-coded Block dissemination and chain diagram" />
+            <div class="image-caption">Figure 4: Erasure-coded Chain Structure.</div>
         </div>
 
         <h2>Deferred Verification, Even Without Coding</h2>
