@@ -160,13 +160,9 @@ use super::{
     metrics::{Peer, ShardMetrics},
 };
 use crate::{
-    marshal::{
-        coding::{
-            types::{CodedBlock, DistributionShard, Shard},
-            validation::{
-                validate_reconstruction, ReconstructionValidationError as InvariantError,
-            },
-        },
+    marshal::coding::{
+        types::{CodedBlock, DistributionShard, Shard},
+        validation::{validate_reconstruction, ReconstructionValidationError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,

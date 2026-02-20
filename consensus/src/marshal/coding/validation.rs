@@ -324,7 +324,11 @@ mod tests {
     fn test_validate_reconstruction_ok() {
         let fixture = baseline_fixture();
         assert_eq!(
-            validate_reconstruction::<Sha256, _>(&fixture.block, fixture.config, fixture.commitment),
+            validate_reconstruction::<Sha256, _>(
+                &fixture.block,
+                fixture.config,
+                fixture.commitment
+            ),
             Ok(())
         );
     }
