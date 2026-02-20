@@ -162,7 +162,7 @@ use super::{
 use crate::{
     marshal::coding::{
         types::{CodedBlock, DistributionShard, Shard},
-        validation::{validate_reconstruction, ReconstructionValidationError as InvariantError},
+        validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
