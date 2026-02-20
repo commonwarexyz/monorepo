@@ -676,14 +676,15 @@ where
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
 
+                        // Prune data in the finalized archives below the new floor.
                         if let Err(err) = self.prune_finalized_archives(height).await {
                             error!(?err, %height, "failed to prune finalized archives");
                             return;
                         }
 
                         // Intentionally keep existing block subscriptions alive. Canceling
-                        // certify waiters here can split honest validators across views.
-
+                        // waiters can have catastrophic consequences (nodes can get stuck in
+                        // different views) as actors do not retry subscriptions on failed channels.
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
@@ -699,8 +700,8 @@ where
                         }
 
                         // Intentionally keep existing block subscriptions alive. Canceling
-                        // certify waiters here can split honest validators across views.
-
+                        // waiters can have catastrophic consequences (nodes can get stuck in
+                        // different views) as actors do not retry subscriptions on failed channels.
                     }
                 }
             },
