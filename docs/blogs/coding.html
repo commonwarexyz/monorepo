@@ -88,7 +88,7 @@
 
         <p>In a "standard" blockchain (akin to <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?</p>
 
-        <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify and relay shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> can notarize that commitment before full block reconstruction.</p>
+        <p>Today, we are introducing a new marshal dialect: <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify uniquely constructed shards and relay to other validators. All without slowing down <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> (which supports safely voting for a block before it is fully reconstructed).</p>
 
         <h2>Certification: A Second Decision Point</h2>
 
