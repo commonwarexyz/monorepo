@@ -53,10 +53,10 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{journaled::State as JournaledMmrState, mem::State as MmrState, Location},
+    mmr::{journaled::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
-use commonware_cryptography::{Digest, DigestOf};
+use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -74,10 +74,6 @@ pub use verify::{
     create_multi_proof, create_proof_store, create_proof_store_from_digests, extract_pinned_nodes,
     verify_multi_proof, verify_proof, verify_proof_and_extract_digests,
 };
-
-/// Trait for valid merkleization state types used by QMDB.
-pub trait MerkleizationState<D: Digest>: MmrState<D> + JournaledMmrState<D> + Send + Sync {}
-impl<D: Digest, S: MmrState<D> + JournaledMmrState<D> + Send + Sync> MerkleizationState<D> for S {}
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]

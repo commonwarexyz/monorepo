@@ -859,6 +859,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         if requested_size > size {
             return Err(Error::RangeOutOfBounds(leaves));
         }
+        if range.is_empty() {
+            return Err(Error::Empty);
+        }
+        if range.end > leaves {
+            return Err(Error::RangeOutOfBounds(range.end));
+        }
         if end_pos > size {
             return Err(Error::RangeOutOfBounds(range.end));
         }
@@ -2720,6 +2726,96 @@ mod tests {
             ));
 
             mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_range_validation_precedes_unmerkleized() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("dirty_range_validation_precedes_unmerkleized"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            // Keep state dirty and unmerkleized by appending without merkleizing.
+            for i in 0..32 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let requested_unmerkleized = Location::new_unchecked(5);
+            let valid_range = Location::new_unchecked(0)..Location::new_unchecked(1);
+            let unmerkleized = mmr
+                .historical_range_proof(requested_unmerkleized, valid_range.clone())
+                .await;
+            assert!(matches!(unmerkleized, Err(Error::Unmerkleized)));
+
+            // Empty range should report Empty before Unmerkleized.
+            let empty_range = requested_unmerkleized..requested_unmerkleized;
+            let empty_result = mmr
+                .historical_range_proof(requested_unmerkleized, empty_range)
+                .await;
+            assert!(matches!(empty_result, Err(Error::Empty)));
+
+            // Requested historical size is out of bounds; this should win over Unmerkleized.
+            let leaves_oob = mmr.leaves() + 1;
+            let dirty_result = mmr
+                .historical_range_proof(leaves_oob, valid_range.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == leaves_oob
+            ));
+
+            // Requested range end is out of bounds for the current MMR; this should also win over
+            // Unmerkleized.
+            let end_oob = mmr.leaves() + 1;
+            let range_oob = Location::new_unchecked(0)..end_oob;
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, range_oob.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == end_oob
+            ));
+
+            // Requested range end can also be out of bounds for the requested historical size
+            // while still being within the current MMR size. This should also beat Unmerkleized.
+            let range_end_gt_requested = requested_unmerkleized + 1;
+            let range_oob_at_requested = Location::new_unchecked(0)..range_end_gt_requested;
+            assert!(range_end_gt_requested <= mmr.leaves());
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, range_oob_at_requested)
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == range_end_gt_requested
+            ));
+
+            // Range location overflow should be returned before Unmerkleized.
+            let overflow_loc = Location::new_unchecked(u64::MAX);
+            let overflow_range = Location::new_unchecked(0)..overflow_loc;
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, overflow_range.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::LocationOverflow(loc)) if loc == overflow_loc
+            ));
+
+            let clean = mmr.merkleize(&mut hasher);
+            let clean_result = clean.historical_range_proof(leaves_oob, valid_range).await;
+            assert!(matches!(
+                clean_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == leaves_oob
+            ));
+
+            clean.destroy().await.unwrap();
         });
     }
 
