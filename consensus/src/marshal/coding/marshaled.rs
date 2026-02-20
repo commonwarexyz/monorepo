@@ -670,7 +670,7 @@ where
                         "rejected proposal with unexpected coding configuration"
                     );
                 }
-                ProposalError::ContextHash => {
+                ProposalError::ContextDigest => {
                     let expected = hash_context::<H, _>(&consensus_context);
                     let got = payload.context::<H::Digest>();
                     warn!(

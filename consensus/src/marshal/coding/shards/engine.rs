@@ -587,7 +587,7 @@ where
                 );
                 return Err(Error::ConfigMismatch);
             }
-            Err(InvariantError::ContextHash(expected, actual)) => {
+            Err(InvariantError::ContextDigest(expected, actual)) => {
                 warn!(
                     %commitment,
                     expected_context_digest = ?expected,

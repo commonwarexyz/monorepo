@@ -23,7 +23,7 @@ pub(crate) enum Error {
     Epoch,
     ParentDigest,
     Height,
-    ContextHash,
+    ContextDigest,
     Context,
 }
 
@@ -31,7 +31,7 @@ pub(crate) enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProposalError {
     CodingConfig,
-    ContextHash,
+    ContextDigest,
 }
 
 /// Validation failures for coded block reconstruction.
@@ -39,7 +39,7 @@ pub(crate) enum ProposalError {
 pub(crate) enum ReconstructionError<D: Digest> {
     BlockDigest,
     CodingConfig,
-    ContextHash(D, D),
+    ContextDigest(D, D),
 }
 
 /// Consolidated validation for coding deferred verification.
@@ -74,7 +74,7 @@ where
     }
     let block_context = block.context();
     if commitment.context::<H::Digest>() != hash_context::<H, _>(&block_context) {
-        return Err(Error::ContextHash);
+        return Err(Error::ContextDigest);
     }
     if block_context != *context {
         return Err(Error::Context);
@@ -95,7 +95,7 @@ pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
     }
     if let Some(context) = context {
         if payload.context::<H::Digest>() != hash_context::<H, _>(context) {
-            return Err(ProposalError::ContextHash);
+            return Err(ProposalError::ContextDigest);
         }
     }
     Ok(())
@@ -121,7 +121,7 @@ where
     let commitment_context = commitment.context::<H::Digest>();
     let block_context = hash_context::<H, _>(&block.context());
     if commitment_context != block_context {
-        return Err(ReconstructionError::ContextHash(
+        return Err(ReconstructionError::ContextDigest(
             commitment_context,
             block_context,
         ));
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_context_hash_error() {
+    fn test_validate_block_context_digest_error() {
         let fixture = baseline_fixture();
         let mut block = fixture.block.clone();
         let wrong_context = Round::new(Epoch::new(0), View::new(9));
@@ -447,7 +447,7 @@ mod tests {
                 wrong_commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::ContextHash)
+            Err(Error::ContextDigest)
         );
     }
 
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_proposal_context_hash_error() {
+    fn test_validate_proposal_context_digest_error() {
         let fixture = baseline_fixture();
         let wrong_context = Round::new(Epoch::new(0), View::new(8));
         assert_eq!(
@@ -488,7 +488,7 @@ mod tests {
                 fixture.config,
                 Some(&wrong_context)
             ),
-            Err(ProposalError::ContextHash)
+            Err(ProposalError::ContextDigest)
         );
     }
 
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_reconstruction_context_hash_error() {
+    fn test_validate_reconstruction_context_digest_error() {
         let fixture = baseline_fixture();
         let wrong_context = Round::new(Epoch::new(0), View::new(8));
         let wrong_commitment = commitment_for(
@@ -535,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             validate_reconstruction::<Sha256, _>(&fixture.block, fixture.config, wrong_commitment),
-            Err(ReconstructionError::ContextHash(
+            Err(ReconstructionError::ContextDigest(
                 wrong_commitment.context(),
                 hash_context::<Sha256, _>(&fixture.block.context),
             ))

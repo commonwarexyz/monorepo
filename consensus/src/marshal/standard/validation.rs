@@ -29,7 +29,7 @@ pub(crate) enum Error {
 
 /// Consolidated validation for standard deferred verification.
 #[inline]
-pub(crate) fn verify_block<B>(
+pub(crate) fn validate_block<B>(
     block: &B,
     parent: &B,
     parent_digest: B::Digest,
@@ -169,7 +169,7 @@ where
     };
 
     // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = verify_block(&block, &parent, parent_digest) {
+    if let Err(err) = validate_block(&block, &parent, parent_digest) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -320,36 +320,36 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_block_ok() {
+    fn test_validate_block_ok() {
         let (parent, block) = baseline_blocks();
-        assert_eq!(verify_block(&block, &parent, parent.digest()), Ok(()));
+        assert_eq!(validate_block(&block, &parent, parent.digest()), Ok(()));
     }
 
     #[test]
-    fn test_verify_block_parent_digest_error() {
+    fn test_validate_block_parent_digest_error() {
         let (parent, mut block) = baseline_blocks();
         block.parent = Sha256::hash(b"wrong_parent");
         assert_eq!(
-            verify_block(&block, &parent, parent.digest()),
+            validate_block(&block, &parent, parent.digest()),
             Err(Error::ParentDigest)
         );
     }
 
     #[test]
-    fn test_verify_block_expected_parent_digest_error() {
+    fn test_validate_block_expected_parent_digest_error() {
         let (parent, block) = baseline_blocks();
         assert_eq!(
-            verify_block(&block, &parent, Sha256::hash(b"wrong_expected_parent")),
+            validate_block(&block, &parent, Sha256::hash(b"wrong_expected_parent")),
             Err(Error::ExpectedParentDigest)
         );
     }
 
     #[test]
-    fn test_verify_block_height_error() {
+    fn test_validate_block_height_error() {
         let (parent, mut block) = baseline_blocks();
         block.height = Height::new(9);
         assert_eq!(
-            verify_block(&block, &parent, parent.digest()),
+            validate_block(&block, &parent, parent.digest()),
             Err(Error::Height)
         );
     }
