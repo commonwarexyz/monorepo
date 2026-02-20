@@ -15,6 +15,13 @@ use commonware_codec::{EncodeSize, Write};
 use commonware_coding::Config as CodingConfig;
 use commonware_cryptography::{Committable, Digest, Hasher};
 
+/// Validation failures for coding proposal verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProposalError {
+    CodingConfig,
+    ContextDigest,
+}
+
 /// Validation failures for coding block verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockError {
@@ -27,19 +34,31 @@ pub(crate) enum BlockError {
     Context,
 }
 
-/// Validation failures for coding proposal verification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProposalError {
-    CodingConfig,
-    ContextDigest,
-}
-
 /// Validation failures for coded block reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconstructionError<D: Digest> {
     BlockDigest,
     CodingConfig,
     ContextDigest(D, D),
+}
+
+/// Consolidated validation for coding proposal checks.
+///
+/// If `context` is `None`, only coding-config validation is applied.
+pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
+    payload: Commitment,
+    expected_config: CodingConfig,
+    context: Option<&C>,
+) -> Result<(), ProposalError> {
+    if payload.config() != expected_config {
+        return Err(ProposalError::CodingConfig);
+    }
+    if let Some(context) = context {
+        if payload.context::<H::Digest>() != hash_context::<H, _>(context) {
+            return Err(ProposalError::ContextDigest);
+        }
+    }
+    Ok(())
 }
 
 /// Consolidated validation for coding block verification.
@@ -78,25 +97,6 @@ where
     }
     if block_context != *context {
         return Err(BlockError::Context);
-    }
-    Ok(())
-}
-
-/// Consolidated validation for coding proposal checks.
-///
-/// If `context` is `None`, only coding-config validation is applied.
-pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
-    payload: Commitment,
-    expected_config: CodingConfig,
-    context: Option<&C>,
-) -> Result<(), ProposalError> {
-    if payload.config() != expected_config {
-        return Err(ProposalError::CodingConfig);
-    }
-    if let Some(context) = context {
-        if payload.context::<H::Digest>() != hash_context::<H, _>(context) {
-            return Err(ProposalError::ContextDigest);
-        }
     }
     Ok(())
 }
