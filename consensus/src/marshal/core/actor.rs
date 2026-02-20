@@ -1404,8 +1404,7 @@ where
             // This invariant comes from the `Variant` commitment mapping contract,
             // not from `CertifiableBlock`.
             assert_eq!(
-                &finalization.proposal.payload,
-                &commitment,
+                &finalization.proposal.payload, &commitment,
                 "finalization payload must match block commitment"
             );
         });
