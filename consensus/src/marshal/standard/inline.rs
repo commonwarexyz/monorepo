@@ -45,12 +45,12 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::{
-            is_block_in_expected_epoch, is_valid_reproposal_at_verify,
-            validate_standard_block_for_verification, LastBuilt,
-        },
+        application::validation::LastBuilt,
         core::Mailbox,
-        standard::Standard,
+        standard::{
+            verification::{self, VerificationDecision},
+            Standard,
+        },
         Update,
     },
     simplex::types::Context,
@@ -65,13 +65,9 @@ use commonware_runtime::{
     Clock, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{
-        fallible::OneshotExt,
-        oneshot::{self, error::RecvError},
-    },
+    channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use futures::future::{ready, Either, Ready};
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::Arc;
@@ -205,7 +201,7 @@ where
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_digest) = consensus_context.parent;
-                let parent_request = fetch_parent(
+                let parent_request = verification::fetch_parent(
                     parent_digest,
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
@@ -321,8 +317,9 @@ where
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let round = context.round;
-                let block_request = marshal.subscribe_by_digest(Some(round), digest).await;
+                let block_request = marshal
+                    .subscribe_by_digest(Some(context.round), digest)
+                    .await;
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping verification");
@@ -341,78 +338,35 @@ where
                     },
                 };
 
-                // Block heights must map to the expected epoch.
-                if !is_block_in_expected_epoch(&epocher, block.height(), context.epoch()) {
-                    debug!(height = %block.height(), "block height not in expected epoch");
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Re-proposals are signaled by `digest == context.parent.1`.
-                // They skip normal parent/height checks because parent == block.
-                if digest == context.parent.1 {
-                    if !is_valid_reproposal_at_verify(&epocher, block.height(), context.epoch()) {
-                        debug!(height = %block.height(), "re-proposal is not at epoch boundary");
-                        tx.send_lossy(false);
+                let block = match verification::precheck_epoch_and_reproposal(
+                    &epocher,
+                    &mut marshal,
+                    &context,
+                    digest,
+                    block,
+                )
+                .await
+                {
+                    VerificationDecision::Complete(valid) => {
+                        tx.send_lossy(valid);
                         return;
                     }
-                    marshal.verified(round, block).await;
-                    tx.send_lossy(true);
-                    return;
-                }
-
-                // Non-reproposal path: fetch the expected parent and validate ancestry.
-                let (parent_view, parent_digest) = context.parent;
-                let parent_request = fetch_parent(
-                    parent_digest,
-                    Some(Round::new(context.epoch(), parent_view)),
-                    &mut application,
-                    &mut marshal,
-                )
-                .await;
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping verification");
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(
-                                ?parent_digest,
-                                reason = "failed to fetch parent block",
-                                "skipping verification"
-                            );
-                            return;
-                        }
-                    },
+                    VerificationDecision::Continue(block) => block,
                 };
 
-                if let Err(err) =
-                    validate_standard_block_for_verification(&block, &parent, parent_digest)
+                let application_valid = match verification::verify_with_parent(
+                    runtime_context,
+                    context,
+                    block,
+                    &mut application,
+                    &mut marshal,
+                    &mut tx,
+                )
+                .await
                 {
-                    debug!(
-                        ?err,
-                        expected_parent = %parent.digest(),
-                        block_parent = %block.parent(),
-                        parent_height = %parent.height(),
-                        block_height = %block.height(),
-                        "block failed standard invariant validation"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
-                let application_valid = application
-                    .verify(
-                        (runtime_context.with_label("app_verify"), context),
-                        ancestry_stream,
-                    )
-                    .await;
-                if application_valid {
-                    marshal.verified(round, block).await;
-                }
+                    Some(valid) => valid,
+                    None => return,
+                };
                 tx.send_lossy(application_valid);
             });
         rx
@@ -481,38 +435,6 @@ where
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
         self.application.report(update).await
-    }
-}
-
-/// Fetches the parent block given its digest and optional round hint.
-///
-/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability.
-///
-/// `parent_round` is only a resolver hint. Callers should supply it when the
-/// source context is trusted.
-#[inline]
-async fn fetch_parent<E, S, A, B>(
-    parent_digest: B::Digest,
-    parent_round: Option<Round>,
-    application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
-{
-    let genesis = application.genesis().await;
-    if parent_digest == genesis.digest() {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        Either::Right(
-            marshal
-                .subscribe_by_digest(parent_round, parent_digest)
-                .await,
-        )
     }
 }
 

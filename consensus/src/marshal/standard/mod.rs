@@ -26,12 +26,14 @@
 //! and want to avoid encoding / decoding overhead.
 
 commonware_macros::stability_scope!(ALPHA {
-    mod marshaled;
-    pub use marshaled::Deferred;
+    mod deferred;
+    pub use deferred::Deferred;
 
     mod inline;
     pub use inline::Inline;
 });
+
+mod verification;
 
 mod variant;
 pub use variant::Standard;
