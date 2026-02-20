@@ -109,10 +109,9 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
-        // This context is produced by simplex for the active epoch, so
-        // `(context.epoch(), parent_view)` is a trusted hint for parent lookup.
-        // Epoch-boundary ancestry is represented via epoch genesis in the
-        // current epoch's view space.
+        // We are guaranteed that the parent round for any `context` is
+        // in the same epoch (recall, the boundary block of the previous epoch
+        // is the genesis block of the current epoch).
         Some(Round::new(context.epoch(), parent_view)),
         application,
         marshal,
