@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_marshaled_rejects_mismatched_context_hash() {
+    fn test_marshaled_rejects_mismatched_context_digest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -652,11 +652,11 @@ mod tests {
                 result = verify_rx => {
                     assert!(
                         !result.unwrap(),
-                        "mismatched context hash should be rejected"
+                        "mismatched context digest should be rejected"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("verify should reject mismatched context hash promptly");
+                    panic!("verify should reject mismatched context digest promptly");
                 },
             }
         })

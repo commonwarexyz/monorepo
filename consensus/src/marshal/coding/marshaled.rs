@@ -657,7 +657,7 @@ where
 
         // Validate proposal-level invariants:
         // - coding config must match active participant set
-        // - context hash must match unless this is a re-proposal
+        // - context digest must match unless this is a re-proposal
         let proposal_context = (!is_reproposal).then_some(&consensus_context);
         if let Err(err) = validate_proposal::<H, _>(payload, coding_config, proposal_context)
         {
@@ -687,7 +687,7 @@ where
             return rx;
         }
 
-        // Re-proposals skip context-hash validation because the consensus context will point
+        // Re-proposals skip context-digest validation because the consensus context will point
         // at the prior epoch-boundary block while the embedded block context is from the
         // original proposal view.
         //

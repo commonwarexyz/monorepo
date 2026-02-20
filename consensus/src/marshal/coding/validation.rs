@@ -17,7 +17,7 @@ use commonware_cryptography::{Committable, Digest, Hasher};
 
 /// Validation failures for coding deferred verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub(crate) enum BlockError {
     Commitment,
     ParentCommitment,
     Epoch,
@@ -50,7 +50,7 @@ pub(crate) fn validate_block<H, ES, B>(
     context: &B::Context,
     commitment: Commitment,
     parent_commitment: Commitment,
-) -> Result<(), Error>
+) -> Result<(), BlockError>
 where
     H: Hasher,
     ES: Epocher,
@@ -58,31 +58,31 @@ where
     B::Context: Epochable + EncodeSize + Write + PartialEq,
 {
     if block.commitment() != commitment {
-        return Err(Error::Commitment);
+        return Err(BlockError::Commitment);
     }
     if parent.commitment() != parent_commitment {
-        return Err(Error::ParentCommitment);
+        return Err(BlockError::ParentCommitment);
     }
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
-        return Err(Error::Epoch);
+        return Err(BlockError::Epoch);
     }
     if block.parent() != parent.digest() {
-        return Err(Error::ParentDigest);
+        return Err(BlockError::ParentDigest);
     }
     if !has_contiguous_height(parent.height(), block.height()) {
-        return Err(Error::Height);
+        return Err(BlockError::Height);
     }
     let block_context = block.context();
     if commitment.context::<H::Digest>() != hash_context::<H, _>(&block_context) {
-        return Err(Error::ContextDigest);
+        return Err(BlockError::ContextDigest);
     }
     if block_context != *context {
-        return Err(Error::Context);
+        return Err(BlockError::Context);
     }
     Ok(())
 }
 
-/// Consolidated validation for coding validation path.
+/// Consolidated validation for coding proposal validation.
 ///
 /// If `context` is `None`, only coding-config validation is applied.
 pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
@@ -351,7 +351,7 @@ mod tests {
                 wrong,
                 fixture.parent_commitment,
             ),
-            Err(Error::Commitment)
+            Err(BlockError::Commitment)
         );
     }
 
@@ -373,7 +373,7 @@ mod tests {
                 fixture.commitment,
                 wrong,
             ),
-            Err(Error::ParentCommitment)
+            Err(BlockError::ParentCommitment)
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
                 fixture.commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::Epoch)
+            Err(BlockError::Epoch)
         );
     }
 
@@ -408,7 +408,7 @@ mod tests {
                 fixture.commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::ParentDigest)
+            Err(BlockError::ParentDigest)
         );
     }
 
@@ -426,7 +426,7 @@ mod tests {
                 fixture.commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::Height)
+            Err(BlockError::Height)
         );
     }
 
@@ -447,7 +447,7 @@ mod tests {
                 wrong_commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::ContextDigest)
+            Err(BlockError::ContextDigest)
         );
     }
 
@@ -464,7 +464,7 @@ mod tests {
                 fixture.commitment,
                 fixture.parent_commitment,
             ),
-            Err(Error::Context)
+            Err(BlockError::Context)
         );
     }
 

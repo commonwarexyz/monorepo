@@ -218,7 +218,7 @@ pub enum Error<C: CodingScheme> {
     #[error("block config mismatch: reconstructed config does not match commitment config")]
     ConfigMismatch,
 
-    /// The reconstructed block's embedded context does not match the commitment context hash
+    /// The reconstructed block's embedded context does not match the commitment context digest
     #[error("block context mismatch: reconstructed context does not match commitment context")]
     ContextMismatch,
 }
@@ -592,7 +592,7 @@ where
                     %commitment,
                     expected_context_digest = ?expected,
                     actual_context_digest = ?actual,
-                    "reconstructed block context hash does not match commitment context hash"
+                    "reconstructed block context digest does not match commitment context digest"
                 );
                 return Err(Error::ContextMismatch);
             }
@@ -3810,7 +3810,7 @@ mod tests {
     #[test_traced]
     fn test_failed_reconstruction_context_mismatch_then_recovery() {
         // Byzantine scenario: shards decode to a block whose digest and coding root/config
-        // match the commitment, but the commitment carries a mismatched context hash.
+        // match the commitment, but the commitment carries a mismatched context digest.
         // The engine must reject reconstruction and keep the commitment unresolved.
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
@@ -3823,16 +3823,16 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
-                let wrong_context_hash = Sha256::hash(b"wrong_context");
+                let wrong_context_digest = Sha256::hash(b"wrong_context");
                 assert_ne!(
                     real_commitment.context::<Sha256Digest>(),
-                    wrong_context_hash,
-                    "test requires a distinct context hash"
+                    wrong_context_digest,
+                    "test requires a distinct context digest"
                 );
                 let fake_commitment = Commitment::from((
                     coded_block.digest(),
                     real_commitment.root::<Sha256Digest>(),
-                    wrong_context_hash,
+                    wrong_context_digest,
                     coding_config,
                 ));
 
