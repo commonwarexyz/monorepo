@@ -90,7 +90,7 @@
 
         <h2>Certification: A Second Decision Point</h2>
 
-        <p>The foundation of this integration is a new phase in a view's progression to finalization: "certification". In Simplex, notarization and finalization are intentionally split, and <code>certify</code> sits in between as a local, deterministic second decision point.</p>
+        <p>The foundation of this integration is a new phase in a view's progression to finalization within simplex. "Certification" offers a local, deterministic method to nullify a view after voting on partial information. For a more formal treatment of this idea, refer to <a href="https://eprint.iacr.org/2023/1916.pdf"><i>Sing a song of Simplex</i></a> by Victor Shoupe.</p>
 
         <p>A notarization proves that a quorum observed the same proposal. It does not force replicas to keep going down that path. After notarization forms, the network can still change course if new information shows up locally.</p>
 
@@ -105,11 +105,11 @@
 
         <h2>Why This Matters for Coding</h2>
 
-        <p>In the coding path, this boundary becomes a latency lever. Validators verify proposal invariants and shard validity against the erasure-coding commitment, then vote to notarize without waiting for full block reconstruction.</p>
-
-        <p>After notarization forms, <code>certify</code> is where we resolve new information: reconstruct the block, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
+        <p>In the coding path, this boundary becomes a latency lever. The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a> by Lei Yang, Seo Jin Park, and Mohammad Alizadeh). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, then relay their shard and vote to notarize without waiting for full block reconstruction.</p>
 
         <p>This is where we differ from other three-round protocols that employ erasure coded broadcast such as MonadBFT and Alpenglow: those designs wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
+
+        <p>After notarization forms, <code>certify</code> is where we resolve new information: reconstruct the block, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
 
         <div class="image-container">
             <img src="../imgs/coding_chain.png" alt="Erasure Coded Block dissemination and chain diagram" />
@@ -128,7 +128,7 @@
 
         <h2>Alto Benchmarks</h2>
 
-        <p>For global <a href="https://alto.commonware.xyz">alto</a> benchmarks, we deploy 50 validators uniformly across <code>ap-northeast-1</code>, <code>ap-nor theast-2</code>, <code>ap-south-1</code>, <code>ap-southeast-2</code>, <code>eu- central-1</code>, <code>eu-north-1</code>, <code>eu-west-1</code>, <code>sa-east -1</code>, <code>us-east-1</code>, and <code>us-west-1</code>. Each validator ru ns on a <code>c8g.2xlarge</code> instance.</p>
+        <p>For global <a href="https://alto.commonware.xyz">alto</a> benchmarks, we deploy 50 validators uniformly across <code>ap-northeast-1</code>, <code>ap-nor theast-2</code>, <code>ap-south-1</code>, <code>ap-southeast-2</code>, <code>eu- central-1</code>, <code>eu-north-1</code>, <code>eu-west-1</code>, <code>sa-east -1</code>, <code>us-east-1</code>, and <code>us-west-1</code>. Each validator runs on a <code>c8g.2xlarge</code> instance.</p>
 
         <div class="image-container">
             <img src="../imgs/alto_coding.png" alt="Alto coding benchmarks" />
@@ -137,7 +137,7 @@
 
         <h2>What Comes Next</h2>
 
-        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster, safer, and more composable consensus deployments.</p>
+        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster, safer, and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="https://commonware.xyz/blogs/is-it-ready-yet">in ALPHA</a>, and will be included in the upcoming release.</p>
 
         <p><i>commonware-constantinople is coming soon.</i></p>
     </div>
