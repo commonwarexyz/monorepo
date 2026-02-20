@@ -85,10 +85,7 @@ use crate::{
         coding::{
             shards,
             types::{coding_config_for_participants, hash_context, CodedBlock},
-            validation::{
-                validate_block, validate_proposal,
-                ProposalError,
-            },
+            validation::{validate_block, validate_proposal, ProposalError},
             Coding,
         },
         core, Update,
@@ -659,8 +656,7 @@ where
         // - coding config must match active participant set
         // - context digest must match unless this is a re-proposal
         let proposal_context = (!is_reproposal).then_some(&consensus_context);
-        if let Err(err) = validate_proposal::<H, _>(payload, coding_config, proposal_context)
-        {
+        if let Err(err) = validate_proposal::<H, _>(payload, coding_config, proposal_context) {
             match err {
                 ProposalError::CodingConfig => {
                     warn!(
