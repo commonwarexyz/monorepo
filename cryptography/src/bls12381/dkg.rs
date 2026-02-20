@@ -139,7 +139,7 @@
 //! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` revealed shares).
 //!
-//! While **it will not be possible for any external observer (or a Byzantine adversary) to recover the shared secret and/or form a signature,**
+//! While **it will not be possible for any external observer (or a Byzantine adversary) to recover the shared secret and/or form a signature**,
 //! a secret with more than `f` revealed shares no longer can be used safely in some applications (like when used to form threshold certificates for consensus).
 //! Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f` honest players and another block `B_2`
 //! to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`), however, with `h` other shares
