@@ -800,7 +800,10 @@ mod tests {
                     B::new::<Sha256>(context_round_2.clone(), parent_digest, Height::new(2), 300);
                 let digest_b = block_b.digest();
                 marshal.clone().proposed(round, block_b).await;
-                assert_ne!(digest_a, digest_b, "equivocation must produce distinct digests");
+                assert_ne!(
+                    digest_a, digest_b,
+                    "equivocation must produce distinct digests"
+                );
                 context.sleep(Duration::from_millis(10)).await;
 
                 // ...then certify a different sibling digest in the same round.
@@ -832,5 +835,4 @@ mod tests {
             });
         }
     }
-
 }

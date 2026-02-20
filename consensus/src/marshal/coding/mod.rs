@@ -429,7 +429,10 @@ mod tests {
             let verify_a = marshaled
                 .verify(equivocation_context.clone(), commitment_a)
                 .await;
-            assert!(verify_a.await.unwrap(), "commitment A verify should succeed");
+            assert!(
+                verify_a.await.unwrap(),
+                "commitment A verify should succeed"
+            );
 
             // Seed the conflicting sibling after verification via verified-cache path.
             let block_b = make_coding_block(
