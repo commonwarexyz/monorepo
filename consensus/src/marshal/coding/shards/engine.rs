@@ -161,10 +161,12 @@ use super::{
 };
 use crate::{
     marshal::{
-        application::validation::{
-            validate_reconstruction, ReconstructionValidationError as InvariantError,
+        coding::{
+            types::{CodedBlock, DistributionShard, Shard},
+            validation::{
+                validate_reconstruction, ReconstructionValidationError as InvariantError,
+            },
         },
-        coding::types::{CodedBlock, DistributionShard, Shard},
     },
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,

@@ -53,6 +53,7 @@
 
 pub mod shards;
 pub mod types;
+pub(crate) mod validation;
 
 mod variant;
 pub use variant::Coding;

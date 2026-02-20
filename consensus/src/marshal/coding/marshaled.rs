@@ -78,15 +78,17 @@ use crate::{
         ancestry::AncestorStream,
         application::{
             validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
-                validate_coded_block_for_verification, validate_coded_proposal,
-                CodedProposalValidationError, LastBuilt,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
             },
             verification_tasks::VerificationTasks,
         },
         coding::{
             shards,
             types::{coding_config_for_participants, hash_context, CodedBlock},
+            validation::{
+                validate_coded_block_for_verification, validate_coded_proposal,
+                CodedProposalValidationError,
+            },
             Coding,
         },
         core, Update,
