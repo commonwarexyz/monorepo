@@ -36,10 +36,10 @@ stability_scope!(ALPHA {
     ///    `on_external` for one event. If a lane message is received (`Some`),
     ///    the service may drain additional ready messages from that same lane,
     ///    up to [`Actor::max_lane_batch`]. Each message is dispatched to
-    ///    `on_read_only` (concurrent) or `on_read_write` (serial), then
-    ///    `postprocess` runs once for the full batch. If the source
-    ///    yields `None` (lane closed or `on_external` exhaustion), skip
-    ///    directly to `on_shutdown`.
+    ///    `on_read_only` (concurrent) or `on_read_write` (serial). After at
+    ///    least one message is dispatched, `postprocess` runs once. If the
+    ///    source yields `None` (lane closed or `on_external` exhaustion),
+    ///    skip directly to `on_shutdown`.
     /// 3. `on_shutdown` once, on graceful exit (runtime stop, lane closure,
     ///    or `on_external` returning `None`).
     ///
@@ -207,11 +207,13 @@ stability_scope!(ALPHA {
             futures::future::pending()
         }
 
-        /// Runs at the end of each iteration that dispatched a message.
+        /// Runs at the end of each iteration that dispatched ingress.
         ///
-        /// Not guaranteed to be called after every single message. When
-        /// a lane batch is enabled via [`Actor::max_lane_batch`],
-        /// `postprocess` runs once after the full batch completes.
+        /// Only called when at least one message was dispatched in the
+        /// iteration. Skipped when the loop merely waited for read
+        /// capacity. When a lane batch is enabled via
+        /// [`Actor::max_lane_batch`], `postprocess` runs once after
+        /// the full batch completes.
         fn postprocess(
             &mut self,
             _context: &mut E,
