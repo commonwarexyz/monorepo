@@ -338,6 +338,9 @@ where
                     },
                 };
 
+                // Shared pre-checks:
+                // 1. Enforce epoch membership
+                // 2. Handle valid/invalid re-proposals (`digest == context.parent.1`)
                 let block = match verification::precheck_epoch_and_reproposal(
                     &epocher,
                     &mut marshal,
@@ -354,6 +357,8 @@ where
                     VerificationDecision::Continue(block) => block,
                 };
 
+                // Non-reproposal path: fetch expected parent, validate ancestry, then
+                // run application verification over the ancestry stream.
                 let application_valid = match verification::verify_with_parent(
                     runtime_context,
                     context,

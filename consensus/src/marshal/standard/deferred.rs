@@ -209,6 +209,10 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
+                // Shared non-reproposal verification:
+                // - fetch parent (using trusted round hint from consensus context)
+                // - validate standard ancestry invariants
+                // - run application verification over ancestry
                 let application_valid = match verification::verify_with_parent(
                     runtime_context,
                     context,
@@ -434,6 +438,9 @@ where
                     },
                 };
 
+                // Shared pre-checks enforce epoch membership and handle re-proposals.
+                // Re-proposals return early; for valid ones we cache a completed task
+                // so `certify` can observe success deterministically.
                 let block = match verification::precheck_epoch_and_reproposal(
                     &marshaled.epocher,
                     &mut marshal,

@@ -309,6 +309,7 @@ mod wrapper_tests {
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
+                // Non-boundary propose should drop the response because mock app cannot build.
                 let non_boundary_context = Ctx {
                     round: Round::new(Epoch::zero(), View::new(1)),
                     leader: me.clone(),
@@ -320,6 +321,7 @@ mod wrapper_tests {
                     "{kind:?}: proposal should be dropped when application returns no block"
                 );
 
+                // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
                 let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
                 let boundary_block = B::new::<Sha256>(
@@ -405,6 +407,7 @@ mod wrapper_tests {
 
                 context.sleep(Duration::from_millis(10)).await;
 
+                // Valid re-proposal: boundary block in the same epoch.
                 let valid_reproposal_context = Ctx {
                     round: Round::new(Epoch::zero(), View::new(boundary_height.get() + 1)),
                     leader: me.clone(),
@@ -419,6 +422,7 @@ mod wrapper_tests {
                     "{kind:?}: boundary re-proposal should be accepted"
                 );
 
+                // Invalid re-proposal: non-boundary block.
                 let non_boundary_height = Height::new(10);
                 let non_boundary_round =
                     Round::new(Epoch::zero(), View::new(non_boundary_height.get()));
@@ -440,6 +444,7 @@ mod wrapper_tests {
 
                 context.sleep(Duration::from_millis(10)).await;
 
+                // Attempt to re-propose a non-boundary block.
                 let invalid_reproposal_context = Ctx {
                     round: Round::new(Epoch::zero(), View::new(15)),
                     leader: me.clone(),
@@ -454,6 +459,7 @@ mod wrapper_tests {
                     "{kind:?}: non-boundary re-proposal should be rejected"
                 );
 
+                // Invalid re-proposal: cross-epoch context.
                 let cross_epoch_context = Ctx {
                     round: Round::new(Epoch::new(1), View::new(boundary_height.get() + 1)),
                     leader: me,
@@ -469,6 +475,7 @@ mod wrapper_tests {
                 );
 
                 if wrapper.kind() == WrapperKind::Deferred {
+                    // Deferred-only crash-recovery path: certify without prior verify.
                     let certify_only_round = Round::new(Epoch::zero(), View::new(21));
                     let certify_result = wrapper
                         .certify(certify_only_round, boundary_digest)
@@ -513,6 +520,8 @@ mod wrapper_tests {
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
+                // Test case 1: non-contiguous height.
+                // Malformed block: parent is genesis but height skips from 0 to 2.
                 let malformed_round = Round::new(Epoch::zero(), View::new(2));
                 let malformed_context = Ctx {
                     round: malformed_round,
@@ -539,11 +548,13 @@ mod wrapper_tests {
                     .await
                     .expect("verify result missing");
                 if kind == WrapperKind::Inline {
+                    // Inline verifies fully in `verify`.
                     assert!(
                         !malformed_verify,
                         "inline verify should reject non-contiguous ancestry"
                     );
                 } else {
+                    // Deferred verify is optimistic; final verdict is observed in `certify`.
                     assert!(
                         malformed_verify,
                         "deferred verify should optimistically pass pre-checks"
@@ -555,6 +566,7 @@ mod wrapper_tests {
                     );
                 }
 
+                // Test case 2: mismatched parent commitment with contiguous heights.
                 let parent_round = Round::new(Epoch::zero(), View::new(1));
                 let parent_context = Ctx {
                     round: parent_round,
@@ -592,11 +604,13 @@ mod wrapper_tests {
                     .await
                     .expect("verify result missing");
                 if kind == WrapperKind::Inline {
+                    // Inline returns the full verification result directly.
                     assert!(
                         !mismatch_verify,
                         "inline verify should reject mismatched parent digest"
                     );
                 } else {
+                    // Deferred reports optimistic success and relies on `certify`.
                     assert!(
                         mismatch_verify,
                         "deferred verify should optimistically pass pre-checks"
@@ -639,6 +653,7 @@ mod wrapper_tests {
                     MockVerifyingApp::with_verify_result(genesis.clone(), false);
                 let mut wrapper = Wrapper::new(kind, context.clone(), mock_app, marshal.clone());
 
+                // 1) Set up a valid parent so structural checks can pass.
                 let parent_round = Round::new(Epoch::zero(), View::new(1));
                 let parent_context = Ctx {
                     round: parent_round,
@@ -649,6 +664,7 @@ mod wrapper_tests {
                 let parent_digest = parent.digest();
                 marshal.clone().proposed(parent_round, parent).await;
 
+                // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
                 let verify_context = Ctx {
                     round,
@@ -661,6 +677,9 @@ mod wrapper_tests {
 
                 context.sleep(Duration::from_millis(10)).await;
 
+                // 3) Compare wrapper behavior:
+                //    - Inline fails in `verify`.
+                //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
                     .verify(verify_context, digest)
                     .await

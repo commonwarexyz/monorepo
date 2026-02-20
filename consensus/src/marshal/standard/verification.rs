@@ -20,11 +20,22 @@ use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use tracing::debug;
 
+/// Result of the shared epoch / re-proposal pre-check step.
+///
+/// `Complete(valid)` indicates verification can terminate immediately with `valid`.
+/// `Continue(block)` indicates full parent + application verification should continue.
 pub(super) enum VerificationDecision<B> {
     Complete(bool),
     Continue(B),
 }
 
+/// Performs shared pre-checks used by both inline and deferred verification paths.
+///
+/// This enforces:
+/// - Block height belongs to the expected epoch.
+/// - Re-proposal validation when `digest == context.parent.1`.
+///
+/// Valid re-proposals are immediately marked verified in marshal and return `Complete(true)`.
 #[inline]
 pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     epocher: &ES,
@@ -38,6 +49,7 @@ where
     S: Scheme,
     B: Block + Clone,
 {
+    // Block heights must map to the expected epoch.
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
         debug!(
             height = %block.height(),
@@ -46,6 +58,8 @@ where
         return VerificationDecision::Complete(false);
     }
 
+    // Re-proposals are signaled by `digest == context.parent.1`.
+    // They skip normal parent/height checks because parent == block.
     if digest == context.parent.1 {
         if !is_valid_reproposal_at_verify(epocher, block.height(), context.epoch()) {
             debug!(
@@ -62,6 +76,14 @@ where
     VerificationDecision::Continue(block)
 }
 
+/// Runs the shared non-reproposal verification flow.
+///
+/// This fetches the expected parent, validates standard ancestry invariants, then
+/// calls application verification over the ancestry stream.
+///
+/// Returns:
+/// - `Some(valid)` when a verification verdict is available.
+/// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
 #[inline]
 pub(super) async fn verify_with_parent<E, S, A, B>(
     runtime_context: E,
@@ -85,6 +107,8 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
+        // This context is produced by simplex for the active epoch, so
+        // `(context.epoch(), parent_view)` is a trusted hint for parent lookup.
         Some(Round::new(context.epoch(), parent_view)),
         application,
         marshal,
@@ -111,6 +135,7 @@ where
         },
     };
 
+    // Validate parent digest and contiguous child height before application logic.
     if let Err(err) = validate_standard_block_for_verification(&block, &parent, parent_digest) {
         debug!(
             ?err,
@@ -123,6 +148,7 @@ where
         return Some(false);
     }
 
+    // Request verification from the application over the two-block ancestry prefix.
     let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
     let validity_request = application.verify(
         (runtime_context.with_label("app_verify"), context.clone()),
@@ -145,6 +171,13 @@ where
     Some(application_valid)
 }
 
+/// Fetches the parent block given its digest and optional round hint.
+///
+/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
+/// to marshal for parent availability.
+///
+/// `parent_round` is a resolver hint. Callers should only provide a hint when the
+/// source context is trusted/validated. Untrusted paths should pass `None`.
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
