@@ -112,6 +112,7 @@
         // TODO: missing some authors I think?
         <p>In the coding path, this boundary becomes a latency lever. The proposer first erasure-encodes their block and commits to all shards to form a consensus payload. Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a> by Lei Yang, Seo Jin Park, and Mohammad Alizadeh). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, then relay their shard and vote to notarize without waiting for full block reconstruction.</p>
 
+        // TODO: add links to Monad/Alpenglow specs
         <p>This is where we differ from other three-round protocols that employ erasure coded broadcast such as MonadBFT and Alpenglow: those designs wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
 
         <p>After notarization forms, <code>certify</code> is where we resolve new information: reconstruct the block, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
@@ -123,8 +124,12 @@
 
         <h2>Deferred Verification, Even Without Coding</h2>
 
+        // TODO: switch to standard/deferred
         <p>There is a second win: <code>certify</code> gives us deferred verification as a first-class pattern. We can start verification early, hide it behind vote propagation latency, and require the result at certification time. This is already used in the standard marshal path (see <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/marshaled.rs">standard::Marshaled</a></code>), even without erasure coding. In a global deployment of <code>alto</code> with a simulated 500ms verification duration, we saw view latency drop by 105ms on average with this feature enabled.</p>
 
+        // TODO: retain inline for applications that want nothing but to order.
+
+        // TODO: Wild Performance Out-of-the-Box
         <h2>Plug-and-Play for Applications</h2>
 
         <p>Applications do not need to be rewritten to use this feature. If you already implement the consensus <code>Application</code>/<code>VerifyingApplication</code> interfaces, wrap the same application with coding marshal and get erasure-coded dissemination automatically. Build, verify, report: same contract.</p>
