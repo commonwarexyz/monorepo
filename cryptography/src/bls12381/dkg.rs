@@ -104,15 +104,16 @@
 //!
 //! In order to prevent malicious dealers from withholding shares from players, we
 //! require the dealers reveal the shares for which they did not receive acks.
-//! Because of the synchrony assumption above, this will only happen if either:
+//!
+//! Under synchrony (as discussed below), this will only happen if either:
 //! - the dealer is malicious, not sending a share, but honestly revealing,
 //! - or, the player is malicious, not sending an ack when they should.
 //!
 //! ### Up to `f` Reveals Under Synchrony
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
-//! this construction will not result in more than `f` reveals and no reveals will be for honest players (`2f + 1` commitments with
-//! at most `f` players are Byzantine).
+//! this construction will not result in more than `f` reveals from honest dealers, and none of those reveals are for honest players
+//! (`2f + 1` commitments with at most `f` players are Byzantine).
 //!
 //! To see how this is true, first consider that in any successful round there must exist `2f + 1` commitments each with at most `f`
 //! reveals. This implies that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments
