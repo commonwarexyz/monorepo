@@ -214,6 +214,16 @@ where
         leader_idx == signer_idx
     }
 
+    fn is_honest_round_robin_leader(&self, view: u64) -> bool {
+        let participant_count = self.byzantine_participants.len() + 1; // + honest
+        if participant_count == 0 {
+            return false;
+        }
+        let honest_idx = self.byzantine_participants.len();
+        let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
+        leader_idx == honest_idx
+    }
+
     // Picks a proposal for the next fuzz event. It may reuse a recent proposal
     // or mutate one to create nearby variants.
     fn select_event_proposal(&mut self) -> Proposal<Sha256Digest> {
@@ -746,7 +756,11 @@ where
             self.last_notarized_view,
             self.last_nullified_view,
         );
+        self.send_nullify_vote_for_view(signer_idx, view).await;
+    }
 
+    async fn send_nullify_vote_for_view(&mut self, signer_idx: usize, view: u64) {
+        let view = view.max(1);
         let key = VoteKey::Nullify {
             signer: signer_idx,
             view,
@@ -1001,6 +1015,40 @@ where
             .await;
     }
 
+    // Force the honest node to assemble and broadcast a local nullification for
+    // an honest-led view so voter::actor can emit the floor certificate branch.
+    async fn try_trigger_local_nullification_floor(&mut self) {
+        let Some(proposal) = self
+            .honest_notarize_votes
+            .keys()
+            .filter(|proposal| {
+                let view = proposal.view().get();
+                self.is_honest_round_robin_leader(view) && proposal.parent.get() > 0
+            })
+            .max_by_key(|proposal| proposal.view().get())
+            .cloned()
+        else {
+            return;
+        };
+
+        let view = proposal.view().get();
+        let parent_view = proposal.parent.get();
+
+        if !self.notarized_by_view.contains_key(&parent_view)
+            && !self.finalized_by_view.contains_key(&parent_view)
+        {
+            let Some(parent_proposal) = self.proposal_by_view.get(&parent_view).cloned() else {
+                return;
+            };
+            self.send_notarization_certificate_for_proposal(0, parent_proposal, true)
+                .await;
+        }
+
+        for signer_idx in 0..self.schemes.len() {
+            self.send_nullify_vote_for_view(signer_idx, view).await;
+        }
+    }
+
     async fn send_nullification_certificate(&mut self, signer_idx: usize) {
         let view = self.strategy.mutate_nullify_view(
             &mut self.context,
@@ -1011,10 +1059,14 @@ where
         );
 
         match self.context.gen_range(0..100u8) {
-            // 90% — normal nullification
-            0..=89 => {
+            // 87% — normal nullification
+            0..=86 => {
                 self.send_nullification_certificate_for_view(signer_idx, view)
                     .await;
+            }
+            // 3% — drive local nullification assembly to hit floor-broadcast path
+            87..=89 => {
+                self.try_trigger_local_nullification_floor().await;
             }
             // 4% — malformed bytes
             90..=93 => {
