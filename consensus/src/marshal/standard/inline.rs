@@ -48,7 +48,9 @@ use crate::{
         application::validation::LastBuilt,
         core::Mailbox,
         standard::{
-            verification::{self, VerificationDecision},
+            verification::{
+                fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
+            },
             Standard,
         },
         Update,
@@ -201,7 +203,7 @@ where
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_digest) = consensus_context.parent;
-                let parent_request = verification::fetch_parent(
+                let parent_request = fetch_parent(
                     parent_digest,
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
@@ -348,7 +350,7 @@ where
                 // - Re-proposals skip normal parent/height checks because:
                 //   1) the block was already verified when originally proposed
                 //   2) parent-child checks would fail by construction when parent == block
-                let block = match verification::precheck_epoch_and_reproposal(
+                let block = match precheck_epoch_and_reproposal(
                     &epocher,
                     &mut marshal,
                     &context,
@@ -357,20 +359,20 @@ where
                 )
                 .await
                 {
-                    VerificationDecision::Complete(valid) => {
+                    Decision::Complete(valid) => {
                         // `Complete` means either an immediate reject or a valid
                         // re-proposal accepted without further ancestry checks.
                         tx.send_lossy(valid);
                         return;
                     }
-                    VerificationDecision::Continue(block) => block,
+                    Decision::Continue(block) => block,
                 };
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
                 // run application verification over the ancestry stream.
                 // The helper returns `None` when work should stop early (for example,
                 // receiver closed or parent unavailable).
-                let application_valid = match verification::verify_with_parent(
+                let application_valid = match verify_with_parent(
                     runtime_context,
                     context,
                     block,

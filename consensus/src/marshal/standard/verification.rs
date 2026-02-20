@@ -24,7 +24,7 @@ use tracing::debug;
 ///
 /// `Complete(valid)` indicates verification can terminate immediately with `valid`.
 /// `Continue(block)` indicates full parent + application verification should continue.
-pub(super) enum VerificationDecision<B> {
+pub(super) enum Decision<B> {
     Complete(bool),
     Continue(B),
 }
@@ -43,7 +43,7 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,
-) -> VerificationDecision<B>
+) -> Decision<B>
 where
     ES: Epocher,
     S: Scheme,
@@ -55,7 +55,7 @@ where
             height = %block.height(),
             "block height not in expected epoch"
         );
-        return VerificationDecision::Complete(false);
+        return Decision::Complete(false);
     }
 
     // Re-proposals are signaled by `digest == context.parent.1`.
@@ -68,14 +68,14 @@ where
                 height = %block.height(),
                 "re-proposal is not at epoch boundary"
             );
-            return VerificationDecision::Complete(false);
+            return Decision::Complete(false);
         }
 
         marshal.verified(context.round, block).await;
-        return VerificationDecision::Complete(true);
+        return Decision::Complete(true);
     }
 
-    VerificationDecision::Continue(block)
+    Decision::Continue(block)
 }
 
 /// Runs the shared non-reproposal verification flow.

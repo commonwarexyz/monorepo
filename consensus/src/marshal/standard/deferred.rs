@@ -79,7 +79,9 @@ use crate::{
         },
         core::Mailbox,
         standard::{
-            verification::{self, VerificationDecision},
+            verification::{
+                fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
+            },
             Standard,
         },
         Update,
@@ -217,7 +219,7 @@ where
                 // The helper preserves the prior early-exit behavior and returns
                 // `None` when work should stop (for example receiver dropped or
                 // parent unavailable).
-                let application_valid = match verification::verify_with_parent(
+                let application_valid = match verify_with_parent(
                     runtime_context,
                     context,
                     block,
@@ -309,7 +311,7 @@ where
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_digest) = consensus_context.parent;
-                let parent_request = verification::fetch_parent(
+                let parent_request = fetch_parent(
                     parent_digest,
                     // We are guaranteed that the parent round for any `consensus_context` is
                     // in the same epoch (recall, the boundary block of the previous epoch
@@ -449,7 +451,7 @@ where
                 // Re-proposals return early and skip normal parent/height checks
                 // because they were already verified when originally proposed and
                 // parent-child checks would fail by construction when parent == block.
-                let block = match verification::precheck_epoch_and_reproposal(
+                let block = match precheck_epoch_and_reproposal(
                     &marshaled.epocher,
                     &mut marshal,
                     &context,
@@ -458,7 +460,7 @@ where
                 )
                 .await
                 {
-                    VerificationDecision::Complete(valid) => {
+                    Decision::Complete(valid) => {
                         if valid {
                             // Valid re-proposal. Create a completed verification task for `certify`.
                             let round = context.round;
@@ -471,7 +473,7 @@ where
                         tx.send_lossy(valid);
                         return;
                     }
-                    VerificationDecision::Continue(block) => block,
+                    Decision::Continue(block) => block,
                 };
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
