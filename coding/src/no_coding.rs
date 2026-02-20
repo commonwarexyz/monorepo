@@ -30,21 +30,21 @@ impl<H> std::fmt::Debug for NoCoding<H> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Shard(Vec<u8>);
+pub struct StrongShard(Vec<u8>);
 
-impl EncodeSize for Shard {
+impl EncodeSize for StrongShard {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
     }
 }
 
-impl Write for Shard {
+impl Write for StrongShard {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.0.write(buf)
     }
 }
 
-impl Read for Shard {
+impl Read for StrongShard {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -57,19 +57,19 @@ impl Read for Shard {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct ReShard(());
+pub struct WeakShard(());
 
-impl EncodeSize for ReShard {
+impl EncodeSize for WeakShard {
     fn encode_size(&self) -> usize {
         0
     }
 }
 
-impl Write for ReShard {
+impl Write for WeakShard {
     fn write(&self, _buf: &mut impl bytes::BufMut) {}
 }
 
-impl Read for ReShard {
+impl Read for WeakShard {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -83,9 +83,9 @@ impl Read for ReShard {
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
 
-    type Shard = Shard;
+    type StrongShard = StrongShard;
 
-    type ReShard = ReShard;
+    type WeakShard = WeakShard;
 
     type CheckedShard = ();
 
@@ -97,26 +97,26 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         config: &crate::Config,
         mut data: impl bytes::Buf,
         _strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+    ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
         let shards = (0..config.total_shards())
-            .map(|_| Shard(data.clone()))
+            .map(|_| StrongShard(data.clone()))
             .collect();
         Ok((commitment, shards))
     }
 
-    fn reshard(
+    fn weaken(
         _config: &Config,
         commitment: &Self::Commitment,
         _index: u16,
-        shard: Self::Shard,
-    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
+        shard: Self::StrongShard,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
         let my_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &my_commitment != commitment {
             return Err(Error::BadData);
         }
-        Ok((shard.0, (), ReShard(())))
+        Ok((shard.0, (), WeakShard(())))
     }
 
     fn check(
@@ -124,7 +124,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
         _index: u16,
-        _reshard: Self::ReShard,
+        _weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         Ok(())
     }
@@ -148,7 +148,7 @@ mod conformance {
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
-        CodecConformance<Shard>,
-        CodecConformance<ReShard>
+        CodecConformance<StrongShard>,
+        CodecConformance<WeakShard>
     }
 }
