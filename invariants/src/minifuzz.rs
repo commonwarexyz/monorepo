@@ -411,7 +411,13 @@ impl Builder {
                     Ok((Err(arbitrary::Error::NotEnoughData), _)) => {
                         sampler.strategy_add_bytes(true);
                     }
-                    Ok((_, remaining)) => {
+                    Ok((Err(arbitrary::Error::IncorrectFormat), remaining)) => {
+                        sampler.set_bytes_used(sample_len - remaining);
+                    }
+                    Ok((Err(e), _)) => {
+                        panic!("failure ({ENV_VAR} = {branch}) (while sampling):\n{e}")
+                    }
+                    Ok((Ok(()), remaining)) => {
                         sampler.set_bytes_used(sample_len - remaining);
                         tries += 1;
                         let past_min = tries >= self.min_iterations;
@@ -562,6 +568,23 @@ mod tests {
                 Ok(())
             });
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn incorrect_format_does_not_count_as_try() {
+        let mut calls = 0u64;
+        super::Builder::default()
+            .with_search_limit(1)
+            .with_seed(0)
+            .test(|_u| {
+                calls += 1;
+                if calls == 1 {
+                    Err(arbitrary::Error::IncorrectFormat)
+                } else {
+                    Ok(())
+                }
+            });
+        assert_eq!(calls, 2);
     }
 
     #[test]
