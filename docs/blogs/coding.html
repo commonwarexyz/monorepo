@@ -88,7 +88,7 @@
 
         <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator (which can take hundreds of milliseconds to distribute a block on a multi-Gbps link). What if the proposer sent only a portion of the block to each validator, and validators used their spare bandwidth to help relay the rest?</p>
 
-        <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators relay verified shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> advances on the same commitment.</p>
+        <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify and relay shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> can notarize that commitment before full block reconstruction.</p>
 
         <h2>Certification: A Second Decision Point</h2>
 
@@ -98,8 +98,6 @@
 
         <p>If <code>certify</code> returns true, the validator advances to the next view and then votes to <code>finalize</code> the certified view. If <code>certify</code> returns false, the validator votes to <code>nullify</code> and refuses to build on that payload. In other words: notarization says “we saw it,” certification decides “we will build on it.”</p>
 
-        <p>For a more formal treatment of this idea, refer to <a href="https://eprint.iacr.org/2023/1916.pdf"><i>Sing a song of Simplex</i></a> by Victor Shoup.</p>
-
         <div class="image-container">
             <img src="/imgs/certify_sequence.png" alt="View Sequence" />
             <div class="image-caption">Figure 1: Simplex view lifecycle with certification.</div>
@@ -107,21 +105,21 @@
 
         <h2>Why This Matters for Coding</h2>
 
-        <p>In the coding path, this boundary can be used to improve view latency. The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a> by Lei Yang, Seo Jin Park, Mohammad Alizadeh, Sreeram Kannan, and David Tse). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, then relay their shard and vote to notarize without waiting for full block reconstruction.</p>
+        <p>In the coding path, this boundary improves view latency by changing when validators vote. The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a>). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, relay their shard, and vote to notarize. Full block reconstruction is deferred to <code>certify</code>.</p>
 
         <div class="image-container">
             <img src="/imgs/coding_commitment_construction.png" alt="Erasure coding commitment construction" />
             <div class="image-caption">Figure 2: Coding Commitment Construction</div>
         </div>
 
-        <p>This is closest in spirit to <i>DispersedSimplex</i>: vote on a commitment first, then gate finalization on local certification. We differ from other three-round protocols that employ erasure-coded broadcast such as <a href="https://arxiv.org/abs/2502.20692">MonadBFT</a> and <a href="https://drive.google.com/file/d/1Rlr3PdHsBmPahOInP6-Pl0bMzdayltdV/view">Alpenglow</a>, which wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
+        <p>This is closest in spirit to <a href="https://eprint.iacr.org/2023/1916.pdf">DispersedSimplex</a>: notarize the commitment first, recover the block later, then gate finalization on local certification. We differ from other three-round protocols that employ erasure-coded broadcast such as <a href="https://arxiv.org/abs/2502.20692">MonadBFT</a> and <a href="https://drive.google.com/file/d/1Rlr3PdHsBmPahOInP6-Pl0bMzdayltdV/view">Alpenglow</a>, which wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
 
         <div class="image-container">
             <img src="/imgs/coding_dissemination.png" alt="Erasure-coded Block dissemination" />
             <div class="image-caption">Figure 3: Block Dissemination Lifecycle.</div>
         </div>
 
-        <p>After notarization, <code>certify</code> is where we resolve new information: we reconstruct the block, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
+        <p>After notarization, <code>certify</code> is the first point where the full block is required: we reconstruct it, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
 
         <div class="image-container">
             <img src="/imgs/coding_chain.png" alt="Erasure-coded Block dissemination and chain diagram" />
