@@ -203,6 +203,9 @@ where
                 let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = verification::fetch_parent(
                     parent_digest,
+                    // This context is produced by simplex for the active epoch, so
+                    // `(consensus_context.epoch(), parent_view)` is a trusted hint
+                    // for parent lookup.
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -339,8 +342,12 @@ where
                 };
 
                 // Shared pre-checks:
-                // 1. Enforce epoch membership
-                // 2. Handle valid/invalid re-proposals (`digest == context.parent.1`)
+                // - Blocks are invalid if they are not in the expected epoch and are
+                //   not a valid boundary re-proposal.
+                // - Re-proposals are detected when `digest == context.parent.1`.
+                // - Re-proposals skip normal parent/height checks because:
+                //   1) the block was already verified when originally proposed
+                //   2) parent-child checks would fail by construction when parent == block
                 let block = match verification::precheck_epoch_and_reproposal(
                     &epocher,
                     &mut marshal,
@@ -351,6 +358,8 @@ where
                 .await
                 {
                     VerificationDecision::Complete(valid) => {
+                        // `Complete` means either an immediate reject or a valid
+                        // re-proposal accepted without further ancestry checks.
                         tx.send_lossy(valid);
                         return;
                     }
@@ -359,6 +368,8 @@ where
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
                 // run application verification over the ancestry stream.
+                // The helper returns `None` when work should stop early (for example,
+                // receiver closed or parent unavailable).
                 let application_valid = match verification::verify_with_parent(
                     runtime_context,
                     context,

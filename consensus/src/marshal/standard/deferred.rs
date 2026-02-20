@@ -213,6 +213,10 @@ where
                 // - fetch parent (using trusted round hint from consensus context)
                 // - validate standard ancestry invariants
                 // - run application verification over ancestry
+                //
+                // The helper preserves the prior early-exit behavior and returns
+                // `None` when work should stop (for example receiver dropped or
+                // parent unavailable).
                 let application_valid = match verification::verify_with_parent(
                     runtime_context,
                     context,
@@ -310,6 +314,8 @@ where
                     // This context comes from simplex for the active epoch, so
                     // `(consensus_context.epoch(), parent_view)` is a trusted
                     // parent hint.
+                    // Epoch-boundary ancestry is represented via epoch genesis in
+                    // the current epoch's view space.
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -438,9 +444,13 @@ where
                     },
                 };
 
-                // Shared pre-checks enforce epoch membership and handle re-proposals.
-                // Re-proposals return early; for valid ones we cache a completed task
-                // so `certify` can observe success deterministically.
+                // Shared pre-checks enforce:
+                // - Block epoch membership.
+                // - Re-proposal detection via `digest == context.parent.1`.
+                //
+                // Re-proposals return early and skip normal parent/height checks
+                // because they were already verified when originally proposed and
+                // parent-child checks would fail by construction when parent == block.
                 let block = match verification::precheck_epoch_and_reproposal(
                     &marshaled.epocher,
                     &mut marshal,
@@ -458,6 +468,8 @@ where
                             task_tx.send_lossy(true);
                             marshaled.verification_tasks.insert(round, digest, task_rx);
                         }
+                        // `Complete` means either immediate rejection or successful
+                        // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
                         return;
                     }
