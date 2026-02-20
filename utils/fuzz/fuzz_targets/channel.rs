@@ -5,6 +5,8 @@ use commonware_utils::channel::tracked;
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 
+const BUFFER_SIZE: usize = 1000;
+
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     SendReceive {
@@ -48,10 +50,22 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::MultipleSends { batches, data } => {
             block_on(async {
-                let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(100);
+                let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(BUFFER_SIZE);
+                let mut in_flight = 0usize;
 
                 for (batch, d) in batches.iter().zip(data.iter()) {
+                    if in_flight >= BUFFER_SIZE {
+                        match receiver.recv().await {
+                            Some(msg) => {
+                                drop(msg);
+                                in_flight -= 1;
+                            }
+                            None => break,
+                        }
+                    }
+
                     let _ = sender.send(*batch, d.clone()).await;
+                    in_flight += 1;
                 }
 
                 let _ = sender.watermark();
