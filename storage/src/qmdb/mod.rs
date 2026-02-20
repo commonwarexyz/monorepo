@@ -53,7 +53,7 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{mem::State as MerkleizationState, Location},
+    mmr::{journaled::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
 use commonware_cryptography::DigestOf;

@@ -131,6 +131,8 @@ pub enum Error {
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]
     RangeOutOfBounds(Location),
+    #[error("mmr requires merkleization for requested size")]
+    Unmerkleized,
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location),
     #[error("bit offset {0} out of bounds (size: {1})")]
