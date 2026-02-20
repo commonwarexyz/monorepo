@@ -39,14 +39,22 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        docker system prune -af || $true
+        if (Get-Command docker -ErrorAction SilentlyContinue) {
+          docker system prune -af
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "docker system prune failed with exit code $LASTEXITCODE; continuing."
+            $global:LASTEXITCODE = 0
+          }
+        } else {
+          Write-Host "docker not available; skipping docker cleanup."
+        }
         Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Android" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:ProgramFiles\dotnet" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "$env:USERPROFILE\.ghcup" -ErrorAction SilentlyContinue
         echo "TEMP=D:\Temp" >> $env:GITHUB_ENV
         echo "TMP=D:\Temp" >> $env:GITHUB_ENV
-        mkdir D:\Temp -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
 
     - name: Show disk free (after)
       shell: bash
