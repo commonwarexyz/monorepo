@@ -216,7 +216,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 }
 
                 // Cleanup the rate limiters periodically
-                if accepted > CLEANUP_INTERVAL {
+                if accepted >= CLEANUP_INTERVAL {
                     ip_rate_limiter.retain_recent();
                     subnet_rate_limiter.retain_recent();
                     accepted = 0;
