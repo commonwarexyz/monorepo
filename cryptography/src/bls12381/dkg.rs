@@ -127,27 +127,24 @@
 //!
 //! ### Up to `2f` Reveals Under Asynchrony
 //!
-//! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
-//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
-//! the shared secret.
+//! If the network is not synchronous, however, Byzantine players may recover up to `2f` reveals (`f` from Byzantine players
+//! and `f` from honest players).
 //!
 //! To see how this could be, consider a network where `f` honest participants are in one partition and (`f + 1` honest and
 //! `f` Byzantine participants) are in another. All `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers.
 //! Participants in the second partition will complete a round and all the reveals will belong to the same set of `f`
 //! honest players (that are in the first partition). A colluding Byzantine adversary will then have access to their acknowledged `f`
-//! shares and the revealed `f` shares (requiring only the participation of a single honest player that was in their partition to recover the shared
-//! secret). If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
-//! that were in the second partition will be able to derive the shared secret without collusion (using their private share
-//! and the `2f` public shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover
-//! the shared secret.**
+//! shares and the revealed `f` shares. If the Byzantine adversary reveals all of their (still private) shares at this time, each of the
+//! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
+//! and the `2f` revealed shares).
 //!
-//! Why care if the secret isn't revealed? When used in consensus, a secret with more than `f` revealed shares (say that `f` shares
-//! revealed by Byzantine players during/after a round and `h` shares for honest players revealed) no longer guarantees safety (when used
-//! to generate threshold certificates). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
-//! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1`
+//! While **it will not be possible for any external observer (or a Byzantine adversary) to recover the shared secret and/or form a signature,**
+//! a secret with more than `f` revealed shares no longer guarantees safety when used in some applications (like when used to form threshold certificates for consensus).
+//! Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f` honest players and another block `B_2`
+//! to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1`
 //! (for `B_2`), however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
-//! #### Future Work: Dropping the Synchrony Assumption for Bounded Reveals?
+//! #### Future Work: Dropping the Synchrony Assumption for `f` Bounded Reveals?
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
