@@ -108,11 +108,6 @@
 //! - the dealer is malicious, not sending a share, but honestly revealing,
 //! - or, the player is malicious, not sending an ack when they should.
 //!
-//! Thus, for honest players, in the worst case, `f` reveals get created, because
-//! they correctly did not ack the `f` malicious dealers who failed to send them
-//! a share. In that case, their final share remains secret, because it is the linear
-//! combination of at least `f + 1` shares received from dealers.
-//!
 //! ### Up to `f` Reveals Under Synchrony
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
@@ -122,10 +117,11 @@
 //! reveals. This implies that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments
 //! (allowing them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
 //! acknowledgements to honest dealers before `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments
-//! must be from honest dealers (where no honest player dealing is revealed). Even if the remaining `f` commitments are from
-//! Byzantine dealers, there will not be enough dealings to recover the derived share of any honest player (at most `f` of
-//! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
-//! for a Byzantine player to derive any honest player's share, this claim holds.
+//! must be from honest dealers (where no honest player dealing is revealed).
+//!
+//! Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough dealings to recover the derived share
+//! of any honest player (at most `f` of `2f + 1` dealings publicly revealed for the linear combination that composes a share). Given all `2f + 1`
+//! honest players have access to their shares and it is not possible for a Byzantine player to derive any honest player's share, this claim holds.
 //!
 //! ### Up to `2f` Reveals Under Asynchrony
 //!
@@ -160,7 +156,6 @@
 //! As of January 2025, these constructions are still considered novel (2-3 years in production), require stronger
 //! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
 //! observers the opportunity to brute force decrypt shares (even if honest players are online).
-//!
 //!
 //! ## Handling Complaints
 //!
