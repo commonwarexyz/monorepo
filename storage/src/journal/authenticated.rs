@@ -11,6 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
+        hasher::Hasher as MmrHasher,
         journaled::{CleanMmr, DirtyMmr, Mmr},
         mem::{Clean, Dirty, State},
         Error as MmrError, Location, Position, Proof, StandardHasher,
@@ -313,6 +314,11 @@ where
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
+    /// Perform all currently available merkleization work while remaining in Dirty state.
+    pub fn do_merkleization_work(&self, hasher: &mut impl MmrHasher<Digest = DigestOf<H>>) {
+        self.mmr.do_merkleization_work(hasher);
+    }
+
     /// Merkleize the journal and compute the root digest.
     pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
         let Self {

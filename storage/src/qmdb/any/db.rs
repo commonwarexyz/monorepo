@@ -10,7 +10,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{Location, Proof},
+    mmr::{hasher::Hasher as MmrHasher, Location, Proof},
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
@@ -276,6 +276,11 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
+    /// Perform all currently available merkleization work while remaining unmerkleized.
+    pub fn prepare_merkleized(&self, hasher: &mut impl MmrHasher<Digest = DigestOf<H>>) {
+        self.log.do_merkleization_work(hasher);
+    }
+
     pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
         Db {
             log: self.log.merkleize(),
@@ -355,6 +360,19 @@ where
     Operation<K, V, U>: Codec,
     AuthenticatedLog<E, C, H, M>: Mutable<Item = Operation<K, V, U>>,
 {
+    /// Applies the given commit operation to the log. Does not raise the inactivity floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given operation is not a commit operation.
+    pub(crate) async fn append_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
+        assert!(op.is_commit(), "commit operation expected");
+        self.last_commit_loc = self.log.size().await;
+        self.log.append(op).await?;
+
+        Ok(())
+    }
+
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
     ///
@@ -362,11 +380,26 @@ where
     ///
     /// Panics if the given operation is not a commit operation.
     pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
-        assert!(op.is_commit(), "commit operation expected");
-        self.last_commit_loc = self.log.size().await;
-        self.log.append(op).await?;
+        self.append_commit_op(op).await?;
+        self.log.commit().await.map_err(Error::from)
+    }
 
-        self.log.commit().await.map_err(Into::into)
+    /// Raise the inactivity floor and append a commit operation, without fsync.
+    pub(crate) async fn commit_no_sync(
+        &mut self,
+        metadata: Option<V::Value>,
+    ) -> Result<Range<Location>, Error> {
+        let start_loc = self.last_commit_loc + 1;
+
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self.raise_floor().await?;
+
+        // Append the commit operation with the new inactivity floor.
+        self.append_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
+            .await?;
+
+        Ok(start_loc..self.log.size().await)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -376,21 +409,13 @@ where
         mut self,
         metadata: Option<V::Value>,
     ) -> Result<(Db<E, C, I, H, U, M, Durable>, Range<Location>), Error> {
-        let start_loc = self.last_commit_loc + 1;
+        let range = self.commit_no_sync(metadata).await?;
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await?;
-
-        let range = start_loc..self.log.size().await;
+        self.log.commit().await.map_err(Error::from)?;
 
         let db = Db {
             log: self.log,
-            inactivity_floor_loc,
+            inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             active_keys: self.active_keys,

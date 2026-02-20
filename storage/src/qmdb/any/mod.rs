@@ -35,6 +35,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
 pub(crate) mod db;
+pub(crate) mod shared;
+pub use shared::{
+    Shared as SharedDb, SharedProver, SharedReader, SharedStateDb, SharedWriter, SyncPolicy,
+};
 pub(crate) mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod states;

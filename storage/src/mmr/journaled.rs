@@ -734,6 +734,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
+    /// Perform all currently available merkleization work while remaining in Dirty state.
+    ///
+    /// This recomputes dirty internal nodes and root, then converts back to Dirty with no pending
+    /// dirty-node work so a subsequent state transition can be lightweight.
+    pub fn do_merkleization_work(&self, h: &mut impl Hasher<Digest = D>) {
+        let mut inner = self.inner.write();
+        let dirty = core::mem::take(&mut inner.mem_mmr);
+        let clean = dirty.merkleize(h, self.pool.clone());
+        inner.mem_mmr = clean.into_dirty();
+    }
+
     /// Merkleize the MMR and compute the root digest.
     pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();
