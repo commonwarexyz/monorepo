@@ -363,7 +363,7 @@ where
     ///
     /// SAFETY: For blocks/certificates admitted by marshal verification, a block digest
     /// maps to exactly one consensus payload commitment for the active marshal
-    /// [`Variant`](crate::marshal::core::Variant) instance.
+    /// [`Variant`] instance.
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,
