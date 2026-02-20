@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// Validation failures for standard deferred verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StandardBlockVerificationError {
+pub(crate) enum Error {
     ParentDigest,
     ExpectedParentDigest,
     Height,
@@ -29,22 +29,22 @@ pub(crate) enum StandardBlockVerificationError {
 
 /// Consolidated validation for standard deferred verification.
 #[inline]
-pub(crate) fn validate_standard_block_for_verification<B>(
+pub(crate) fn verify_block<B>(
     block: &B,
     parent: &B,
     parent_digest: B::Digest,
-) -> Result<(), StandardBlockVerificationError>
+) -> Result<(), Error>
 where
     B: Block,
 {
     if block.parent() != parent.digest() {
-        return Err(StandardBlockVerificationError::ParentDigest);
+        return Err(Error::ParentDigest);
     }
     if parent.digest() != parent_digest {
-        return Err(StandardBlockVerificationError::ExpectedParentDigest);
+        return Err(Error::ExpectedParentDigest);
     }
     if !has_contiguous_height(parent.height(), block.height()) {
-        return Err(StandardBlockVerificationError::Height);
+        return Err(Error::Height);
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ where
     };
 
     // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = validate_standard_block_for_verification(&block, &parent, parent_digest) {
+    if let Err(err) = verify_block(&block, &parent, parent_digest) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -320,44 +320,37 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_standard_block_for_verification_ok() {
+    fn test_verify_block_ok() {
         let (parent, block) = baseline_blocks();
-        assert_eq!(
-            validate_standard_block_for_verification(&block, &parent, parent.digest()),
-            Ok(())
-        );
+        assert_eq!(verify_block(&block, &parent, parent.digest()), Ok(()));
     }
 
     #[test]
-    fn test_validate_standard_block_for_verification_parent_digest_error() {
+    fn test_verify_block_parent_digest_error() {
         let (parent, mut block) = baseline_blocks();
         block.parent = Sha256::hash(b"wrong_parent");
         assert_eq!(
-            validate_standard_block_for_verification(&block, &parent, parent.digest()),
-            Err(StandardBlockVerificationError::ParentDigest)
+            verify_block(&block, &parent, parent.digest()),
+            Err(Error::ParentDigest)
         );
     }
 
     #[test]
-    fn test_validate_standard_block_for_verification_expected_parent_digest_error() {
+    fn test_verify_block_expected_parent_digest_error() {
         let (parent, block) = baseline_blocks();
         assert_eq!(
-            validate_standard_block_for_verification(
-                &block,
-                &parent,
-                Sha256::hash(b"wrong_expected_parent"),
-            ),
-            Err(StandardBlockVerificationError::ExpectedParentDigest)
+            verify_block(&block, &parent, Sha256::hash(b"wrong_expected_parent")),
+            Err(Error::ExpectedParentDigest)
         );
     }
 
     #[test]
-    fn test_validate_standard_block_for_verification_height_error() {
+    fn test_verify_block_height_error() {
         let (parent, mut block) = baseline_blocks();
         block.height = Height::new(9);
         assert_eq!(
-            validate_standard_block_for_verification(&block, &parent, parent.digest()),
-            Err(StandardBlockVerificationError::Height)
+            verify_block(&block, &parent, parent.digest()),
+            Err(Error::Height)
         );
     }
 }
