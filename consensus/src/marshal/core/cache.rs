@@ -361,16 +361,9 @@ where
 
     /// Get a finalization from the prunable archive by block digest.
     ///
-    /// Protocol invariant: for blocks/certificates admitted by marshal verification,
-    /// a block digest maps to exactly one consensus payload commitment for the active
-    /// marshal variant instance.
-    ///
-    /// This is the [`Variant`](crate::marshal::core::Variant) commitment mapping
-    /// invariant, not a `CertifiableBlock` property.
-    ///
-    /// We keep this lookup digest-scoped for that invariant and assert payload-vs-block
-    /// commitment equality at promotion sites. A mismatch indicates invariant violation
-    /// (bug, corruption, or adversarial behavior), not an expected runtime path.
+    /// SAFETY: For blocks/certificates admitted by marshal verification, a block digest
+    /// maps to exactly one consensus payload commitment for the active marshal
+    /// [`Variant`](crate::marshal::core::Variant) instance.
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,
