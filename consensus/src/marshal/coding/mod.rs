@@ -345,6 +345,254 @@ mod tests {
         })
     }
 
+    /// Regression test: same-round leader equivocation must not clobber verification/certification
+    /// state across commitments.
+    ///
+    /// A Byzantine leader can propose two different commitments in the same round to different
+    /// voters. Marshal must keep `(round, commitment)` verification tasks independent so whichever
+    /// commitment is later certified can complete without interference.
+    #[test_traced("INFO")]
+    fn test_same_round_equivocation_certification_independent_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Parent block at height 1.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            let coded_parent = CodedBlock::new(parent, coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            // Two conflicting commitments for the same round/context/height.
+            let equivocation_round = Round::new(Epoch::zero(), View::new(2));
+            let equivocation_context = CodingCtx {
+                round: equivocation_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            let block_a = make_coding_block(
+                equivocation_context.clone(),
+                parent_digest,
+                Height::new(2),
+                200,
+            );
+            let coded_a = CodedBlock::new(block_a, coding_config, &Sequential);
+            let commitment_a = coded_a.commitment();
+            shards.clone().proposed(equivocation_round, coded_a).await;
+
+            let block_b = make_coding_block(
+                equivocation_context.clone(),
+                parent_digest,
+                Height::new(2),
+                300,
+            );
+            let coded_b = CodedBlock::new(block_b, coding_config, &Sequential);
+            let commitment_b = coded_b.commitment();
+            shards.clone().proposed(equivocation_round, coded_b).await;
+
+            assert_ne!(
+                commitment_a, commitment_b,
+                "equivocating proposals must produce distinct commitments"
+            );
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify only commitment A first.
+            let verify_a = marshaled
+                .verify(equivocation_context.clone(), commitment_a)
+                .await;
+            assert!(verify_a.await.unwrap(), "commitment A verify should succeed");
+            // Then certify commitment B without prior verify.
+            let certify_b = marshaled.certify(equivocation_round, commitment_b).await;
+            select! {
+                result = certify_b => {
+                    assert!(
+                        result.unwrap(),
+                        "commitment B certify should succeed without prior verify"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("commitment B certification timed out");
+                },
+            }
+
+            let certify_a = marshaled.certify(equivocation_round, commitment_a).await;
+            select! {
+                result = certify_a => {
+                    assert!(result.unwrap(), "commitment A certify should succeed");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("commitment A certification timed out after same-round equivocation");
+                },
+            }
+        })
+    }
+
+    /// Regression test: a failing equivocated commitment in a round must not poison a valid
+    /// commitment from that same round.
+    #[test_traced("INFO")]
+    fn test_same_round_equivocation_invalid_commitment_does_not_poison_valid_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Parent block at height 1.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            let coded_parent = CodedBlock::new(parent, coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let context_round_2 = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            // Valid commitment for the round.
+            let valid_block =
+                make_coding_block(context_round_2.clone(), parent_digest, Height::new(2), 200);
+            let valid_coded = CodedBlock::new(valid_block, coding_config, &Sequential);
+            let valid_commitment = valid_coded.commitment();
+            shards.clone().proposed(round, valid_coded).await;
+
+            // Equivocated commitment with invalid ancestry (wrong parent digest).
+            let invalid_block =
+                make_coding_block(context_round_2.clone(), genesis.digest(), Height::new(2), 300);
+            let invalid_coded = CodedBlock::new(invalid_block, coding_config, &Sequential);
+            let invalid_commitment = invalid_coded.commitment();
+            shards.clone().proposed(round, invalid_coded).await;
+
+            assert_ne!(
+                valid_commitment, invalid_commitment,
+                "equivocating proposals must produce distinct commitments"
+            );
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify only the valid commitment first.
+            let verify_valid = marshaled
+                .verify(context_round_2.clone(), valid_commitment)
+                .await;
+            assert!(
+                verify_valid.await.unwrap(),
+                "valid commitment should pass optimistic verify"
+            );
+
+            // Invalid branch fails deferred certification even without prior verify...
+            let certify_invalid = marshaled.certify(round, invalid_commitment).await;
+            select! {
+                result = certify_invalid => {
+                    assert!(
+                        !result.unwrap(),
+                        "equivocated commitment with invalid ancestry must fail certify"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("invalid commitment certification timed out");
+                },
+            }
+
+            // ...but valid branch in the same round remains certifiable.
+            let certify_valid = marshaled.certify(round, valid_commitment).await;
+            select! {
+                result = certify_valid => {
+                    assert!(result.unwrap(), "valid commitment should still certify after sibling failure");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("valid commitment certification timed out after sibling equivocation failure");
+                },
+            }
+        })
+    }
+
     /// Regression test for re-proposal validation in optimistic_verify.
     ///
     /// Verifies that:
