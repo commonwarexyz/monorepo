@@ -18,7 +18,7 @@
     <meta property="og:url" content="https://commonware.xyz/blogs/coding" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/coding_dissemination.png" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/coding_chain.png" />
     <meta property="og:title" content="Deliver Us in Pieces" />
     <meta property="og:description" content="Validator clusters already have the bandwidth. We are just not using it. In the standard proposal path of consensus::simplex, one node pushes the whole block while everyone else mostly waits, so effective throughput collapses to a single bottleneck. What if we distributed the load?" />
     <meta property="article:author" content="https://x.com/vex_0x" />
@@ -30,7 +30,7 @@
     <meta property="twitter:url" content="https://commonware.xyz/blogs/coding" />
     <meta property="twitter:title" content="Deliver Us in Pieces" />
     <meta property="twitter:description" content="Validator clusters already have the bandwidth. We are just not using it. In the standard proposal path of consensus::simplex, one node pushes the whole block while everyone else mostly waits, so effective throughput collapses to a single bottleneck. What if we distributed the load?" />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/coding_dissemination.png" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/coding_chain.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@vex_0x" />
 
@@ -112,7 +112,7 @@
         <p>This is where we differ from other three-round protocols that employ erasure coded broadcast such as MonadBFT and Alpenglow: those designs wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
 
         <div class="image-container">
-            <img src="../imgs/coding_dissemination.png" alt="Erasure Coded Block dissemination" />
+            <img src="../imgs/coding_chain.png" alt="Erasure Coded Block dissemination and chain diagram" />
             <div class="image-caption">Figure 2: Block Dissemination Lifecycle.</div>
         </div>
 
