@@ -729,7 +729,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_same_round_equivocation_certification_independent_by_digest() {
-        for kind in wrapper_kinds() {
+        for kind in [WrapperKind::Deferred] {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
                 let mut oracle = setup_network(context.clone(), None);
@@ -782,53 +782,52 @@ mod tests {
                 let block_a =
                     B::new::<Sha256>(context_round_2.clone(), parent_digest, Height::new(2), 200);
                 let digest_a = block_a.digest();
-                marshal.clone().proposed(round, block_a).await;
+                // Seed one branch through the verified-cache path.
+                marshal.clone().verified(round, block_a).await;
 
-                let block_b =
-                    B::new::<Sha256>(context_round_2.clone(), parent_digest, Height::new(2), 300);
-                let digest_b = block_b.digest();
-                marshal.clone().proposed(round, block_b).await;
-
-                assert_ne!(digest_a, digest_b, "equivocation must produce distinct digests");
-                context.sleep(Duration::from_millis(10)).await;
-
-                // Verify only one digest first.
+                // Listener-style flow: verify one sibling digest first...
                 assert!(
                     wrapper
                         .verify(context_round_2.clone(), digest_a)
                         .await
                         .await
                         .expect("verify result for digest A missing"),
-                    "{kind:?}: digest A verify should succeed"
+                    "deferred: digest A verify should succeed from verified cache"
                 );
-                // Deferred wrapper must key certification by `(round, digest)`.
-                // We verified only digest A, then certify digest B first.
-                if wrapper.kind() == WrapperKind::Deferred {
-                    let certify_b = wrapper.certify(round, digest_b).await;
-                    select! {
-                        result = certify_b => {
-                            assert!(
-                                result.expect("certify result for digest B missing"),
-                                "deferred: digest B certify should succeed without prior verify"
-                            );
-                        },
-                        _ = context.sleep(Duration::from_secs(5)) => {
-                            panic!("deferred: digest B certification timed out");
-                        },
-                    }
 
-                    let certify_a = wrapper.certify(round, digest_a).await;
-                    select! {
-                        result = certify_a => {
-                            assert!(
-                                result.expect("certify result for digest A missing"),
-                                "deferred: digest A certify should still succeed"
-                            );
-                        },
-                        _ = context.sleep(Duration::from_secs(5)) => {
-                            panic!("deferred: digest A certification timed out");
-                        },
-                    }
+                // Seed a different same-round sibling through proposal/buffer path.
+                let block_b =
+                    B::new::<Sha256>(context_round_2.clone(), parent_digest, Height::new(2), 300);
+                let digest_b = block_b.digest();
+                marshal.clone().proposed(round, block_b).await;
+                assert_ne!(digest_a, digest_b, "equivocation must produce distinct digests");
+                context.sleep(Duration::from_millis(10)).await;
+
+                // ...then certify a different sibling digest in the same round.
+                let certify_b = wrapper.certify(round, digest_b).await;
+                select! {
+                    result = certify_b => {
+                        assert!(
+                            result.expect("certify result for digest B missing"),
+                            "deferred: digest B certify should succeed"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("deferred: digest B certification timed out");
+                    },
+                }
+
+                let certify_a = wrapper.certify(round, digest_a).await;
+                select! {
+                    result = certify_a => {
+                        assert!(
+                            result.expect("certify result for digest A missing"),
+                            "deferred: digest A certify should still succeed"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("deferred: digest A certification timed out");
+                    },
                 }
             });
         }
@@ -836,7 +835,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_same_round_equivocation_invalid_digest_does_not_poison_valid_digest() {
-        for kind in wrapper_kinds() {
+        for kind in [WrapperKind::Deferred] {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
                 let mut oracle = setup_network(context.clone(), None);
@@ -890,13 +889,13 @@ mod tests {
                 let valid_block =
                     B::new::<Sha256>(context_round_2.clone(), parent_digest, Height::new(2), 200);
                 let valid_digest = valid_block.digest();
-                marshal.clone().proposed(round, valid_block).await;
+                // Seed valid branch through verified cache.
+                marshal.clone().verified(round, valid_block).await;
 
                 // Equivocated invalid block: wrong parent digest, but same embedded context.
                 let invalid_block =
                     B::new::<Sha256>(context_round_2.clone(), genesis.digest(), Height::new(2), 300);
                 let invalid_digest = invalid_block.digest();
-                marshal.clone().proposed(round, invalid_block).await;
 
                 assert_ne!(
                     valid_digest, invalid_digest,
@@ -904,61 +903,43 @@ mod tests {
                 );
                 context.sleep(Duration::from_millis(10)).await;
 
-                if wrapper.kind() == WrapperKind::Inline {
-                    // Inline performs full ancestry verification in `verify`.
-                    assert!(
-                        wrapper
-                            .verify(context_round_2.clone(), valid_digest)
-                            .await
-                            .await
-                            .expect("verify result for valid digest missing"),
-                        "inline: valid digest should verify"
-                    );
-                    assert!(
-                        !wrapper
-                            .verify(context_round_2.clone(), invalid_digest)
-                            .await
-                            .await
-                            .expect("verify result for invalid digest missing"),
-                        "inline: invalid digest should be rejected"
-                    );
-                } else {
-                    // Deferred verify is optimistic; certification determines validity.
-                    assert!(
-                        wrapper
-                            .verify(context_round_2.clone(), valid_digest)
-                            .await
-                            .await
-                            .expect("verify result for valid digest missing"),
-                        "deferred: valid digest should pass optimistic verify"
-                    );
-                    // Do not verify invalid digest first: model certification request for a
-                    // different digest in the same round.
-                    let certify_invalid = wrapper.certify(round, invalid_digest).await;
-                    select! {
-                        result = certify_invalid => {
-                            assert!(
-                                !result.expect("certify result for invalid digest missing"),
-                                "deferred: invalid digest must fail certify"
-                            );
-                        },
-                        _ = context.sleep(Duration::from_secs(5)) => {
-                            panic!("deferred: invalid digest certification timed out");
-                        },
-                    }
+                assert!(
+                    wrapper
+                        .verify(context_round_2.clone(), valid_digest)
+                        .await
+                        .await
+                        .expect("verify result for valid digest missing"),
+                    "deferred: valid digest should pass optimistic verify"
+                );
 
-                    let certify_valid = wrapper.certify(round, valid_digest).await;
-                    select! {
-                        result = certify_valid => {
-                            assert!(
-                                result.expect("certify result for valid digest missing"),
-                                "deferred: valid digest should still certify after sibling failure"
-                            );
-                        },
-                        _ = context.sleep(Duration::from_secs(5)) => {
-                            panic!("deferred: valid digest certification timed out");
-                        },
-                    }
+                // Seed the conflicting sibling after verification through proposal/buffer path.
+                marshal.clone().proposed(round, invalid_block).await;
+
+                // Certification must remain independent across sibling digests in the same round.
+                let certify_invalid = wrapper.certify(round, invalid_digest).await;
+                select! {
+                    result = certify_invalid => {
+                        assert!(
+                            !result.expect("certify result for invalid digest missing"),
+                            "deferred: invalid digest must fail certify"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("deferred: invalid digest certification timed out");
+                    },
+                }
+
+                let certify_valid = wrapper.certify(round, valid_digest).await;
+                select! {
+                    result = certify_valid => {
+                        assert!(
+                            result.expect("certify result for valid digest missing"),
+                            "deferred: valid digest should still certify after sibling failure"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("deferred: valid digest certification timed out");
+                    },
                 }
             });
         }

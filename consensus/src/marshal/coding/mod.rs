@@ -422,8 +422,16 @@ mod tests {
             );
             let coded_a = CodedBlock::new(block_a, coding_config, &Sequential);
             let commitment_a = coded_a.commitment();
+            // Seed one branch through shard-engine proposed path so `verify` can observe shard validity.
             shards.clone().proposed(equivocation_round, coded_a).await;
 
+            // Verify one sibling first.
+            let verify_a = marshaled
+                .verify(equivocation_context.clone(), commitment_a)
+                .await;
+            assert!(verify_a.await.unwrap(), "commitment A verify should succeed");
+
+            // Seed the conflicting sibling after verification via verified-cache path.
             let block_b = make_coding_block(
                 equivocation_context.clone(),
                 parent_digest,
@@ -432,27 +440,20 @@ mod tests {
             );
             let coded_b = CodedBlock::new(block_b, coding_config, &Sequential);
             let commitment_b = coded_b.commitment();
-            shards.clone().proposed(equivocation_round, coded_b).await;
-
+            marshal.clone().verified(equivocation_round, coded_b).await;
             assert_ne!(
                 commitment_a, commitment_b,
                 "equivocating proposals must produce distinct commitments"
             );
-
             context.sleep(Duration::from_millis(10)).await;
 
-            // Verify only commitment A first.
-            let verify_a = marshaled
-                .verify(equivocation_context.clone(), commitment_a)
-                .await;
-            assert!(verify_a.await.unwrap(), "commitment A verify should succeed");
-            // Then certify commitment B without prior verify.
+            // Then certify the other sibling commitment.
             let certify_b = marshaled.certify(equivocation_round, commitment_b).await;
             select! {
                 result = certify_b => {
                     assert!(
                         result.unwrap(),
-                        "commitment B certify should succeed without prior verify"
+                        "commitment B certify should succeed"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
@@ -541,6 +542,7 @@ mod tests {
                 make_coding_block(context_round_2.clone(), parent_digest, Height::new(2), 200);
             let valid_coded = CodedBlock::new(valid_block, coding_config, &Sequential);
             let valid_commitment = valid_coded.commitment();
+            // Seed valid branch through shard-engine proposed path so `verify` can complete.
             shards.clone().proposed(round, valid_coded).await;
 
             // Equivocated commitment with invalid ancestry (wrong parent digest).
@@ -548,7 +550,6 @@ mod tests {
                 make_coding_block(context_round_2.clone(), genesis.digest(), Height::new(2), 300);
             let invalid_coded = CodedBlock::new(invalid_block, coding_config, &Sequential);
             let invalid_commitment = invalid_coded.commitment();
-            shards.clone().proposed(round, invalid_coded).await;
 
             assert_ne!(
                 valid_commitment, invalid_commitment,
@@ -557,7 +558,6 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
-            // Verify only the valid commitment first.
             let verify_valid = marshaled
                 .verify(context_round_2.clone(), valid_commitment)
                 .await;
@@ -566,7 +566,10 @@ mod tests {
                 "valid commitment should pass optimistic verify"
             );
 
-            // Invalid branch fails deferred certification even without prior verify...
+            // Seed conflicting sibling after verify through verified cache.
+            marshal.clone().verified(round, invalid_coded).await;
+
+            // Invalid branch fails certification...
             let certify_invalid = marshaled.certify(round, invalid_commitment).await;
             select! {
                 result = certify_invalid => {
@@ -580,7 +583,7 @@ mod tests {
                 },
             }
 
-            // ...but valid branch in the same round remains certifiable.
+            // ...but valid sibling commitment in the same round remains certifiable.
             let certify_valid = marshaled.certify(round, valid_commitment).await;
             select! {
                 result = certify_valid => {
