@@ -43,10 +43,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Recipients,
+        Recipients, Sender as _,
     };
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner,
+        count_running_tasks, deterministic, Clock, Error, IoBuf, Metrics, Quota, Runner,
     };
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
@@ -617,6 +617,135 @@ mod tests {
 
             assert_eq!(h1, h2, "Messages returned in different order for {seed}");
         }
+    }
+
+    #[test_traced]
+    fn test_malformed_network_payload_does_not_break_valid_traffic() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+
+            let attacker = peers[0].clone();
+            let honest = peers[1].clone();
+            let victim = peers[2].clone();
+
+            let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+            let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
+            let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
+
+            // Send malformed bytes that cannot decode into `TestMessage`.
+            let sent = attacker_sender
+                .send(
+                    Recipients::One(victim.clone()),
+                    IoBuf::from(vec![0xFF]),
+                    false,
+                )
+                .await
+                .expect("malformed payload send should not fail at transport level");
+            assert_eq!(sent, vec![victim.clone()]);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // The victim should still process later valid traffic.
+            let message = TestMessage::shared(b"valid-after-malformed");
+            let result = honest_mailbox
+                .broadcast(Recipients::One(victim.clone()), message.clone())
+                .await;
+            assert_eq!(result.await.unwrap(), vec![victim.clone()]);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            let received = victim_mailbox
+                .subscribe(message.digest())
+                .await
+                .await
+                .expect("victim should receive valid message after malformed payload");
+            assert_eq!(received, message);
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_waiters_for_missing_digest_are_cleaned_up() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 1, 1.0).await;
+            let peer = peers[0].clone();
+            let (sender, receiver) = registrations.remove(&peer).unwrap();
+
+            let engine_context = context.with_label("waiter_cleanup");
+            let config = Config {
+                public_key: peer,
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+            };
+            let (engine, mailbox) =
+                Engine::<_, PublicKey, TestMessage>::new(engine_context.clone(), config);
+            engine.start((sender, receiver));
+
+            let missing = TestMessage::shared(b"never-arrives");
+            let missing_digest = missing.digest();
+            let rx1 = mailbox.subscribe(missing_digest).await;
+            let rx2 = mailbox.subscribe(missing_digest).await;
+
+            // Ensure subscriptions are processed and waiters are reflected in metrics.
+            let _ = mailbox
+                .get(TestMessage::shared(b"before-cleanup").digest())
+                .await;
+            context.sleep(A_JIFFY).await;
+            let metrics_before = engine_context.encode();
+            let waiter_values_before: Vec<f64> = metrics_before
+                .lines()
+                .filter(|line| {
+                    line.starts_with("waiters")
+                        || (line.contains("_waiters")
+                            && !line.starts_with("# HELP")
+                            && !line.starts_with("# TYPE"))
+                })
+                .filter_map(|line| line.split_whitespace().last())
+                .filter_map(|value| value.parse::<f64>().ok())
+                .collect();
+            assert!(
+                !waiter_values_before.is_empty(),
+                "waiters metric not found in output:\n{metrics_before}"
+            );
+            assert!(
+                waiter_values_before.iter().any(|value| *value > 0.0),
+                "expected positive waiters before cleanup, got:\n{metrics_before}"
+            );
+
+            drop(rx1);
+            drop(rx2);
+
+            // Trigger another mailbox event and give the run loop time to clean closed waiters.
+            let _ = mailbox
+                .get(TestMessage::shared(b"after-cleanup").digest())
+                .await;
+            context.sleep(A_JIFFY).await;
+
+            let metrics_after = engine_context.encode();
+            let waiter_values_after: Vec<f64> = metrics_after
+                .lines()
+                .filter(|line| {
+                    line.starts_with("waiters")
+                        || (line.contains("_waiters")
+                            && !line.starts_with("# HELP")
+                            && !line.starts_with("# TYPE"))
+                })
+                .filter_map(|line| line.split_whitespace().last())
+                .filter_map(|value| value.parse::<f64>().ok())
+                .collect();
+            assert!(
+                !waiter_values_after.is_empty(),
+                "waiters metric not found in output:\n{metrics_after}"
+            );
+            assert!(
+                waiter_values_after.iter().all(|value| *value == 0.0),
+                "expected zero retained waiters, got:\n{metrics_after}"
+            );
+        });
     }
 
     #[allow(clippy::type_complexity)]
