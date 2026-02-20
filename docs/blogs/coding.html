@@ -9,7 +9,7 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Deliver Us in Pieces</title>
-    <meta name="description" content="The bandwidth is there. We just were not using it (until now). In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?">
+    <meta name="description" content="Most validator clusters leave bandwidth idle during block dissemination. In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?">
     <meta name="author" content="Ben Clabby">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -20,7 +20,7 @@
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/coding_chain.png" />
     <meta property="og:title" content="Deliver Us in Pieces" />
-    <meta property="og:description" content="The bandwidth is there. We just were not using it (until now). In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?" />
+    <meta property="og:description" content="Most validator clusters leave bandwidth idle during block dissemination. In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?" />
     <meta property="article:author" content="https://x.com/vex_0x" />
     <meta property="article:published_time" content="2026-02-20T00:00:00Z" />
     <meta property="article:modified_time" content="2026-02-20T00:00:00Z" />
@@ -29,7 +29,7 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/coding" />
     <meta property="twitter:title" content="Deliver Us in Pieces" />
-    <meta property="twitter:description" content="The bandwidth is there. We just were not using it (until now). In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?" />
+    <meta property="twitter:description" content="Most validator clusters leave bandwidth idle during block dissemination. In the standard marshal path over broadcast::buffered, the proposer pushes the whole block to each validator, bottlenecking throughput. What if we distributed the load?" />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/coding_chain.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@vex_0x" />
@@ -84,9 +84,9 @@
             <div class="date">February 20, 2026</div>
         </div>
 
-        <p>Your validator cluster has available bandwidth. We just weren't using it (until now).</p>
+        <p>Most validators use very little of their available bandwidth during block dissemination.</p>
 
-        <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator (which can take hundreds of milliseconds to distribute a block on a multi-Gbps link). What if the proposer sent only a portion of the block to each validator, and validators used their spare bandwidth to help relay the rest?</p>
+        <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. What if the proposer sent only a portion of the block to each validator, and validators used their spare bandwidth to help relay the rest?</p>
 
         <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify and relay shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> can notarize that commitment before full block reconstruction.</p>
 
