@@ -105,14 +105,16 @@
 
         <h2>Why This Matters for Coding</h2>
 
-        <p>In the coding path, this boundary improves view latency by changing when validators vote. The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a>). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, relay their shard, and vote to notarize. Full block reconstruction is deferred to <code>certify</code>.</p>
+        <p>In the coding path, this boundary improves view latency by changing when validators can vote.</p>
+
+        <p>The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf"><i>Dispersed Ledger</i></a>). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, relay their shard, and vote to notarize. Full block reconstruction is deferred to <code>certify</code>.</p>
 
         <div class="image-container">
             <img src="/imgs/coding_commitment_construction.png" alt="Erasure coding commitment construction" />
             <div class="image-caption">Figure 2: Coding Commitment Construction</div>
         </div>
 
-        <p>This is closest in spirit to <a href="https://eprint.iacr.org/2023/1916.pdf">DispersedSimplex</a>: notarize the commitment first, recover the block later, then gate finalization on local certification. We differ from other three-round protocols that employ erasure-coded broadcast such as <a href="https://arxiv.org/abs/2502.20692">MonadBFT</a> and <a href="https://drive.google.com/file/d/1Rlr3PdHsBmPahOInP6-Pl0bMzdayltdV/view">Alpenglow</a>, which wait for full block recovery before voting. We move that wait to certification, after notarization, resulting in a lower view latency with a hard safety gate before finalization.</p>
+        <p>This is closest in spirit to <a href="https://eprint.iacr.org/2023/1916.pdf">DispersedSimplex</a>: notarize the commitment first, recover the block later, then gate finalization on local certification. We differ from other stacks that employ erasure-coded broadcast (such as <a href="https://arxiv.org/abs/2502.20692">RaptorCast + MonadBFT</a>) which typically wait for full block recovery before a validator can vote (increasing view latency and thus transaction latency).</p>
 
         <div class="image-container">
             <img src="/imgs/coding_dissemination.png" alt="Erasure-coded Block dissemination" />
