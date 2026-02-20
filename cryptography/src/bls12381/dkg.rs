@@ -118,7 +118,8 @@
 //! reveals. This implies that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments
 //! (allowing them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
 //! acknowledgements to honest dealers before `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments
-//! must be from honest dealers (where no honest player dealing is revealed).
+//! must be from honest dealers (where no honest player dealing is revealed...recall, a Byzantine dealer can opt to reveal any
+//! player's dealing even if they sent an acknowledgement).
 //!
 //! Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough dealings to recover the derived share
 //! of any honest player (at most `f` of `2f + 1` dealings publicly revealed for the linear combination that composes a share). Given all `2f + 1`
