@@ -839,6 +839,9 @@ where
         }
 
         // We don't have the block locally, so fetch by round if we have one.
+        // If we only have a digest (no round), do not issue a resolver request:
+        // we would not know when to drop it, and it could stay pending forever
+        // for a block that never finalizes.
         if let Some(round) = round {
             if round < self.last_processed_round {
                 // At this point, we have failed to find the block locally, and
