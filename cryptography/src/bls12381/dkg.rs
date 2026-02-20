@@ -100,33 +100,51 @@
 //!
 //! # Caveats
 //!
-//! ## Synchrony Assumption
+//! ## Share Reveals
+//!
+//! In order to prevent malicious dealers from withholding shares from players, we
+//! require the dealers reveal the shares for which they did not receive acks.
+//!
+//! Under synchrony (as discussed below), this will only happen if either:
+//! - the dealer is malicious, not sending a share, but honestly revealing,
+//! - or, the player is malicious, not sending an ack when they should.
+//!
+//! ### Up to `f` Reveals Under Synchrony
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
-//! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
-//! recover the shared secret (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
-//! first consider that in any successful round there must exist `2f + 1` commitments with at most `f` reveals. This implies
-//! that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments (allowing
-//! them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
+//! this construction will not result in more than `f` reveals from honest dealers, and none of those reveals are for honest players
+//! (`2f + 1` commitments with at most `f` players are Byzantine).
+//!
+//! To see how this is true, first consider that in any successful round there must exist `2f + 1` commitments each with at most `f`
+//! reveals. This implies that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments
+//! (allowing them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
 //! acknowledgements to honest dealers before `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments
-//! must be from honest dealers (where no honest player dealing is revealed). Even if the remaining `f` commitments are from
-//! Byzantine dealers, there will not be enough dealings to recover the derived share of any honest player (at most `f` of
-//! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
-//! for a Byzantine player to derive any honest player's share, this claim holds.
+//! must be from honest dealers (where no honest player dealing is revealed...recall, a Byzantine dealer can opt to reveal any
+//! player's dealing even if they sent an acknowledgement).
 //!
-//! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
-//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
-//! the shared secret (if the Byzantine players reveal their shares). To see how this could be, consider a network where
-//! `f` honest participants are in one partition and (`f + 1` honest and `f` Byzantine participants) are in another. All
-//! `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers. Participants in the second partition will
-//! complete a round and all the reveals will belong to the same set of `f` honest players (that are in the first partition).
-//! A colluding Byzantine adversary will then have access to their acknowledged `f` shares and the revealed `f` shares
-//! (requiring only the participation of a single honest player that was in their partition to recover the shared secret).
-//! If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
-//! that were in the second partition will be able to derive the shared secret without collusion (using their private share
-//! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
+//! Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough dealings to recover the derived share
+//! of any honest player (at most `f` of `2f + 1` points for a linear combination publicly revealed). Given all `2f + 1`
+//! honest players have access to their shares and it is not possible for a Byzantine player to derive any honest player's share, this claim holds.
 //!
-//! ### Future Work: Dropping the Synchrony Assumption?
+//! ### Up to `2f` Reveals Under Asynchrony
+//!
+//! If the network is asynchronous, Byzantine players may obtain up to `2f` revealed shares (`f` from Byzantine players
+//! and `f` from honest players).
+//!
+//! To see how this could be, consider a network where `f` honest participants are in one partition and (`f + 1` honest and
+//! `f` Byzantine participants) are in another. All `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers.
+//! Participants in the second partition will complete a round and all the reveals will belong to the same set of `f`
+//! honest players (that are in the first partition). A colluding Byzantine adversary will then have access to their acknowledged `f`
+//! shares and the revealed `f` shares. If the Byzantine adversary reveals all of their (still private) shares at this time, each of the
+//! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
+//! and the `2f` revealed shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover the shared secret.**
+//!
+//! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
+//! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
+//! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`),
+//! however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
+//!
+//! #### Future Work: Dropping the Synchrony Assumption for `f` Bounded Reveals?
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
@@ -164,19 +182,6 @@
 //! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
 //! require an extra round of broadcast ([GJKR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
 //! [BK25](https://eprint.iacr.org/2025/819)).
-//!
-//! ## Share Reveals
-//!
-//! In order to prevent malicious dealers from withholding shares from players, we
-//! require the dealers reveal the shares for which they did not receive acks.
-//! Because of the synchrony assumption above, this will only happen if either:
-//! - the dealer is malicious, not sending a share, but honestly revealing,
-//! - or, the player is malicious, not sending an ack when they should.
-//!
-//! Thus, for honest players, in the worst case, `f` reveals get created, because
-//! they correctly did not ack the `f` malicious dealers who failed to send them
-//! a share. In that case, their final share remains secret, because it is the linear
-//! combination of at least `f + 1` shares received from dealers.
 //!
 //! # Example
 //!
