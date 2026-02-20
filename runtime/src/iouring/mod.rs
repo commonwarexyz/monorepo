@@ -66,9 +66,10 @@
 //!
 //! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
 //! a multishot `PollAdd` on an internal `eventfd`.
-//! - [Submitter::send] coalesces wake writes with an atomic wake-pending latch
-//! - Wake CQEs drain `eventfd` readiness and re-arm when `IORING_CQE_F_MORE` is not set
-//! - The loop resets the wake latch immediately before blocking
+//! - [Submitter::send] increments an atomic submission sequence
+//! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE` is not set
+//! - The loop uses an arm-and-recheck sleep handshake (`submitted_seq` vs `processed_seq`)
+//! - Submitters ring `eventfd` only while sleep intent is armed
 //!
 //! ## Shutdown Process
 //!
@@ -98,16 +99,24 @@ use std::{
     mem::size_of,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
+use tracing::warn;
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Reserved ID for internal wake poll completions.
 const WAKE_WORK_ID: u64 = u64::MAX - 1;
+
+/// Bit used to mark that the loop is armed for sleep.
+const SLEEP_INTENT_BIT: u64 = 1;
+/// Packed-state increment for one submitted operation (bit 0 is reserved).
+const SUBMISSION_INCREMENT: u64 = 2;
+/// Sequence domain used by the packed submission counter (state >> 1).
+const SUBMISSION_SEQ_MASK: u64 = u64::MAX >> 1;
 
 /// Buffer for io_uring operations.
 ///
@@ -252,15 +261,45 @@ pub struct Op {
     pub fd: Option<OpFd>,
 }
 
+/// Shared wake state used by submitters and the io_uring loop.
+///
+/// `state` packs two values:
+/// - bit 0: sleep intent flag (`1` means the loop may block in `submit_and_wait`)
+/// - bits 1..: submitted sequence (`submitted_seq`)
+///
+/// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
+/// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
+/// stored in loop-local state). The loop may block only when:
+/// - sleep intent is armed, and
+/// - `submitted_seq == processed_seq`.
+///
+/// Blocking follows an arm-and-recheck protocol:
+/// - The loop first verifies `submitted_seq == processed_seq`, then arms sleep intent.
+/// - Before entering `submit_and_wait`, it re-checks `submitted_seq`.
+/// - Submitters ring `eventfd` only when they observe sleep intent armed.
+///
+/// This makes submissions racing with the sleep transition observable either by
+/// sequence mismatch in the loop or by an eventfd wakeup.
 struct WakerInner {
     wake_fd: OwnedFd,
-    wake_pending: AtomicBool,
+    state: AtomicU64,
 }
 
 /// Internal eventfd-backed wake source for the io_uring loop.
 ///
-/// Producers signal this after enqueueing work. The loop consumes wake
-/// notifications from CQEs and re-arms multishot poll when needed.
+/// - Publish submissions from producers via [`Waker::publish`]
+/// - Expose submitted sequence snapshots via [`Waker::submitted`]
+/// - Coordinate sleep intent transitions via [`Waker::arm`] and [`Waker::disarm`]
+/// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
+/// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
+///
+/// This type intentionally separates:
+/// - sequence publication (`state` high bits)
+/// - sleep gating (`state` bit 0)
+/// - kernel readiness consumption (`eventfd` read path)
+///
+/// Keeping these concerns separate makes the wake protocol explicit and avoids
+/// coupling correctness to exact eventfd coalescing behavior.
 #[derive(Clone)]
 struct Waker {
     inner: Arc<WakerInner>,
@@ -280,13 +319,13 @@ impl Waker {
         Ok(Self {
             inner: Arc::new(WakerInner {
                 wake_fd,
-                wake_pending: AtomicBool::new(false),
+                state: AtomicU64::new(0),
             }),
         })
     }
 
-    /// Signal wake by incrementing the eventfd counter.
-    fn signal(&self) {
+    /// Ring the eventfd doorbell.
+    fn ring(&self) {
         let value: u64 = 1;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -305,42 +344,82 @@ impl Waker {
                 match std::io::Error::last_os_error().raw_os_error() {
                     // Retry if interrupted by a signal before completion.
                     Some(libc::EINTR) => continue,
-                    // Non-blocking write would block because the counter is
-                    // saturated: a wake is already pending, so no retry is needed.
+                    // Non-blocking write would block because the eventfd
+                    // counter is saturated. A wake is already queued, so no
+                    // retry is needed.
                     Some(libc::EAGAIN) => return,
-                    _ => return,
+                    _ => {
+                        warn!("eventfd write failed");
+                        return;
+                    }
                 }
             }
             return;
         }
     }
 
-    /// Wake once per producer burst using the pending latch.
+    /// Publish one submitted operation and optionally ring `eventfd`.
     ///
-    /// The first caller in a burst flips `wake_pending` and writes to eventfd.
-    /// Subsequent callers skip the syscall until the loop resets the latch
-    /// before the next blocking wait.
-    fn wake(&self) {
-        if self
+    /// Callers must invoke this only after successfully enqueueing work into
+    /// the MPSC channel. That ordering guarantees that when the loop observes
+    /// an updated sequence, there is corresponding work to drain.
+    ///
+    /// We ring `eventfd` only when sleep intent was armed in the previous
+    /// state. This ensures submissions that race with the sleep transition
+    /// are visible to the loop without requiring submitters to ring on every
+    /// enqueue.
+    fn publish(&self) {
+        let prev = self
             .inner
-            .wake_pending
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.signal();
+            .state
+            .fetch_add(SUBMISSION_INCREMENT, Ordering::Release);
+
+        if (prev & SLEEP_INTENT_BIT) != 0 {
+            self.ring();
         }
+    }
+
+    /// Return the current submitted sequence.
+    ///
+    /// The sequence domain is masked to 63 bits and compared against the
+    /// loop-local `processed_seq` in the same domain.
+    fn submitted(&self) -> u64 {
+        (self.inner.state.load(Ordering::Acquire) >> 1) & SUBMISSION_SEQ_MASK
+    }
+
+    /// Arm sleep intent before attempting to block.
+    ///
+    /// After this point, any successful submission that races with sleep will
+    /// observe sleep intent and ring eventfd.
+    ///
+    /// The loop always performs a submission-sequence recheck after arming.
+    /// If sequence changed, it skips blocking and disarms immediately.
+    fn arm(&self) {
+        self.inner
+            .state
+            .fetch_or(SLEEP_INTENT_BIT, Ordering::AcqRel);
+    }
+
+    /// Disarm sleep intent after we resume running.
+    ///
+    /// Keeping sleep intent clear while actively running avoids redundant
+    /// eventfd writes during bursts. This is done both after a real wake and
+    /// after a post-arm recheck decides not to block.
+    fn disarm(&self) {
+        self.inner
+            .state
+            .fetch_and(!SLEEP_INTENT_BIT, Ordering::Release);
     }
 
     /// Drain eventfd readiness acknowledged by a wake CQE.
     ///
-    /// This acknowledges kernel-visible wake readiness, but intentionally does
-    /// not touch `wake_pending`. Latch reset is a separate step performed in
-    /// the main loop immediately before `submit_and_wait` to minimize the
-    /// window where producers can skip signaling.
+    /// This acknowledges kernel-visible wake readiness. Sleep gating is tracked
+    /// separately in the packed `state` atomic and is managed by
+    /// [`Waker::arm`] / [`Waker::disarm`].
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
-    fn drain(&self) {
+    fn acknowledge(&self) {
         let mut value: u64 = 0;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -355,7 +434,7 @@ impl Waker {
             if ret == size_of::<u64>() as isize {
                 // eventfd (without EFD_SEMAPHORE) returns the full counter and
                 // resets it to zero in one read.
-                break;
+                return;
             }
             if ret == -1 {
                 match std::io::Error::last_os_error().raw_os_error() {
@@ -363,28 +442,22 @@ impl Waker {
                     Some(libc::EINTR) => continue,
                     // Non-blocking read would block because the counter is zero,
                     // there is nothing left to drain right now.
-                    Some(libc::EAGAIN) => break,
-                    _ => break,
+                    Some(libc::EAGAIN) => return,
+                    _ => {
+                        tracing::warn!("eventfd read failed");
+                        return;
+                    }
                 }
             }
-            break;
+            return;
         }
     }
 
-    /// Reset the producer wake-pending latch.
+    /// Install the wake poll request into the SQ.
     ///
-    /// This is called in the main loop immediately before the blocking
-    /// `submit_and_wait` call. After reset, the next successful producer send
-    /// can flip the latch and write to `eventfd` again.
-    fn reset(&self) {
-        self.inner.wake_pending.store(false, Ordering::Relaxed);
-    }
-
-    /// Rearm the wake poll request.
-    ///
-    /// This uses multishot poll and is called when a wake CQE indicates the
-    /// previous multishot arm is no longer active.
-    fn rearm(&self, submission_queue: &mut SubmissionQueue<'_>) {
+    /// This uses multishot poll and is called on startup and whenever a wake
+    /// CQE indicates the previous multishot request is no longer active.
+    fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) {
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
             .build()
@@ -410,8 +483,10 @@ impl Drop for SubmitterInner {
         // handles a wake CQE before channel closure becomes observable.
         drop(self.sender.take());
 
-        // Wake the loop so shutdown observes disconnect promptly.
-        self.waker.signal();
+        // Wake the loop so shutdown observes disconnect promptly. This is an
+        // out-of-band wake for channel closure, so we ring directly rather
+        // than publish a synthetic submission.
+        self.waker.ring();
     }
 }
 
@@ -424,8 +499,8 @@ pub struct Submitter {
 impl Submitter {
     /// Submit an operation to the io_uring loop.
     ///
-    /// On success, this may signal the loop's `eventfd` wake source. Wake writes are coalesced
-    /// with an atomic wake-pending latch so bursts of submissions usually trigger a single wake.
+    /// On success, this publishes one submission and conditionally rings the loop's
+    /// `eventfd` wake source if sleep intent is armed.
     pub async fn send(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
         self.inner
             .sender
@@ -434,8 +509,8 @@ impl Submitter {
             .send(op)
             .await?;
 
-        // Only the first send in a burst performs the eventfd write.
-        self.inner.waker.wake();
+        // Publish submission and ring eventfd only if loop sleep intent is armed.
+        self.inner.waker.publish();
 
         Ok(())
     }
@@ -450,6 +525,7 @@ pub(crate) struct IoUringLoop {
     waker: Waker,
     wake_rearm_needed: bool,
     next_work_id: u64,
+    processed_seq: u64,
 }
 
 impl IoUringLoop {
@@ -479,6 +555,7 @@ impl IoUringLoop {
                 waker,
                 wake_rearm_needed: true,
                 next_work_id: 0,
+                processed_seq: 0,
             },
         )
     }
@@ -494,53 +571,83 @@ impl IoUringLoop {
                 self.handle_cqe(cqe);
             }
 
-            // Fill submission queue with inbound work.
-            let disconnected = self.fill_submission_queue(&mut ring);
-
-            if disconnected {
-                // All submitters are gone, drain in-flight ops and shutdown.
+            // Stage as much inbound work as capacity allows.
+            let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
+                // Producer side disconnected. Drain in-flight operations and exit.
                 self.drain(&mut ring);
                 return;
-            }
+            };
 
+            // Update pending operations metric.
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // Reset wake latch immediately before potentially blocking.
-            // Keeping this as late as possible maximizes wake coalescing, so
-            // producers avoid redundant eventfd writes while the loop is still
-            // actively submitting work.
-            self.waker.reset();
+            // If submissions are still pending, do not arm sleep.
+            //
+            // `submitted != processed_seq` means producers have published work we
+            // have not yet drained. Sleep here could park with pending work and
+            // no guaranteed eventfd wake, because publish only rings after sleep
+            // intent is armed.
+            if self.waker.submitted() != self.processed_seq {
+                if at_capacity {
+                    // Pending submissions exist and staging stopped at capacity.
+                    //
+                    // Enter the kernel to submit pending SQEs and wait for at
+                    // least one completion so capacity can open up.
+                    self.submit_and_wait(&mut ring, 1, None)
+                        .expect("unable to submit to ring");
+                }
 
-            // Submit pending SQEs and wait for a completion or wake event.
-            self.submit_and_wait(&mut ring, 1, None)
-                .expect("unable to submit to ring");
+                continue;
+            }
+
+            // Idle path. No pending submissions are visible.
+            //
+            // Arm sleep intent, re-check sequence, and block only if still idle.
+            // Any submission that arrives after `arm()` observes sleep intent and
+            // rings eventfd, so the loop is woken instead of sleeping through newly
+            // published work.
+            self.waker.arm();
+            if self.waker.submitted() == self.processed_seq {
+                self.submit_and_wait(&mut ring, 1, None)
+                    .expect("unable to submit to ring");
+            }
+            // Disarm sleep intent as soon as we resume running. While disarmed,
+            // producers do not ring eventfd for each publish.
+            self.waker.disarm();
         }
     }
 
-    /// Rearm wake poll (if needed) and stage inbound work into the SQ.
+    /// Stage inbound work into the SQ, reinstalling wake poll if needed.
     ///
-    /// Returns whether the inbound channel closed during staging.
+    /// Advances `processed_seq` by exactly the number of drained submissions.
     ///
-    /// Staging is limited by `cfg.size` active waiters. This remains correct
-    /// when `op_timeout` is enabled because `new_ring` doubles ring size to
-    /// accommodate `op + linked timeout` SQE pairs.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> bool {
-        let mut disconnected = false;
+    /// Returns whether staging ended at waiter capacity, or `None` if producer
+    /// channel disconnected.
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
+        let mut drained = 0u64;
         let mut submission_queue = ring.submission();
 
+        // Reinstall wake poll only when a prior wake CQE indicated multishot
+        // termination. Otherwise keep the existing poll registration.
         if std::mem::take(&mut self.wake_rearm_needed) {
-            self.waker.rearm(&mut submission_queue);
+            self.waker.reinstall(&mut submission_queue);
         }
 
+        // Stage until we either run out of channel work or hit waiter capacity.
+        //
+        // Capacity is bounded by `cfg.size` active waiters. This remains correct
+        // when `op_timeout` is enabled because `new_ring` doubles ring size to
+        // accommodate `op + linked timeout` SQE pairs.
         while self.waiters.len() < self.cfg.size as usize {
             let op = match self.receiver.try_recv() {
                 Ok(work) => work,
-                Err(TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
+                Err(TryRecvError::Disconnected) => return None,
                 Err(TryRecvError::Empty) => break,
             };
+
+            // Count exactly how many published submissions we consumed so
+            // `processed_seq` stays in sync with the published sequence domain.
+            drained += 1;
 
             let Op {
                 mut work,
@@ -610,12 +717,15 @@ impl IoUringLoop {
                 None
             };
 
-            // We'll send the result of this operation to `sender`.
-            // `fd` is retained to prevent FD reuse until completion.
+            // Keep per-op resources alive until CQE handling so all SQE pointers
+            // stay valid and the FD cannot be reused early.
             self.waiters.insert(work_id, (sender, buffer, fd, timespec));
         }
 
-        disconnected
+        // Track which submitted sequence has been consumed.
+        self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
+
+        Some(self.waiters.len() == self.cfg.size as usize)
     }
 
     /// Handle a single CQE from the ring.
@@ -632,7 +742,7 @@ impl IoUringLoop {
                 );
 
                 // Drain wake readiness from eventfd for this wake CQE.
-                self.waker.drain();
+                self.waker.acknowledge();
 
                 // Multishot can terminate, so we must re-arm to keep the wake
                 // path live.
