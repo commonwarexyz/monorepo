@@ -166,7 +166,8 @@
 //! and the `2f` public shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover
 //! the shared secret/form a signature.**
 //!
-//! W
+//! Why care if the secret isn't revealed? When used in consensus, a secret with more than `f` shares held by Byzantine players (say that
+//! `h` shares assigned to honest players are revealed) no longer guarantees safety. Consider the case where `f` Byzantine players
 //!
 //! Why does bounding the number of reveals matter (particularly bounding it to `f`)? Consensus constructions assume there exist at
 //! most `f` Byzantine players. If more than `f` shares are revealed, it lowers the Byzantine tolerance by the number of "honest" players
