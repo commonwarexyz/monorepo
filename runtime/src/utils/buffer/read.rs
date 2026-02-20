@@ -1,4 +1,4 @@
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBufMut};
+use crate::{Blob, Buf as _, Error, IoBufs};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -20,12 +20,11 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
-///     let mut header = [0u8; 16];
-///     reader.read_exact(&mut header, 16).await.expect("unable to read data");
-///     println!("Read header: {:?}", header);
+///     let header = reader.read_exact(16).await.expect("unable to read data");
+///     println!("Read header: {:?}", header.coalesce());
 ///
 ///     // Position is still at 16 (after header)
 ///     assert_eq!(reader.position(), 16);
@@ -34,61 +33,36 @@ use std::num::NonZeroUsize;
 pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
-    /// The buffer storing the data read from the blob.
-    buffer: IoBufMut,
-    /// The current position in the blob from where the buffer was filled.
-    blob_position: u64,
+    /// The buffered unread bytes.
+    buffer: IoBufs,
+    /// The next absolute position to fetch from the blob.
+    fetch_position: u64,
     /// The size of the blob.
     blob_size: u64,
-    /// The current position within the buffer for reading.
-    buffer_position: usize,
-    /// The valid data length in the buffer.
-    buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
-    /// Buffer pool used for internal allocations.
-    pool: BufferPool,
 }
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
-    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: pool.alloc(buffer_size.get()),
-            blob_position: 0,
+            buffer: IoBufs::default(),
+            fetch_position: 0,
             blob_size,
-            buffer_position: 0,
-            buffer_valid_len: 0,
             buffer_size: buffer_size.get(),
-            pool,
         }
     }
 
-    /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
-    pub fn from_pooler(
-        pooler: &impl BufferPooler,
-        blob: B,
-        blob_size: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Self {
-        Self::new(
-            blob,
-            blob_size,
-            buffer_size,
-            pooler.storage_buffer_pool().clone(),
-        )
-    }
-
     /// Returns how many valid bytes are remaining in the buffer.
-    pub const fn buffer_remaining(&self) -> usize {
-        self.buffer_valid_len - self.buffer_position
+    pub fn buffer_remaining(&self) -> usize {
+        self.buffer.len()
     }
 
     /// Returns how many bytes remain in the blob from the current position.
-    pub const fn blob_remaining(&self) -> u64 {
-        self.blob_size
-            .saturating_sub(self.blob_position + self.buffer_position as u64)
+    pub fn blob_remaining(&self) -> u64 {
+        self.blob_size.saturating_sub(self.position())
     }
 
     /// Returns the number of bytes in the blob, as provided at construction.
@@ -99,13 +73,8 @@ impl<B: Blob> Read<B> {
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
     async fn refill(&mut self) -> Result<usize, Error> {
-        // Update blob position to account for consumed bytes
-        self.blob_position += self.buffer_position as u64;
-        self.buffer_position = 0;
-        self.buffer_valid_len = 0;
-
-        // Calculate how many bytes remain in the blob
-        let blob_remaining = self.blob_size.saturating_sub(self.blob_position);
+        // Calculate how many bytes remain in the blob from the fetch cursor.
+        let blob_remaining = self.blob_size.saturating_sub(self.fetch_position);
         if blob_remaining == 0 {
             return Err(Error::BlobInsufficientLength);
         }
@@ -113,88 +82,74 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Reuse existing buffer if it has enough capacity, otherwise allocate new
-        let mut buf = std::mem::take(&mut self.buffer);
-        buf.clear();
-        let buf = if buf.capacity() >= bytes_to_read {
-            buf
-        } else {
-            self.pool.alloc(bytes_to_read)
-        };
-        let read_result = self
+        let read = self
             .blob
-            .read_at_buf(self.blob_position, bytes_to_read, buf)
-            .await?;
-        self.buffer = read_result.coalesce_with_pool(&self.pool);
-        self.buffer_valid_len = bytes_to_read;
+            .read_at(self.fetch_position, bytes_to_read)
+            .await?
+            .freeze();
+        self.fetch_position = self
+            .fetch_position
+            .checked_add(bytes_to_read as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        self.buffer.extend(read);
 
         Ok(bytes_to_read)
     }
 
-    /// Reads exactly `size` bytes into the provided buffer. Returns an error if not enough bytes
-    /// are available.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `size` is greater than the length of `buf`.
-    pub async fn read_exact(&mut self, buf: &mut [u8], size: usize) -> Result<(), Error> {
-        assert!(
-            size <= buf.len(),
-            "provided buffer is too small for requested size"
-        );
-
-        // Quick check if we have enough bytes total before attempting reads
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
+    /// Reads exactly `size` bytes and returns them as immutable buffers.
+    pub async fn read_exact(&mut self, size: usize) -> Result<IoBufs, Error> {
+        if size == 0 {
+            return Ok(IoBufs::default());
+        }
+        // Quick check if we have enough bytes total before attempting reads.
+        if self.blob_remaining() < size as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Read until we have enough bytes
-        let mut bytes_read = 0;
-        while bytes_read < size {
-            // Check if we need to refill
-            if self.buffer_position >= self.buffer_valid_len {
-                self.refill().await?;
-            }
-
-            // Calculate how many bytes we can copy from the buffer
-            let bytes_to_copy = std::cmp::min(size - bytes_read, self.buffer_remaining());
-
-            // Copy bytes from buffer to output
-            buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
-            );
-
-            self.buffer_position += bytes_to_copy;
-            bytes_read += bytes_to_copy;
+        while self.buffer_remaining() < size {
+            self.refill().await?;
         }
 
-        Ok(())
+        Ok(self.buffer.split_to(size))
+    }
+
+    /// Reads up to `max_len` bytes and returns available bytes as immutable buffers.
+    pub async fn read_up_to(&mut self, max_len: usize) -> Result<IoBufs, Error> {
+        if max_len == 0 {
+            return Ok(IoBufs::default());
+        }
+        // `blob_remaining()` already includes unread buffered bytes because
+        // `position()` is derived from `fetch_position - buffer_remaining()`.
+        let available = std::cmp::min(max_len, self.blob_remaining() as usize);
+        if available == 0 {
+            return Err(Error::BlobInsufficientLength);
+        }
+        self.read_exact(available).await
     }
 
     /// Returns the current absolute position in the blob.
-    pub const fn position(&self) -> u64 {
-        self.blob_position + self.buffer_position as u64
+    pub fn position(&self) -> u64 {
+        self.fetch_position
+            .saturating_sub(self.buffer_remaining() as u64)
     }
 
     /// Repositions the buffer to read from the specified position in the blob.
-    pub const fn seek_to(&mut self, position: u64) -> Result<(), Error> {
+    pub fn seek_to(&mut self, position: u64) -> Result<(), Error> {
         // Check if the seek position is valid
         if position > self.blob_size {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Check if the position is within the current buffer
-        let buffer_start = self.blob_position;
-        let buffer_end = self.blob_position + self.buffer_valid_len as u64;
-
+        // Check if the position is within the currently buffered range.
+        let buffer_start = self.position();
+        let buffer_end = self.fetch_position;
         if position >= buffer_start && position < buffer_end {
-            // Position is within the current buffer, adjust buffer_position
-            self.buffer_position = (position - self.blob_position) as usize;
+            // Position is within buffered data: advance within current buffer.
+            self.buffer.advance((position - buffer_start) as usize);
         } else {
-            // Position is outside the current buffer, reset buffer state
-            self.blob_position = position;
-            self.buffer_position = 0;
-            self.buffer_valid_len = 0;
+            // Position is outside current buffer, reset read state.
+            self.fetch_position = position;
+            self.buffer = IoBufs::default();
         }
 
         Ok(())

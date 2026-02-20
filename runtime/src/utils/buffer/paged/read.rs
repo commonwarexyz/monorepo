@@ -1,5 +1,5 @@
-use super::Checksum;
-use crate::{Blob, Buf, Error, IoBuf};
+use super::{read_at_buf_single, Checksum};
+use crate::{Blob, Buf, BufferPool, Error, IoBuf};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -37,6 +37,8 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// Pool used for replay read buffers.
+    pool: BufferPool,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -54,6 +56,7 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         prefetch_count: usize,
         logical_page_size: NonZeroU16,
+        pool: BufferPool,
     ) -> Self {
         let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
@@ -66,6 +69,7 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
+            pool,
         }
     }
 
@@ -110,10 +114,9 @@ impl<B: Blob> PageReader<B> {
         // Read physical data
         let physical_buf = self
             .blob
-            .read_at(start_offset, bytes_to_read)
-            .await?
-            .coalesce()
-            .freeze();
+            .read_at_buf(start_offset, bytes_to_read, self.pool.alloc(bytes_to_read))
+            .await?;
+        let physical_buf = read_at_buf_single(physical_buf)?;
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -199,8 +202,9 @@ impl ReplayBuf {
 
     /// Adds a buffer from a fill operation.
     fn push(&mut self, state: BufferState, logical_bytes: usize) {
-        // If buffers is empty, this is the first fill after a seek.
-        // Skip bytes before the seek offset (offset_in_page).
+        // If buffers is empty, this is the first fill after a seek. `seek_to` sets
+        // `offset_in_page` to the in-page seek offset, and `chunk` starts from that offset in the
+        // first pushed page. Subtract those skipped bytes from `remaining` only on this first push.
         let skip = if self.buffers.is_empty() {
             self.offset_in_page
         } else {
@@ -366,12 +370,16 @@ impl<B: Blob> Buf for Replay<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::append::Append, *};
+    use super::{
+        super::{append::Append, CacheRef},
+        *,
+    };
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
+    const PHYSICAL_PAGE_SIZE: NonZeroU16 = NZU16!(115);
     const BUFFER_PAGES: usize = 2;
 
     #[test_traced("DEBUG")]
@@ -382,7 +390,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -420,7 +428,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -449,7 +457,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -505,7 +513,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -544,7 +552,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();

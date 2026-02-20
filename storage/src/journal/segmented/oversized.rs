@@ -530,7 +530,7 @@ mod tests {
         Config {
             index_partition: "test-index".into(),
             value_partition: "test-values".into(),
-            index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
+            index_page_cache: CacheRef::from_pooler(pooler, NZU16!(76), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -922,11 +922,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1462,11 +1458,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1747,11 +1739,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2474,11 +2462,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,

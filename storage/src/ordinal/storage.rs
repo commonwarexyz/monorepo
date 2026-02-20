@@ -115,7 +115,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         bits: Option<BTreeMap<u64, &Option<BitMap>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
-        let mut blobs = BTreeMap::new();
+        let mut raw_blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&config.partition).await {
             Ok(blobs) => blobs,
             Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
@@ -145,19 +145,18 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             }
 
             debug!(blob = index, len, "found index blob");
-            let wrapped_blob = Write::from_pooler(&context, blob, len, config.write_buffer);
-            blobs.insert(index, wrapped_blob);
+            raw_blobs.insert(index, (blob, len));
         }
 
         // Initialize intervals by scanning existing records
         debug!(
-            blobs = blobs.len(),
+            blobs = raw_blobs.len(),
             "rebuilding intervals from existing index"
         );
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, blob) in &blobs {
+        for (section, (blob, size)) in &raw_blobs {
             // Skip if bits are provided and the section is not in the bits
             if let Some(bits) = &bits {
                 if !bits.contains_key(section) {
@@ -165,16 +164,12 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
                     continue;
                 }
             }
-
-            // Initialize read buffer
-            let size = blob.size().await;
-            let mut replay_blob =
-                ReadBuffer::from_pooler(&context, blob.clone(), size, config.replay_buffer);
+            let mut replay_blob = ReadBuffer::new(blob.clone(), *size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
             let items_per_blob = config.items_per_blob.get();
-            while offset < size {
+            while offset < *size {
                 // Calculate index for this record
                 let index = section * items_per_blob + (offset / Record::<V>::SIZE as u64);
 
@@ -197,14 +192,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
-                let mut record_buf = vec![0u8; Record::<V>::SIZE];
-                replay_blob
-                    .read_exact(&mut record_buf, Record::<V>::SIZE)
-                    .await?;
+                let mut read_buf = replay_blob.read_exact(Record::<V>::SIZE).await?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
+                if let Ok(record) = Record::<V>::read(&mut read_buf) {
                     if record.is_valid() {
                         items += 1;
                         intervals.insert(index);
@@ -224,6 +216,12 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             elapsed = ?context.current().duration_since(start).unwrap_or_default(),
             "rebuilt intervals"
         );
+
+        let mut blobs = BTreeMap::new();
+        for (index, (blob, len)) in raw_blobs {
+            let wrapped_blob = Write::from_pooler(&context, blob, len, config.write_buffer);
+            blobs.insert(index, wrapped_blob);
+        }
 
         // Initialize metrics
         let puts = Counter::default();
@@ -300,8 +298,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
-        let record = Record::<V>::read(&mut read_buf.as_ref())?;
+        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
+        let record = Record::<V>::read(&mut read_buf)?;
 
         // If record is valid, return it
         if record.is_valid() {

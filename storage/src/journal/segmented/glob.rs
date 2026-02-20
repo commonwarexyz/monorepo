@@ -30,7 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, BufMut, BufferPooler, Error as RError, Metrics, Storage};
+use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
