@@ -82,7 +82,7 @@ where
     Ok(())
 }
 
-/// Consolidated validation for coding proposal validation.
+/// Consolidated validation for coding proposal checks.
 ///
 /// If `context` is `None`, only coding-config validation is applied.
 pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(

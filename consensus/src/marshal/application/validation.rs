@@ -1,6 +1,7 @@
-//! Shared validation helpers for marshal verification.
+//! Shared validation helpers for marshal verification and certification.
 //!
-//! This module centralizes pure invariant checks shared across marshal flows.
+//! This module centralizes pure invariant checks shared across marshal verification
+//! and certification flows.
 
 use crate::types::{Epoch, Epocher, Height, Round};
 use commonware_utils::sync::Mutex;
