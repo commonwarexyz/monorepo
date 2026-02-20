@@ -134,7 +134,7 @@
 
         <p>Applications do not need to be rewritten to use this feature. If you already implement the <code>Application</code>/<code>VerifyingApplication</code> interfaces, wrap the same application with <code>marshal::coding</code> and get erasure-coded dissemination automatically.</p>
 
-        <p>Interested in upgrading to <code>marshal::coding</code> at some point but not quite ready yet? We continue to support <code>marshal::standard::Inline</code> (all you need is a height and a parent digest) and <code>marshal::standard::Deferred</code> (if you block stores the consensus context, we can defer the verification check until <code>certify</code>).</p>
+        <p>Interested in upgrading to <code>marshal::coding</code> at some point but not quite ready yet? We continue to support <code>marshal::standard::Inline</code> (all you need is a height and a parent digest) and <code>marshal::standard::Deferred</code> (if your block stores the consensus context, we can defer the verification check until <code>certify</code>).</p>
 
         <h2>Alto Benchmarks</h2>
 
