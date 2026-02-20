@@ -167,15 +167,9 @@
 //! the shared secret/form a signature.**
 //!
 //! Why care if the secret isn't revealed? When used in consensus, a secret with more than `f` shares held by Byzantine players (say that
-//! `h` shares assigned to honest players are revealed) no longer guarantees safety. Consider the case where `f` Byzantine players
-//!
-//! Why does bounding the number of reveals matter (particularly bounding it to `f`)? Consensus constructions assume there exist at
-//! most `f` Byzantine players. If more than `f` shares are revealed, it lowers the Byzantine tolerance by the number of "honest" players
-//! with revealed shares (let's call this `h`).
-//!
-//! Bounding the number of shares that can be revealed to `f` ends up being very important if a shared secret is used in consensus.
-//! If more than `f` shares are revealed (especially shares of "honest" players), it lowers the Byzantine tolerance by the number
-//! of "honest" player reveals (we already assume `f` Byzantine players are ready and willing to reveal their shares at any time).
+//! `h` shares assigned to honest players are revealed) can no longer guarantee safety. Consider an equivocating leader (one of the `f` Byzantine players)
+//! that sends one block `B_1` to `f` honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible
+//! to create one quorum of `2f + 1` (for `B_2`), however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
 //! #### Future Work: Dropping the Synchrony Assumption?
 //!
