@@ -137,7 +137,7 @@
             <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
             <div class="date">February 20, 2026</div>
         </div>
-        <p>Validator clusters already have the bandwidth. We are just not using it. In the standard proposal path of <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code>, one node pushes the whole block while everyone else waits, so throughput is bottlenecked. What if we distributed the load?</p>
+        <p>Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time. In a "standard" blockchain (akin to marshal::standard over broadcast::buffered), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?</p>
         <h3><a href="/blogs/is-it-ready-yet.html">Is it ready yet?</a></h3>
         <div class="meta">
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
