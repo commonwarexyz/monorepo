@@ -86,7 +86,7 @@
 
         <p>Your validator cluster has available bandwidth. We just weren't using it (until now).</p>
 
-        <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator (which can take hundreds of milliseconds to distribute a block on a 10Gbps link). What if we made the distributed block bigger (and sent less to each)?</p>
+        <p>In the standard marshal path (<code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator (which can take hundreds of milliseconds to distribute a block on a multi-Gbps link). What if we made the distributed block bigger (and sent less to each)?</p>
 
         <p>Today, we are introducing a new path for marshal: erasure-coded broadcast integrated through <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators relay verified shards, and <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> advances on the same commitment.</p>
 
