@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-actor.svg)](https://crates.io/crates/commonware-actor)
 [![Docs.rs](https://docs.rs/commonware-actor/badge.svg)](https://docs.rs/commonware-actor)
 
-Coordinate actors with protocol-driven ingress and lane-aware control loops.
+Coordinate actors with priority ingress.
 
 ## Declare incoming messages with `ingress!`
 
@@ -294,6 +294,7 @@ multiple ready messages before the loop polls other lanes again.
 ```rust,ignore
 use commonware_actor::service::ServiceBuilder;
 use std::num::NonZeroUsize;
+use commonware_utils::NZUsize;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Lane {
@@ -304,8 +305,8 @@ enum Lane {
 # let context = unimplemented!();
 # let actor = unimplemented!();
 let (_lanes, _service) = ServiceBuilder::new(actor)
-    .with_lane(Lane::Control, NonZeroUsize::new(32).expect("non-zero"))
-    .with_lane(Lane::Data, NonZeroUsize::new(256).expect("non-zero"))
+    .with_lane(Lane::Control, NZUsize!(32))
+    .with_lane(Lane::Data, NZUsize!(256))
     .build(context)
     .expect("duplicate lanes");
 ```
