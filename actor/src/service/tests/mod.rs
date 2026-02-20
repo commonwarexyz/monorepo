@@ -865,6 +865,142 @@ fn test_generic_mailbox_actor() {
     });
 }
 
+struct GenericReadOnlyResponseActor<T: Clone + Send + 'static> {
+    value: T,
+}
+
+ingress! {
+    GenericReadOnlyResponseMailbox<T: Clone + Send + 'static>,
+
+    pub tell GenericReadOnlyPing;
+    pub ask GenericReadOnlyGetValue -> T;
+}
+
+impl<E: Spawner, T: Clone + Send + 'static> Actor<E> for GenericReadOnlyResponseActor<T> {
+    type Mailbox = GenericReadOnlyResponseMailbox<T>;
+    type Ingress = GenericReadOnlyResponseMailboxMessage<T>;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = T;
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {
+        self.value.clone()
+    }
+
+    async fn on_read_only(
+        _context: E,
+        snapshot: Self::Snapshot,
+        message: GenericReadOnlyResponseMailboxReadOnlyMessage<T>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            GenericReadOnlyResponseMailboxReadOnlyMessage::GenericReadOnlyGetValue { response } => {
+                response.send_lossy(snapshot);
+                Ok(())
+            }
+        }
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: GenericReadOnlyResponseMailboxReadWriteMessage<T>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            GenericReadOnlyResponseMailboxReadWriteMessage::GenericReadOnlyPing => Ok(()),
+            GenericReadOnlyResponseMailboxReadWriteMessage::_Phantom(_) => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn test_generic_mailbox_with_readonly_generic_response() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let actor = GenericReadOnlyResponseActor {
+            value: "value".to_string(),
+        };
+        let (mailbox, service) =
+            ServiceBuilder::new(actor).build(context.with_label("generic_readonly_response"));
+        service.start();
+
+        mailbox.generic_read_only_ping().await.expect("ping failed");
+        let value = mailbox
+            .generic_read_only_get_value()
+            .await
+            .expect("ask failed");
+        assert_eq!(value, "value".to_string());
+    });
+}
+
+struct PostprocessIngressOnlyActor {
+    postprocess_count: Arc<AtomicUsize>,
+}
+
+ingress! {
+    PostprocessIngressOnlyMailbox,
+
+    pub ask SlowRead -> ();
+}
+
+impl<E: Spawner + Clock> Actor<E> for PostprocessIngressOnlyActor {
+    type Mailbox = PostprocessIngressOnlyMailbox;
+    type Ingress = PostprocessIngressOnlyMailboxMessage;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    async fn on_read_only(
+        context: E,
+        _snapshot: Self::Snapshot,
+        message: PostprocessIngressOnlyMailboxReadOnlyMessage,
+    ) -> Result<(), Self::Error> {
+        match message {
+            PostprocessIngressOnlyMailboxReadOnlyMessage::SlowRead { response } => {
+                context.sleep(Duration::from_millis(10)).await;
+                response.send_lossy(());
+                Ok(())
+            }
+        }
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: PostprocessIngressOnlyMailboxReadWriteMessage,
+    ) -> Result<(), Self::Error> {
+        match message {}
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess_count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn test_postprocess_runs_only_after_dispatch() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let postprocess_count = Arc::new(AtomicUsize::new(0));
+        let actor = PostprocessIngressOnlyActor {
+            postprocess_count: postprocess_count.clone(),
+        };
+        let (mailbox, service) =
+            ServiceBuilder::new(actor).build(context.with_label("postprocess_dispatch_only"));
+        let handle = service.start();
+
+        mailbox.slow_read().await.expect("ask failed");
+        context.sleep(Duration::from_millis(1)).await;
+        assert_eq!(postprocess_count.load(Ordering::SeqCst), 1);
+
+        drop(mailbox);
+        let _ = handle.await;
+    });
+}
+
 struct SubscribeActor {
     pending: Option<commonware_utils::channel::oneshot::Sender<String>>,
 }
