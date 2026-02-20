@@ -111,7 +111,8 @@
 //! ### Up to `f` Reveals Under Synchrony
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
-//! this construction will not result in more than `f` reveals (`2f + 1` commitments with at most `f` players are Byzantine).
+//! this construction will not result in more than `f` reveals and no reveals will be for honest players (`2f + 1` commitments with
+//! at most `f` players are Byzantine).
 //!
 //! To see how this is true, first consider that in any successful round there must exist `2f + 1` commitments each with at most `f`
 //! reveals. This implies that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments
