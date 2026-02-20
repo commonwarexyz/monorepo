@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf, IoBufMut, IoBufsMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
@@ -39,28 +39,69 @@ use tracing::{debug, error};
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
+/// Convert a `read_at_buf` result into a single immutable buffer.
+///
+/// We always pass exactly one destination buffer to `read_at_buf`, so chunked output indicates
+/// a violated contract in the blob implementation.
+fn read_at_buf_single(bufs: IoBufsMut) -> Result<IoBuf, Error> {
+    match bufs {
+        IoBufsMut::Single(buf) => Ok(buf.freeze()),
+        IoBufsMut::Chunked(_) => {
+            error!("blob.read_at_buf returned chunked output for single-buffer input");
+            Err(Error::ReadFailed)
+        }
+    }
+}
+
+/// Read the designated page from the underlying blob and return its logical bytes as an `IoBuf` if
+/// it passes the integrity check, returning error otherwise. Safely handles partial pages. Caller
+/// can check the length of the returned buffer to determine if the page was partial vs full.
+async fn read_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
+    pool: &BufferPool,
 ) -> Result<IoBuf, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-    let physical_page_start = page_num * physical_page_size;
+    read_page_from_blob_into(
+        blob,
+        page_num,
+        logical_page_size,
+        pool.alloc(physical_page_size as usize),
+    )
+    .await
+}
+
+/// Read the designated page from the underlying blob into the provided buffer and return its
+/// validated logical bytes.
+///
+/// The returned [`IoBuf`] is a frozen slice that aliases the provided `buf` allocation.
+async fn read_page_from_blob_into(
+    blob: &impl Blob,
+    page_num: u64,
+    logical_page_size: u64,
+    buf: IoBufMut,
+) -> Result<IoBuf, Error> {
+    let physical_page_size = logical_page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_size =
+        usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
-        .await?
-        .coalesce();
+        .read_at_buf(physical_page_start, physical_page_size, buf)
+        .await?;
+    let page = read_at_buf_single(page)?;
 
     let Some(record) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
     let (len, _) = record.get_crc();
 
-    Ok(page.freeze().slice(..len as usize))
+    Ok(page.slice(..len as usize))
 }
 
 /// Describes a CRC record stored at the end of a page.
@@ -241,6 +282,7 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{deterministic, Runner, Storage};
 
     #[test]
     fn test_crc_record_encode_read_roundtrip() {
@@ -487,6 +529,25 @@ mod tests {
             validated.is_none(),
             "Should fail when primary is invalid and fallback has len=0"
         );
+    }
+
+    #[test]
+    fn test_read_page_from_blob_into_overflow_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, _) = context
+                .open("paged-overflow", b"blob")
+                .await
+                .expect("failed to open blob");
+
+            // For logical_page_size=1, physical page size is 13 bytes.
+            // This page number forces checked multiplication to overflow.
+            let page_num = (u64::MAX / 13) + 1;
+            let err = read_page_from_blob_into(&blob, page_num, 1, IoBufMut::default())
+                .await
+                .expect_err("expected offset overflow");
+            assert!(matches!(err, Error::OffsetOverflow));
+        });
     }
 
     #[cfg(feature = "arbitrary")]

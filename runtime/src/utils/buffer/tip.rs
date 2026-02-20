@@ -29,7 +29,7 @@ pub(super) struct Buffer {
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
     ///
-    /// The backing buffer starts empty and grows on demand via `merge`/`append`.
+    /// The backing buffer starts empty and is allocated lazily on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
         Self {
             data: IoBufMut::default(),
@@ -71,8 +71,7 @@ impl Buffer {
 
         // Handle case where there is some data in the buffer.
         if len >= self.size() {
-            let replacement = self.pool.alloc(self.capacity);
-            let previous = (std::mem::replace(&mut self.data, replacement), self.offset);
+            let previous = (std::mem::take(&mut self.data), self.offset);
             self.offset = len;
             Some(previous)
         } else if len >= self.offset {
@@ -94,45 +93,34 @@ impl Buffer {
         if self.is_empty() {
             return None;
         }
-        let replacement = self.pool.alloc(self.capacity);
-        let buf = std::mem::replace(&mut self.data, replacement);
+        let buf = std::mem::take(&mut self.data);
         let offset = self.offset;
         self.offset += buf.len() as u64;
         Some((buf, offset))
     }
 
-    /// Extract and return any data from the blob range `[offset,offset+buf.len)` that is contained
-    /// in the buffer, returning the number of bytes that could not be extracted. (Any bytes
-    /// that could not be extracted must reside at the beginning of the range.)
+    /// Ensure `self.data` can hold at least `needed` bytes without reallocation.
     ///
-    /// # Panics
-    ///
-    /// Panics if the end offset of the requested data falls outside the range of the logical blob.
-    pub(super) fn extract(&self, buf: &mut [u8], offset: u64) -> usize {
-        let end_offset = offset
-            .checked_add(buf.len() as u64)
-            .expect("end_offset overflow");
-        assert!(end_offset <= self.size());
-        if end_offset <= self.offset {
-            // Range does not overlap with the buffer.
-            return buf.len();
+    /// The first allocation grows to at least configured `capacity` to avoid repeated small
+    /// reallocations. Subsequent expansions use geometric growth.
+    fn ensure_capacity(&mut self, needed: usize) {
+        if self.data.capacity() >= needed {
+            return;
         }
-
-        let (start, remaining) = if offset < self.offset {
-            // Some data is before the buffer.
-            (0, (self.offset - offset) as usize)
+        let current = self.data.capacity();
+        let target = if current == 0 {
+            self.capacity.max(needed)
         } else {
-            // Can read entirely from the buffer.
-            ((offset - self.offset) as usize, 0)
+            let mut next = current.max(self.capacity);
+            while next < needed {
+                next = next.checked_mul(2).unwrap_or(needed);
+            }
+            next
         };
 
-        let end = start + buf.len() - remaining;
-        assert!(end <= self.data.len());
-
-        // Copy the requested buffered data into the appropriate part of the user-provided slice.
-        buf[remaining..].copy_from_slice(&self.data.as_ref()[start..end]);
-
-        remaining
+        let mut grown = self.pool.alloc(target);
+        grown.put_slice(self.data.as_ref());
+        self.data = grown;
     }
 
     /// Merges the provided `data` into the buffer at the provided blob `offset` if it falls
@@ -155,11 +143,7 @@ impl Buffer {
 
         // Expand buffer if necessary (fills with zeros).
         if end > self.data.len() {
-            if end > self.data.capacity() {
-                let mut grown = self.pool.alloc(end);
-                grown.put_slice(self.data.as_ref());
-                self.data = grown;
-            }
+            self.ensure_capacity(end);
             let prev = self.data.len();
             // SAFETY: We initialize the newly exposed bytes below.
             unsafe { self.data.set_len(end) };
@@ -179,11 +163,7 @@ impl Buffer {
     /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.data.len() + data.len();
-        if end > self.data.capacity() {
-            let mut grown = self.pool.alloc(end);
-            grown.put_slice(self.data.as_ref());
-            self.data = grown;
-        }
+        self.ensure_capacity(end);
         self.data.put_slice(data);
 
         self.over_capacity()
@@ -226,10 +206,12 @@ mod tests {
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
+        assert_eq!(buffer.data.capacity(), 0);
         assert!(buffer.take().is_none());
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
+        assert!(buffer.data.capacity() >= 100);
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
@@ -290,5 +272,17 @@ mod tests {
         assert_eq!(buffer.size(), 59);
         assert!(buffer.take().is_none());
         assert_eq!(buffer.size(), 59);
+    }
+
+    #[test]
+    fn test_tip_lazy_allocation_on_first_merge() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(0, 16, pool);
+        assert_eq!(buffer.data.capacity(), 0);
+
+        assert!(buffer.merge(b"abc", 0));
+        assert_eq!(buffer.data.as_ref(), b"abc");
+        assert!(buffer.data.capacity() >= 16);
     }
 }

@@ -17,9 +17,9 @@ use std::num::NonZeroU16;
 mod append;
 mod read;
 
+/// Physical page size passed to `CacheRef::from_pooler`.
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
-const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
+const WRITE_BUFFER_SIZE: usize = (PAGE_SIZE.get() as usize) * 4;
 const CACHE_SIZE: usize = 10_000;
 
 type MemBlob = <Context as commonware_runtime::Storage>::Blob;

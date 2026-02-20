@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, IoBuf, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -14,6 +14,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_SIZE: usize = 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
+const CRC_BYTES: u16 = 12;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -38,10 +39,6 @@ enum FuzzOperation {
         cache_capacity: u16,
     },
     ReadExact {
-        size: u16,
-    },
-    ReadExactRandomBuf {
-        buf: Vec<u8>,
         size: u16,
     },
     ReadSeekTo {
@@ -107,7 +104,6 @@ fn fuzz(input: FuzzInput) {
         let mut write_buffer = None;
         let mut append_buffer = None;
         let mut cache_ref = None;
-        let mut cache_page_size_ref = None;
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
@@ -123,19 +119,16 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
+                    let mut effective_size = blob_size.min(size);
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
                         if (0u64).checked_add(data.len() as u64).is_some() {
                             blob.write_at(0, data).await.expect("cannot write");
+                            effective_size = blob_size;
                         }
                     }
 
-                    read_buffer = Some(Read::from_pooler(
-                        &context,
-                        blob,
-                        blob_size.min(size),
-                        NZUsize!(buffer_size),
-                    ));
+                    read_buffer = Some(Read::new(blob, effective_size, NZUsize!(buffer_size)));
                 }
 
                 FuzzOperation::CreateWrite {
@@ -175,13 +168,13 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        let cache_page_size = cache_page_size.clamp(1, u16::MAX);
+                        let logical_page_size = cache_page_size.clamp(1, u16::MAX - CRC_BYTES);
+                        let physical_page_size = logical_page_size + CRC_BYTES;
                         cache_ref = Some(CacheRef::from_pooler(
                             &context,
-                            NZU16!(cache_page_size),
+                            NZU16!(physical_page_size),
                             cache_capacity,
                         ));
-                        cache_page_size_ref = Some(cache_page_size);
                     }
 
                     if let Some(ref cache) = cache_ref {
@@ -197,18 +190,8 @@ fn fuzz(input: FuzzInput) {
                         let size = (size as usize).clamp(0, MAX_SIZE);
                         let current_pos = reader.position();
                         if current_pos.checked_add(size as u64).is_some() {
-                            let mut buf = vec![0u8; size];
-                            let _ = reader.read_exact(&mut buf, size).await;
+                            let _ = reader.read_exact(size).await;
                         }
-                    }
-                }
-
-                FuzzOperation::ReadExactRandomBuf { mut buf, size } => {
-                    if size > buf.len() as u16 {
-                        continue;
-                    }
-                    if let Some(ref mut reader) = read_buffer {
-                        let _ = reader.read_exact(&mut buf, size as usize).await;
                     }
                 }
 
@@ -286,11 +269,15 @@ fn fuzz(input: FuzzInput) {
                         let offset = offset as u64;
                         if data.len() >= cache.page_size() as usize {
                             let data = &data[..cache.page_size() as usize];
-                            if let Some(cache_page_size) = cache_page_size_ref {
-                                let aligned_offset =
-                                    (offset / cache_page_size as u64) * cache_page_size as u64;
-                                let _ = cache.cache(blob_id as u64, data, aligned_offset);
-                            }
+                            let page_size = cache.page_size();
+                            let aligned_offset = (offset / page_size) * page_size;
+                            cache
+                                .cache(
+                                    blob_id as u64,
+                                    vec![IoBuf::copy_from_slice(data)],
+                                    aligned_offset,
+                                )
+                                .await;
                         }
                     }
                 }
