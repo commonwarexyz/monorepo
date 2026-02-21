@@ -61,10 +61,7 @@ mod tests {
                 bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
                 secp256r1, Scheme,
             },
-            types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullify, Proposal,
-                Vote,
-            },
+            types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Participant, Round, View},
         Viewable,
@@ -78,10 +75,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network},
-        Recipients, Sender as _,
-    };
+    use commonware_p2p::simulated::{Config as NConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
@@ -2411,39 +2405,7 @@ mod tests {
             }
 
             let target_view = current_view;
-            let leader_idx = current_leader;
-            let leader_pk = participants[usize::from(leader_idx)].clone();
-            let (mut leader_sender, _leader_receiver) = oracle
-                .control(leader_pk.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            oracle
-                .add_link(
-                    leader_pk.clone(),
-                    me.clone(),
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-
-            let leader_nullify = Nullify::sign::<Sha256Digest>(
-                &schemes[usize::from(leader_idx)],
-                Round::new(epoch, target_view),
-            )
-            .unwrap();
-            leader_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Vote::<S, Sha256Digest>::Nullify(leader_nullify).encode(),
-                    true,
-                )
-                .await
-                .unwrap();
+            mailbox.expire(target_view).await;
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -2466,22 +2428,8 @@ mod tests {
                 }
             }
 
-            // Send the same leader nullify again. Duplicates should not retrigger the fast-path.
-            leader_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Vote::<S, Sha256Digest>::Nullify(
-                        Nullify::sign::<Sha256Digest>(
-                            &schemes[usize::from(leader_idx)],
-                            Round::new(epoch, target_view),
-                        )
-                        .unwrap(),
-                    )
-                    .encode(),
-                    true,
-                )
-                .await
-                .unwrap();
+            // Send the same expire signal again. Duplicates should not retrigger the fast-path.
+            mailbox.expire(target_view).await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             while context.current() < duplicate_window {
@@ -2517,6 +2465,186 @@ mod tests {
         );
         leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(ed25519::fixture);
         leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// Tests that if the application drops proposal requests, the leader emits `nullify`
+    /// immediately instead of waiting for timeout.
+    fn dropped_propose_emits_nullify_immediately<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"dropped_propose_emits_nullify_immediately".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let me_idx = Participant::new(0);
+            let signing = schemes[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.set_drop_proposals(true);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_drop_propose_test_{me}"),
+                epoch,
+                mailbox_size: 128,
+                // Long timeouts prove nullify came from fast-path, not timer expiry.
+                leader_timeout: Duration::from_secs(10),
+                notarization_timeout: Duration::from_secs(10),
+                nullify_retry: Duration::from_secs(10),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            let (mut current_view, mut current_leader) =
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        active,
+                        ..
+                    } => {
+                        active.send(true).unwrap();
+                        (current, leader)
+                    }
+                    _ => panic!("expected initial update"),
+                };
+
+            // Move to a leader view.
+            while current_leader != me_idx {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } if current > current_view => {
+                            active.send(true).unwrap();
+                            current_view = current;
+                            current_leader = leader;
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                }
+            }
+
+            let target_view = current_view;
+
+            // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on dropped propose.
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!(
+                            "expected nullify for view {} within 1s (timeouts are 10s)",
+                            target_view
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_propose_emits_nullify_immediately() {
+        dropped_propose_emits_nullify_immediately(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        dropped_propose_emits_nullify_immediately(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        dropped_propose_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
+        dropped_propose_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
+        dropped_propose_emits_nullify_immediately(ed25519::fixture);
+        dropped_propose_emits_nullify_immediately(secp256r1::fixture);
     }
 
     /// Tests that if the application drops verification requests, the voter emits `nullify`
