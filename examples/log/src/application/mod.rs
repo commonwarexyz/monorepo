@@ -3,6 +3,7 @@
 //! participants are active at a given view.
 
 use commonware_cryptography::Hasher;
+use std::num::NonZeroUsize;
 
 mod actor;
 pub use actor::Application;
@@ -16,10 +17,7 @@ pub struct Config<H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Signing scheme for this network.
-    pub scheme: Scheme,
-
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 }

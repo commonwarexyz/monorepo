@@ -191,16 +191,16 @@ fn main() {
             256, // 256 messages in flight
         );
 
-        // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
             .expect("private key must be in participants");
-        let (application, scheme, reporter, mailbox) = application::Application::new(
+
+        // Initialize application
+        let application = application::Application::init(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
-                scheme,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
             },
         );
 
@@ -209,9 +209,9 @@ fn main() {
             scheme,
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
-            automaton: mailbox.clone(),
-            relay: mailbox.clone(),
-            reporter: reporter.clone(),
+            automaton: application.mailbox.clone(),
+            relay: application.mailbox,
+            reporter: application.reporter.clone(),
             partition: String::from("log"),
             mailbox_size: 1024,
             epoch: Epoch::zero(),
@@ -230,7 +230,7 @@ fn main() {
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
-        application.start();
+        application.service.start();
         network.start();
         engine.start(
             (vote_sender, vote_receiver),

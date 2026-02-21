@@ -1412,6 +1412,7 @@ version = "2026.2.0"
 dependencies = [
  "chrono",
  "clap",
+ "commonware-actor",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",

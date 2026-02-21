@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
+commonware-actor.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
