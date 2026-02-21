@@ -241,15 +241,15 @@ impl<
                     // If we already buffered a leader nullify for this now-current view
                     // (allowed because we accept votes up to `current+1`), we can skip
                     // the leader timeout immediately via the `is_active` response below.
-                    let local_is_leader = self.scheme.me().is_some_and(|me| me == leader);
-                    let leader_nullified_current = !local_is_leader
+                    let is_local_leader = self.scheme.me().is_some_and(|me| me == leader);
+                    let should_expire = !is_local_leader
                         && work
                             .get(&current.0)
                             .is_some_and(|round| round.has_pending_nullify(leader));
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
-                    let is_active = !leader_nullified_current
+                    let is_active = !should_expire
                         && (
                             // Ensure we have enough data to judge activity (none of this
                             // data may be in the last skip_timeout views if we jumped ahead
