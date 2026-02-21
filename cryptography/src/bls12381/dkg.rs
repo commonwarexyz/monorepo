@@ -1637,6 +1637,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         {
             return Err(Error::PlayerCorrupted);
         }
+
         // We are extracting the private scalars from `Secret` protection
         // because interpolation/summation needs owned scalars for polynomial
         // arithmetic. The extracted scalars are scoped to this function and
