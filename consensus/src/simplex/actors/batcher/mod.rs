@@ -1291,13 +1291,20 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) = mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             let link = Link {
                 latency: Duration::from_millis(1),
@@ -1305,8 +1312,11 @@ mod tests {
                 success_rate: 1.0,
             };
             let leader_pk = participants[1].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link)
                 .await
@@ -1336,11 +1346,10 @@ mod tests {
 
             // Nullify-only activity should still count as activity for skip-timeout.
             let next_view = View::new(skip_timeout + 1);
-            let active = batcher_mailbox.update(next_view, leader, View::zero()).await;
-            assert!(
-                active,
-                "leader should remain active with nullify activity"
-            );
+            let active = batcher_mailbox
+                .update(next_view, leader, View::zero())
+                .await;
+            assert!(active, "leader should remain active with nullify activity");
         });
     }
 
@@ -1405,18 +1414,28 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) = mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             let leader_idx = Participant::new(2);
             let leader_pk = participants[usize::from(leader_idx)].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(
                     leader_pk.clone(),
@@ -1443,8 +1462,11 @@ mod tests {
                 .send(
                     Recipients::One(me.clone()),
                     Vote::<S, Sha256Digest>::Nullify(
-                        Nullify::sign::<Sha256Digest>(&schemes[usize::from(leader_idx)], Round::new(epoch, buffered_view))
-                            .expect("nullify"),
+                        Nullify::sign::<Sha256Digest>(
+                            &schemes[usize::from(leader_idx)],
+                            Round::new(epoch, buffered_view),
+                        )
+                        .expect("nullify"),
                     )
                     .encode(),
                     true,
@@ -1455,8 +1477,13 @@ mod tests {
 
             // Move current view to 2 with that same leader; this should fast-path timeout by
             // reporting the leader as inactive in the update response.
-            let active = batcher_mailbox.update(buffered_view, leader_idx, View::zero()).await;
-            assert!(!active, "buffered leader nullify should skip timeout on view entry");
+            let active = batcher_mailbox
+                .update(buffered_view, leader_idx, View::zero())
+                .await;
+            assert!(
+                !active,
+                "buffered leader nullify should skip timeout on view entry"
+            );
         });
     }
 
@@ -1470,6 +1497,137 @@ mod tests {
         leader_nullify_hint_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
         leader_nullify_hint_on_view_entry(ed25519::fixture);
         leader_nullify_hint_on_view_entry(secp256r1::fixture);
+    }
+
+    /// Test that we do not hint timeout when the sender is the current leader but the
+    /// nullify vote is for a different view.
+    fn leader_nullify_wrong_view_no_hint<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_leader_nullify_wrong_view_no_hint".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let leader = Participant::new(2);
+            let leader_pk = participants[usize::from(leader)].clone();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    leader_pk,
+                    me.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let current_view = View::new(2);
+            let _ = batcher_mailbox
+                .update(current_view, leader, View::zero())
+                .await;
+
+            let wrong_view = current_view.next();
+            let leader_nullify = Nullify::sign::<Sha256Digest>(
+                &schemes[usize::from(leader)],
+                Round::new(epoch, wrong_view),
+            )
+            .expect("nullify");
+            leader_sender
+                .send(
+                    Recipients::One(me),
+                    Vote::<S, Sha256Digest>::Nullify(leader_nullify).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            let got_wrong_view_hint = select! {
+                message = voter_receiver.recv() => {
+                    matches!(message, Some(voter::Message::Expire(view)) if view == wrong_view)
+                },
+                _ = context.sleep(Duration::from_millis(100)) => false,
+            };
+            assert!(
+                !got_wrong_view_hint,
+                "must not fast-path timeout for a leader nullify in a non-current view"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_leader_nullify_wrong_view_no_hint() {
+        leader_nullify_wrong_view_no_hint(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_hint(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_hint(bls12381_threshold_std::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_hint(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_hint(bls12381_multisig::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_hint(bls12381_multisig::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_hint(ed25519::fixture);
+        leader_nullify_wrong_view_no_hint(secp256r1::fixture);
     }
 
     /// Test that votes above finalized trigger verification/construction,

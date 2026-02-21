@@ -994,9 +994,9 @@ impl<
                         }
                     }
                     Message::Expire(nullified_view) => {
-                        // A leader nullify is an explicit "cannot progress" signal. We expire
-                        // the current round so the normal timeout path fires immediately on the
-                        // next tick.
+                        // When the elected leader nullifies a view, it is signaling that this
+                        // view cannot make progress. Expire the round so the normal timeout
+                        // transition runs on the next tick.
                         debug!(%nullified_view, "leader nullify observed, expiring round");
                         self.state.expire_round(nullified_view);
                         continue;

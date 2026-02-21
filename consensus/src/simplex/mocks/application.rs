@@ -376,7 +376,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     Message::Propose { context, response } => {
                         if self.drop_proposals {
                             // Drop the sender to simulate an application that is not ready.
-                            drop(response);
                             continue;
                         }
                         let digest = self.propose(context).await;
@@ -389,7 +388,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     } => {
                         if self.drop_verifications {
                             // Drop the sender to simulate an application that is not ready.
-                            drop(response);
                             continue;
                         }
                         if let Some(contents) = seen.get(&payload) {

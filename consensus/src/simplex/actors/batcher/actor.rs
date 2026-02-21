@@ -7,7 +7,7 @@ use crate::{
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
-    types::{Epoch, View, ViewDelta},
+    types::{Epoch, Participant, View, ViewDelta},
     Epochable, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
@@ -32,6 +32,8 @@ use prometheus_client::metrics::{
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
+
+type CurrentState = (View, Option<Participant>);
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + CryptoRngCore,
@@ -161,13 +163,13 @@ impl<
     /// Returns true if this network message is a current-view nullify from the elected leader.
     fn should_hint_leader_nullify(
         &self,
-        current: View,
-        current_leader: Option<crate::types::Participant>,
+        current: CurrentState,
         sender: &S::PublicKey,
         message: &Vote<S, D>,
     ) -> bool {
+        let (current_view, current_leader) = current;
         let view = message.view();
-        if view != current || !matches!(message, Vote::Nullify(_)) {
+        if view != current_view || !matches!(message, Vote::Nullify(_)) {
             return false;
         }
 
@@ -210,8 +212,7 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
-        let mut current = View::zero();
-        let mut current_leader = None;
+        let mut current: CurrentState = (View::zero(), None);
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
         select_loop! {
@@ -230,10 +231,9 @@ impl<
                     finalized: new_finalized,
                     active,
                 } => {
-                    current = new_current;
-                    current_leader = Some(leader);
+                    current = (new_current, Some(leader));
                     finalized = new_finalized;
-                    work.entry(current)
+                    work.entry(current.0)
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
@@ -243,7 +243,7 @@ impl<
                     let local_is_leader = self.scheme.me().is_some_and(|me| me == leader);
                     let leader_nullified_current = !local_is_leader
                         && work
-                            .get(&current)
+                            .get(&current.0)
                             .is_some_and(|round| round.has_pending_nullify(leader));
 
                     // Check if the leader has been active recently
@@ -264,12 +264,12 @@ impl<
                     active.send_lossy(is_active);
 
                     // Setting leader may enable batch verification
-                    updated_view = current;
+                    updated_view = current.0;
                 }
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current, view, false) {
+                    if !interesting(self.activity_timeout, finalized, current.0, view, false) {
                         continue;
                     }
 
@@ -311,7 +311,7 @@ impl<
                 if !interesting(
                     self.activity_timeout,
                     finalized,
-                    current,
+                    current.0,
                     view,
                     true, // allow future
                 ) {
@@ -420,7 +420,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current, view, false) {
+                if !interesting(self.activity_timeout, finalized, current.0, view, false) {
                     continue;
                 }
 
@@ -428,7 +428,7 @@ impl<
                 // it can fast-path timeout without waiting for its local timer. We do this because
                 // `nullify` still counts as "activity" for skip-timeout heuristics.
                 let leader_nullified_current =
-                    self.should_hint_leader_nullify(current, current_leader, &sender, &message);
+                    self.should_hint_leader_nullify(current, &sender, &message);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
@@ -460,7 +460,7 @@ impl<
                 );
 
                 // Forward leader's proposal to voter (if we're not the leader and haven't already)
-                if let Some(round) = work.get_mut(&current) {
+                if let Some(round) = work.get_mut(&current.0) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
                             voter.proposal(proposal).await;
@@ -519,7 +519,7 @@ impl<
                 } else {
                     timer.cancel();
                     trace!(
-                        %current,
+                        current = %current.0,
                         %finalized,
                         "no verifier ready"
                     );
@@ -556,7 +556,7 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current, view, false)
+                    !interesting(self.activity_timeout, finalized, current.0, view, false)
                 }) {
                     work.pop_first();
                 }
