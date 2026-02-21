@@ -13,7 +13,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
+use crate::qmdb::operation::Key;
 use std::{future::Future, ops::Range};
 
 /// A mutable operation log that can be durably persisted.
@@ -35,7 +35,7 @@ pub trait CleanAny:
     MerkleizedStore
     + PrunableStore
     + Persistable<Error = Error>
-    + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The mutable state type (Unmerkleized,Non-durable).
     type Mutable: MutableAny<
@@ -55,7 +55,7 @@ pub trait CleanAny:
 /// Use `into_mutable` to transition to the (Unmerkleized,NonDurable) state, or `into_merkleized` to
 /// transition to the (Merkleized,Durable) state.
 pub trait UnmerkleizedDurableAny:
-    LogStore + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    LogStore + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;
@@ -89,7 +89,7 @@ pub trait UnmerkleizedDurableAny:
 pub trait MerkleizedNonDurableAny:
     MerkleizedStore
     + PrunableStore
-    + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The mutable state type (Unmerkleized,NonDurable).
     type Mutable: MutableAny<Key = Self::Key>;
@@ -104,7 +104,7 @@ pub trait MerkleizedNonDurableAny:
 /// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
 /// NonDurable state.
 pub trait MutableAny:
-    LogStore + Batchable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    LogStore + Batchable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;

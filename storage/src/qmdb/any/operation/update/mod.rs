@@ -1,5 +1,4 @@
-use crate::qmdb::any::value::ValueEncoding;
-use commonware_utils::Array;
+use crate::qmdb::{any::value::ValueEncoding, operation::Key};
 use std::fmt;
 
 mod sealed {
@@ -13,7 +12,7 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync {
+pub trait Update<K: Key, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync {
     /// The updated key.
     fn key(&self) -> &K;
 

@@ -188,7 +188,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: crate::qmdb::operation::Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,
@@ -287,6 +287,27 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: (),
+            translator: T::default(),
+            thread_pool: None,
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Config for a varkey DB with Digest keys (both key and value Cfg are `()`).
+    pub(crate) fn varkey_db_config<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> VariableConfig<T, ((), ())> {
+        VariableConfig {
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("log-journal-{suffix}"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: ((), ()),
             translator: T::default(),
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -843,9 +864,12 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
 
-    // Type aliases for all 12 variants (all use OneCap for collision coverage).
+    // Type aliases for all 13 variants (all use OneCap for collision coverage).
     type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
+    // Varkey variant: uses VarKeyEncoding with Digest keys for generic test compatibility.
+    type UnorderedVarKey =
+        unordered::varkey::Db<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedFixedP1 =
@@ -870,11 +894,12 @@ pub(crate) mod test {
         Sha256::hash(&i.to_be_bytes())
     }
 
-    // Defines all 12 variants in one place. Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines all 13 variants in one place. Calls $cb!($($args)*, $label, $type, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
             $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
+            $cb!($($args)*, "uvk", UnorderedVarKey, varkey_db_config);
             $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
             $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
             $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);

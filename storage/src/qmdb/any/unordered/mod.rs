@@ -21,18 +21,19 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use crate::qmdb::operation::Key;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
 pub mod fixed;
 pub mod variable;
+pub mod varkey;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -77,7 +78,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -216,7 +217,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
@@ -240,7 +241,7 @@ where
 impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
@@ -260,7 +261,7 @@ where
 impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
@@ -279,7 +280,7 @@ impl<E, K, V, C, I, H> UnmerkleizedDurableAny
     for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
@@ -306,7 +307,7 @@ impl<E, K, V, C, I, H> MerkleizedNonDurableAny
     for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
@@ -325,7 +326,7 @@ where
 impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,

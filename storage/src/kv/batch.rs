@@ -3,7 +3,7 @@
 use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
 use commonware_codec::CodecShared;
-use commonware_utils::Array;
+use crate::qmdb::operation::Key;
 use std::{collections::BTreeMap, future::Future};
 
 /// A batch of changes which may be written to an underlying store with [Batchable::write_batch].
@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, future::Future};
 /// will be reflected in reads from the batch.
 pub struct Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -28,7 +28,7 @@ where
 
 impl<'a, K, V, D> Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -50,7 +50,7 @@ where
 
 impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -71,7 +71,7 @@ where
 
 impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -85,7 +85,7 @@ where
 
 impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -113,7 +113,7 @@ where
 
 impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
 where
-    K: Array,
+    K: Key,
     V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
@@ -126,7 +126,7 @@ where
 }
 
 /// A k/v store that supports making batched changes.
-pub trait Batchable: Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> {
+pub trait Batchable: Gettable<Key: Key, Value: CodecShared + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
