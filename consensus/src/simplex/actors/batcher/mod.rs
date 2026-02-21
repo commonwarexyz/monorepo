@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     /// Test that if a leader nullify for `v+1` is buffered while current view is `v`,
-    /// the batcher emits a voter hint immediately when entering `v+1`.
+    /// entering `v+1` reports the leader inactive so the voter skips timeout immediately.
     fn leader_nullify_hint_on_view_entry<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1405,8 +1405,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let (voter_sender, _voter_receiver) = mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
             let (_vote_sender, vote_receiver) =
@@ -1454,16 +1453,10 @@ mod tests {
                 .unwrap();
             context.sleep(Duration::from_millis(50)).await;
 
-            // Move current view to 2 with that same leader; should emit the hint immediately.
-            let _ = batcher_mailbox.update(buffered_view, leader_idx, View::zero()).await;
-
-            loop {
-                match voter_receiver.recv().await.unwrap() {
-                    voter::Message::LeaderNullify(view) if view == buffered_view => break,
-                    voter::Message::Proposal(_) | voter::Message::Verified(_, _) => continue,
-                    _ => continue,
-                }
-            }
+            // Move current view to 2 with that same leader; this should fast-path timeout by
+            // reporting the leader as inactive in the update response.
+            let active = batcher_mailbox.update(buffered_view, leader_idx, View::zero()).await;
+            assert!(!active, "buffered leader nullify should skip timeout on view entry");
         });
     }
 

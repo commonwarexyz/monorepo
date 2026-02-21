@@ -11,7 +11,7 @@ pub enum Message<S: Scheme, D: Digest> {
     ///
     /// The voter can use this to fast-path timeout in `v` rather than waiting
     /// for the local leader timeout.
-    LeaderNullify(View),
+    Skip(View),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -36,8 +36,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Hint that the current leader broadcast a nullify vote for `view`.
-    pub async fn leader_nullify(&mut self, view: View) {
-        self.sender.send_lossy(Message::LeaderNullify(view)).await;
+    pub async fn skip(&mut self, view: View) {
+        self.sender.send_lossy(Message::Skip(view)).await;
     }
 
     /// Send a recovered certificate.

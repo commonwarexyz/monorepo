@@ -238,26 +238,29 @@ impl<
                         .set_leader(leader);
 
                     // If we already buffered a leader nullify for this now-current view
-                    // (allowed because we accept votes up to `current+1`), fast-path the
-                    // voter immediately on view entry.
+                    // (allowed because we accept votes up to `current+1`), we can skip
+                    // the leader timeout immediately via the `is_active` response below.
                     let local_is_leader = self.scheme.me().is_some_and(|me| me == leader);
-                    if !local_is_leader
+                    let leader_nullified_current = !local_is_leader
                         && work
                             .get(&current)
-                            .is_some_and(|round| round.has_pending_nullify(leader))
-                    {
-                        voter.leader_nullify(current).await;
-                    }
+                            .is_some_and(|round| round.has_pending_nullify(leader));
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
-                    let is_active =
-                        // Ensure we have enough data to judge activity (none of this
-                        // data may be in the last skip_timeout views if we jumped ahead
-                        // to a new view)
-                        work.len() < skip_timeout
-                        // Leader active in at least one recent round
-                        || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
+                    let is_active = !leader_nullified_current
+                        && (
+                            // Ensure we have enough data to judge activity (none of this
+                            // data may be in the last skip_timeout views if we jumped ahead
+                            // to a new view)
+                            work.len() < skip_timeout
+                            // Leader active in at least one recent round
+                            || work
+                                .iter()
+                                .rev()
+                                .take(skip_timeout)
+                                .any(|(_, round)| round.is_active(leader))
+                        );
                     active.send_lossy(is_active);
 
                     // Setting leader may enable batch verification
@@ -445,7 +448,7 @@ impl<
 
                     // Only fast-path once for the first accepted leader nullify vote.
                     if leader_nullified_current {
-                        voter.leader_nullify(view).await;
+                        voter.skip(view).await;
                     }
                 }
                 updated_view = view;
