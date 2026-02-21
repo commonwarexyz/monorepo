@@ -13,7 +13,7 @@ use commonware_utils::{
 use rand::{CryptoRng, RngCore};
 
 /// Generates ed25519 identity participants.
-pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
+pub fn participants_old<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
@@ -25,6 +25,28 @@ where
         })
         .try_collect()
         .expect("ed25519 public keys are unique")
+}
+
+pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
+where
+    R: RngCore + CryptoRng,
+{
+    loop {
+        let pairs: Vec<_> = (0..n)
+            .map(|_| {
+                let private_key = PrivateKey::random(&mut *rng);
+                let public_key = private_key.public_key();
+                (public_key, private_key)
+            })
+            .collect();
+
+        if let Ok(map) = pairs
+            .into_iter()
+            .try_collect::<Map<PublicKey, PrivateKey>>()
+        {
+            return map;
+        }
+    }
 }
 
 /// Builds ed25519 identities alongside a caller-provided ed25519 certificate scheme wrapper.
