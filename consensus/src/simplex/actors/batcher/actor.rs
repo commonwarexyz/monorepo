@@ -33,6 +33,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
+/// Tracks the current view together with its elected leader so they update atomically.
 type CurrentState = (View, Option<Participant>);
 
 pub struct Actor<
