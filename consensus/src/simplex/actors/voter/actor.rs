@@ -993,7 +993,7 @@ impl<
                             }
                         }
                     }
-                    Message::Skip(nullified_view) => {
+                    Message::Expire(nullified_view) => {
                         // A leader nullify is an explicit "cannot progress" signal. We expire
                         // the current round so the normal timeout path fires immediately on the
                         // next tick.

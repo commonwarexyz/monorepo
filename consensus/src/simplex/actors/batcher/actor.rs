@@ -448,7 +448,7 @@ impl<
 
                     // Only fast-path once for the first accepted leader nullify vote.
                     if leader_nullified_current {
-                        voter.skip(view).await;
+                        voter.expire(view).await;
                     }
                 }
                 updated_view = view;
