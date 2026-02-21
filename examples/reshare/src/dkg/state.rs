@@ -477,24 +477,25 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent))
     }
 
-    /// Create a Player for the given epoch, replaying any stored dealer messages.
+    /// Create a Player for the given epoch by resuming from persisted state.
     pub fn create_player<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
         round_info: Info<V, P>,
     ) -> Option<Player<V, C>> {
-        let crypto_player =
-            CryptoPlayer::new(round_info, signer).expect("should be able to create player");
-        let mut player = Player::new(crypto_player);
-
-        // Replay persisted dealer messages
-        for (dealer, pub_msg, priv_msg) in self.dealings(epoch) {
-            player.replay::<M>(dealer.clone(), pub_msg, priv_msg);
-            debug!(?epoch, ?dealer, "replayed committed dealer message");
+        let logs = self.logs(epoch);
+        let dealings = self.dealings(epoch);
+        let (crypto_player, acks) = CryptoPlayer::resume::<M>(round_info, signer, &logs, dealings)
+            .expect("should be able to resume player");
+        for dealer in acks.keys() {
+            debug!(?epoch, ?dealer, "restored committed dealer message");
         }
 
-        Some(player)
+        Some(Player {
+            player: crypto_player,
+            acks,
+        })
     }
 }
 
@@ -593,13 +594,6 @@ pub struct Player<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> Player<V, C> {
-    pub const fn new(player: CryptoPlayer<V, C>) -> Self {
-        Self {
-            player,
-            acks: BTreeMap::new(),
-        }
-    }
-
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
@@ -628,24 +622,6 @@ impl<V: Variant, C: Signer> Player<V, C> {
             return Some(ack);
         }
         None
-    }
-
-    /// Replay an already-persisted dealer message (updates in-memory state only).
-    fn replay<M: Faults>(
-        &mut self,
-        dealer: C::PublicKey,
-        pub_msg: DealerPubMsg<V>,
-        priv_msg: DealerPrivMsg,
-    ) {
-        if self.acks.contains_key(&dealer) {
-            return;
-        }
-        if let Some(ack) = self
-            .player
-            .dealer_message::<M>(dealer.clone(), pub_msg, priv_msg)
-        {
-            self.acks.insert(dealer, ack);
-        }
     }
 
     /// Finalize the player's participation in the DKG round.
