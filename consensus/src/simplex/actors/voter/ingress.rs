@@ -7,10 +7,10 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
-    /// Hint from batcher that the current leader has broadcast `nullify(v)`.
+    /// Signal from the batcher to expire a view after observing a leader nullify vote.
     ///
-    /// The voter can use this to fast-path timeout in `v` rather than waiting
-    /// for the local leader timeout.
+    /// This lets the voter trigger its normal timeout transition immediately,
+    /// instead of waiting for the local leader timer.
     Expire(View),
     /// Certificate from batcher or resolver.
     ///
@@ -35,7 +35,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
-    /// Hint that the current leader broadcast a nullify vote for `view`.
+    /// Signal that the current leader broadcast a nullify vote for `view`.
     pub async fn expire(&mut self, view: View) {
         self.sender.send_lossy(Message::Expire(view)).await;
     }

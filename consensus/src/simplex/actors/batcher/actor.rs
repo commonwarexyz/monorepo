@@ -161,7 +161,7 @@ impl<
         )
     }
 
-    /// Returns true if this vote should trigger an expire hint for the current view.
+    /// Returns true if this vote should trigger expiry for the current view.
     fn should_expire(
         &self,
         current: CurrentState,
@@ -174,7 +174,7 @@ impl<
             return false;
         }
 
-        // Skip local-leader hinting (only useful for verifiers).
+        // Skip local-leader expiry (only useful for verifiers).
         if self
             .scheme
             .me()
@@ -425,7 +425,7 @@ impl<
                     continue;
                 }
 
-                // If the current leader explicitly nullifies the current view, hint the voter so
+                // If the current leader explicitly nullifies the current view, signal the voter so
                 // it can fast-path timeout without waiting for its local timer. We do this because
                 // `nullify` still counts as "activity" for skip-timeout heuristics.
                 let should_expire = self.should_expire(current, &sender, &message);
