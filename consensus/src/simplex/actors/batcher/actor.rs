@@ -174,7 +174,7 @@ impl<
             return false;
         }
 
-        // Skip local-leader expiry (only useful for verifiers).
+        // Skip local-leader expiry
         if self
             .scheme
             .me()
