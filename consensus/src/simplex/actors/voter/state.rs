@@ -392,11 +392,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
-    ///
-    /// Returns `true` if `view` was the current view and was expired, `false` otherwise.
-    pub fn expire_round(&mut self, view: View) -> bool {
+    pub fn expire_round(&mut self, view: View) {
         if view != self.view {
-            return false;
+            return;
         }
 
         let now = self.context.current();
@@ -409,7 +407,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 .get_or_create(&Peer::new(&leader.key))
                 .inc();
         }
-        true
     }
 
     /// Attempt to propose a new block.
@@ -834,7 +831,7 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            assert!(!state.expire_round(View::zero()));
+            state.expire_round(View::zero());
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
@@ -857,7 +854,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            assert!(!state.expire_round(view_1));
+            state.expire_round(view_1);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });

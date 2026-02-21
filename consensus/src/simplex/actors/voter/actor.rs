@@ -865,12 +865,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        if self.state.expire_round(context.view()) {
-                            debug!(
-                                round = ?context.round,
-                                "proposal unavailable, expiring round"
-                            );
-                        }
+                        self.state.expire_round(context.view());
                         continue;
                     }
                 };
@@ -908,19 +903,12 @@ impl<
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        if self.state.expire_round(context.view()) {
-                            debug!(round = ?context.round, "proposal failed verification, expiring round");
-                        }
+                        self.state.expire_round(context.view());
                         continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
-                        if self.state.expire_round(context.view()) {
-                            debug!(
-                                round = ?context.round,
-                                "verification unavailable, expiring round"
-                            );
-                        }
+                        self.state.expire_round(context.view());
                         continue;
                     }
                 };
