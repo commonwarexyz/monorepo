@@ -1528,6 +1528,11 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// with the appropriate messages, but includes extra safeguards to detect
     /// missing / corrupted state.
     ///
+    /// It's imperative that the `logs` passed in have been verified. This is done
+    /// naturally when converting from a [`SignedDealerLog`] to a [`DealerLog`],
+    /// but this function, like [`Player::finalize`], assumes that this check has
+    /// been done.
+    ///
     /// All messages the player should have received must be passed into this method,
     /// and if any messages which should be present based on this player's actions
     /// in the log are missing, this method will return [`Error::PlayerCorrupted`].
