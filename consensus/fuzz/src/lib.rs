@@ -28,10 +28,7 @@ use commonware_consensus::{
     Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, Scheme},
-    ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest,
-    Sha256,
+    certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
@@ -97,9 +94,9 @@ pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 
-async fn setup_degraded_network<E: Clock>(
-    oracle: &mut Oracle<Ed25519PublicKey, E>,
-    participants: &[Ed25519PublicKey],
+async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
+    oracle: &mut Oracle<P, E>,
+    participants: &[P],
 ) {
     let Some(victim) = participants.last() else {
         return;
@@ -201,18 +198,20 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-type NetworkChannels = (
+type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+
+type NetworkChannels<P> = (
     (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+        commonware_p2p::simulated::Sender<P, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<P>,
     ),
     (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+        commonware_p2p::simulated::Sender<P, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<P>,
     ),
     (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+        commonware_p2p::simulated::Sender<P, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<P>,
     ),
 );
 
@@ -221,10 +220,10 @@ async fn setup_network<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
-    Oracle<Ed25519PublicKey, deterministic::Context>,
-    Vec<Ed25519PublicKey>,
+    Oracle<PublicKeyOf<P>, deterministic::Context>,
+    Vec<PublicKeyOf<P>>,
     Vec<P::Scheme>,
-    HashMap<Ed25519PublicKey, NetworkChannels>,
+    HashMap<PublicKeyOf<P>, NetworkChannels<PublicKeyOf<P>>>,
 ) {
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
@@ -236,12 +235,7 @@ async fn setup_network<P: simplex::Simplex>(
     );
     network.start();
 
-    let Fixture {
-        participants,
-        schemes,
-        verifier: _,
-        ..
-    } = P::fixture(context, NAMESPACE, input.configuration.n);
+    let (participants, schemes) = P::setup(context, NAMESPACE, input.configuration.n);
 
     let registrations = register(&mut oracle, &participants).await;
 
@@ -274,16 +268,16 @@ fn start_disrupter<P: simplex::Simplex>(
     scheme: P::Scheme,
     strategy: &StrategyChoice,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) {
     match *strategy {
@@ -327,7 +321,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
-    channels: NetworkChannels,
+    channels: NetworkChannels<PublicKeyOf<P>>,
 ) {
     let (vote_network, certificate_network, resolver_network) = channels;
     start_disrupter::<P>(
@@ -342,12 +336,12 @@ fn spawn_disrupter<P: simplex::Simplex>(
 
 fn spawn_honest_validator<P: simplex::Simplex>(
     context: deterministic::Context,
-    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
-    participants: &[Ed25519PublicKey],
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
-    validator: Ed25519PublicKey,
-    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
-    channels: NetworkChannels,
+    validator: PublicKeyOf<P>,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
     spawn_honest_validator_with_network::<P>(
@@ -366,22 +360,22 @@ fn spawn_honest_validator<P: simplex::Simplex>(
 #[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator_with_network<P: simplex::Simplex>(
     context: deterministic::Context,
-    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
-    participants: &[Ed25519PublicKey],
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
-    validator: Ed25519PublicKey,
-    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
+    validator: PublicKeyOf<P>,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let elector = P::Elector::default();
@@ -445,13 +439,13 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
 #[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     context: deterministic::Context,
-    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
-    participants: &[Ed25519PublicKey],
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
-    validator: Ed25519PublicKey,
-    byzantine_router: crate::network::Router<Ed25519PublicKey, deterministic::Context>,
-    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
-    channels: NetworkChannels,
+    validator: PublicKeyOf<P>,
+    byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;

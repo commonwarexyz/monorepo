@@ -1,4 +1,4 @@
-use crate::scheme as id_scheme;
+use crate::scheme as id;
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, Random, RoundRobin},
@@ -9,7 +9,7 @@ use commonware_consensus::simplex::{
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    certificate::{self, mocks::Fixture},
+    certificate,
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     PublicKey, Sha256,
@@ -57,13 +57,16 @@ pub trait Simplex: 'static
 where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
-    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Scheme: Scheme<Sha256Digest>;
     type Elector: ElectorConfig<Self::Scheme> + Default;
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme>;
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    );
 }
 
 pub struct SimplexEd25519;
@@ -72,27 +75,34 @@ impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        ed25519::fixture(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
 pub struct SimplexId;
 
 impl Simplex for SimplexId {
-    type Scheme = id_scheme::Scheme;
+    type Scheme = id::Scheme;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        id_scheme::fixture(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        id::fixture(context, namespace, n)
     }
 }
 
@@ -102,12 +112,16 @@ impl Simplex for SimplexEd25519CustomRoundRobin {
     type Scheme = ed25519::Scheme;
     type Elector = CustomRoundRobinShuffled;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        ed25519::fixture(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -117,12 +131,16 @@ impl Simplex for SimplexBls12381MultisigMinPk {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinPk, _>(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_multisig::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -132,12 +150,16 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinSig, _>(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_multisig::fixture::<MinSig, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -147,12 +169,16 @@ impl Simplex for SimplexBls12381MinPk {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -162,12 +188,16 @@ impl Simplex for SimplexBls12381MinPkCustomRandom {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = CustomRandomSelected;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -177,12 +207,16 @@ impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = Random;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
@@ -192,12 +226,16 @@ impl Simplex for SimplexSecp256r1 {
     type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
     type Elector = RoundRobin;
 
-    fn fixture(
+    fn setup(
         context: &mut deterministic::Context,
         namespace: &[u8],
         n: u32,
-    ) -> Fixture<Self::Scheme> {
-        secp256r1::fixture(context, namespace, n)
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = secp256r1::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 
