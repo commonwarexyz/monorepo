@@ -1017,6 +1017,16 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    fn get_ack(&self, player: &P) -> Option<&PlayerAck<P>> {
+        let DealerResult::Ok(results) = &self.results else {
+            return None;
+        };
+        match results.get_value(player) {
+            Some(AckOrReveal::Ack(ack)) => Some(ack),
+            _ => None,
+        }
+    }
+
     fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
@@ -1065,16 +1075,6 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
                         .expect("map keys are deduped"),
                 }
             }
-        }
-    }
-
-    /// Returns true if a player's ack is contained in this log.
-    pub fn player_acked(&self, player: &P) -> bool {
-        match &self.results {
-            DealerResult::TooManyReveals => false,
-            DealerResult::Ok(map) => map
-                .get_value(player)
-                .is_some_and(|a_or_r| matches!(a_or_r, AckOrReveal::Ack(_))),
         }
     }
 }
@@ -1566,11 +1566,17 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 acks.insert(dealer, ack);
             }
         }
-        // Have we emitted any acks, publicly recorded, for which we do not have the private message?
-        if logs
-            .iter()
-            .any(|(d, l)| l.player_acked(&this.me_pub) && !acks.contains_key(d))
-        {
+        // Have we emitted any valid acks, publicly recorded, for which we do
+        // not have the private message?
+        if logs.iter().any(|(dealer, log)| {
+            let Some(ack) = log.get_ack(&this.me_pub) else {
+                return false;
+            };
+            // Only trust this ack if the signature is valid for this round.
+            transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
+                .verify(&this.me_pub, &ack.sig)
+                && !acks.contains_key(dealer)
+        }) {
             // If so, we have a problem, because we're missing a share that we're
             // supposed to have, and that we publicly committed to having, so we're
             // corrupted.
@@ -1629,11 +1635,13 @@ impl<V: Variant, S: Signer> Player<V, S> {
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
+        // `select` verifies ack signatures, so any ack present in `selected`
+        // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
         // then we're corrupted.
         if selected
             .iter_pairs()
-            .any(|(d, l)| l.player_acked(&self.me_pub) && !self.view.contains_key(d))
+            .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
         {
             return Err(Error::PlayerCorrupted);
         }
@@ -2398,7 +2406,7 @@ mod test_plan {
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
                             assert!(
-                                missing_log.player_acked(&player_pk),
+                                missing_log.get_ack(&player_pk).is_some(),
                                 "dealer {missing_dealer} did not ack player {i_player}, cannot assert missing-message corruption"
                             );
 
@@ -2529,7 +2537,7 @@ mod test_plan {
                         .get(&missing_pk)
                         .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
                     assert!(
-                        missing_log.player_acked(&player_pk),
+                        missing_log.get_ack(&player_pk).is_some(),
                         "dealer {missing_dealer} did not ack player {i_player}, cannot assert finalize corruption"
                     );
 
@@ -3052,6 +3060,61 @@ mod test {
         std::mem::swap(&mut log0.log, &mut log1.log);
         assert!(log0.check(&info).is_none());
         assert!(log1.check(&info).is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_ignores_invalid_logged_ack_signature() -> Result<(), Error> {
+        let dealer_sk = ed25519::PrivateKey::from_seed(11);
+        let dealer_pk = dealer_sk.public_key();
+        let player_sk = ed25519::PrivateKey::from_seed(22);
+        let player_pk = player_sk.public_key();
+        let dealers: Set<ed25519::PublicKey> = vec![dealer_pk.clone()].try_into().unwrap();
+        let players: Set<ed25519::PublicKey> = vec![player_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Default::default(),
+            dealers.clone(),
+            players.clone(),
+        )?;
+        let wrong_round_info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            1,
+            None,
+            Default::default(),
+            dealers,
+            players,
+        )?;
+        let (_, pub_msg, _) =
+            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), dealer_sk, None)?;
+        let bad_ack = PlayerAck {
+            sig: transcript_for_ack(
+                &transcript_for_round(&wrong_round_info),
+                &dealer_pk,
+                &pub_msg,
+            )
+            .sign(&player_sk),
+        };
+        let results: Map<_, _> = vec![(player_pk, AckOrReveal::Ack(bad_ack))]
+            .into_iter()
+            .try_collect()
+            .unwrap();
+        let mut logs = BTreeMap::new();
+        logs.insert(
+            dealer_pk,
+            DealerLog {
+                pub_msg,
+                results: DealerResult::Ok(results),
+            },
+        );
+
+        let resumed = Player::resume::<N3f1>(info, player_sk, &logs, []);
+        assert!(resumed.is_ok());
+        let (_, acks) = resumed.unwrap();
+        assert!(acks.is_empty());
 
         Ok(())
     }
