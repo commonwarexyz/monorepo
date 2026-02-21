@@ -8,9 +8,6 @@ pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
     /// Signal from the batcher to expire a view after observing a leader nullify vote.
-    ///
-    /// This lets the voter trigger its normal timeout transition immediately,
-    /// instead of waiting for the local leader timer.
     Expire(View),
     /// Certificate from batcher or resolver.
     ///

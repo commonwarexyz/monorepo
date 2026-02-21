@@ -1367,13 +1367,13 @@ mod tests {
 
     /// Test that if a leader nullify for `v+1` is buffered while current view is `v`,
     /// entering `v+1` reports the leader inactive so the voter skips timeout immediately.
-    fn leader_nullify_hint_on_view_entry<S, F>(mut fixture: F)
+    fn leader_nullify_expire_on_view_entry<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let namespace = b"batcher_leader_nullify_hint_on_view_entry".to_vec();
+        let namespace = b"batcher_leader_nullify_expire_on_view_entry".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1488,26 +1488,26 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_leader_nullify_hint_on_view_entry() {
-        leader_nullify_hint_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        leader_nullify_hint_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        leader_nullify_hint_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>);
-        leader_nullify_hint_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>);
-        leader_nullify_hint_on_view_entry(bls12381_multisig::fixture::<MinPk, _>);
-        leader_nullify_hint_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
-        leader_nullify_hint_on_view_entry(ed25519::fixture);
-        leader_nullify_hint_on_view_entry(secp256r1::fixture);
+    fn test_leader_nullify_expire_on_view_entry() {
+        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>);
+        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinPk, _>);
+        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
+        leader_nullify_expire_on_view_entry(ed25519::fixture);
+        leader_nullify_expire_on_view_entry(secp256r1::fixture);
     }
 
-    /// Test that we do not hint timeout when the sender is the current leader but the
+    /// Test that we do not signal expiry when the sender is the current leader but the
     /// nullify vote is for a different view.
-    fn leader_nullify_wrong_view_no_hint<S, F>(mut fixture: F)
+    fn leader_nullify_wrong_view_no_expire<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let namespace = b"batcher_leader_nullify_wrong_view_no_hint".to_vec();
+        let namespace = b"batcher_leader_nullify_wrong_view_no_expire".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1605,29 +1605,29 @@ mod tests {
                 .await
                 .unwrap();
 
-            let got_wrong_view_hint = select! {
+            let got_wrong_view_expire = select! {
                 message = voter_receiver.recv() => {
                     matches!(message, Some(voter::Message::Expire(view)) if view == wrong_view)
                 },
                 _ = context.sleep(Duration::from_millis(100)) => false,
             };
             assert!(
-                !got_wrong_view_hint,
+                !got_wrong_view_expire,
                 "must not fast-path timeout for a leader nullify in a non-current view"
             );
         });
     }
 
     #[test_traced]
-    fn test_leader_nullify_wrong_view_no_hint() {
-        leader_nullify_wrong_view_no_hint(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        leader_nullify_wrong_view_no_hint(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        leader_nullify_wrong_view_no_hint(bls12381_threshold_std::fixture::<MinPk, _>);
-        leader_nullify_wrong_view_no_hint(bls12381_threshold_std::fixture::<MinSig, _>);
-        leader_nullify_wrong_view_no_hint(bls12381_multisig::fixture::<MinPk, _>);
-        leader_nullify_wrong_view_no_hint(bls12381_multisig::fixture::<MinSig, _>);
-        leader_nullify_wrong_view_no_hint(ed25519::fixture);
-        leader_nullify_wrong_view_no_hint(secp256r1::fixture);
+    fn test_leader_nullify_wrong_view_no_expire() {
+        leader_nullify_wrong_view_no_expire(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_expire(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_expire(bls12381_threshold_std::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_expire(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_expire(bls12381_multisig::fixture::<MinPk, _>);
+        leader_nullify_wrong_view_no_expire(bls12381_multisig::fixture::<MinSig, _>);
+        leader_nullify_wrong_view_no_expire(ed25519::fixture);
+        leader_nullify_wrong_view_no_expire(secp256r1::fixture);
     }
 
     /// Test that votes above finalized trigger verification/construction,
