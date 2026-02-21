@@ -1,0 +1,36 @@
+[package]
+name = "commonware-actor"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Coordinate actors with priority ingress."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/actor"
+documentation = "https://docs.rs/commonware-actor"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-actor-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
+commonware-runtime.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lib]
+bench = false
+crate-type = ["rlib", "cdylib"]
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["async"] }
+rand.workspace = true
+
+[[bench]]
+name = "actor"
+harness = false
+path = "src/benches/bench.rs"
