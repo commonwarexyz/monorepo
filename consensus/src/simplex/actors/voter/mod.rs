@@ -2365,18 +2365,19 @@ mod tests {
                 certificate_sender,
             );
 
-            let (mut current_view, mut current_leader) = match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update {
-                    current,
-                    leader,
-                    active,
-                    ..
-                } => {
-                    active.send(true).unwrap();
-                    (current, leader)
-                }
-                _ => panic!("expected initial update"),
-            };
+            let (mut current_view, mut current_leader) =
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        active,
+                        ..
+                    } => {
+                        active.send(true).unwrap();
+                        (current, leader)
+                    }
+                    _ => panic!("expected initial update"),
+                };
 
             // Move to a non-leader view so we act as a verifier.
             while current_leader == me_idx {
@@ -2667,7 +2668,14 @@ mod tests {
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(target_view.previous().unwrap().get().to_be_bytes().as_slice()),
+                Sha256::hash(
+                    target_view
+                        .previous()
+                        .unwrap()
+                        .get()
+                        .to_be_bytes()
+                        .as_slice(),
+                ),
                 7u64,
             )
                 .encode();
@@ -2832,18 +2840,19 @@ mod tests {
                 certificate_sender,
             );
 
-            let (mut current_view, mut current_leader) = match batcher_receiver.recv().await.unwrap() {
-                batcher::Message::Update {
-                    current,
-                    leader,
-                    active,
-                    ..
-                } => {
-                    active.send(true).unwrap();
-                    (current, leader)
-                }
-                _ => panic!("expected initial update"),
-            };
+            let (mut current_view, mut current_leader) =
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        active,
+                        ..
+                    } => {
+                        active.send(true).unwrap();
+                        (current, leader)
+                    }
+                    _ => panic!("expected initial update"),
+                };
 
             // Move to a view where we are leader.
             while current_leader != me_idx {
@@ -2897,7 +2906,10 @@ mod tests {
                     },
                 }
             }
-            assert!(became_ready, "expected a network vote in leader view {leader_view}");
+            assert!(
+                became_ready,
+                "expected a network vote in leader view {leader_view}"
+            );
 
             // Move to a non-leader view to trigger dropped verification.
             let (target_view, target_leader) = loop {
@@ -2944,7 +2956,14 @@ mod tests {
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(target_view.previous().unwrap().get().to_be_bytes().as_slice()),
+                Sha256::hash(
+                    target_view
+                        .previous()
+                        .unwrap()
+                        .get()
+                        .to_be_bytes()
+                        .as_slice(),
+                ),
                 11u64,
             )
                 .encode();
@@ -2986,7 +3005,9 @@ mod tests {
         dropped_verify_still_votes_after_prior_participation(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        dropped_verify_still_votes_after_prior_participation(bls12381_multisig::fixture::<MinPk, _>);
+        dropped_verify_still_votes_after_prior_participation(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
         dropped_verify_still_votes_after_prior_participation(
             bls12381_multisig::fixture::<MinSig, _>,
         );

@@ -1,5 +1,7 @@
-use crate::simplex::types::{Certificate, Proposal};
-use crate::types::View;
+use crate::{
+    simplex::types::{Certificate, Proposal},
+    types::View,
+};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 
