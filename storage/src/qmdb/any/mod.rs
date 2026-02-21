@@ -188,7 +188,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: crate::qmdb::operation::Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,

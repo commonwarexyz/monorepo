@@ -21,18 +21,20 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
+use crate::qmdb::operation::Key;
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
 pub mod fixed;
 pub mod variable;
+pub mod varkey;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -77,7 +79,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -216,7 +218,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,

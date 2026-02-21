@@ -34,6 +34,15 @@ impl<V: VariableValue> sealed::ValueEncoding for VariableEncoding<V> {
     type Value = V;
 }
 
+/// Variable-length key with variable-size value. This encoding type is used for operations where
+/// both the key and value have variable sizes, such as when using `Vec<u8>` keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VarKeyEncoding<V: VariableValue>(PhantomData<V>);
+
+impl<V: VariableValue> sealed::ValueEncoding for VarKeyEncoding<V> {
+    type Value = V;
+}
+
 /// A fixed-size, clonable value.
 pub trait FixedValue: CodecFixedShared + Clone {}
 impl<T: CodecFixedShared + Clone> FixedValue for T {}
