@@ -161,16 +161,16 @@ impl<
         )
     }
 
-    /// Returns true if this network message is a current-view nullify from the elected leader.
-    fn should_hint_leader_nullify(
+    /// Returns true if this vote should trigger an expire hint for the current view.
+    fn should_expire(
         &self,
         current: CurrentState,
         sender: &S::PublicKey,
-        message: &Vote<S, D>,
+        vote: &Vote<S, D>,
     ) -> bool {
         let (current_view, current_leader) = current;
-        let view = message.view();
-        if view != current_view || !matches!(message, Vote::Nullify(_)) {
+        let view = vote.view();
+        if view != current_view || !matches!(vote, Vote::Nullify(_)) {
             return false;
         }
 
@@ -428,8 +428,7 @@ impl<
                 // If the current leader explicitly nullifies the current view, hint the voter so
                 // it can fast-path timeout without waiting for its local timer. We do this because
                 // `nullify` still counts as "activity" for skip-timeout heuristics.
-                let leader_nullified_current =
-                    self.should_hint_leader_nullify(current, &sender, &message);
+                let should_expire = self.should_expire(current, &sender, &message);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
@@ -448,7 +447,7 @@ impl<
                         .try_set_max(view.get());
 
                     // Only fast-path once for the first accepted leader nullify vote.
-                    if leader_nullified_current {
+                    if should_expire {
                         voter.expire(view).await;
                     }
                 }
