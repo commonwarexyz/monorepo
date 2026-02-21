@@ -53,7 +53,7 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{mem::State as MerkleizationState, Location},
+    mmr::{journaled::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
 use commonware_cryptography::DigestOf;
@@ -103,6 +103,11 @@ pub enum Error {
     /// The key exists in the db, so we cannot prove its exclusion.
     #[error("key exists")]
     KeyExists,
+
+    /// The db is not empty at the last commit, so an empty exclusion proof
+    /// cannot be generated.
+    #[error("db not empty at last commit")]
+    NotEmpty,
 
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),

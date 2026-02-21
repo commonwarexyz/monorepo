@@ -18,10 +18,10 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
+	"dep:commonware-invariants",
 	"std",
 ]
 default = [ "std" ]
-test_strategies = [ "dep:proptest", "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
@@ -30,20 +30,22 @@ std = [
 	"commonware-utils/std",
 	"rand_core/std",
 ]
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-invariants = { workspace = true, optional = true }
 commonware-macros.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
-proptest = { workspace = true, optional = true }
 rand_core.workspace = true
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
-proptest.workspace = true
+commonware-invariants.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

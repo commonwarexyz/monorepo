@@ -16,8 +16,8 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sender.send(buf).await.map_err(|_| Error::SendFailed)
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.sender.send(bufs).await.map_err(|_| Error::SendFailed)
     }
 }
 

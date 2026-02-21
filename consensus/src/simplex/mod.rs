@@ -274,7 +274,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
 #[cfg(not(target_arch = "wasm32"))]

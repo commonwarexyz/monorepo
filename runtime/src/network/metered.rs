@@ -54,8 +54,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
-        let bufs = data.into();
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+        let bufs = bufs.into();
         let len = bufs.len();
         self.inner.send(bufs).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);

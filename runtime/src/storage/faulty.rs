@@ -297,24 +297,24 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
-        self.inner.read_at_buf(offset, len, buf.into()).await
+        self.inner.read_at_buf(offset, len, bufs.into()).await
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf: IoBufs = buf.into();
-        let total_bytes = buf.remaining() as u64;
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let total_bytes = bufs.remaining() as u64;
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();
         if should_fail {
             if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
                 // Partial write: write some bytes, sync, then fail
                 self.inner
-                    .write_at(offset, buf.coalesce().slice(..bytes as usize))
+                    .write_at(offset, bufs.coalesce().slice(..bytes as usize))
                     .await?;
                 self.inner.sync().await?;
                 self.size
@@ -324,7 +324,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Err(Error::Io(injected_io_error()));
         }
 
-        self.inner.write_at(offset, buf).await?;
+        self.inner.write_at(offset, bufs).await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         Ok(())

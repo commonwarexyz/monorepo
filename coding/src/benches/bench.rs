@@ -76,38 +76,38 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                 };
 
                                 let my_shard = shards.pop().unwrap();
-                                let reshards = shards
+                                let weak_shards = shards
                                     .into_iter()
                                     .enumerate()
                                     .take(min as usize)
                                     .map(|(i, shard)| {
-                                        let (_, _, reshard) =
-                                            S::reshard(&config, &commitment, i as u16, shard)
+                                        let (_, _, weak_shard) =
+                                            S::weaken(&config, &commitment, i as u16, shard)
                                                 .unwrap();
-                                        reshard
+                                        weak_shard
                                     })
                                     .collect::<Vec<_>>();
 
-                                (commitment, my_shard, reshards)
+                                (commitment, my_shard, weak_shards)
                             },
-                            |(commitment, my_shard, reshards)| {
-                                let (checking_data, _, _) = S::reshard(
+                            |(commitment, my_shard, weak_shards)| {
+                                let (checking_data, _, _) = S::weaken(
                                     &config,
                                     &commitment,
                                     config.minimum_shards.get() + config.extra_shards.get() - 1,
                                     my_shard,
                                 )
                                 .unwrap();
-                                let checked_shards = reshards
+                                let checked_shards = weak_shards
                                     .into_iter()
                                     .enumerate()
-                                    .map(|(i, reshard)| {
+                                    .map(|(i, weak_shard)| {
                                         S::check(
                                             &config,
                                             &commitment,
                                             &checking_data,
                                             i as u16,
-                                            reshard,
+                                            weak_shard,
                                         )
                                         .unwrap()
                                     })
