@@ -1,4 +1,7 @@
-use crate::simplex::types::{Certificate, Proposal};
+use crate::{
+    simplex::types::{Certificate, Proposal},
+    types::View,
+};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 
@@ -6,6 +9,8 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
+    /// Signal from the batcher to expire a view after observing a leader nullify vote.
+    Expire(View),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -27,6 +32,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a leader's proposal.
     pub async fn proposal(&mut self, proposal: Proposal<D>) {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
+    }
+
+    /// Signal that the current leader broadcast a nullify vote for `view`.
+    pub async fn expire(&mut self, view: View) {
+        self.sender.send_lossy(Message::Expire(view)).await;
     }
 
     /// Send a recovered certificate.

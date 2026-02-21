@@ -865,6 +865,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
+                        self.state.expire_round(context.view());
                         continue;
                     }
                 };
@@ -902,15 +903,13 @@ impl<
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(
-                            &mut batcher,
-                            &mut vote_sender,
-                            &mut certificate_sender,
-                        )
-                        .await;
+                        self.state.expire_round(context.view());
+                        continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
+                        self.state.expire_round(context.view());
+                        continue;
                     }
                 };
             },
@@ -993,6 +992,14 @@ impl<
                                 }
                             }
                         }
+                    }
+                    Message::Expire(nullified_view) => {
+                        // When the elected leader nullifies a view, it is signaling that this
+                        // view cannot make progress. Expire the round so the normal timeout
+                        // transition runs on the next tick.
+                        debug!(%nullified_view, "leader nullify observed, expiring round");
+                        self.state.expire_round(nullified_view);
+                        continue;
                     }
                 }
             },
