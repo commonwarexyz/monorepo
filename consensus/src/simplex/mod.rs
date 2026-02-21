@@ -86,12 +86,9 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
-//! * Treat proposal fetch failure as immediate timeout expiry and reuse the normal timeout path to
-//!   promptly broadcast `nullify(v)`.
-//! * Treat proposal verification failure as immediate timeout expiry and reuse the normal timeout
-//!   path to promptly broadcast `nullify(v)`.
-//! * Treat observing the current leader's `nullify(v)` as immediate timeout expiry and reuse the
-//!   normal timeout path to promptly broadcast our `nullify(v)` (without waiting for local leader timeout).
+//! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
+//! * Treat local verification failure as immediate timeout expiry and broadcast `nullify(v)`.
+//! * Consider the current leader's `nullify(v)` as immediate timeout expiry and broadcast `nullify(v)`.
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
