@@ -360,6 +360,7 @@ mod test {
         roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
         roundtrip::<NoCoding<Sha256>>(&config, b"", &selected);
         roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+        roundtrip::<Raptor<Sha256>>(&config, b"", &selected);
     }
 
     // This exercises an edge case in ZODA, but is also useful for other schemes.
@@ -375,6 +376,7 @@ mod test {
         roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
         roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+        roundtrip::<Raptor<Sha256>>(&config, &data, &selected);
     }
 
     #[test]
@@ -409,6 +411,63 @@ mod test {
             .test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+    }
+
+    /// Generate a test case with Raptor constraints: k in [4, 32].
+    ///
+    /// Raptor codes are probabilistic fountain codes, not MDS codes. Unlike
+    /// Reed-Solomon, decoding with exactly k symbols may fail with non-trivial
+    /// probability (especially for small k). We therefore always select at
+    /// least k + 2 shards to account for the Raptor overhead.
+    fn generate_case_raptor(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
+        const MIN_RAPTOR_SHARDS: u16 = 8;
+        // Raptor codes need a small overhead beyond k for reliable decoding.
+        // The overhead is more significant for small k values.
+        const RAPTOR_OVERHEAD: u16 = 4;
+        const MIN_RAPTOR_EXTRA: u16 = RAPTOR_OVERHEAD + MIN_EXTRA_SHARDS;
+        let minimum_shards =
+            MIN_RAPTOR_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_RAPTOR_SHARDS + 1));
+        let extra_shards =
+            MIN_RAPTOR_EXTRA + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_RAPTOR_EXTRA + 1));
+        let total_shards = minimum_shards + extra_shards;
+
+        let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
+        let data = u.bytes(data_len)?.to_vec();
+
+        // Always select at least minimum_shards + RAPTOR_OVERHEAD
+        let min_selected = usize::from(minimum_shards + RAPTOR_OVERHEAD);
+        let max_extra = usize::from(total_shards) - min_selected;
+        let selected_len = min_selected + (usize::from(u.arbitrary::<u16>()?) % (max_extra + 1));
+        let mut selected: Vec<u16> = (0..total_shards).collect();
+        for i in 0..selected_len {
+            let remaining = usize::from(total_shards) - i;
+            let j = i + (usize::from(u.arbitrary::<u16>()?) % remaining);
+            selected.swap(i, j);
+        }
+        selected.truncate(selected_len);
+
+        Ok((
+            Config {
+                minimum_shards: NZU16!(minimum_shards),
+                extra_shards: NZU16!(extra_shards),
+            },
+            data,
+            selected,
+        ))
+    }
+
+    #[test]
+    fn minifuzz_roundtrip_raptor() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case_raptor(u)?;
+                roundtrip::<Raptor<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
     }
