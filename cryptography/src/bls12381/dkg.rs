@@ -2869,7 +2869,7 @@ mod test {
         Plan::new(NZU32!(4))
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .no_ack(1, 1)
+                    .no_ack(1, 0)
                     .resume_missing_dealer_msg_fails(2, 1),
             )
             .run::<MinPk>(0)
