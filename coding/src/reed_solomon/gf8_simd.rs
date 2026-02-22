@@ -29,6 +29,7 @@ pub(crate) fn gf_vect_mad(dst: &mut [u8], src: &[u8], coeff: u8) {
     get_mad_fn()(dst, src, coeff);
 }
 
+
 /// Multi-destination multiply-accumulate (ISA-L-style optimization).
 ///
 /// For each byte position: `dsts[d][i] ^= gf_mul(coeffs[d], src[i])` for all `d`.
@@ -365,7 +366,6 @@ mod gfni_avx2 {
         let len = dst.len();
         let chunks = len / 64;
 
-        // Process 64 bytes per iteration (2x __m256i)
         for i in 0..chunks {
             let offset = i * 64;
             let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
@@ -373,32 +373,18 @@ mod gfni_avx2 {
             let d0 = _mm256_loadu_si256(dst.as_ptr().add(offset).cast());
             let d1 = _mm256_loadu_si256(dst.as_ptr().add(offset + 32).cast());
 
-            let p0 = _mm256_gf2p8mul_epi8(coeff_v, s0);
-            let p1 = _mm256_gf2p8mul_epi8(coeff_v, s1);
-
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset).cast(),
-                _mm256_xor_si256(d0, p0),
+                _mm256_xor_si256(d0, _mm256_gf2p8mul_epi8(coeff_v, s0)),
             );
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset + 32).cast(),
-                _mm256_xor_si256(d1, p1),
+                _mm256_xor_si256(d1, _mm256_gf2p8mul_epi8(coeff_v, s1)),
             );
         }
 
         let tail_start = chunks * 64;
-        if tail_start + 32 <= len {
-            let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
-            let d = _mm256_loadu_si256(dst.as_ptr().add(tail_start).cast());
-            let p = _mm256_gf2p8mul_epi8(coeff_v, s);
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().add(tail_start).cast(),
-                _mm256_xor_si256(d, p),
-            );
-            gf_vect_mad_scalar(&mut dst[tail_start + 32..], &src[tail_start + 32..], coeff);
-        } else {
-            gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
-        }
+        gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
     }
 
     /// Multi-destination MAD using GFNI+AVX2.
