@@ -10,26 +10,39 @@ use commonware_consensus::{
     simplex::{
         scheme::Scheme as SimplexScheme,
         types::{
-            Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            Proposal, Vote,
+            Artifact, Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, Proposal, Vote,
         },
     },
     types::{Epoch, Round, View},
     Monitor, Viewable,
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{
+    certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest,
+};
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Metrics, Runner};
-use commonware_utils::{channel::mpsc::Receiver, BytesRng};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
 use futures::FutureExt;
 use rand::Rng;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    num::{NonZeroU16, NonZeroUsize},
+};
 
 const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 60;
+const MIN_JOURNAL_EVENTS: usize = 0;
+const MAX_JOURNAL_EVENTS: usize = 24;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
+const MAX_REPLAY_VIEW_HINT: u8 = 20;
+const MAX_PARENT_GAP_HINT: u8 = 6;
+const JOURNAL_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+const JOURNAL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+const JOURNAL_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 pub enum Event {
@@ -49,10 +62,31 @@ pub struct SimplexNodeEvent {
     pub event: Event,
 }
 
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum ReplayedEventKind {
+    Notarize,
+    Notarization,
+    Certification,
+    Nullify,
+    Nullification,
+    Finalize,
+    Finalization,
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub struct SimplexReplayedEvent {
+    pub kind: ReplayedEventKind,
+    pub from_node_idx: u8,
+    pub view_hint: u8,
+    pub parent_gap_hint: u8,
+    pub success: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimplexNodeFuzzInput {
     pub raw_bytes: Vec<u8>,
     pub events: Vec<SimplexNodeEvent>,
+    pub journal_plan: Vec<SimplexReplayedEvent>,
 }
 
 impl Arbitrary<'_> for SimplexNodeFuzzInput {
@@ -64,6 +98,16 @@ impl Arbitrary<'_> for SimplexNodeFuzzInput {
             events.push(SimplexNodeEvent::arbitrary(u)?);
         }
 
+        let journal_count = if u.int_in_range(0..=99)? < 80 {
+            u.int_in_range(1..=MAX_JOURNAL_EVENTS)?
+        } else {
+            MIN_JOURNAL_EVENTS
+        };
+        let mut journal_plan = Vec::with_capacity(journal_count);
+        for _ in 0..journal_count {
+            journal_plan.push(SimplexReplayedEvent::arbitrary(u)?);
+        }
+
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
@@ -71,7 +115,11 @@ impl Arbitrary<'_> for SimplexNodeFuzzInput {
             u.bytes(remaining)?.to_vec()
         };
 
-        Ok(Self { raw_bytes, events })
+        Ok(Self {
+            raw_bytes,
+            events,
+            journal_plan,
+        })
     }
 }
 
@@ -107,6 +155,180 @@ enum CertificateKey {
         payload: Sha256Digest,
         with_honest_vote: bool,
     },
+}
+
+fn replay_signer_triplet(from: u8, participants: usize) -> Option<[usize; 3]> {
+    if participants < 3 {
+        return None;
+    }
+
+    let a = usize::from(from) % participants;
+    let b = (a + 1) % participants;
+    let c = (a + 2) % participants;
+    Some([a, b, c])
+}
+
+fn replay_proposal(
+    proposals: &mut HashMap<u64, Proposal<Sha256Digest>>,
+    view: u64,
+    parent_gap: u64,
+) -> Proposal<Sha256Digest> {
+    if let Some(existing) = proposals.get(&view) {
+        return existing.clone();
+    }
+
+    let capped_gap = parent_gap.min(view);
+    let parent_view = view.saturating_sub(capped_gap);
+    let payload_byte = (view as u8)
+        .wrapping_mul(31)
+        .wrapping_add(parent_view as u8);
+    let proposal = Proposal::new(
+        Round::new(Epoch::new(crate::EPOCH), View::new(view)),
+        View::new(parent_view),
+        Sha256Digest::from([payload_byte; 32]),
+    );
+    proposals.insert(view, proposal.clone());
+    proposal
+}
+
+fn build_journal_artifacts<S>(
+    plan: &[SimplexReplayedEvent],
+    schemes: &[S],
+    honest_signer_idx: usize,
+) -> Vec<Artifact<S, Sha256Digest>>
+where
+    S: SimplexScheme<Sha256Digest>,
+{
+    if schemes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut artifacts = Vec::with_capacity(plan.len());
+    let mut proposals: HashMap<u64, Proposal<Sha256Digest>> = HashMap::new();
+
+    for seed in plan {
+        let view = (seed.view_hint % MAX_REPLAY_VIEW_HINT).max(1) as u64;
+        let parent_gap = (seed.parent_gap_hint % MAX_PARENT_GAP_HINT).max(1) as u64;
+        let signer_idx = honest_signer_idx;
+        let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
+
+        match seed.kind {
+            ReplayedEventKind::Notarize => {
+                let proposal = replay_proposal(&mut proposals, view, parent_gap);
+                if let Some(vote) = Notarize::sign(&schemes[signer_idx], proposal) {
+                    artifacts.push(Artifact::Notarize(vote));
+                }
+            }
+            ReplayedEventKind::Notarization => {
+                let Some([a, b, c]) = replay_signer_triplet(seed.from_node_idx, schemes.len())
+                else {
+                    continue;
+                };
+                let proposal = replay_proposal(&mut proposals, view, parent_gap);
+                let Some(votes) = [a, b, c]
+                    .into_iter()
+                    .map(|idx| Notarize::sign(&schemes[idx], proposal.clone()))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if let Some(certificate) =
+                    Notarization::from_notarizes(&schemes[a], &votes, &Sequential)
+                {
+                    artifacts.push(Artifact::Notarization(certificate));
+                }
+            }
+            ReplayedEventKind::Certification => {
+                artifacts.push(Artifact::Certification(round, seed.success));
+            }
+            ReplayedEventKind::Nullify => {
+                if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&schemes[signer_idx], round)
+                {
+                    artifacts.push(Artifact::Nullify(vote));
+                }
+            }
+            ReplayedEventKind::Nullification => {
+                let Some([a, b, c]) = replay_signer_triplet(seed.from_node_idx, schemes.len())
+                else {
+                    continue;
+                };
+                let Some(votes) = [a, b, c]
+                    .into_iter()
+                    .map(|idx| Nullify::<S>::sign::<Sha256Digest>(&schemes[idx], round))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if let Some(certificate) =
+                    Nullification::from_nullifies(&schemes[a], &votes, &Sequential)
+                {
+                    artifacts.push(Artifact::Nullification(certificate));
+                }
+            }
+            ReplayedEventKind::Finalize => {
+                let proposal = replay_proposal(&mut proposals, view, parent_gap);
+                if let Some(vote) = Finalize::sign(&schemes[signer_idx], proposal) {
+                    artifacts.push(Artifact::Finalize(vote));
+                }
+            }
+            ReplayedEventKind::Finalization => {
+                let Some([a, b, c]) = replay_signer_triplet(seed.from_node_idx, schemes.len())
+                else {
+                    continue;
+                };
+                let proposal = replay_proposal(&mut proposals, view, parent_gap);
+                let Some(votes) = [a, b, c]
+                    .into_iter()
+                    .map(|idx| Finalize::sign(&schemes[idx], proposal.clone()))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if let Some(certificate) =
+                    Finalization::from_finalizes(&schemes[a], &votes, &Sequential)
+                {
+                    artifacts.push(Artifact::Finalization(certificate));
+                }
+            }
+        }
+    }
+
+    artifacts
+}
+
+async fn build_honest_journal_once<S>(
+    context: deterministic::Context,
+    partition: String,
+    certificate_codec_config: <S::Certificate as Read>::Cfg,
+    artifacts: Vec<Artifact<S, Sha256Digest>>,
+) where
+    S: SimplexScheme<Sha256Digest>,
+{
+    if artifacts.is_empty() {
+        return;
+    }
+
+    let page_cache = CacheRef::from_pooler(&context, JOURNAL_PAGE_SIZE, JOURNAL_PAGE_CACHE_SIZE);
+    let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        context.with_label("journal_seed"),
+        JConfig {
+            partition,
+            compression: None,
+            codec_config: certificate_codec_config,
+            page_cache,
+            write_buffer: JOURNAL_WRITE_BUFFER,
+        },
+    )
+    .await
+    .expect("unable to initialize journal");
+
+    for artifact in artifacts {
+        journal
+            .append(artifact.view().get(), artifact)
+            .await
+            .expect("unable to append artifact");
+    }
+    journal.sync_all().await.expect("unable to sync journal");
 }
 
 struct NodeDriver<S>
@@ -1280,6 +1502,19 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
         let (oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &base).await;
 
+        let honest = participants[3].clone();
+        let honest_scheme = schemes[3].clone();
+        let honest_signer_idx = schemes.len().saturating_sub(1);
+        let journal_artifacts =
+            build_journal_artifacts::<P::Scheme>(&input.journal_plan, &schemes, honest_signer_idx);
+        build_honest_journal_once::<P::Scheme>(
+            context.with_label("honest_journal"),
+            honest.to_string(),
+            honest_scheme.certificate_codec_config(),
+            journal_artifacts,
+        )
+        .await;
+
         let (fuzzer_schemes, honest_schemes) = schemes.split_at(3);
         let honest_scheme = honest_schemes[0].clone();
 
@@ -1310,7 +1545,6 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
             resolver_receivers.push(resolver_receiver);
         }
 
-        let honest = participants[3].clone();
         let honest_channels = registrations
             .remove(&honest)
             .expect("honest participant must exist");
@@ -1374,6 +1608,13 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
+            journal_plan: vec![SimplexReplayedEvent {
+                kind: ReplayedEventKind::Notarize,
+                from_node_idx: 0,
+                view_hint: 3,
+                parent_gap_hint: 1,
+                success: true,
+            }],
         };
         fuzz_simplex_node::<simplex::SimplexEd25519>(input);
     }
