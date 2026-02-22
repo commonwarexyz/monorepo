@@ -1,33 +1,33 @@
 //! Anonymous credentials via threshold blind BLS signatures.
 //!
-//! This module implements digest-bound anonymous credentials using threshold blind
-//! BLS signatures based on the Boldyreva scheme (PKC 2003). A threshold signing group
-//! (e.g., validators) can issue credentials bound to a message digest without learning
-//! the digest. The resulting credential is a standard BLS signature verifiable with
+//! This module implements anonymous credentials using threshold blind BLS signatures
+//! based on the Boldyreva scheme (PKC 2003). A threshold signing group (e.g.,
+//! validators) can issue credentials bound to a message without learning what the
+//! message is. The resulting credential is a standard BLS signature verifiable with
 //! [`ops::verify_message`].
 //!
 //! # Protocol
 //!
-//! 1. The user computes a digest `D` of their payload.
-//! 2. The user calls [`blind`] to hash `D` to the curve and multiply by a random
-//!    scalar `r`, producing a blinded point. Validators cannot recover `D` from this.
-//! 3. Each validator calls [`sign_blinded`] with their threshold share, producing a
+//! 1. The user calls [`blind`] to hash a message to the curve and multiply by a
+//!    random scalar `r`, producing a blinded point. Validators cannot recover the
+//!    message from this.
+//! 2. Each validator calls [`sign_blinded`] with their threshold share, producing a
 //!    [`PartialSignature`]. The user (or anyone) can check each partial with
 //!    [`verify_blinded`].
-//! 4. The user collects enough partials and recovers the threshold signature using
+//! 3. The user collects enough partials and recovers the threshold signature using
 //!    [`threshold::recover`].
-//! 5. The user calls [`unblind`] to remove the blinding factor, yielding a standard
-//!    BLS signature over the digest.
-//! 6. Anyone can verify the credential with [`ops::verify_message`] using the group
-//!    public key, the namespace, and the digest.
+//! 4. The user calls [`unblind`] to remove the blinding factor, yielding a standard
+//!    BLS signature over the message.
+//! 5. Anyone can verify the credential with [`ops::verify_message`] using the group
+//!    public key, the namespace, and the message.
 //!
 //! # Security
 //!
 //! - **Blindness**: Validators see only uniformly random group elements during signing.
-//!   They learn nothing about the digest.
-//! - **Binding**: The credential is a standard BLS signature over the digest. It is
-//!   invalid for any other digest.
-//! - **Unlinkability**: The same digest blinded with different factors produces identical
+//!   They learn nothing about the message.
+//! - **Binding**: The credential is a standard BLS signature over the message. It is
+//!   invalid for any other message.
+//! - **Unlinkability**: The same message blinded with different factors produces identical
 //!   unblinded signatures but distinct blinded points. Issuance sessions cannot be
 //!   correlated with redemption.
 //! - **Public verifiability**: Anyone with the group public key can verify the credential
@@ -74,10 +74,10 @@
 //! let n = NZU32!(5);
 //! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut OsRng, Mode::default(), n);
 //!
-//! // User: blind a digest
+//! // User: blind a message
 //! let namespace = b"my_app";
-//! let digest = b"sha256_of_my_payload";
-//! let (blinding_factor, blinded) = credentials::blind::<_, MinSig>(&mut OsRng, namespace, digest);
+//! let message = b"payload_to_sign_anonymously";
+//! let (blinding_factor, blinded) = credentials::blind::<_, MinSig>(&mut OsRng, namespace, message);
 //!
 //! // Validators: sign the blinded point
 //! let partials: Vec<_> = shares.iter().map(|s| credentials::sign_blinded::<MinSig>(s, &blinded)).collect();
@@ -92,7 +92,7 @@
 //! let credential = credentials::unblind::<MinSig>(&blinding_factor, &blinded_sig);
 //!
 //! // Anyone: verify the credential using standard BLS verification
-//! ops::verify_message::<MinSig>(sharing.public(), namespace, digest, &credential)
+//! ops::verify_message::<MinSig>(sharing.public(), namespace, message, &credential)
 //!     .expect("credential should be valid");
 //! ```
 //!
@@ -114,10 +114,10 @@ use super::primitives::{
 use commonware_math::algebra::{Field, Random};
 use rand_core::CryptoRngCore;
 
-/// Blinds a digest for anonymous threshold signing.
+/// Blinds a message for anonymous threshold signing.
 ///
-/// Hashes the digest to the signature curve and multiplies by a random scalar,
-/// producing a blinded point that hides the digest from validators.
+/// Hashes the message to the signature curve and multiplies by a random scalar,
+/// producing a blinded point that hides the message from validators.
 ///
 /// Returns `(blinding_factor, blinded_point)`. The blinding factor must be kept
 /// secret (it implements [`ZeroizeOnDrop`](zeroize::ZeroizeOnDrop)) and passed to
@@ -125,9 +125,9 @@ use rand_core::CryptoRngCore;
 pub fn blind<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     namespace: &[u8],
-    digest: &[u8],
+    message: &[u8],
 ) -> (Scalar, V::Signature) {
-    let h = hash_with_namespace::<V>(V::MESSAGE, namespace, digest);
+    let h = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
     let r = Scalar::random(rng);
     let blinded = h * &r;
     (r, blinded)
@@ -150,7 +150,7 @@ pub fn sign_blinded<V: Variant>(share: &Share, blinded: &V::Signature) -> Partia
 ///
 /// Checks that the partial signature was produced using the correct threshold
 /// share for the given blinded point. This confirms the signer used their
-/// legitimate share without learning the underlying digest.
+/// legitimate share without learning the underlying message.
 pub fn verify_blinded<V: Variant>(
     sharing: &Sharing<V>,
     blinded: &V::Signature,
@@ -165,7 +165,7 @@ pub fn verify_blinded<V: Variant>(
 /// After recovering the threshold signature from partial blind signatures
 /// (via [`threshold::recover`](super::primitives::ops::threshold::recover)),
 /// the user calls this to obtain a standard BLS signature over the original
-/// digest. The result can be verified with
+/// message. The result can be verified with
 /// [`ops::verify_message`](super::primitives::ops::verify_message).
 ///
 /// # Panics
@@ -199,10 +199,10 @@ mod tests {
         let (sharing, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"deadbeef01234567";
+        let message = b"deadbeef01234567";
 
         // Client blinds
-        let (blinding_factor, blinded) = blind::<_, V>(&mut rng, namespace, digest);
+        let (blinding_factor, blinded) = blind::<_, V>(&mut rng, namespace, message);
 
         // Each signer produces and verifies a partial
         let partials: Vec<_> = shares
@@ -220,7 +220,7 @@ mod tests {
         let credential = unblind::<V>(&blinding_factor, &blinded_sig);
 
         // Verify with standard BLS verification
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &credential)
+        ops::verify_message::<V>(sharing.public(), namespace, message, &credential)
             .expect("credential should be valid");
     }
 
@@ -237,11 +237,11 @@ mod tests {
         let (sharing, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng1, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"same_digest_both_times";
+        let message = b"same_message_both_times";
 
-        // Blind the same digest with two different factors
-        let (bf1, blinded1) = blind::<_, V>(&mut rng1, namespace, digest);
-        let (bf2, blinded2) = blind::<_, V>(&mut rng2, namespace, digest);
+        // Blind the same message with two different factors
+        let (bf1, blinded1) = blind::<_, V>(&mut rng1, namespace, message);
+        let (bf2, blinded2) = blind::<_, V>(&mut rng2, namespace, message);
 
         // Blinded points must differ (different random factors)
         assert_ne!(blinded1, blinded2, "blinded points should differ");
@@ -263,13 +263,13 @@ mod tests {
         let cred1 = unblind::<V>(&bf1, &sig1);
         let cred2 = unblind::<V>(&bf2, &sig2);
 
-        // Unblinded signatures must be identical (same digest, same key)
+        // Unblinded signatures must be identical (same message, same key)
         assert_eq!(cred1, cred2, "unblinded credentials should be identical");
 
         // Both must verify
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &cred1)
+        ops::verify_message::<V>(sharing.public(), namespace, message, &cred1)
             .expect("credential 1 should be valid");
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &cred2)
+        ops::verify_message::<V>(sharing.public(), namespace, message, &cred2)
             .expect("credential 2 should be valid");
     }
 
@@ -279,16 +279,16 @@ mod tests {
         unlinkability::<MinSig>();
     }
 
-    fn wrong_digest<V: Variant>() {
+    fn wrong_message<V: Variant>() {
         let mut rng = test_rng();
         let n = NZU32!(5);
         let (sharing, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"correct_digest";
-        let wrong = b"wrong_digest";
+        let message = b"correct_message";
+        let wrong = b"wrong_message";
 
-        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, digest);
+        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, message);
         let partials: Vec<_> = shares
             .iter()
             .map(|s| sign_blinded::<V>(s, &blinded))
@@ -297,21 +297,21 @@ mod tests {
             threshold::recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         let credential = unblind::<V>(&bf, &blinded_sig);
 
-        // Must fail with wrong digest
+        // Must fail with wrong message
         assert!(
             ops::verify_message::<V>(sharing.public(), namespace, wrong, &credential).is_err(),
-            "verification with wrong digest should fail"
+            "verification with wrong message should fail"
         );
 
-        // Must succeed with correct digest
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &credential)
-            .expect("verification with correct digest should succeed");
+        // Must succeed with correct message
+        ops::verify_message::<V>(sharing.public(), namespace, message, &credential)
+            .expect("verification with correct message should succeed");
     }
 
     #[test]
-    fn test_wrong_digest() {
-        wrong_digest::<MinPk>();
-        wrong_digest::<MinSig>();
+    fn test_wrong_message() {
+        wrong_message::<MinPk>();
+        wrong_message::<MinSig>();
     }
 
     fn wrong_namespace<V: Variant>() {
@@ -320,9 +320,9 @@ mod tests {
         let (sharing, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
 
         let namespace = b"correct_ns";
-        let digest = b"some_digest";
+        let message = b"some_message";
 
-        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, digest);
+        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, message);
         let partials: Vec<_> = shares
             .iter()
             .map(|s| sign_blinded::<V>(s, &blinded))
@@ -332,7 +332,7 @@ mod tests {
         let credential = unblind::<V>(&bf, &blinded_sig);
 
         assert!(
-            ops::verify_message::<V>(sharing.public(), b"wrong_ns", digest, &credential).is_err(),
+            ops::verify_message::<V>(sharing.public(), b"wrong_ns", message, &credential).is_err(),
             "verification with wrong namespace should fail"
         );
     }
@@ -351,9 +351,9 @@ mod tests {
         let (sharing2, _) = dkg::deal_anonymous::<V, N3f1>(&mut rng2, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"some_digest";
+        let message = b"some_message";
 
-        let (bf, blinded) = blind::<_, V>(&mut rng1, namespace, digest);
+        let (bf, blinded) = blind::<_, V>(&mut rng1, namespace, message);
         let partials: Vec<_> = shares1
             .iter()
             .map(|s| sign_blinded::<V>(s, &blinded))
@@ -364,12 +364,12 @@ mod tests {
 
         // Must fail with wrong public key
         assert!(
-            ops::verify_message::<V>(sharing2.public(), namespace, digest, &credential).is_err(),
+            ops::verify_message::<V>(sharing2.public(), namespace, message, &credential).is_err(),
             "verification with wrong key should fail"
         );
 
         // Must succeed with correct public key
-        ops::verify_message::<V>(sharing1.public(), namespace, digest, &credential)
+        ops::verify_message::<V>(sharing1.public(), namespace, message, &credential)
             .expect("verification with correct key should succeed");
     }
 
@@ -386,9 +386,9 @@ mod tests {
         let (sharing, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"threshold_test";
+        let message = b"threshold_test";
 
-        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, digest);
+        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, message);
 
         // Get all partial signatures
         let all_partials: Vec<_> = shares
@@ -413,9 +413,9 @@ mod tests {
         );
 
         // Both must verify
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &cred1)
+        ops::verify_message::<V>(sharing.public(), namespace, message, &cred1)
             .expect("credential from subset 1 should be valid");
-        ops::verify_message::<V>(sharing.public(), namespace, digest, &cred2)
+        ops::verify_message::<V>(sharing.public(), namespace, message, &cred2)
             .expect("credential from subset 2 should be valid");
     }
 
@@ -431,9 +431,9 @@ mod tests {
         let (sharing, mut shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
 
         let namespace = b"test";
-        let digest = b"invalid_partial_test";
+        let message = b"invalid_partial_test";
 
-        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, digest);
+        let (bf, blinded) = blind::<_, V>(&mut rng, namespace, message);
 
         // Corrupt one share
         shares[2].private = Private::random(&mut rng);
@@ -460,7 +460,7 @@ mod tests {
         let credential = unblind::<V>(&bf, &blinded_sig);
 
         assert!(
-            ops::verify_message::<V>(sharing.public(), namespace, digest, &credential).is_err(),
+            ops::verify_message::<V>(sharing.public(), namespace, message, &credential).is_err(),
             "credential from corrupted partials should be invalid"
         );
     }
