@@ -61,3 +61,8 @@ path = "src/benches/bench.rs"
 name = "coding_scheme_sizes"
 harness = false
 path = "src/benches/bench_size.rs"
+
+[[bench]]
+name = "coding_breakdown"
+harness = false
+path = "src/benches/breakdown.rs"
