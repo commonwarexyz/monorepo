@@ -2,9 +2,9 @@
 //!
 //! Isolates engine encode time to identify bottlenecks.
 
-use commonware_coding::{Config, Gf8, Gf16, ReedSolomon, ReedSolomon8, Scheme};
 use commonware_coding::reed_solomon::Engine;
-use commonware_cryptography::Sha256;
+use commonware_coding::{Config, Gf16, Gf8, ReedSolomon, ReedSolomon8, Scheme};
+use commonware_cryptography::Blake3;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
 use std::hint::black_box;
@@ -60,7 +60,12 @@ fn bench_engine_decode<V: Engine>(label: &str, k: usize, m: usize, data: &[u8], 
     let refs: Vec<&[u8]> = originals.iter().map(|v| v.as_slice()).collect();
 
     let recovery = V::encode(k, m, &refs).unwrap();
-    let recovery_refs: Vec<(usize, &[u8])> = recovery.iter().enumerate().take(k).map(|(i, r)| (i, r.as_slice())).collect();
+    let recovery_refs: Vec<(usize, &[u8])> = recovery
+        .iter()
+        .enumerate()
+        .take(k)
+        .map(|(i, r)| (i, r.as_slice()))
+        .collect();
 
     // Warm up
     for _ in 0..5 {
@@ -101,20 +106,53 @@ fn bench_full_decode<S: Scheme>(label: &str, config: &Config, data: &[u8], iters
     let my_shard = shards.last().unwrap().clone();
     let my_idx = min + config.extra_shards.get() - 1;
     let (checking_data, _, _) = S::weaken(config, &commitment, my_idx, my_shard).unwrap();
-    let weak_shards: Vec<_> = shards.into_iter().enumerate().take(min as usize)
-        .map(|(i, shard)| { let (_, _, weak) = S::weaken(config, &commitment, i as u16, shard).unwrap(); weak }).collect();
+    let weak_shards: Vec<_> = shards
+        .into_iter()
+        .enumerate()
+        .take(min as usize)
+        .map(|(i, shard)| {
+            let (_, _, weak) = S::weaken(config, &commitment, i as u16, shard).unwrap();
+            weak
+        })
+        .collect();
 
     for _ in 0..3 {
-        let checked: Vec<_> = weak_shards.iter().enumerate()
-            .map(|(i, ws)| S::check(config, &commitment, &checking_data, i as u16, ws.clone()).unwrap()).collect();
-        let _ = black_box(S::decode(config, &commitment, checking_data.clone(), &checked, &STRATEGY).unwrap());
+        let checked: Vec<_> = weak_shards
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| {
+                S::check(config, &commitment, &checking_data, i as u16, ws.clone()).unwrap()
+            })
+            .collect();
+        let _ = black_box(
+            S::decode(
+                config,
+                &commitment,
+                checking_data.clone(),
+                &checked,
+                &STRATEGY,
+            )
+            .unwrap(),
+        );
     }
 
     let start = Instant::now();
     for _ in 0..iters {
-        let checked: Vec<_> = weak_shards.iter().enumerate()
-            .map(|(i, ws)| S::check(config, &commitment, &checking_data, i as u16, ws.clone()).unwrap()).collect();
-        let result = S::decode(config, &commitment, checking_data.clone(), &checked, &STRATEGY).unwrap();
+        let checked: Vec<_> = weak_shards
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| {
+                S::check(config, &commitment, &checking_data, i as u16, ws.clone()).unwrap()
+            })
+            .collect();
+        let result = S::decode(
+            config,
+            &commitment,
+            checking_data.clone(),
+            &checked,
+            &STRATEGY,
+        )
+        .unwrap();
         black_box(&result);
     }
     let elapsed = start.elapsed();
@@ -145,8 +183,10 @@ fn main() {
             black_box(&result);
         }
         let elapsed = start.elapsed();
-        println!("  alloc {m} x {shard_len}B vecs: {:.3} ms/iter\n",
-            elapsed.as_secs_f64() * 1000.0 / iters as f64);
+        println!(
+            "  alloc {m} x {shard_len}B vecs: {:.3} ms/iter\n",
+            elapsed.as_secs_f64() * 1000.0 / iters as f64
+        );
     }
 
     println!("Engine-only:");
@@ -158,9 +198,9 @@ fn main() {
     println!();
 
     println!("Full pipeline:");
-    bench_full::<ReedSolomon<Sha256>>("GF16", &config, &data, iters);
-    bench_full::<ReedSolomon8<Sha256>>("GF8 ", &config, &data, iters);
+    bench_full::<ReedSolomon<Blake3>>("GF16", &config, &data, iters);
+    bench_full::<ReedSolomon8<Blake3>>("GF8 ", &config, &data, iters);
     println!();
-    bench_full_decode::<ReedSolomon<Sha256>>("GF16", &config, &data, iters);
-    bench_full_decode::<ReedSolomon8<Sha256>>("GF8 ", &config, &data, iters);
+    bench_full_decode::<ReedSolomon<Blake3>>("GF16", &config, &data, iters);
+    bench_full_decode::<ReedSolomon8<Blake3>>("GF8 ", &config, &data, iters);
 }

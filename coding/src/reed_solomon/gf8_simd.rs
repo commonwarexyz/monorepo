@@ -402,6 +402,7 @@ mod avx2 {
     ) {
         const MAX_ROWS: usize = 16;
         const MAX_COLS: usize = 255;
+        const ROW_BLOCK: usize = 4;
 
         let rows = output.len();
         if rows == 0 || num_cols == 0 {
@@ -424,68 +425,76 @@ mod avx2 {
             dst_ptrs[r] = output[r].as_mut_ptr();
         }
 
-        // Precompute broadcast coefficients once per destination row/column.
-        let mut coeff_vs = [[_mm256_setzero_si256(); MAX_COLS]; MAX_ROWS];
-        for r in 0..rows {
-            let row = &matrix_rows[r * num_cols..(r + 1) * num_cols];
-            for j in 0..num_cols {
-                coeff_vs[r][j] = _mm256_set1_epi8(row[j] as i8);
-            }
-        }
-
         let chunks = len / 64;
-        for i in 0..chunks {
-            let offset = i * 64;
-
-            let mut acc0 = [_mm256_setzero_si256(); MAX_ROWS];
-            let mut acc1 = [_mm256_setzero_si256(); MAX_ROWS];
-
-            for j in 0..num_cols {
-                let src_ptr = input[j].as_ptr().add(offset);
-                let s0 = _mm256_loadu_si256(src_ptr.cast());
-                let s1 = _mm256_loadu_si256(src_ptr.add(32).cast());
-
-                for r in 0..rows {
-                    acc0[r] =
-                        _mm256_xor_si256(acc0[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s0));
-                    acc1[r] =
-                        _mm256_xor_si256(acc1[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s1));
-                }
-            }
-
-            for r in 0..rows {
-                let dst_ptr = dst_ptrs[r].add(offset);
-                _mm256_storeu_si256(dst_ptr.cast(), acc0[r]);
-                _mm256_storeu_si256(dst_ptr.add(32).cast(), acc1[r]);
-            }
-        }
-
         let tail_start = chunks * 64;
-        let mut scalar_start = tail_start;
 
-        if tail_start + 32 <= len {
-            let mut acc = [_mm256_setzero_si256(); MAX_ROWS];
-            for j in 0..num_cols {
-                let s = _mm256_loadu_si256(input[j].as_ptr().add(tail_start).cast());
-                for r in 0..rows {
-                    acc[r] = _mm256_xor_si256(acc[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s));
+        for row_start in (0..rows).step_by(ROW_BLOCK) {
+            let row_end = (row_start + ROW_BLOCK).min(rows);
+            let block_rows = row_end - row_start;
+
+            // Precompute broadcast coefficients for this row block.
+            let mut coeff_vs = [[_mm256_setzero_si256(); MAX_COLS]; ROW_BLOCK];
+            for br in 0..block_rows {
+                let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
+                for j in 0..num_cols {
+                    coeff_vs[br][j] = _mm256_set1_epi8(row[j] as i8);
                 }
             }
-            for r in 0..rows {
-                _mm256_storeu_si256(dst_ptrs[r].add(tail_start).cast(), acc[r]);
-            }
-            scalar_start += 32;
-        }
 
-        if scalar_start < len {
-            for r in 0..rows {
-                let row = &matrix_rows[r * num_cols..(r + 1) * num_cols];
-                let dst_tail = std::slice::from_raw_parts_mut(
-                    dst_ptrs[r].add(scalar_start),
-                    len - scalar_start,
-                );
+            for i in 0..chunks {
+                let offset = i * 64;
+
+                let mut acc0 = [_mm256_setzero_si256(); ROW_BLOCK];
+                let mut acc1 = [_mm256_setzero_si256(); ROW_BLOCK];
+
                 for j in 0..num_cols {
-                    gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
+                    let src_ptr = input[j].as_ptr().add(offset);
+                    let s0 = _mm256_loadu_si256(src_ptr.cast());
+                    let s1 = _mm256_loadu_si256(src_ptr.add(32).cast());
+
+                    for br in 0..block_rows {
+                        acc0[br] =
+                            _mm256_xor_si256(acc0[br], _mm256_gf2p8mul_epi8(coeff_vs[br][j], s0));
+                        acc1[br] =
+                            _mm256_xor_si256(acc1[br], _mm256_gf2p8mul_epi8(coeff_vs[br][j], s1));
+                    }
+                }
+
+                for br in 0..block_rows {
+                    let dst_ptr = dst_ptrs[row_start + br].add(offset);
+                    _mm256_storeu_si256(dst_ptr.cast(), acc0[br]);
+                    _mm256_storeu_si256(dst_ptr.add(32).cast(), acc1[br]);
+                }
+            }
+
+            let mut scalar_start = tail_start;
+
+            if tail_start + 32 <= len {
+                let mut acc = [_mm256_setzero_si256(); ROW_BLOCK];
+                for j in 0..num_cols {
+                    let s = _mm256_loadu_si256(input[j].as_ptr().add(tail_start).cast());
+                    for br in 0..block_rows {
+                        acc[br] =
+                            _mm256_xor_si256(acc[br], _mm256_gf2p8mul_epi8(coeff_vs[br][j], s));
+                    }
+                }
+                for br in 0..block_rows {
+                    _mm256_storeu_si256(dst_ptrs[row_start + br].add(tail_start).cast(), acc[br]);
+                }
+                scalar_start += 32;
+            }
+
+            if scalar_start < len {
+                for br in 0..block_rows {
+                    let row =
+                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
+                    let dst_tail = std::slice::from_raw_parts_mut(
+                        dst_ptrs[row_start + br].add(scalar_start),
+                        len - scalar_start,
+                    );
+                    for j in 0..num_cols {
+                        gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
+                    }
                 }
             }
         }
