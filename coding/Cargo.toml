@@ -26,6 +26,7 @@ commonware-utils = { workspace = true, features = ["std"] }
 num-rational.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+raptor-code.workspace = true
 rayon.workspace = true
 reed-solomon-simd.workspace = true
 thiserror.workspace = true

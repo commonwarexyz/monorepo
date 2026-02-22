@@ -1107,6 +1107,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "raptor-code",
  "rayon",
  "reed-solomon-simd",
  "thiserror 2.0.17",
@@ -3899,6 +3900,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "primes"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0466ef49edd4a5a4bc9d62804a34e89366810bd8bfc3ed537101e3d099f245c5"
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4157,6 +4164,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.3",
+]
+
+[[package]]
+name = "raptor-code"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37e655e0d64b93e30cbd54d12b80820a7cf70aebe7bf1e0fb11dbb4f878b60c1"
+dependencies = [
+ "primes",
 ]
 
 [[package]]

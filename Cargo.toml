@@ -143,6 +143,7 @@ proptest = "1.8.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quote = "1.0"
+raptor-code = "1.0.9"
 rand = { version = "0.8.5", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = "0.6.4"
