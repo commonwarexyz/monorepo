@@ -36,3 +36,8 @@ criterion.workspace = true
 
 [lib]
 bench = false
+
+[[bench]]
+name = "encrypted_transport"
+harness = false
+path = "src/benches/bench.rs"
