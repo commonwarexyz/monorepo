@@ -27,7 +27,7 @@ use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const MIN_EVENTS: usize = 10;
-const MAX_EVENTS: usize = 40;
+const MAX_EVENTS: usize = 60;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
 
