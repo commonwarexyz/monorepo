@@ -19,6 +19,9 @@ commonware_macros::stability_scope!(ALPHA {
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
 
+    mod raptor;
+    pub use raptor::{Error as RaptorError, Raptor};
+
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 

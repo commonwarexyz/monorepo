@@ -38,22 +38,24 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
-/// A piece of data from a Reed-Solomon encoded object.
+/// A piece of data from an encoded object, with a [bmt] proof.
+///
+/// Used by both Reed-Solomon and Raptor coding schemes.
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
-    shard: Bytes,
+    pub(crate) shard: Bytes,
 
     /// The index of [Chunk] in the original data.
-    index: u16,
+    pub(crate) index: u16,
 
     /// The multi-proof of the shard in the [bmt] at the given index.
-    proof: bmt::Proof<D>,
+    pub(crate) proof: bmt::Proof<D>,
 }
 
 impl<D: Digest> Chunk<D> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
+    pub(crate) const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
             shard,
             index,
@@ -62,7 +64,7 @@ impl<D: Digest> Chunk<D> {
     }
 
     /// Verify a [Chunk] against the given root.
-    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> bool {
+    pub(crate) fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> bool {
         // Ensure the index matches
         if index != self.index {
             return false;
