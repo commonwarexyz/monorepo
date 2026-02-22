@@ -9,7 +9,7 @@
 
 use super::{
     gf8_arithmetic::{inv, mul},
-    gf8_simd::{gf_vect_mad, gf_vect_mad_multi},
+    gf8_simd::{gf_vect_mad, gf_vect_mad_multi_raw},
     Engine,
 };
 use thiserror::Error;
@@ -73,31 +73,13 @@ impl Engine for Gf8 {
         let enc_matrix = build_encoding_matrix(k, m)?;
         let mut recovery = vec![vec![0u8; shard_len]; m];
 
-        // Multi-destination encode: process recovery shards in groups for cache efficiency.
-        // Each pass over the original data updates multiple recovery shards simultaneously,
-        // loading source data once and scattering to N outputs (ISA-L pattern).
-        let group_size = 4;
-        for group_start in (0..m).step_by(group_size) {
-            let group_end = (group_start + group_size).min(m);
-            let num_dsts = group_end - group_start;
-
-            for j in 0..k {
-                if num_dsts == 1 {
-                    // Single destination: use the optimized single-dest kernel
-                    let coeff = enc_matrix[group_start * k + j];
-                    gf_vect_mad(&mut recovery[group_start], original[j], coeff);
-                } else {
-                    let coeffs: Vec<u8> = (group_start..group_end)
-                        .map(|i| enc_matrix[i * k + j])
-                        .collect();
-                    let mut dsts: Vec<&mut [u8]> = recovery[group_start..group_end]
-                        .iter_mut()
-                        .map(|s| s.as_mut_slice())
-                        .collect();
-                    gf_vect_mad_multi(&mut dsts, original[j], &coeffs);
-                }
-            }
-        }
+        // Multi-destination encode: process recovery shards in groups for cache
+        // efficiency. Each pass over the original data updates multiple recovery
+        // shards simultaneously, loading source data once and scattering to N
+        // outputs (ISA-L pattern). Group size 16 keeps the working set (~2MB)
+        // within L2 cache while reducing source passes from ceil(m/4)=17 to
+        // ceil(m/16)=5 for the typical 33+67 configuration.
+        encode_matrix_mul(&enc_matrix, k, &mut recovery, original);
 
         Ok(recovery)
     }
@@ -166,29 +148,83 @@ impl Engine for Gf8 {
         // Multiply: result[j] = sum_i inv_matrix[j][i] * selected_data[i]
         let mut result = vec![vec![0u8; shard_len]; k];
 
-        let group_size = 4;
-        for group_start in (0..k).step_by(group_size) {
-            let group_end = (group_start + group_size).min(k);
-            let num_dsts = group_end - group_start;
+        let selected_data: Vec<&[u8]> = selected.iter().map(|&(_, data)| data).collect();
+        encode_matrix_mul(&inv_matrix, k, &mut result, &selected_data);
 
-            for (i, &(_, data)) in selected.iter().enumerate() {
-                if num_dsts == 1 {
-                    let coeff = inv_matrix[group_start * k + i];
-                    gf_vect_mad(&mut result[group_start], data, coeff);
-                } else {
-                    let coeffs: Vec<u8> = (group_start..group_end)
-                        .map(|j| inv_matrix[j * k + i])
-                        .collect();
-                    let mut dsts: Vec<&mut [u8]> = result[group_start..group_end]
-                        .iter_mut()
-                        .map(|s| s.as_mut_slice())
-                        .collect();
-                    gf_vect_mad_multi(&mut dsts, data, &coeffs);
+        Ok(result)
+    }
+}
+
+/// Maximum number of destinations processed simultaneously.
+///
+/// With ~127KB shards, 16 destinations use ~2MB of working set, fitting in L2.
+const GROUP_SIZE: usize = 16;
+
+/// Optimized matrix-vector multiply: `output[i] += matrix[i][j] * input[j]` for all i, j.
+///
+/// `matrix` is row-major with `num_cols` columns and `output.len()` rows.
+/// `input` has `num_cols` entries. All buffers in `output` must be the same length.
+///
+/// This function uses no heap allocation in its hot loop. It processes
+/// destinations in groups of [GROUP_SIZE] for cache efficiency, and pre-filters
+/// zero coefficients to eliminate branches in the SIMD inner loop.
+fn encode_matrix_mul(
+    matrix: &[u8],
+    num_cols: usize,
+    output: &mut [Vec<u8>],
+    input: &[&[u8]],
+) {
+    let num_rows = output.len();
+    if num_rows == 0 || num_cols == 0 {
+        return;
+    }
+
+    for group_start in (0..num_rows).step_by(GROUP_SIZE) {
+        let group_end = (group_start + GROUP_SIZE).min(num_rows);
+
+        for j in 0..num_cols {
+            // Pre-filter: collect only non-zero coefficients and their
+            // destination indices on the stack. This avoids branches in the
+            // SIMD inner loop and skips entirely-zero columns for free.
+            let mut coeffs = [0u8; GROUP_SIZE];
+            let mut dst_indices = [0usize; GROUP_SIZE];
+            let mut count = 0;
+
+            for i in group_start..group_end {
+                let c = matrix[i * num_cols + j];
+                if c != 0 {
+                    coeffs[count] = c;
+                    dst_indices[count] = i;
+                    count += 1;
+                }
+            }
+
+            if count == 0 {
+                continue;
+            }
+
+            if count == 1 {
+                gf_vect_mad(&mut output[dst_indices[0]], input[j], coeffs[0]);
+            } else {
+                // Collect destination pointers on the stack.
+                let shard_len = output[dst_indices[0]].len();
+                let mut dsts_ptrs: [*mut u8; GROUP_SIZE] = [std::ptr::null_mut(); GROUP_SIZE];
+                for d in 0..count {
+                    dsts_ptrs[d] = output[dst_indices[d]].as_mut_ptr();
+                }
+
+                // SAFETY: each pointer comes from a distinct `output` Vec,
+                // they do not overlap, and shard_len matches their allocation.
+                unsafe {
+                    gf_vect_mad_multi_raw(
+                        &dsts_ptrs[..count],
+                        input[j],
+                        &coeffs[..count],
+                        shard_len,
+                    );
                 }
             }
         }
-
-        Ok(result)
     }
 }
 

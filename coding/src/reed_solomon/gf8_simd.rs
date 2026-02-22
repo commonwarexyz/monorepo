@@ -33,12 +33,56 @@ pub(crate) fn gf_vect_mad(dst: &mut [u8], src: &[u8], coeff: u8) {
 ///
 /// For each byte position: `dsts[d][i] ^= gf_mul(coeffs[d], src[i])` for all `d`.
 ///
+/// All coefficients must be nonzero. The caller is responsible for filtering
+/// out zero coefficients before calling this function.
+///
 /// This amortizes the cost of loading source data across multiple outputs,
 /// dramatically improving cache utilization when computing multiple recovery shards.
 #[inline]
+#[cfg(test)]
 pub(crate) fn gf_vect_mad_multi(dsts: &mut [&mut [u8]], src: &[u8], coeffs: &[u8]) {
     debug_assert_eq!(dsts.len(), coeffs.len());
+    debug_assert!(coeffs.iter().all(|&c| c != 0));
     get_mad_multi_fn()(dsts, src, coeffs);
+}
+
+/// Raw-pointer multi-destination MAD for zero-allocation hot paths.
+///
+/// # Safety
+///
+/// - Each `dsts[i]` must point to a valid, writable buffer of at least `len` bytes.
+/// - All destination buffers must be non-overlapping.
+/// - All coefficients must be nonzero.
+#[inline]
+pub(crate) unsafe fn gf_vect_mad_multi_raw(
+    dsts: &[*mut u8],
+    src: &[u8],
+    coeffs: &[u8],
+    len: usize,
+) {
+    debug_assert_eq!(dsts.len(), coeffs.len());
+    // Convert raw pointers to slices and delegate to the dispatched function.
+    // The slice construction is zero-cost (just pointer + length).
+    // We use a fixed-size stack buffer to avoid heap allocation.
+    const MAX_DSTS: usize = 255;
+    debug_assert!(dsts.len() <= MAX_DSTS);
+    let n = dsts.len();
+
+    // Build &mut [u8] slices from raw pointers on the stack using MaybeUninit
+    // to avoid needing Copy/Default for &mut [u8].
+    let mut slices: [std::mem::MaybeUninit<&mut [u8]>; MAX_DSTS] =
+        [const { std::mem::MaybeUninit::uninit() }; MAX_DSTS];
+    for i in 0..n {
+        slices[i].write(std::slice::from_raw_parts_mut(dsts[i], len));
+    }
+
+    // SAFETY: first `n` elements are initialized above
+    let slice_refs: &mut [&mut [u8]] = std::slice::from_raw_parts_mut(
+        slices.as_mut_ptr().cast::<&mut [u8]>(),
+        n,
+    );
+
+    get_mad_multi_fn()(slice_refs, src, coeffs);
 }
 
 // ======================================================================
@@ -161,35 +205,65 @@ mod avx2 {
         let high_v = _mm256_broadcastsi128_si256(_mm_loadu_si128(high_tbl.as_ptr().cast()));
         let mask = _mm256_set1_epi8(0x0F);
 
-        let chunks = dst.len() / 32;
+        let len = dst.len();
+        let chunks = len / 64;
 
+        // Process 64 bytes (2x __m256i) per iteration
         for i in 0..chunks {
-            let offset = i * 32;
-            let s = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
-            let d = _mm256_loadu_si256(dst.as_ptr().add(offset).cast());
+            let offset = i * 64;
+            let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
+            let s1 = _mm256_loadu_si256(src.as_ptr().add(offset + 32).cast());
+            let d0 = _mm256_loadu_si256(dst.as_ptr().add(offset).cast());
+            let d1 = _mm256_loadu_si256(dst.as_ptr().add(offset + 32).cast());
 
-            let lo = _mm256_and_si256(s, mask);
-            let hi = _mm256_and_si256(_mm256_srli_epi64::<4>(s), mask);
+            let lo0 = _mm256_and_si256(s0, mask);
+            let hi0 = _mm256_and_si256(_mm256_srli_epi64::<4>(s0), mask);
+            let p0 = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_v, lo0),
+                _mm256_shuffle_epi8(high_v, hi0),
+            );
 
-            let prod = _mm256_xor_si256(
-                _mm256_shuffle_epi8(low_v, lo),
-                _mm256_shuffle_epi8(high_v, hi),
+            let lo1 = _mm256_and_si256(s1, mask);
+            let hi1 = _mm256_and_si256(_mm256_srli_epi64::<4>(s1), mask);
+            let p1 = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_v, lo1),
+                _mm256_shuffle_epi8(high_v, hi1),
             );
 
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset).cast(),
-                _mm256_xor_si256(d, prod),
+                _mm256_xor_si256(d0, p0),
+            );
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset + 32).cast(),
+                _mm256_xor_si256(d1, p1),
             );
         }
 
-        let tail_start = chunks * 32;
-        gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
+        // Handle remaining 32-byte chunk
+        let tail_start = chunks * 64;
+        if tail_start + 32 <= len {
+            let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
+            let d = _mm256_loadu_si256(dst.as_ptr().add(tail_start).cast());
+            let lo = _mm256_and_si256(s, mask);
+            let hi = _mm256_and_si256(_mm256_srli_epi64::<4>(s), mask);
+            let p = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_v, lo),
+                _mm256_shuffle_epi8(high_v, hi),
+            );
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(tail_start).cast(),
+                _mm256_xor_si256(d, p),
+            );
+            gf_vect_mad_scalar(&mut dst[tail_start + 32..], &src[tail_start + 32..], coeff);
+        } else {
+            gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
+        }
     }
 
     /// Multi-destination MAD using AVX2 split-nibble technique.
     ///
-    /// Loads source data once per chunk and scatters multiply-accumulate results
-    /// to multiple destinations, improving cache utilization.
+    /// All coefficients must be nonzero. No internal heap allocation.
     ///
     /// # Safety
     /// Caller must ensure AVX2 is available.
@@ -200,50 +274,70 @@ mod avx2 {
         coeffs: &[u8],
     ) {
         let mask = _mm256_set1_epi8(0x0F);
+        let ndst = dsts.len();
 
-        // Precompute lookup tables for all coefficients
-        let tables: Vec<(__m256i, __m256i, bool)> = coeffs
-            .iter()
-            .map(|&c| {
-                if c == 0 {
-                    let z = _mm256_setzero_si256();
-                    (z, z, true)
-                } else {
-                    let (lo, hi) = init_mul_table(c);
-                    (
-                        _mm256_broadcastsi128_si256(_mm_loadu_si128(lo.as_ptr().cast())),
-                        _mm256_broadcastsi128_si256(_mm_loadu_si128(hi.as_ptr().cast())),
-                        false,
-                    )
-                }
-            })
-            .collect();
+        // Precompute lookup tables on the stack (max 255 destinations)
+        let mut lo_tbls = [_mm256_setzero_si256(); 255];
+        let mut hi_tbls = [_mm256_setzero_si256(); 255];
+        for i in 0..ndst {
+            let (lo, hi) = init_mul_table(coeffs[i]);
+            lo_tbls[i] = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo.as_ptr().cast()));
+            hi_tbls[i] = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi.as_ptr().cast()));
+        }
 
-        let chunks = src.len() / 32;
+        let len = src.len();
+        let chunks = len / 64;
 
+        // Process 64 bytes per iteration (2x __m256i), unrolled
         for i in 0..chunks {
-            let offset = i * 32;
-            let s = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
-            let lo = _mm256_and_si256(s, mask);
-            let hi = _mm256_and_si256(_mm256_srli_epi64::<4>(s), mask);
+            let offset = i * 64;
+            let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
+            let s1 = _mm256_loadu_si256(src.as_ptr().add(offset + 32).cast());
+            let lo0 = _mm256_and_si256(s0, mask);
+            let hi0 = _mm256_and_si256(_mm256_srli_epi64::<4>(s0), mask);
+            let lo1 = _mm256_and_si256(s1, mask);
+            let hi1 = _mm256_and_si256(_mm256_srli_epi64::<4>(s1), mask);
 
-            for (d, &(lo_tbl, hi_tbl, is_zero)) in dsts.iter_mut().zip(tables.iter()) {
-                if is_zero {
-                    continue;
-                }
-                let d_ptr = d.as_mut_ptr().add(offset).cast::<__m256i>();
-                let existing = _mm256_loadu_si256(d_ptr);
-                let prod = _mm256_xor_si256(
-                    _mm256_shuffle_epi8(lo_tbl, lo),
-                    _mm256_shuffle_epi8(hi_tbl, hi),
+            for d in 0..ndst {
+                let d_ptr0 = dsts[d].as_mut_ptr().add(offset).cast::<__m256i>();
+                let d_ptr1 = dsts[d].as_mut_ptr().add(offset + 32).cast::<__m256i>();
+
+                let p0 = _mm256_xor_si256(
+                    _mm256_shuffle_epi8(lo_tbls[d], lo0),
+                    _mm256_shuffle_epi8(hi_tbls[d], hi0),
                 );
-                _mm256_storeu_si256(d_ptr, _mm256_xor_si256(existing, prod));
+                let p1 = _mm256_xor_si256(
+                    _mm256_shuffle_epi8(lo_tbls[d], lo1),
+                    _mm256_shuffle_epi8(hi_tbls[d], hi1),
+                );
+
+                _mm256_storeu_si256(d_ptr0, _mm256_xor_si256(_mm256_loadu_si256(d_ptr0), p0));
+                _mm256_storeu_si256(d_ptr1, _mm256_xor_si256(_mm256_loadu_si256(d_ptr1), p1));
             }
         }
 
-        let tail = chunks * 32;
-        for (dst, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
-            gf_vect_mad_scalar(&mut dst[tail..], &src[tail..], coeff);
+        // Tail: remaining 32-byte chunk
+        let tail_start = chunks * 64;
+        if tail_start + 32 <= len {
+            let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
+            let lo = _mm256_and_si256(s, mask);
+            let hi = _mm256_and_si256(_mm256_srli_epi64::<4>(s), mask);
+
+            for d in 0..ndst {
+                let d_ptr = dsts[d].as_mut_ptr().add(tail_start).cast::<__m256i>();
+                let p = _mm256_xor_si256(
+                    _mm256_shuffle_epi8(lo_tbls[d], lo),
+                    _mm256_shuffle_epi8(hi_tbls[d], hi),
+                );
+                _mm256_storeu_si256(d_ptr, _mm256_xor_si256(_mm256_loadu_si256(d_ptr), p));
+            }
+            for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+                gf_vect_mad_scalar(&mut d[tail_start + 32..], &src[tail_start + 32..], coeff);
+            }
+        } else {
+            for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+                gf_vect_mad_scalar(&mut d[tail_start..], &src[tail_start..], coeff);
+            }
         }
     }
 }
@@ -268,24 +362,48 @@ mod gfni_avx2 {
         }
 
         let coeff_v = _mm256_set1_epi8(coeff as i8);
-        let chunks = dst.len() / 32;
+        let len = dst.len();
+        let chunks = len / 64;
 
+        // Process 64 bytes per iteration (2x __m256i)
         for i in 0..chunks {
-            let offset = i * 32;
-            let s = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
-            let d = _mm256_loadu_si256(dst.as_ptr().add(offset).cast());
-            let prod = _mm256_gf2p8mul_epi8(coeff_v, s);
+            let offset = i * 64;
+            let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
+            let s1 = _mm256_loadu_si256(src.as_ptr().add(offset + 32).cast());
+            let d0 = _mm256_loadu_si256(dst.as_ptr().add(offset).cast());
+            let d1 = _mm256_loadu_si256(dst.as_ptr().add(offset + 32).cast());
+
+            let p0 = _mm256_gf2p8mul_epi8(coeff_v, s0);
+            let p1 = _mm256_gf2p8mul_epi8(coeff_v, s1);
+
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset).cast(),
-                _mm256_xor_si256(d, prod),
+                _mm256_xor_si256(d0, p0),
+            );
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(offset + 32).cast(),
+                _mm256_xor_si256(d1, p1),
             );
         }
 
-        let tail_start = chunks * 32;
-        gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
+        let tail_start = chunks * 64;
+        if tail_start + 32 <= len {
+            let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
+            let d = _mm256_loadu_si256(dst.as_ptr().add(tail_start).cast());
+            let p = _mm256_gf2p8mul_epi8(coeff_v, s);
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().add(tail_start).cast(),
+                _mm256_xor_si256(d, p),
+            );
+            gf_vect_mad_scalar(&mut dst[tail_start + 32..], &src[tail_start + 32..], coeff);
+        } else {
+            gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
+        }
     }
 
     /// Multi-destination MAD using GFNI+AVX2.
+    ///
+    /// All coefficients must be nonzero. No internal heap allocation.
     ///
     /// # Safety
     /// Caller must ensure AVX2 and GFNI are available.
@@ -295,37 +413,51 @@ mod gfni_avx2 {
         src: &[u8],
         coeffs: &[u8],
     ) {
-        let coeff_vs: Vec<(__m256i, bool)> = coeffs
-            .iter()
-            .map(|&c| {
-                if c == 0 {
-                    (_mm256_setzero_si256(), true)
-                } else {
-                    (_mm256_set1_epi8(c as i8), false)
-                }
-            })
-            .collect();
+        let ndst = dsts.len();
 
-        let chunks = src.len() / 32;
+        // Precompute broadcast coefficients on the stack
+        let mut coeff_vs = [_mm256_setzero_si256(); 255];
+        for i in 0..ndst {
+            coeff_vs[i] = _mm256_set1_epi8(coeffs[i] as i8);
+        }
 
+        let len = src.len();
+        let chunks = len / 64;
+
+        // Process 64 bytes per iteration (2x __m256i), unrolled
         for i in 0..chunks {
-            let offset = i * 32;
-            let s = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
+            let offset = i * 64;
+            let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
+            let s1 = _mm256_loadu_si256(src.as_ptr().add(offset + 32).cast());
 
-            for (d, &(cv, is_zero)) in dsts.iter_mut().zip(coeff_vs.iter()) {
-                if is_zero {
-                    continue;
-                }
-                let d_ptr = d.as_mut_ptr().add(offset).cast::<__m256i>();
-                let existing = _mm256_loadu_si256(d_ptr);
-                let prod = _mm256_gf2p8mul_epi8(cv, s);
-                _mm256_storeu_si256(d_ptr, _mm256_xor_si256(existing, prod));
+            for d in 0..ndst {
+                let d_ptr0 = dsts[d].as_mut_ptr().add(offset).cast::<__m256i>();
+                let d_ptr1 = dsts[d].as_mut_ptr().add(offset + 32).cast::<__m256i>();
+
+                let p0 = _mm256_gf2p8mul_epi8(coeff_vs[d], s0);
+                let p1 = _mm256_gf2p8mul_epi8(coeff_vs[d], s1);
+
+                _mm256_storeu_si256(d_ptr0, _mm256_xor_si256(_mm256_loadu_si256(d_ptr0), p0));
+                _mm256_storeu_si256(d_ptr1, _mm256_xor_si256(_mm256_loadu_si256(d_ptr1), p1));
             }
         }
 
-        let tail = chunks * 32;
-        for (dst, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
-            gf_vect_mad_scalar(&mut dst[tail..], &src[tail..], coeff);
+        // Tail
+        let tail_start = chunks * 64;
+        if tail_start + 32 <= len {
+            let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
+            for d in 0..ndst {
+                let d_ptr = dsts[d].as_mut_ptr().add(tail_start).cast::<__m256i>();
+                let p = _mm256_gf2p8mul_epi8(coeff_vs[d], s);
+                _mm256_storeu_si256(d_ptr, _mm256_xor_si256(_mm256_loadu_si256(d_ptr), p));
+            }
+            for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+                gf_vect_mad_scalar(&mut d[tail_start + 32..], &src[tail_start + 32..], coeff);
+            }
+        } else {
+            for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+                gf_vect_mad_scalar(&mut d[tail_start..], &src[tail_start..], coeff);
+            }
         }
     }
 }
@@ -354,25 +486,37 @@ mod ssse3 {
         let high_v = _mm_loadu_si128(high_tbl.as_ptr().cast());
         let mask = _mm_set1_epi8(0x0F);
 
-        let chunks = dst.len() / 16;
+        let len = dst.len();
+        let chunks = len / 32;
 
+        // Process 32 bytes (2x __m128i) per iteration
         for i in 0..chunks {
-            let offset = i * 16;
-            let s = _mm_loadu_si128(src.as_ptr().add(offset).cast());
-            let d = _mm_loadu_si128(dst.as_ptr().add(offset).cast());
+            let offset = i * 32;
+            let s0 = _mm_loadu_si128(src.as_ptr().add(offset).cast());
+            let s1 = _mm_loadu_si128(src.as_ptr().add(offset + 16).cast());
+            let d0 = _mm_loadu_si128(dst.as_ptr().add(offset).cast());
+            let d1 = _mm_loadu_si128(dst.as_ptr().add(offset + 16).cast());
 
-            let lo = _mm_and_si128(s, mask);
-            let hi = _mm_and_si128(_mm_srli_epi64::<4>(s), mask);
-
-            let prod = _mm_xor_si128(_mm_shuffle_epi8(low_v, lo), _mm_shuffle_epi8(high_v, hi));
+            let p0 = _mm_xor_si128(
+                _mm_shuffle_epi8(low_v, _mm_and_si128(s0, mask)),
+                _mm_shuffle_epi8(high_v, _mm_and_si128(_mm_srli_epi64::<4>(s0), mask)),
+            );
+            let p1 = _mm_xor_si128(
+                _mm_shuffle_epi8(low_v, _mm_and_si128(s1, mask)),
+                _mm_shuffle_epi8(high_v, _mm_and_si128(_mm_srli_epi64::<4>(s1), mask)),
+            );
 
             _mm_storeu_si128(
                 dst.as_mut_ptr().add(offset).cast(),
-                _mm_xor_si128(d, prod),
+                _mm_xor_si128(d0, p0),
+            );
+            _mm_storeu_si128(
+                dst.as_mut_ptr().add(offset + 16).cast(),
+                _mm_xor_si128(d1, p1),
             );
         }
 
-        let tail_start = chunks * 16;
+        let tail_start = chunks * 32;
         gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
     }
 
@@ -387,47 +531,50 @@ mod ssse3 {
         coeffs: &[u8],
     ) {
         let mask = _mm_set1_epi8(0x0F);
+        let ndst = dsts.len();
 
-        let tables: Vec<(__m128i, __m128i, bool)> = coeffs
-            .iter()
-            .map(|&c| {
-                if c == 0 {
-                    let z = _mm_setzero_si128();
-                    (z, z, true)
-                } else {
-                    let (lo, hi) = init_mul_table(c);
-                    (
-                        _mm_loadu_si128(lo.as_ptr().cast()),
-                        _mm_loadu_si128(hi.as_ptr().cast()),
-                        false,
-                    )
-                }
-            })
-            .collect();
+        // Stack-allocated lookup tables
+        let mut lo_tbls = [_mm_setzero_si128(); 255];
+        let mut hi_tbls = [_mm_setzero_si128(); 255];
+        for i in 0..ndst {
+            let (lo, hi) = init_mul_table(coeffs[i]);
+            lo_tbls[i] = _mm_loadu_si128(lo.as_ptr().cast());
+            hi_tbls[i] = _mm_loadu_si128(hi.as_ptr().cast());
+        }
 
-        let chunks = src.len() / 16;
+        let len = src.len();
+        let chunks = len / 32;
 
         for i in 0..chunks {
-            let offset = i * 16;
-            let s = _mm_loadu_si128(src.as_ptr().add(offset).cast());
-            let lo = _mm_and_si128(s, mask);
-            let hi = _mm_and_si128(_mm_srli_epi64::<4>(s), mask);
+            let offset = i * 32;
+            let s0 = _mm_loadu_si128(src.as_ptr().add(offset).cast());
+            let s1 = _mm_loadu_si128(src.as_ptr().add(offset + 16).cast());
+            let lo0 = _mm_and_si128(s0, mask);
+            let hi0 = _mm_and_si128(_mm_srli_epi64::<4>(s0), mask);
+            let lo1 = _mm_and_si128(s1, mask);
+            let hi1 = _mm_and_si128(_mm_srli_epi64::<4>(s1), mask);
 
-            for (d, &(lo_tbl, hi_tbl, is_zero)) in dsts.iter_mut().zip(tables.iter()) {
-                if is_zero {
-                    continue;
-                }
-                let d_ptr = d.as_mut_ptr().add(offset).cast::<__m128i>();
-                let existing = _mm_loadu_si128(d_ptr);
-                let prod =
-                    _mm_xor_si128(_mm_shuffle_epi8(lo_tbl, lo), _mm_shuffle_epi8(hi_tbl, hi));
-                _mm_storeu_si128(d_ptr, _mm_xor_si128(existing, prod));
+            for d in 0..ndst {
+                let d_ptr0 = dsts[d].as_mut_ptr().add(offset).cast::<__m128i>();
+                let d_ptr1 = dsts[d].as_mut_ptr().add(offset + 16).cast::<__m128i>();
+
+                let p0 = _mm_xor_si128(
+                    _mm_shuffle_epi8(lo_tbls[d], lo0),
+                    _mm_shuffle_epi8(hi_tbls[d], hi0),
+                );
+                let p1 = _mm_xor_si128(
+                    _mm_shuffle_epi8(lo_tbls[d], lo1),
+                    _mm_shuffle_epi8(hi_tbls[d], hi1),
+                );
+
+                _mm_storeu_si128(d_ptr0, _mm_xor_si128(_mm_loadu_si128(d_ptr0), p0));
+                _mm_storeu_si128(d_ptr1, _mm_xor_si128(_mm_loadu_si128(d_ptr1), p1));
             }
         }
 
-        let tail = chunks * 16;
-        for (dst, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
-            gf_vect_mad_scalar(&mut dst[tail..], &src[tail..], coeff);
+        let tail = chunks * 32;
+        for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+            gf_vect_mad_scalar(&mut d[tail..], &src[tail..], coeff);
         }
     }
 }
@@ -453,22 +600,31 @@ mod neon {
         let high_v: uint8x16_t = unsafe { vld1q_u8(high_tbl.as_ptr()) };
         let mask: uint8x16_t = unsafe { vdupq_n_u8(0x0F) };
 
-        let chunks = dst.len() / 16;
+        let len = dst.len();
+        let chunks = len / 32;
         for i in 0..chunks {
             unsafe {
-                let offset = i * 16;
-                let s = vld1q_u8(src.as_ptr().add(offset));
-                let d = vld1q_u8(dst.as_ptr().add(offset));
+                let offset = i * 32;
+                let s0 = vld1q_u8(src.as_ptr().add(offset));
+                let s1 = vld1q_u8(src.as_ptr().add(offset + 16));
+                let d0 = vld1q_u8(dst.as_ptr().add(offset));
+                let d1 = vld1q_u8(dst.as_ptr().add(offset + 16));
 
-                let lo = vandq_u8(s, mask);
-                let hi = vandq_u8(vshrq_n_u8::<4>(s), mask);
+                let p0 = veorq_u8(
+                    vqtbl1q_u8(low_v, vandq_u8(s0, mask)),
+                    vqtbl1q_u8(high_v, vandq_u8(vshrq_n_u8::<4>(s0), mask)),
+                );
+                let p1 = veorq_u8(
+                    vqtbl1q_u8(low_v, vandq_u8(s1, mask)),
+                    vqtbl1q_u8(high_v, vandq_u8(vshrq_n_u8::<4>(s1), mask)),
+                );
 
-                let prod = veorq_u8(vqtbl1q_u8(low_v, lo), vqtbl1q_u8(high_v, hi));
-                vst1q_u8(dst.as_mut_ptr().add(offset), veorq_u8(d, prod));
+                vst1q_u8(dst.as_mut_ptr().add(offset), veorq_u8(d0, p0));
+                vst1q_u8(dst.as_mut_ptr().add(offset + 16), veorq_u8(d1, p1));
             }
         }
 
-        let tail_start = chunks * 16;
+        let tail_start = chunks * 32;
         gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
     }
 
@@ -479,44 +635,45 @@ mod neon {
         coeffs: &[u8],
     ) {
         let mask: uint8x16_t = unsafe { vdupq_n_u8(0x0F) };
+        let ndst = dsts.len();
 
-        let tables: Vec<(uint8x16_t, uint8x16_t, bool)> = coeffs
-            .iter()
-            .map(|&c| {
-                if c == 0 {
-                    unsafe {
-                        let z = vdupq_n_u8(0);
-                        (z, z, true)
-                    }
-                } else {
-                    let (lo, hi) = init_mul_table(c);
-                    unsafe { (vld1q_u8(lo.as_ptr()), vld1q_u8(hi.as_ptr()), false) }
-                }
-            })
-            .collect();
+        let mut lo_tbls = [unsafe { vdupq_n_u8(0) }; 255];
+        let mut hi_tbls = [unsafe { vdupq_n_u8(0) }; 255];
+        for i in 0..ndst {
+            let (lo, hi) = init_mul_table(coeffs[i]);
+            lo_tbls[i] = unsafe { vld1q_u8(lo.as_ptr()) };
+            hi_tbls[i] = unsafe { vld1q_u8(hi.as_ptr()) };
+        }
 
-        let chunks = src.len() / 16;
+        let len = src.len();
+        let chunks = len / 32;
         for i in 0..chunks {
             unsafe {
-                let offset = i * 16;
-                let s = vld1q_u8(src.as_ptr().add(offset));
-                let lo = vandq_u8(s, mask);
-                let hi = vandq_u8(vshrq_n_u8::<4>(s), mask);
+                let offset = i * 32;
+                let s0 = vld1q_u8(src.as_ptr().add(offset));
+                let s1 = vld1q_u8(src.as_ptr().add(offset + 16));
+                let lo0 = vandq_u8(s0, mask);
+                let hi0 = vandq_u8(vshrq_n_u8::<4>(s0), mask);
+                let lo1 = vandq_u8(s1, mask);
+                let hi1 = vandq_u8(vshrq_n_u8::<4>(s1), mask);
 
-                for (d, &(lo_tbl, hi_tbl, is_zero)) in dsts.iter_mut().zip(tables.iter()) {
-                    if is_zero {
-                        continue;
-                    }
-                    let existing = vld1q_u8(d.as_ptr().add(offset));
-                    let prod = veorq_u8(vqtbl1q_u8(lo_tbl, lo), vqtbl1q_u8(hi_tbl, hi));
-                    vst1q_u8(d.as_mut_ptr().add(offset), veorq_u8(existing, prod));
+                for d in 0..ndst {
+                    let p0 =
+                        veorq_u8(vqtbl1q_u8(lo_tbls[d], lo0), vqtbl1q_u8(hi_tbls[d], hi0));
+                    let p1 =
+                        veorq_u8(vqtbl1q_u8(lo_tbls[d], lo1), vqtbl1q_u8(hi_tbls[d], hi1));
+
+                    let e0 = vld1q_u8(dsts[d].as_ptr().add(offset));
+                    let e1 = vld1q_u8(dsts[d].as_ptr().add(offset + 16));
+                    vst1q_u8(dsts[d].as_mut_ptr().add(offset), veorq_u8(e0, p0));
+                    vst1q_u8(dsts[d].as_mut_ptr().add(offset + 16), veorq_u8(e1, p1));
                 }
             }
         }
 
-        let tail = chunks * 16;
-        for (dst, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
-            gf_vect_mad_scalar(&mut dst[tail..], &src[tail..], coeff);
+        let tail = chunks * 32;
+        for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
+            gf_vect_mad_scalar(&mut d[tail..], &src[tail..], coeff);
         }
     }
 }
@@ -563,9 +720,9 @@ mod tests {
 
     #[test]
     fn test_multi_matches_sequential() {
-        for len in [0, 1, 31, 32, 33, 128, 1024] {
+        for len in [0, 1, 31, 32, 33, 63, 64, 128, 1024] {
             let src: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
-            let coeffs = [3u8, 0, 127, 255, 1];
+            let coeffs = [3u8, 127, 255, 1, 42];
             let n = coeffs.len();
 
             // Sequential single-destination
@@ -574,7 +731,7 @@ mod tests {
                 gf_vect_mad(d, &src, c);
             }
 
-            // Multi-destination
+            // Multi-destination (all coeffs nonzero as required)
             let mut dsts_multi: Vec<Vec<u8>> = (0..n).map(|_| vec![0xAAu8; len]).collect();
             let mut refs: Vec<&mut [u8]> =
                 dsts_multi.iter_mut().map(|v| v.as_mut_slice()).collect();
@@ -604,17 +761,14 @@ mod tests {
 
     #[test]
     fn test_accumulation() {
-        // Verify that MAD accumulates (XORs) rather than overwrites
         let src = vec![0xFFu8; 64];
         let mut dst = vec![0xAAu8; 64];
         gf_vect_mad(&mut dst, &src, 1);
-        // dst[i] = 0xAA ^ (1 * 0xFF) = 0xAA ^ 0xFF = 0x55
         assert!(dst.iter().all(|&b| b == 0x55), "accumulation failed");
     }
 
     #[test]
     fn test_large_data() {
-        // ~127KB, similar to production shard size
         let len = 127 * 1024;
         let src: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
         let mut dst_ref = vec![0u8; len];
@@ -622,5 +776,27 @@ mod tests {
         reference_mad(&mut dst_ref, &src, 0x53);
         gf_vect_mad(&mut dst_test, &src, 0x53);
         assert_eq!(dst_ref, dst_test, "large data mismatch");
+    }
+
+    #[test]
+    fn test_multi_large_group() {
+        // Test with a larger group size to exercise the stack-allocated path
+        let len = 1024;
+        let src: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        let n = 16;
+        let coeffs: Vec<u8> = (1..=n as u8).collect();
+
+        let mut dsts_seq: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; len]).collect();
+        for (d, &c) in dsts_seq.iter_mut().zip(coeffs.iter()) {
+            gf_vect_mad(d, &src, c);
+        }
+
+        let mut dsts_multi: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; len]).collect();
+        let mut refs: Vec<&mut [u8]> = dsts_multi.iter_mut().map(|v| v.as_mut_slice()).collect();
+        gf_vect_mad_multi(&mut refs, &src, &coeffs);
+
+        for d in 0..n {
+            assert_eq!(dsts_seq[d], dsts_multi[d], "multi mismatch at dst={d}");
+        }
     }
 }
