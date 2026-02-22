@@ -7,7 +7,7 @@
 //! - `portable`: Enables `portable` feature on `blst` (<https://github.com/supranational/blst?tab=readme-ov-file#platform-and-language-compatibility>).
 
 pub mod certificate;
-pub mod credentials;
+commonware_macros::stability_mod!(ALPHA, pub mod credentials);
 #[cfg(feature = "std")]
 pub mod dkg;
 pub mod primitives;

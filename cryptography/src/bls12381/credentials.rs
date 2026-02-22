@@ -4,7 +4,7 @@
 //! based on the Boldyreva scheme (PKC 2003). A threshold signing group (e.g.,
 //! validators) can issue credentials bound to a message without learning what the
 //! message is. The resulting credential is a standard BLS signature verifiable with
-//! [`ops::verify_message`].
+//! [`ops::verify_message`](super::primitives::ops::verify_message).
 //!
 //! # Protocol
 //!
@@ -15,10 +15,11 @@
 //!    [`PartialSignature`]. The user (or anyone) can check each partial with
 //!    [`verify_blinded`].
 //! 3. The user collects enough partials and recovers the threshold signature using
-//!    [`threshold::recover`].
+//!    [`threshold::recover`](super::primitives::ops::threshold::recover).
 //! 4. The user calls [`unblind`] to remove the blinding factor, yielding a standard
 //!    BLS signature over the message.
-//! 5. Anyone can verify the credential with [`ops::verify_message`] using the group
+//! 5. Anyone can verify the credential with
+//!    [`ops::verify_message`](super::primitives::ops::verify_message) using the group
 //!    public key, the namespace, and the message.
 //!
 //! # Security
@@ -31,7 +32,8 @@
 //!   unblinded signatures but distinct blinded points. Issuance sessions cannot be
 //!   correlated with redemption.
 //! - **Public verifiability**: Anyone with the group public key can verify the credential
-//!   via [`ops::verify_message`]. No validator interaction is needed at redemption.
+//!   via [`ops::verify_message`](super::primitives::ops::verify_message). No validator
+//!   interaction is needed at redemption.
 //!
 //! # Concurrent Session Limitation
 //!
