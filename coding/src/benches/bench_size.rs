@@ -10,7 +10,7 @@ const STRATEGY: Sequential = Sequential;
 
 fn bench_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [8, 12, 16, 19, 20, 22, 24].map(|i| 2usize.pow(i));
 
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
