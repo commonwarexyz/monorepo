@@ -2406,9 +2406,7 @@ mod test_plan {
                             .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
-                            if missing_log.get_ack(&player_pk).is_none() {
-                                continue;
-                            }
+                            let was_acked = missing_log.get_ack(&player_pk).is_some();
 
                             let replay = persisted_msgs
                                 .get(&player_pk)
@@ -2424,10 +2422,17 @@ mod test_plan {
                                 &dealer_logs,
                                 replay_without,
                             );
-                            assert!(
-                                matches!(resumed, Err(Error::PlayerCorrupted)),
-                                "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
-                            );
+                            if was_acked {
+                                assert!(
+                                    matches!(resumed, Err(Error::PlayerCorrupted)),
+                                    "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
+                                );
+                            } else {
+                                assert!(
+                                    resumed.is_ok(),
+                                    "resume without dealer {missing_dealer} message should succeed for unacked player {i_player}"
+                                );
+                            }
                         }
                     }
 
