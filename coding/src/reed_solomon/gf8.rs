@@ -214,9 +214,9 @@ fn encode_matrix_mul(
             }
 
             if count == 1 {
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(dsts_ptrs[0], shard_len)
-                };
+                // SAFETY: dsts_ptrs[0] is from output[i] which has shard_len allocated bytes.
+                let dst =
+                    unsafe { std::slice::from_raw_parts_mut(dsts_ptrs[0], shard_len) };
                 gf_vect_mad(dst, input[j], coeffs[0]);
             } else {
                 // SAFETY: pointers from distinct output Vecs, non-overlapping.

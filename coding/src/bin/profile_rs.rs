@@ -2,13 +2,11 @@
 //!
 //! Isolates engine encode time to identify bottlenecks.
 
-use commonware_coding::reed_solomon::Engine;
-use commonware_coding::{Config, Gf16, Gf8, ReedSolomon, ReedSolomon8, Scheme};
-use commonware_cryptography::Blake3;
+use commonware_coding::{Config, Engine, Gf16, Gf8, ReedSolomon, ReedSolomon8, Scheme};
+use commonware_cryptography::{Blake3, Sha256};
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 const STRATEGY: Sequential = Sequential;
 
@@ -174,22 +172,7 @@ fn main() {
 
     println!("=== 4MB / 100 shards (33+67), {iters} iterations ===\n");
 
-    // Measure allocation cost of output vector
-    let shard_len = (4 + data.len()).div_ceil(k);
-    {
-        let start = Instant::now();
-        for _ in 0..iters {
-            let result: Vec<Vec<u8>> = black_box(vec![vec![0u8; shard_len]; m]);
-            black_box(&result);
-        }
-        let elapsed = start.elapsed();
-        println!(
-            "  alloc {m} x {shard_len}B vecs: {:.3} ms/iter\n",
-            elapsed.as_secs_f64() * 1000.0 / iters as f64
-        );
-    }
-
-    println!("Engine-only:");
+    println!("Engine-only (RS codec, no hashing/BMT):");
     bench_engine_encode::<Gf16>("GF16", k, m, &data, iters);
     bench_engine_encode::<Gf8>("GF8 ", k, m, &data, iters);
     println!();
@@ -197,7 +180,15 @@ fn main() {
     bench_engine_decode::<Gf8>("GF8 ", k, m, &data, iters);
     println!();
 
-    println!("Full pipeline:");
+    println!("Full pipeline (SHA-256):");
+    bench_full::<ReedSolomon<Sha256>>("GF16", &config, &data, iters);
+    bench_full::<ReedSolomon8<Sha256>>("GF8 ", &config, &data, iters);
+    println!();
+    bench_full_decode::<ReedSolomon<Sha256>>("GF16", &config, &data, iters);
+    bench_full_decode::<ReedSolomon8<Sha256>>("GF8 ", &config, &data, iters);
+    println!();
+
+    println!("Full pipeline (BLAKE3):");
     bench_full::<ReedSolomon<Blake3>>("GF16", &config, &data, iters);
     bench_full::<ReedSolomon8<Blake3>>("GF8 ", &config, &data, iters);
     println!();

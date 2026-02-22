@@ -13,7 +13,13 @@
 //! 4. **NEON** (AArch64): split-nibble via `vqtbl1q_u8` -- 16 bytes per iteration
 //! 5. **Scalar**: log/exp table lookup -- 1 byte per iteration
 
-use super::gf8_arithmetic::{init_mul_table, mul};
+use super::gf8_arithmetic::mul;
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64"
+))]
+use super::gf8_arithmetic::init_mul_table;
 use std::sync::OnceLock;
 
 // ======================================================================
@@ -168,6 +174,12 @@ fn detect_mad_fn() -> MadFn {
             };
         }
     }
+    // NEON is baseline on AArch64, no runtime detection needed
+    #[cfg(target_arch = "aarch64")]
+    {
+        return neon::gf_vect_mad;
+    }
+    #[allow(unreachable_code)]
     gf_vect_mad_scalar
 }
 
@@ -193,6 +205,12 @@ fn detect_mad_multi_fn() -> MadMultiFn {
             };
         }
     }
+    // NEON is baseline on AArch64, no runtime detection needed
+    #[cfg(target_arch = "aarch64")]
+    {
+        return neon::gf_vect_mad_multi;
+    }
+    #[allow(unreachable_code)]
     gf_vect_mad_multi_scalar
 }
 
