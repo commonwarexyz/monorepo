@@ -24,9 +24,7 @@ fn bench_encode(c: &mut Criterion) {
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
-                    &format!(
-                        "raptor::encode/msg_len={data_length} chunks={chunks} conc={conc}"
-                    ),
+                    &format!("raptor::encode/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
                         b.iter_batched(
                             || {
@@ -63,9 +61,7 @@ fn bench_decode(c: &mut Criterion) {
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
-                    &format!(
-                        "raptor::decode/msg_len={data_length} chunks={chunks} conc={conc}"
-                    ),
+                    &format!("raptor::decode/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
                         b.iter_batched(
                             || {
@@ -97,8 +93,7 @@ fn bench_decode(c: &mut Criterion) {
                                 let (checking_data, _, _) = R::weaken(
                                     &config,
                                     &commitment,
-                                    config.minimum_shards.get() + config.extra_shards.get()
-                                        - 1,
+                                    config.minimum_shards.get() + config.extra_shards.get() - 1,
                                     my_shard,
                                 )
                                 .unwrap();
