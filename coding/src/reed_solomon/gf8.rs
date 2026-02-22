@@ -155,19 +155,20 @@ impl Engine for Gf8 {
     }
 }
 
-/// Maximum number of destinations processed simultaneously.
-///
-/// With ~127KB shards, 16 destinations use ~2MB of working set, fitting in L2.
-const GROUP_SIZE: usize = 16;
-
 /// Optimized matrix-vector multiply: `output[i] += matrix[i][j] * input[j]` for all i, j.
 ///
 /// `matrix` is row-major with `num_cols` columns and `output.len()` rows.
 /// `input` has `num_cols` entries. All buffers in `output` must be the same length.
 ///
-/// This function uses no heap allocation in its hot loop. It processes
-/// destinations in groups of [GROUP_SIZE] for cache efficiency, and pre-filters
-/// zero coefficients to eliminate branches in the SIMD inner loop.
+/// Following ISA-L's `ec_encode_data` approach, this processes ALL destinations in
+/// a single pass per source shard. For each source, the SIMD inner loop loads one
+/// chunk of source data and scatters multiply-accumulate results to all destinations.
+/// This minimizes source data reads (each shard loaded exactly once) at the cost of
+/// a larger destination working set. Sequential destination access enables hardware
+/// prefetching despite the working set exceeding L2.
+///
+/// Zero coefficients are pre-filtered per source to eliminate branches in the
+/// SIMD inner loop. No heap allocation occurs in the hot path.
 fn encode_matrix_mul(
     matrix: &[u8],
     num_cols: usize,
@@ -179,50 +180,46 @@ fn encode_matrix_mul(
         return;
     }
 
-    for group_start in (0..num_rows).step_by(GROUP_SIZE) {
-        let group_end = (group_start + GROUP_SIZE).min(num_rows);
+    let shard_len = output[0].len();
 
-        for j in 0..num_cols {
-            // Pre-filter: collect only non-zero coefficients and their
-            // destination indices on the stack. This avoids branches in the
-            // SIMD inner loop and skips entirely-zero columns for free.
-            let mut coeffs = [0u8; GROUP_SIZE];
-            let mut dst_indices = [0usize; GROUP_SIZE];
-            let mut count = 0;
+    // Stack-allocated buffers for pre-filtered coefficients and destination pointers.
+    // MAX_SHARDS = 255 is the maximum number of rows (destinations).
+    let mut coeffs = [0u8; MAX_SHARDS];
+    let mut dsts_ptrs: [*mut u8; MAX_SHARDS] = [std::ptr::null_mut(); MAX_SHARDS];
 
-            for i in group_start..group_end {
-                let c = matrix[i * num_cols + j];
-                if c != 0 {
-                    coeffs[count] = c;
-                    dst_indices[count] = i;
-                    count += 1;
-                }
+    // For each source shard, update ALL destinations in one pass.
+    for j in 0..num_cols {
+        // Pre-filter: collect only non-zero coefficients and their destination
+        // pointers. This eliminates branches in the SIMD inner loop.
+        let mut count = 0;
+        for i in 0..num_rows {
+            let c = matrix[i * num_cols + j];
+            if c != 0 {
+                coeffs[count] = c;
+                dsts_ptrs[count] = output[i].as_mut_ptr();
+                count += 1;
             }
+        }
 
-            if count == 0 {
-                continue;
-            }
+        if count == 0 {
+            continue;
+        }
 
-            if count == 1 {
-                gf_vect_mad(&mut output[dst_indices[0]], input[j], coeffs[0]);
-            } else {
-                // Collect destination pointers on the stack.
-                let shard_len = output[dst_indices[0]].len();
-                let mut dsts_ptrs: [*mut u8; GROUP_SIZE] = [std::ptr::null_mut(); GROUP_SIZE];
-                for d in 0..count {
-                    dsts_ptrs[d] = output[dst_indices[d]].as_mut_ptr();
-                }
-
-                // SAFETY: each pointer comes from a distinct `output` Vec,
-                // they do not overlap, and shard_len matches their allocation.
-                unsafe {
-                    gf_vect_mad_multi_raw(
-                        &dsts_ptrs[..count],
-                        input[j],
-                        &coeffs[..count],
-                        shard_len,
-                    );
-                }
+        if count == 1 {
+            // SAFETY: pointer comes from output[i] which has shard_len bytes
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(dsts_ptrs[0], shard_len) };
+            gf_vect_mad(dst, input[j], coeffs[0]);
+        } else {
+            // SAFETY: each pointer comes from a distinct `output` Vec,
+            // they do not overlap, and shard_len matches their allocation.
+            unsafe {
+                gf_vect_mad_multi_raw(
+                    &dsts_ptrs[..count],
+                    input[j],
+                    &coeffs[..count],
+                    shard_len,
+                );
             }
         }
     }
