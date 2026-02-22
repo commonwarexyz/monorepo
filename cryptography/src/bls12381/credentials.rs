@@ -24,14 +24,14 @@
 //!
 //! # Security
 //!
-//! - **Blindness**: Validators see only uniformly random group elements during signing.
+//! * **Blindness**: Validators see only uniformly random group elements during signing.
 //!   They learn nothing about the message.
-//! - **Binding**: The credential is a standard BLS signature over the message. It is
+//! * **Binding**: The credential is a standard BLS signature over the message. It is
 //!   invalid for any other message.
-//! - **Unlinkability**: The same message blinded with different factors produces identical
+//! * **Unlinkability**: The same message blinded with different factors produces identical
 //!   unblinded signatures but distinct blinded points. Issuance sessions cannot be
 //!   correlated with redemption.
-//! - **Public verifiability**: Anyone with the group public key can verify the credential
+//! * **Public verifiability**: Anyone with the group public key can verify the credential
 //!   via [`ops::verify_message`](super::primitives::ops::verify_message). No validator
 //!   interaction is needed at redemption.
 //!
@@ -60,10 +60,10 @@
 //!
 //! Approximate security levels:
 //!
-//! - 1 concurrent session: ~2^128
-//! - 2-3 concurrent sessions: ~2^85
-//! - 4-7 concurrent sessions: ~2^64
-//! - 128+ concurrent sessions: ~2^32 (insecure)
+//! * 1 concurrent session: ~2^128
+//! * 2-3 concurrent sessions: ~2^85
+//! * 4-7 concurrent sessions: ~2^64
+//! * 128+ concurrent sessions: ~2^32 (insecure)
 //!
 //! **The application layer must limit concurrent blind signing sessions per user.**
 //!
@@ -114,12 +114,14 @@
 //!     .expect("credential should be valid");
 //! ```
 //!
-//! # References
+//! # Acknowledgements
 //!
-//! - Boldyreva, "Threshold Signatures, Multisignatures and Blind Signatures Based on
+//! The following resources were used as references when implementing this module:
+//!
+//! * Boldyreva, "Threshold Signatures, Multisignatures and Blind Signatures Based on
 //!   the Gap-Diffie-Hellman-Group Signature Scheme" (PKC 2003)
-//! - Benhamouda et al., "One-More Discrete Logarithm Assumption" (EUROCRYPT 2021)
-//! - Jarecki and Nazarian, "Adaptively Secure Threshold Blind BLS Signatures"
+//! * Benhamouda et al., "One-More Discrete Logarithm Assumption" (EUROCRYPT 2021)
+//! * Jarecki and Nazarian, "Adaptively Secure Threshold Blind BLS Signatures"
 //!   (ASIACRYPT 2025)
 
 use super::primitives::{
