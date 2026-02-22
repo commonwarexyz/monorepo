@@ -93,25 +93,23 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     async fn send_payload<Si: Sink>(
         pool: &BufferPool,
         sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
+        sent_counter: &Counter,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
         let msg = payload.encode_with_pool(pool);
         sender.send(msg).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        sent_counter.inc();
         Ok(())
     }
 
     /// Sends pre-encoded bytes directly to the stream.
     async fn send_encoded<Si: Sink>(
         sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
+        sent_counter: &Counter,
         payload: IoBufs,
     ) -> Result<(), Error> {
         sender.send(payload).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        sent_counter.inc();
         Ok(())
     }
 
@@ -134,12 +132,47 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
 
+        // Pre-register and cache metric counters to avoid per-message label allocations
+        // and family lookups on the hot path.
+        let greeting_metric = metrics::Message::new_greeting(&peer);
+        let sent_greeting_counter = self.sent_messages.get_or_create(&greeting_metric).clone();
+        let received_greeting_counter = self
+            .received_messages
+            .get_or_create(&greeting_metric)
+            .clone();
+
+        let bit_vec_metric = metrics::Message::new_bit_vec(&peer);
+        let sent_bit_vec_counter = self.sent_messages.get_or_create(&bit_vec_metric).clone();
+        let received_bit_vec_counter = self
+            .received_messages
+            .get_or_create(&bit_vec_metric)
+            .clone();
+
+        let peers_metric = metrics::Message::new_peers(&peer);
+        let sent_peers_counter = self.sent_messages.get_or_create(&peers_metric).clone();
+        let received_peers_counter = self.received_messages.get_or_create(&peers_metric).clone();
+
+        let invalid_metric = metrics::Message::new_invalid(&peer);
+        let invalid_counter = self.received_messages.get_or_create(&invalid_metric).clone();
+
+        let mut sent_data_counters = HashMap::new();
+        let mut received_data_counters = HashMap::new();
+        let mut dropped_data_counters = HashMap::new();
+        let mut rate_limited_data_metrics = HashMap::new();
+        for channel in rate_limits.keys().copied() {
+            let metric = metrics::Message::new_data(&peer, channel);
+            sent_data_counters.insert(channel, self.sent_messages.get_or_create(&metric).clone());
+            received_data_counters
+                .insert(channel, self.received_messages.get_or_create(&metric).clone());
+            dropped_data_counters.insert(channel, self.dropped_messages.get_or_create(&metric).clone());
+            rate_limited_data_metrics.insert(channel, metric);
+        }
+
         // Send greeting first before any other messages
         Self::send_payload(
             &pool,
             &mut conn_sender,
-            &self.sent_messages,
-            metrics::Message::new_greeting(&peer),
+            &sent_greeting_counter,
             types::Payload::Greeting(greeting),
         )
         .await?;
@@ -151,6 +184,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 let mut tracker = tracker.clone();
                 let mailbox = self.mailbox.clone();
                 let rate_limits = rate_limits.clone();
+                let sent_data_counters = sent_data_counters.clone();
+                let sent_bit_vec_counter = sent_bit_vec_counter.clone();
+                let sent_peers_counter = sent_peers_counter.clone();
                 move |context| async move {
                     // Set the initial deadline to now to start gossiping immediately
                     let mut deadline = context.current();
@@ -169,13 +205,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         Some(msg) = self.control.recv() else {
                             return Err(Error::PeerDisconnected);
                         } => {
-                            let (metric, payload) = match msg {
+                            let (sent_counter, payload) = match msg {
                                 Message::BitVec(bit_vec) => (
-                                    metrics::Message::new_bit_vec(&peer),
+                                    &sent_bit_vec_counter,
                                     types::Payload::BitVec(bit_vec),
                                 ),
                                 Message::Peers(peers) => (
-                                    metrics::Message::new_peers(&peer),
+                                    &sent_peers_counter,
                                     types::Payload::Peers(peers),
                                 ),
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
@@ -183,8 +219,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             Self::send_payload(
                                 &pool,
                                 &mut conn_sender,
-                                &self.sent_messages,
-                                metric,
+                                sent_counter,
                                 payload,
                             )
                             .await?;
@@ -192,10 +227,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                            let sent_counter = sent_data_counters
+                                .get(&encoded.channel)
+                                .expect("channel should have pre-registered metric");
                             Self::send_encoded(
                                 &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_data(&peer, encoded.channel),
+                                sent_counter,
                                 encoded.payload,
                             )
                             .await?;
@@ -203,10 +240,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         msg_low = self.low.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                            let sent_counter = sent_data_counters
+                                .get(&encoded.channel)
+                                .expect("channel should have pre-registered metric");
                             Self::send_encoded(
                                 &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_data(&peer, encoded.channel),
+                                sent_counter,
                                 encoded.payload,
                             )
                             .await?;
@@ -245,18 +284,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_invalid(&peer))
-                                .inc();
+                            invalid_counter.inc();
                             return Err(Error::DecodeFailed(err));
                         }
                     };
 
                     // Handle greeting messages first (they `continue` the loop).
                     if let types::Payload::Greeting(info) = msg {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_greeting(&peer))
-                            .inc();
+                        received_greeting_counter.inc();
                         if greeting_received {
                             debug!(?peer, "received duplicate greeting");
                             return Err(Error::DuplicateGreeting);
@@ -287,16 +322,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
-                    let (metric, rate_limiter) = match &msg {
+                    let (received_counter, rate_limited_metric, rate_limiter) = match &msg {
                         types::Payload::Data(data) => match rate_limits.get(&data.channel) {
                             Some(rate_limit) => {
-                                (metrics::Message::new_data(&peer, data.channel), Some(rate_limit))
+                                let received_counter = received_data_counters
+                                    .get(&data.channel)
+                                    .expect("channel should have pre-registered metric");
+                                let rate_limited_metric = rate_limited_data_metrics
+                                    .get(&data.channel)
+                                    .expect("channel should have pre-registered metric");
+                                (received_counter, rate_limited_metric, Some(rate_limit))
                             }
                             None => {
                                 debug!(?peer, channel = data.channel, "invalid channel");
-                                self.received_messages
-                                    .get_or_create(&metrics::Message::new_invalid(&peer))
-                                    .inc();
+                                invalid_counter.inc();
                                 return Err(Error::InvalidChannel);
                             }
                         },
@@ -308,7 +347,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 first_bit_vec_received = true;
                                 None
                             };
-                            (metrics::Message::new_bit_vec(&peer), rate_limiter)
+                            (
+                                &received_bit_vec_counter,
+                                &bit_vec_metric,
+                                rate_limiter,
+                            )
                         }
                         types::Payload::Peers(_) => {
                             let rate_limiter = if first_peers_received {
@@ -317,13 +360,17 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 first_peers_received = true;
                                 None
                             };
-                            (metrics::Message::new_peers(&peer), rate_limiter)
+                            (
+                                &received_peers_counter,
+                                &peers_metric,
+                                rate_limiter,
+                            )
                         }
                     };
-                    self.received_messages.get_or_create(&metric).inc();
+                    received_counter.inc();
                     if let Some(rate_limiter) = rate_limiter {
                         if let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
+                            self.rate_limited.get_or_create(rate_limited_metric).inc();
                             let wait_duration = wait_until.wait_time_from(context.now());
                             context.sleep(wait_duration).await;
                         }
@@ -341,8 +388,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender.try_send((peer.clone(), data.message)) {
                                 if matches!(e, TrySendError::Full(_)) {
-                                    self.dropped_messages
-                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                    dropped_data_counters
+                                        .get(&data.channel)
+                                        .expect("channel should have pre-registered metric")
                                         .inc();
                                 }
                                 debug!(err=?e, channel=data.channel, "failed to send message to client");

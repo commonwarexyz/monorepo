@@ -1,13 +1,14 @@
 use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
 use commonware_p2p::{
-    authenticated::lookup::{self, Config as LookupConfig, Receiver as LookupReceiver, Sender as LookupSender},
+    authenticated::lookup::{
+        self, Config as LookupConfig, Receiver as LookupReceiver, Sender as LookupSender,
+    },
     Address, AddressableManager as _, Receiver as _, Recipients, Sender as _,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
-    Clock as _,
-    IoBuf, Metrics as _, Quota,
+    Clock as _, IoBuf, Metrics as _, Quota,
 };
 use commonware_utils::ordered::Map;
 use criterion::{criterion_group, Criterion, Throughput};
@@ -26,7 +27,9 @@ const MESSAGES_PER_ITERATION: u64 = 128;
 fn next_local_addr() -> SocketAddr {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .expect("failed to reserve local address");
-    let addr = listener.local_addr().expect("failed to fetch local address");
+    let addr = listener
+        .local_addr()
+        .expect("failed to fetch local address");
     drop(listener);
     addr
 }
@@ -83,10 +86,8 @@ fn bench_steady_state(c: &mut Criterion) {
                 oracle0.track(0, peers.clone()).await;
                 oracle1.track(0, peers).await;
 
-                let quota_0 =
-                    Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
-                let quota_1 =
-                    Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
+                let quota_0 = Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
+                let quota_1 = Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
                 let (mut sender0, _receiver0): (LookupSender<_, Context>, LookupReceiver<_>) =
                     network0.register(CHANNEL, quota_0, RECEIVER_BACKLOG);
                 let (_sender1, mut receiver1): (LookupSender<_, Context>, LookupReceiver<_>) =
@@ -98,16 +99,22 @@ fn bench_steady_state(c: &mut Criterion) {
                 let payload = IoBuf::from(vec![0xCD; message_size]);
 
                 // Establish connection before timing.
+                let warmup_deadline = context.current() + Duration::from_secs(10);
                 loop {
                     let sent = sender0
                         .send(Recipients::One(peer1_pk.clone()), payload.clone(), true)
                         .await
                         .expect("warm-up send failed");
                     if sent.len() == 1 {
-                        let (_sender, received) = receiver1.recv().await.expect("warm-up recv failed");
+                        let (_sender, received) =
+                            receiver1.recv().await.expect("warm-up recv failed");
                         debug_assert_eq!(received.len(), message_size);
                         break;
                     }
+                    assert!(
+                        context.current() < warmup_deadline,
+                        "timed out waiting for peer connection"
+                    );
                     context.sleep(Duration::from_millis(5)).await;
                 }
 

@@ -2,11 +2,7 @@ use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
-    IoBuf,
-    Listener as _,
-    Metrics as _,
-    Network as _,
-    Spawner as _,
+    IoBuf, Listener as _, Metrics as _, Network as _, Spawner as _,
 };
 use commonware_stream::encrypted::{self, Config as StreamConfig};
 use criterion::{criterion_group, Criterion, Throughput};
@@ -52,22 +48,25 @@ fn bench_steady_state(c: &mut Criterion) {
                     .expect("failed to bind listener");
                 let listener_addr = listener.local_addr().expect("failed to get listener addr");
 
-                let listener_task = context
-                    .clone()
-                    .with_label("listener")
-                    .spawn(move |context| async move {
-                        let (_addr, sink, stream) =
-                            listener.accept().await.expect("failed to accept connection");
-                        encrypted::listen(
-                            context,
-                            |_| async { true },
-                            stream_config(listener_key),
-                            stream,
-                            sink,
-                        )
-                        .await
-                        .expect("listener handshake failed")
-                    });
+                let listener_task =
+                    context
+                        .clone()
+                        .with_label("listener")
+                        .spawn(move |context| async move {
+                            let (_addr, sink, stream) = listener
+                                .accept()
+                                .await
+                                .expect("failed to accept connection");
+                            encrypted::listen(
+                                context,
+                                |_| async { true },
+                                stream_config(listener_key),
+                                stream,
+                                sink,
+                            )
+                            .await
+                            .expect("listener handshake failed")
+                        });
 
                 let (sink, stream) = context
                     .dial(listener_addr)
@@ -83,9 +82,8 @@ fn bench_steady_state(c: &mut Criterion) {
                 .await
                 .expect("dialer handshake failed");
 
-                let (_peer, _sender, mut receiver) = listener_task
-                    .await
-                    .expect("listener task failed");
+                let (_peer, _sender, mut receiver) =
+                    listener_task.await.expect("listener task failed");
 
                 let payload = IoBuf::from(vec![0xABu8; message_size]);
                 let start = Instant::now();
