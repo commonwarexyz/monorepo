@@ -1,20 +1,21 @@
-use commonware_coding::{Config, Scheme};
+use commonware_coding::{Config, Raptor, Scheme};
+use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, NZU16};
-use criterion::{criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
-mod no_coding;
-mod raptor;
-mod reed_solomon;
-mod zoda;
+type R = Raptor<Sha256>;
 
-pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+/// Raptor codes require k >= 4, so we skip chunks=10 (where min=3).
+const VALID_CHUNKS: &[u16] = &[25, 50, 100, 250];
+
+fn bench_encode(c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
-    for data_length in cases.into_iter() {
-        for chunks in [10u16, 25, 50, 100, 250] {
+    for data_length in cases {
+        for &chunks in VALID_CHUNKS {
             for conc in [1, 4, 8] {
                 let min = chunks / 3;
                 let config = Config {
@@ -23,20 +24,21 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
-                    &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
+                    &format!(
+                        "raptor::encode/msg_len={data_length} chunks={chunks} conc={conc}"
+                    ),
                     |b| {
                         b.iter_batched(
                             || {
-                                // Generate random data
                                 let mut data = vec![0u8; data_length];
                                 rng.fill_bytes(&mut data);
                                 data
                             },
                             |data| {
                                 if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                    R::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    R::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -48,11 +50,11 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+fn bench_decode(c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
-    for data_length in cases.into_iter() {
-        for chunks in [10u16, 25, 50, 100, 250] {
+    for data_length in cases {
+        for &chunks in VALID_CHUNKS {
             for conc in [1, 4, 8] {
                 let min = chunks / 3;
                 let config = Config {
@@ -61,19 +63,19 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
-                    &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
+                    &format!(
+                        "raptor::decode/msg_len={data_length} chunks={chunks} conc={conc}"
+                    ),
                     |b| {
                         b.iter_batched(
                             || {
-                                // Generate random data
                                 let mut data = vec![0u8; data_length];
                                 rng.fill_bytes(&mut data);
 
-                                // Encode data
                                 let (commitment, mut shards) = if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                    R::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    R::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 };
 
                                 let my_shard = shards.pop().unwrap();
@@ -83,7 +85,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     .take(min as usize)
                                     .map(|(i, shard)| {
                                         let (_, _, weak_shard) =
-                                            S::weaken(&config, &commitment, i as u16, shard)
+                                            R::weaken(&config, &commitment, i as u16, shard)
                                                 .unwrap();
                                         weak_shard
                                     })
@@ -92,10 +94,11 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                 (commitment, my_shard, weak_shards)
                             },
                             |(commitment, my_shard, weak_shards)| {
-                                let (checking_data, _, _) = S::weaken(
+                                let (checking_data, _, _) = R::weaken(
                                     &config,
                                     &commitment,
-                                    config.minimum_shards.get() + config.extra_shards.get() - 1,
+                                    config.minimum_shards.get() + config.extra_shards.get()
+                                        - 1,
                                     my_shard,
                                 )
                                 .unwrap();
@@ -103,7 +106,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     .into_iter()
                                     .enumerate()
                                     .map(|(i, weak_shard)| {
-                                        S::check(
+                                        R::check(
                                             &config,
                                             &commitment,
                                             &checking_data,
@@ -114,7 +117,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     })
                                     .collect::<Vec<_>>();
                                 if conc > 1 {
-                                    S::decode(
+                                    R::decode(
                                         &config,
                                         &commitment,
                                         checking_data,
@@ -123,7 +126,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     )
                                     .unwrap()
                                 } else {
-                                    S::decode(
+                                    R::decode(
                                         &config,
                                         &commitment,
                                         checking_data,
@@ -142,9 +145,8 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-criterion_main!(
-    reed_solomon::benches,
-    no_coding::benches,
-    raptor::benches,
-    zoda::benches,
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_encode, bench_decode
+}
