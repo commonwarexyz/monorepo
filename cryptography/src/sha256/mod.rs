@@ -79,6 +79,39 @@ impl Hasher for Sha256 {
         self.hasher = ISha256::new();
         self
     }
+
+    /// Hashes two 32-byte digests using the raw SHA-256 compression function.
+    ///
+    /// Standard `SHA-256(left || right)` requires two compression calls
+    /// (one for the 64-byte data block, one for the padding block).
+    /// This method feeds `left || right` as a single 64-byte block
+    /// directly into `compress256` with the SHA-256 IV, using only
+    /// one compression call.
+    ///
+    /// # Security
+    ///
+    /// The SHA-256 compression function with a fixed IV is collision-resistant
+    /// on fixed-length inputs. Domain separation from leaf hashing is inherent:
+    /// leaves use standard SHA-256 (with Merkle-Damgard padding) while this
+    /// method omits padding entirely, producing distinct outputs for the same
+    /// byte content.
+    fn hash_node(&mut self, left: &Digest, right: &Digest) -> Digest {
+        // SHA-256 IV (FIPS 180-4 section 5.3.3)
+        let mut state: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ce935,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        ];
+        let mut block = [0u8; 64];
+        block[..32].copy_from_slice(left.as_ref());
+        block[32..].copy_from_slice(right.as_ref());
+        let ga = sha2::digest::generic_array::GenericArray::from_slice(&block);
+        sha2::compress256(&mut state, core::slice::from_ref(ga));
+        let mut out = [0u8; 32];
+        for (chunk, word) in out.chunks_exact_mut(4).zip(state.iter()) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        Digest::from(out)
+    }
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -217,6 +250,46 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[test]
+    fn test_hash_node_deterministic() {
+        let a = Sha256::hash(b"left");
+        let b = Sha256::hash(b"right");
+        let mut hasher = Sha256::new();
+        let r1 = hasher.hash_node(&a, &b);
+        let r2 = hasher.hash_node(&a, &b);
+        assert_eq!(r1, r2, "hash_node must be deterministic");
+    }
+
+    #[test]
+    fn test_hash_node_order_matters() {
+        let a = Sha256::hash(b"left");
+        let b = Sha256::hash(b"right");
+        let mut hasher = Sha256::new();
+        let lr = hasher.hash_node(&a, &b);
+        let rl = hasher.hash_node(&b, &a);
+        assert_ne!(lr, rl, "hash_node(a,b) != hash_node(b,a)");
+    }
+
+    #[test]
+    fn test_hash_node_differs_from_standard_sha256() {
+        let a = Sha256::hash(b"left");
+        let b = Sha256::hash(b"right");
+
+        // hash_node uses raw compression
+        let mut hasher = Sha256::new();
+        let node = hasher.hash_node(&a, &b);
+
+        // Standard SHA-256(a || b) uses Merkle-Damgard with padding
+        hasher.update(a.as_ref());
+        hasher.update(b.as_ref());
+        let standard = hasher.finalize();
+
+        assert_ne!(
+            node, standard,
+            "hash_node must differ from SHA-256(left || right)"
+        );
     }
 
     #[cfg(feature = "arbitrary")]

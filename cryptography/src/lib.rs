@@ -262,6 +262,23 @@ commonware_macros::stability_scope!(BETA {
         fn hash(message: &[u8]) -> Self::Digest {
             Self::new().update(message).finalize()
         }
+
+        /// Hashes two digests to produce a parent digest in a Merkle tree.
+        ///
+        /// Implementations may override this with a construction that uses
+        /// fewer compression calls than `update(left) + update(right) + finalize()`.
+        /// For example, SHA-256 uses the raw compression function on a single
+        /// 64-byte block (`compress256`), halving the work compared to standard
+        /// `SHA-256(left || right)` which requires a data block and a padding block.
+        ///
+        /// The output of an override need not match `H(left || right)`.
+        /// Callers must use this method (not manual `update`+`finalize`) for
+        /// Merkle-tree internal-node hashing so that build and verify agree.
+        fn hash_node(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+            self.update(left.as_ref());
+            self.update(right.as_ref());
+            self.finalize()
+        }
     }
 });
 
