@@ -1984,18 +1984,19 @@ mod test_plan {
                         "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
                     ));
                 }
-                for &player in &self.players {
+                let any_valid_ack = self.players.iter().any(|&player| {
                     let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
                         || self.bad_shares.contains(&(missing_dealer, player))
                         || self
                             .bad_player_sigs
                             .get(&(missing_dealer, player))
                             .is_some_and(Masks::modifies_player_ack);
-                    if ack_corrupted {
-                        return Err(anyhow!(
-                            "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack player {player}"
-                        ));
-                    }
+                    !ack_corrupted
+                });
+                if !any_valid_ack {
+                    return Err(anyhow!(
+                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack at least one player"
+                    ));
                 }
             }
             for &(player, missing_dealer) in &self.finalize_missing_dealer_msg_fails {
@@ -2405,10 +2406,7 @@ mod test_plan {
                             .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
-                            assert!(
-                                missing_log.get_ack(&player_pk).is_some(),
-                                "dealer {missing_dealer} did not ack player {i_player}, cannot assert missing-message corruption"
-                            );
+                            let was_acked = missing_log.get_ack(&player_pk).is_some();
 
                             let replay = persisted_msgs
                                 .get(&player_pk)
@@ -2424,10 +2422,17 @@ mod test_plan {
                                 &dealer_logs,
                                 replay_without,
                             );
-                            assert!(
-                                matches!(resumed, Err(Error::PlayerCorrupted)),
-                                "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
-                            );
+                            if was_acked {
+                                assert!(
+                                    matches!(resumed, Err(Error::PlayerCorrupted)),
+                                    "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
+                                );
+                            } else {
+                                assert!(
+                                    resumed.is_ok(),
+                                    "resume without dealer {missing_dealer} message should succeed for unacked player {i_player}"
+                                );
+                            }
                         }
                     }
 
@@ -2860,6 +2865,17 @@ mod test {
     }
 
     #[test]
+    fn resume_missing_good_dealer_message_skips_unacked_players() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(1, 0)
+                    .resume_missing_dealer_msg_fails(2, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
     fn finalize_fails_after_resume_without_good_dealer_message() -> anyhow::Result<()> {
         Plan::new(NZU32!(1))
             .with(Round::new(vec![0], vec![0]).finalize_missing_dealer_msg_fails(0, 0))
@@ -2883,14 +2899,6 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
-            )
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .no_ack(1, 0)
                     .resume_missing_dealer_msg_fails(2, 1),
             )
             .validate()
