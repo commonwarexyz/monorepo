@@ -101,6 +101,46 @@ impl<H: Hasher> Builder<H> {
     pub fn build(self) -> Tree<H::Digest> {
         Tree::new(self.hasher, self.leaves)
     }
+
+    /// Computes only the finalized root without storing the full tree.
+    ///
+    /// This is more efficient than [Builder::build] when proofs are not
+    /// needed (e.g., verifying consistency of a reconstructed encoding)
+    /// because intermediate levels are computed in-place without
+    /// additional allocations.
+    pub fn root(mut self) -> H::Digest {
+        let leaf_count = self.leaves.len() as u32;
+
+        // Empty tree: root = H(0 || H())
+        if self.leaves.is_empty() {
+            let empty_root = self.hasher.finalize();
+            self.hasher.update(&0u32.to_be_bytes());
+            self.hasher.update(&empty_root);
+            return self.hasher.finalize();
+        }
+
+        // Compute tree in-place, overwriting the first half at each level.
+        let mut level = self.leaves;
+        while level.len() > 1 {
+            let len = level.len();
+            let new_len = len.div_ceil(2);
+            for i in 0..new_len {
+                let left = level[2 * i];
+                let right = if 2 * i + 1 < len {
+                    level[2 * i + 1]
+                } else {
+                    level[2 * i]
+                };
+                level[i] = self.hasher.hash_node(&left, &right);
+            }
+            level.truncate(new_len);
+        }
+
+        // Finalize: H(leaf_count || tree_root)
+        self.hasher.update(&leaf_count.to_be_bytes());
+        self.hasher.update(&level[0]);
+        self.hasher.finalize()
+    }
 }
 
 /// Constructed Binary Merkle Tree (BMT).
@@ -142,19 +182,13 @@ impl<D: Digest> Tree<D> {
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             for chunk in current_level.chunks(2) {
-                // Hash the left child
-                hasher.update(&chunk[0]);
-
-                // Hash the right child
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
+                let right = if chunk.len() == 2 {
+                    &chunk[1]
                 } else {
                     // If no right child exists, duplicate left child.
-                    hasher.update(&chunk[0]);
+                    &chunk[0]
                 };
-
-                // Compute the parent digest
-                next_level.push(hasher.finalize());
+                next_level.push(hasher.hash_node(&chunk[0], right));
             }
 
             // Add the computed level to the tree
@@ -506,9 +540,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            computed = hasher.finalize();
+            computed = hasher.hash_node(left_node, right_node);
 
             // Move up the tree
             position /= 2;
@@ -623,9 +655,7 @@ impl<D: Digest> Proof<D> {
                 };
 
                 // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                next_level.push((parent_pos, hasher.finalize()));
+                next_level.push((parent_pos, hasher.hash_node(&left, &right)));
 
                 idx += 1;
             }
@@ -1494,6 +1524,35 @@ mod tests {
         hasher.update(Sha256::hash(b"").as_ref());
         let expected_root = hasher.finalize();
         assert_eq!(roots[0], expected_root);
+    }
+
+    #[test]
+    fn test_builder_root_matches_build() {
+        // Verify builder.root() matches builder.build().root() for various sizes.
+        for n in [0, 1, 2, 3, 4, 7, 8, 15, 16, 100, 1000] {
+            let digests: Vec<Digest> = (0..n as u32)
+                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .collect();
+
+            // Build full tree
+            let mut builder_full = Builder::<Sha256>::new(n);
+            for d in &digests {
+                builder_full.add(d);
+            }
+            let full_root = builder_full.build().root();
+
+            // Root-only path
+            let mut builder_root = Builder::<Sha256>::new(n);
+            for d in &digests {
+                builder_root.add(d);
+            }
+            let fast_root = builder_root.root();
+
+            assert_eq!(
+                full_root, fast_root,
+                "root mismatch for n={n}"
+            );
+        }
     }
 
     #[rstest]

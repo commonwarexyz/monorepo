@@ -355,7 +355,7 @@ fn decode<H: Hasher, S: Strategy>(
     let recovery_shards: Vec<&[u8]> = encoding.recovery_iter().collect();
     shards.extend(recovery_shards);
 
-    // Build Merkle tree
+    // Compute Merkle root (no proofs needed, so use in-place root computation)
     let mut builder = Builder::<H>::new(n);
     let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
         hasher.update(shard);
@@ -364,10 +364,7 @@ fn decode<H: Hasher, S: Strategy>(
     for hash in &shard_hashes {
         builder.add(hash);
     }
-    let tree = builder.build();
-
-    // Confirm root is consistent
-    if tree.root() != *root {
+    if builder.root() != *root {
         return Err(Error::Inconsistent);
     }
 
