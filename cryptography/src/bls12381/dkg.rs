@@ -1843,7 +1843,7 @@ mod test_plan {
         dealers: Vec<u32>,
         players: Vec<u32>,
         crash_resume_players: BTreeSet<(u32, u32)>,
-        resume_missing_dealer_msg_fails: BTreeSet<(u32, u32)>,
+        resume_missing_dealer_msg_fails: BTreeSet<(u32, u32, u32)>,
         finalize_missing_dealer_msg_fails: BTreeSet<(u32, u32)>,
         no_acks: BTreeSet<(u32, u32)>,
         bad_shares: BTreeSet<(u32, u32)>,
@@ -1875,11 +1875,12 @@ mod test_plan {
 
         pub fn resume_missing_dealer_msg_fails(
             mut self,
+            player: u32,
             after_dealer: u32,
             missing_dealer: u32,
         ) -> Self {
             self.resume_missing_dealer_msg_fails
-                .insert((after_dealer, missing_dealer));
+                .insert((player, after_dealer, missing_dealer));
             self
         }
 
@@ -1963,7 +1964,10 @@ mod test_plan {
                 .map(|(idx, &dealer)| (dealer, idx))
                 .collect();
             let previous_successful_round = previous_players.is_some();
-            for &(after_dealer, missing_dealer) in &self.resume_missing_dealer_msg_fails {
+            for &(player, after_dealer, missing_dealer) in &self.resume_missing_dealer_msg_fails {
+                if !self.players.contains(&player) {
+                    return Err(anyhow!("resume_missing player {player} not in round"));
+                }
                 if !self.dealers.contains(&after_dealer) {
                     return Err(anyhow!("resume_missing dealer {after_dealer} not in round"));
                 }
@@ -1984,18 +1988,16 @@ mod test_plan {
                         "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
                     ));
                 }
-                for &player in &self.players {
-                    let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
-                        || self.bad_shares.contains(&(missing_dealer, player))
-                        || self
-                            .bad_player_sigs
-                            .get(&(missing_dealer, player))
-                            .is_some_and(Masks::modifies_player_ack);
-                    if ack_corrupted {
-                        return Err(anyhow!(
-                            "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack player {player}"
-                        ));
-                    }
+                let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
+                    || self.bad_shares.contains(&(missing_dealer, player))
+                    || self
+                        .bad_player_sigs
+                        .get(&(missing_dealer, player))
+                        .is_some_and(Masks::modifies_player_ack);
+                if ack_corrupted {
+                    return Err(anyhow!(
+                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack player {player}"
+                    ));
                 }
             }
             for &(player, missing_dealer) in &self.finalize_missing_dealer_msg_fails {
@@ -2219,12 +2221,15 @@ mod test_plan {
                         .or_default()
                         .push(player);
                 }
-                let mut resume_missing_msg_by_dealer: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-                for &(after_dealer, missing_dealer) in &round.resume_missing_dealer_msg_fails {
+                let mut resume_missing_msg_by_dealer: BTreeMap<u32, Vec<(u32, u32)>> =
+                    BTreeMap::new();
+                for &(player, after_dealer, missing_dealer) in
+                    &round.resume_missing_dealer_msg_fails
+                {
                     resume_missing_msg_by_dealer
                         .entry(after_dealer)
                         .or_default()
-                        .push(missing_dealer);
+                        .push((player, missing_dealer));
                 }
 
                 // Run dealer protocol
@@ -2390,7 +2395,7 @@ mod test_plan {
 
                     // For selected checkpoints, omit a good dealer's private message and
                     // ensure resume reports corruption. Do not mutate player state.
-                    for &missing_dealer in resume_missing_msg_by_dealer
+                    for &(i_player, missing_dealer) in resume_missing_msg_by_dealer
                         .get(&i_dealer)
                         .into_iter()
                         .flatten()
@@ -2403,32 +2408,30 @@ mod test_plan {
                         let missing_log = dealer_logs
                             .get(&missing_pk)
                             .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
-                        for &i_player in &round.players {
-                            let player_pk = keys[i_player as usize].public_key();
-                            assert!(
-                                missing_log.get_ack(&player_pk).is_some(),
-                                "dealer {missing_dealer} did not ack player {i_player}, cannot assert missing-message corruption"
-                            );
+                        let player_pk = keys[i_player as usize].public_key();
+                        assert!(
+                            missing_log.get_ack(&player_pk).is_some(),
+                            "dealer {missing_dealer} did not ack player {i_player}, cannot assert missing-message corruption"
+                        );
 
-                            let replay = persisted_msgs
-                                .get(&player_pk)
-                                .cloned()
-                                .expect("player should be present");
-                            let replay_without = replay
-                                .into_iter()
-                                .filter(|(dealer, _, _)| dealer != &missing_pk);
-                            let player_sk = keys[i_player as usize].clone();
-                            let resumed = Player::resume::<N3f1>(
-                                info.clone(),
-                                player_sk,
-                                &dealer_logs,
-                                replay_without,
-                            );
-                            assert!(
-                                matches!(resumed, Err(Error::PlayerCorrupted)),
-                                "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
-                            );
-                        }
+                        let replay = persisted_msgs
+                            .get(&player_pk)
+                            .cloned()
+                            .expect("player should be present");
+                        let replay_without = replay
+                            .into_iter()
+                            .filter(|(dealer, _, _)| dealer != &missing_pk);
+                        let player_sk = keys[i_player as usize].clone();
+                        let resumed = Player::resume::<N3f1>(
+                            info.clone(),
+                            player_sk,
+                            &dealer_logs,
+                            replay_without,
+                        );
+                        assert!(
+                            matches!(resumed, Err(Error::PlayerCorrupted)),
+                            "resume without dealer {missing_dealer} message should report PlayerCorrupted for player {i_player}"
+                        );
                     }
 
                     // Crash/resume selected players after this dealer has finalized.
@@ -2854,7 +2857,21 @@ mod test {
         Plan::new(NZU32!(4))
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg_fails(0, 2, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn resume_missing_good_dealer_message_fails_for_targeted_players() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    // Dealer 1 reveals for player 1, but still acks players 0 and 2.
+                    // The resume corruption check should still run for targeted players.
+                    .no_ack(1, 1)
+                    .resume_missing_dealer_msg_fails(0, 2, 1)
+                    .resume_missing_dealer_msg_fails(2, 2, 1),
             )
             .run::<MinPk>(0)
     }
@@ -2875,7 +2892,7 @@ mod test {
         assert!(Plan::new(NZU32!(4))
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
+                    .resume_missing_dealer_msg_fails(0, 1, 2),
             )
             .validate()
             .is_err());
@@ -2883,7 +2900,7 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg_fails(0, 2, 1),
             )
             .validate()
             .is_err());
@@ -2891,7 +2908,7 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg_fails(0, 2, 1),
             )
             .validate()
             .is_err());
