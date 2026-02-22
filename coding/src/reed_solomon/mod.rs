@@ -4,15 +4,58 @@ use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
-use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{collections::HashSet, marker::PhantomData};
+use std::{collections::HashSet, fmt::Debug, marker::PhantomData};
 use thiserror::Error;
+
+pub(crate) mod gf8_arithmetic;
+pub(crate) mod gf8_simd;
+
+mod gf16;
+mod gf8;
+
+pub use gf16::Gf16;
+pub use gf8::Gf8;
+
+/// A Reed-Solomon encoding/decoding engine over a specific Galois field.
+///
+/// Implementations provide the core field arithmetic and matrix operations
+/// for encoding original data shards into recovery shards, and decoding
+/// a mix of original and recovery shards back to the full set of originals.
+pub trait Engine: Clone + Debug + Send + Sync + 'static {
+    /// Error type for encode/decode operations.
+    type Error: Debug + std::fmt::Display + std::error::Error + Send + 'static;
+
+    /// Required shard length alignment in bytes (1 = no requirement).
+    const SHARD_ALIGNMENT: usize;
+
+    /// Maximum total shards (k + m) supported by this engine.
+    fn max_shards() -> usize;
+
+    /// Encode `k` original shards into `m` recovery shards.
+    ///
+    /// All shards in `original` must have the same length.
+    fn encode(k: usize, m: usize, original: &[&[u8]]) -> Result<Vec<Vec<u8>>, Self::Error>;
+
+    /// Decode from a mix of original and recovery shards.
+    ///
+    /// `original`: (index, data) pairs for available originals (index in `0..k`).
+    /// `recovery`: (index, data) pairs for available recovery (index in `0..m`).
+    ///
+    /// Returns all `k` original shards.
+    fn decode(
+        k: usize,
+        m: usize,
+        shard_len: usize,
+        original: &[(usize, &[u8])],
+        recovery: &[(usize, &[u8])],
+    ) -> Result<Vec<Vec<u8>>, Self::Error>;
+}
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("reed-solomon error: {0}")]
-    ReedSolomon(#[from] RsError),
+    #[error("engine error: {0}")]
+    Engine(String),
     #[error("inconsistent")]
     Inconsistent,
     #[error("invalid proof")]
@@ -31,11 +74,15 @@ pub enum Error {
     TooManyTotalShards(u32),
 }
 
-fn total_shards(config: &Config) -> Result<u16, Error> {
+fn validate_total_shards<V: Engine>(config: &Config) -> Result<u16, Error> {
     let total = config.total_shards();
-    total
+    let n: u16 = total
         .try_into()
-        .map_err(|_| Error::TooManyTotalShards(total))
+        .map_err(|_| Error::TooManyTotalShards(total))?;
+    if (n as usize) > V::max_shards() {
+        return Err(Error::TooManyTotalShards(total));
+    }
+    Ok(n)
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
@@ -132,16 +179,18 @@ where
     }
 }
 
-/// Prepare data for encoding.
-fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
+/// Prepare data for encoding, splitting it into `k` equal-length shards
+/// with a 4-byte length prefix.
+fn prepare_data<V: Engine>(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     // Compute shard length
     let data_len = data.len();
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
+    // Align shard length to the engine's requirement
+    let align = V::SHARD_ALIGNMENT;
+    if align > 1 && !shard_len.is_multiple_of(align) {
+        shard_len = shard_len.div_ceil(align) * align;
     }
 
     // Prepare data
@@ -178,8 +227,8 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
 /// Type alias for the internal encoding result.
 type Encoding<D> = (bmt::Tree<D>, Vec<Vec<u8>>);
 
-/// Inner logic for [encode()]
-fn encode_inner<H: Hasher, S: Strategy>(
+/// Inner logic for encoding with a specific engine.
+fn encode_inner<V: Engine, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -196,23 +245,10 @@ fn encode_inner<H: Hasher, S: Strategy>(
     }
 
     // Prepare data
-    let mut shards = prepare_data(data, k, m);
-    let shard_len = shards[0].len();
-
-    // Create encoder
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in &shards {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-
-    // Compute recovery shards
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
+    let mut shards = prepare_data::<V>(data, k, m);
+    // Use engine to encode
+    let original_refs: Vec<&[u8]> = shards.iter().map(|s| s.as_slice()).collect();
+    let recovery_shards = V::encode(k, m, &original_refs).map_err(|e| Error::Engine(e.to_string()))?;
     shards.extend(recovery_shards);
 
     // Build Merkle tree
@@ -230,27 +266,15 @@ fn encode_inner<H: Hasher, S: Strategy>(
 }
 
 /// Encode data using a Reed-Solomon coder and insert it into a [bmt].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-/// - `concurrency`: The level of concurrency to use.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
 #[allow(clippy::type_complexity)]
-fn encode<H: Hasher, S: Strategy>(
+fn rs_encode<V: Engine, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
     strategy: &S,
 ) -> Result<(H::Digest, Vec<Chunk<H::Digest>>), Error> {
     // Encode data
-    let (tree, shards) = encode_inner::<H, _>(total, min, data, strategy)?;
+    let (tree, shards) = encode_inner::<V, H, _>(total, min, data, strategy)?;
     let root = tree.root();
     let n = total as usize;
 
@@ -264,22 +288,8 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
-/// Decode data from a set of [Chunk]s.
-///
-/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-/// - `concurrency`: The level of concurrency to use.
-///
-/// # Returns
-///
-/// - `data`: The decoded data.
-fn decode<H: Hasher, S: Strategy>(
+/// Decode data from a set of [Chunk]s using a specific engine.
+fn rs_decode<V: Engine, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
@@ -296,13 +306,12 @@ fn decode<H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    // Verify chunks
+    // Collect and validate chunks
     let shard_len = chunks[0].shard.len();
     let mut seen = HashSet::new();
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     for chunk in chunks {
-        // Check for duplicate index
         let index = chunk.index;
         if index >= total {
             return Err(Error::InvalidIndex(index));
@@ -312,7 +321,6 @@ fn decode<H: Hasher, S: Strategy>(
         }
         seen.insert(index);
 
-        // Add to provided shards
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
@@ -320,44 +328,26 @@ fn decode<H: Hasher, S: Strategy>(
         }
     }
 
-    // Decode original data
-    let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for (idx, ref shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, ref shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+    // Use engine to decode
+    let decoded_originals = V::decode(k, m, shard_len, &provided_originals, &provided_recoveries)
+        .map_err(|e| Error::Engine(e.to_string()))?;
 
-    // Reconstruct all original shards
-    let mut shards = Vec::with_capacity(n);
-    shards.resize(k, Default::default());
-    for (idx, shard) in provided_originals {
-        shards[idx] = shard;
+    // Reconstruct all shards (originals from decode + re-encode for recovery)
+    let original_refs: Vec<&[u8]> = decoded_originals.iter().map(|s| s.as_slice()).collect();
+    let recovery_shards =
+        V::encode(k, m, &original_refs).map_err(|e| Error::Engine(e.to_string()))?;
+
+    let mut all_shards: Vec<&[u8]> = Vec::with_capacity(n);
+    for s in &decoded_originals {
+        all_shards.push(s.as_slice());
     }
-    for (idx, shard) in decoding.restored_original_iter() {
-        shards[idx] = shard;
+    for s in &recovery_shards {
+        all_shards.push(s.as_slice());
     }
 
-    // Encode recovered data to get recovery shards
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in shards.iter().take(k) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<&[u8]> = encoding.recovery_iter().collect();
-    shards.extend(recovery_shards);
-
-    // Build Merkle tree
+    // Build Merkle tree to verify consistency
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+    let shard_hashes = strategy.map_init_collect_vec(&all_shards, H::new, |hasher, shard| {
         hasher.update(shard);
         hasher.finalize()
     });
@@ -372,103 +362,28 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    Ok(extract_data(shards, k))
+    Ok(extract_data(all_shards, k))
 }
 
-/// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
+/// A Reed-Solomon coder parameterized by a hasher `H` and an engine `V`.
 ///
-/// # Behavior
+/// The engine determines the Galois field used for encoding/decoding. Use
+/// [`Gf16`] for GF(2^16) (up to 65535 shards) or [`Gf8`] for GF(2^8)
+/// (up to 255 shards with SIMD-accelerated arithmetic).
 ///
-/// The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
-/// shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
-/// All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
-/// is packaged as a chunk containing the shard data, its index, and a Merkle multi-proof against the [bmt] root.
-///
-/// ## Encoding
-///
-/// ```text
-///               +--------------------------------------+
-///               |         Original Data (Bytes)        |
-///               +--------------------------------------+
-///                                  |
-///                                  v
-///               +--------------------------------------+
-///               | [Length Prefix | Original Data...]   |
-///               +--------------------------------------+
-///                                  |
-///                                  v
-///              +----------+ +----------+    +-----------+
-///              |  Shard 0 | |  Shard 1 | .. | Shard k-1 |  (Data Shards)
-///              +----------+ +----------+    +-----------+
-///                     |            |             |
-///                     |            |             |
-///                     +------------+-------------+
-///                                  |
-///                                  v
-///                        +------------------+
-///                        | Reed-Solomon     |
-///                        | Encoder (k, m)   |
-///                        +------------------+
-///                                  |
-///                                  v
-///              +----------+ +----------+    +-----------+
-///              |  Shard k | | Shard k+1| .. | Shard n-1 |  (Recovery Shards)
-///              +----------+ +----------+    +-----------+
-/// ```
-///
-/// ## Merkle Tree Construction
-///
-/// All `n` shards (data and recovery) are hashed and used as leaves to build a [bmt].
-///
-/// ```text
-/// Shards:    [Shard 0, Shard 1, ..., Shard n-1]
-///             |        |              |
-///             v        v              v
-/// Hashes:    [H(S_0), H(S_1), ..., H(S_n-1)]
-///             \       / \       /
-///              \     /   \     /
-///               +---+     +---+
-///                 |         |
-///                 \         /
-///                  \       /
-///                   +-----+
-///                      |
-///                      v
-///                +----------+
-///                |   Root   |
-///                +----------+
-/// ```
-///
-/// The final output is the [bmt] root and a set of `n` chunks.
-///
-/// `(Root, [Chunk 0, Chunk 1, ..., Chunk n-1])`
-///
-/// Each chunk contains:
-/// - `shard`: The shard data (original or recovery).
-/// - `index`: The shard's original index (0 to n-1).
-/// - `proof`: A Merkle multi-proof of the shard's inclusion in the [bmt].
-///
-/// ## Decoding and Verification
-///
-/// The decoder requires any `k` chunks to reconstruct the original data.
-/// 1. Each chunk's Merkle multi-proof is verified against the [bmt] root.
-/// 2. The shards from the valid chunks are used to reconstruct the original `k` data shards.
-/// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
-///    generated. This new root MUST match the original [bmt] root. This prevents attacks where
-///    an adversary provides a valid set of chunks that decode to different data.
-/// 4. If the roots match, the original data is extracted from the reconstructed data shards.
+/// See [`ReedSolomon`] and [`ReedSolomon8`] for convenient type aliases.
 #[derive(Clone, Copy)]
-pub struct ReedSolomon<H> {
-    _marker: PhantomData<H>,
+pub struct ReedSolomonInner<H, V: Engine> {
+    _marker: PhantomData<(H, V)>,
 }
 
-impl<H> std::fmt::Debug for ReedSolomon<H> {
+impl<H, V: Engine> std::fmt::Debug for ReedSolomonInner<H, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReedSolomon").finish()
     }
 }
 
-impl<H: Hasher> Scheme for ReedSolomon<H> {
+impl<H: Hasher, V: Engine> Scheme for ReedSolomonInner<H, V> {
     type Commitment = H::Digest;
 
     type StrongShard = Chunk<H::Digest>;
@@ -484,8 +399,8 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode::<H, _>(
-            total_shards(config)?,
+        rs_encode::<V, H, _>(
+            validate_total_shards::<V>(config)?,
             config.minimum_shards.get(),
             data,
             strategy,
@@ -531,8 +446,8 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         shards: &[Self::CheckedShard],
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        decode::<H, _>(
-            total_shards(config)?,
+        rs_decode::<V, H, _>(
+            validate_total_shards::<V>(config)?,
             config.minimum_shards.get(),
             commitment,
             shards,
@@ -541,14 +456,30 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 }
 
+/// Backward-compatible type alias: Reed-Solomon over GF(2^16).
+///
+/// Supports up to 65535 total shards. Uses `reed-solomon-simd` internally.
+pub type ReedSolomon<H> = ReedSolomonInner<H, Gf16>;
+
+/// Reed-Solomon over GF(2^8) with SIMD-accelerated arithmetic.
+///
+/// Supports up to 255 total shards. Uses native Rust with runtime SIMD
+/// dispatch (GFNI, AVX2, SSSE3, NEON) for ISA-L-class performance.
+pub type ReedSolomon8<H> = ReedSolomonInner<H, Gf8>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
+    use reed_solomon_simd::ReedSolomonEncoder;
 
     const STRATEGY: Sequential = Sequential;
+
+    // ======================================================================
+    // Tests using the Gf16 engine (backward compat verification)
+    // ======================================================================
 
     #[test]
     fn test_recovery() {
@@ -556,18 +487,17 @@ mod tests {
         let total = 8u16;
         let min = 3u16;
 
-        // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[4].clone(), // recovery
-            chunks[6].clone(), // recovery
+            chunks[0].clone(),
+            chunks[4].clone(),
+            chunks[6].clone(),
         ];
 
-        // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY).unwrap();
+        let decoded =
+            rs_decode::<Gf16, Sha256, _>(total, min, &root, &pieces, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -577,14 +507,12 @@ mod tests {
         let total = 6u16;
         let min = 4u16;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Try with fewer than min
         let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
-        // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = rs_decode::<Gf16, Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::NotEnoughChunks)));
     }
 
@@ -594,14 +522,12 @@ mod tests {
         let total = 5u16;
         let min = 3u16;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Include duplicate index by cloning the first chunk
         let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
-        // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = rs_decode::<Gf16, Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::DuplicateIndex(0))));
     }
 
@@ -611,10 +537,9 @@ mod tests {
         let total = 5u16;
         let min = 3u16;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Verify all proofs at invalid index
         for i in 0..total {
             assert!(!chunks[i as usize].verify::<Sha256>(i + 1, &root));
         }
@@ -624,18 +549,14 @@ mod tests {
     #[should_panic(expected = "assertion failed: total > min")]
     fn test_invalid_total() {
         let data = b"Test parameter validation";
-
-        // total <= min should panic
-        encode::<Sha256, _>(3, 3, data.to_vec(), &STRATEGY).unwrap();
+        rs_encode::<Gf16, Sha256, _>(3, 3, data.to_vec(), &STRATEGY).unwrap();
     }
 
     #[test]
     #[should_panic(expected = "assertion failed: min > 0")]
     fn test_invalid_min() {
         let data = b"Test parameter validation";
-
-        // min = 0 should panic
-        encode::<Sha256, _>(5, 0, data.to_vec(), &STRATEGY).unwrap();
+        rs_encode::<Gf16, Sha256, _>(5, 0, data.to_vec(), &STRATEGY).unwrap();
     }
 
     #[test]
@@ -644,27 +565,27 @@ mod tests {
         let total = 100u16;
         let min = 30u16;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded =
+            rs_decode::<Gf16, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_large_data() {
-        let data = vec![42u8; 1000]; // 1KB of data
+        let data = vec![42u8; 1000];
         let total = 7u16;
         let min = 4u16;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
-        // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded =
+            rs_decode::<Gf16, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -674,25 +595,21 @@ mod tests {
         let total = 7u16;
         let min = 4u16;
 
-        // Encode data correctly to get valid chunks
         let (_correct_root, chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
         hasher.update(b"malicious_data_that_wasnt_actually_encoded");
         let malicious_root = hasher.finalize();
 
-        // Verify all proofs at incorrect root
         for i in 0..total {
             assert!(!chunks[i as usize].verify::<Sha256>(i, &malicious_root));
         }
 
-        // Collect valid pieces (these are legitimate fragments)
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
 
-        // Attempt to decode with malicious root
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
+        let result =
+            rs_decode::<Gf16, Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -702,18 +619,16 @@ mod tests {
         let total = 6u16;
         let min = 3u16;
 
-        // Encode data
-        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, mut chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Tamper with one of the chunks by modifying the shard data
         if !chunks[1].shard.is_empty() {
             let mut shard = chunks[1].shard.to_vec();
-            shard[0] ^= 0xFF; // Flip bits in first byte
+            shard[0] ^= 0xFF;
             chunks[1].shard = shard.into();
         }
 
-        // Try to decode with the tampered chunk
-        let result = decode::<Sha256, _>(total, min, &root, &chunks, &STRATEGY);
+        let result = rs_decode::<Gf16, Sha256, _>(total, min, &root, &chunks, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -724,12 +639,11 @@ mod tests {
         let min = 3u16;
         let m = total - min;
 
-        // Compute original data encoding
-        let shards = prepare_data(data.to_vec(), min as usize, total as usize - min as usize);
+        let shards = prepare_data::<Gf16>(data.to_vec(), min as usize, m as usize);
         let shard_size = shards[0].len();
 
-        // Re-encode the data
-        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
+        let mut encoder =
+            ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
         for shard in &shards {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -739,16 +653,13 @@ mod tests {
             .map(|s| s.to_vec())
             .collect();
 
-        // Tamper with one recovery shard
         if !recovery_shards[0].is_empty() {
             recovery_shards[0][0] ^= 0xFF;
         }
 
-        // Build malicious shards
         let mut malicious_shards = shards.clone();
         malicious_shards.extend(recovery_shards);
 
-        // Build malicious tree
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &malicious_shards {
             let mut hasher = Sha256::new();
@@ -758,8 +669,7 @@ mod tests {
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
 
-        // Generate chunks for min pieces, including the tampered recovery
-        let selected_indices = vec![0, 1, 3]; // originals 0,1 and recovery 0 (index 3)
+        let selected_indices = vec![0, 1, 3];
         let mut pieces = Vec::new();
         for &i in &selected_indices {
             let merkle_proof = malicious_tree.proof(i as u32).unwrap();
@@ -768,8 +678,8 @@ mod tests {
             pieces.push(chunk);
         }
 
-        // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
+        let result =
+            rs_decode::<Gf16, Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -779,54 +689,43 @@ mod tests {
         let total = 8u16;
         let min = 3u16;
 
-        // Encode the data
-        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, mut chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
-        // Use a mix of original and recovery pieces
         chunks[1].index = 8;
         let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[1].clone(), // recovery with invalid index
-            chunks[6].clone(), // recovery
+            chunks[0].clone(),
+            chunks[1].clone(),
+            chunks[6].clone(),
         ];
 
-        // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = rs_decode::<Gf16, Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 
     #[test]
     fn test_max_chunks() {
-        let data = vec![42u8; 1000]; // 1KB of data
+        let data = vec![42u8; 1000];
         let total = u16::MAX;
         let min = u16::MAX / 2;
 
-        // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+        let (root, chunks) =
+            rs_encode::<Gf16, Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
-        // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded =
+            rs_decode::<Gf16, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_too_many_chunks() {
-        let data = vec![42u8; 1000]; // 1KB of data
+        let data = vec![42u8; 1000];
         let total = u16::MAX;
         let min = u16::MAX / 2 - 1;
 
-        // Encode data
-        let result = encode::<Sha256, _>(total, min, data, &STRATEGY);
-        assert!(matches!(
-            result,
-            Err(Error::ReedSolomon(
-                reed_solomon_simd::Error::UnsupportedShardCount {
-                    original_count: _,
-                    recovery_count: _,
-                }
-            ))
-        ));
+        let result = rs_encode::<Gf16, Sha256, _>(total, min, data, &STRATEGY);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -840,6 +739,126 @@ mod tests {
             &STRATEGY,
         )
         .is_err())
+    }
+
+    // ======================================================================
+    // Tests using the Gf8 engine
+    // ======================================================================
+
+    #[test]
+    fn test_gf8_recovery() {
+        let data = b"Testing GF8 recovery pieces";
+        let total = 8u16;
+        let min = 3u16;
+
+        let (root, chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+
+        let pieces: Vec<_> = vec![
+            chunks[0].clone(),
+            chunks[4].clone(),
+            chunks[6].clone(),
+        ];
+
+        let decoded =
+            rs_decode::<Gf8, Sha256, _>(total, min, &root, &pieces, &STRATEGY).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_gf8_empty_data() {
+        let data = b"";
+        let total = 100u16;
+        let min = 30u16;
+
+        let (root, chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded =
+            rs_decode::<Gf8, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_gf8_large_data() {
+        let data = vec![42u8; 1000];
+        let total = 7u16;
+        let min = 4u16;
+
+        let (root, chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded =
+            rs_decode::<Gf8, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_gf8_malicious_root_detection() {
+        let data = b"Original data that should be protected";
+        let total = 7u16;
+        let min = 4u16;
+
+        let (_correct_root, chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"malicious");
+        let malicious_root = hasher.finalize();
+
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let result =
+            rs_decode::<Gf8, Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_gf8_max_shards() {
+        let data = vec![42u8; 100];
+        let total = 255u16;
+        let min = 85u16;
+
+        let (root, chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded =
+            rs_decode::<Gf8, Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_gf8_too_many_shards() {
+        assert!(ReedSolomon8::<Sha256>::encode(
+            &Config {
+                minimum_shards: NZU16!(128),
+                extra_shards: NZU16!(128),
+            },
+            [0u8; 100].as_slice(),
+            &STRATEGY,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_gf8_manipulated_chunk() {
+        let data = b"Data integrity must be maintained";
+        let total = 6u16;
+        let min = 3u16;
+
+        let (root, mut chunks) =
+            rs_encode::<Gf8, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+
+        if !chunks[1].shard.is_empty() {
+            let mut shard = chunks[1].shard.to_vec();
+            shard[0] ^= 0xFF;
+            chunks[1].shard = shard.into();
+        }
+
+        let result = rs_decode::<Gf8, Sha256, _>(total, min, &root, &chunks, &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[cfg(feature = "arbitrary")]

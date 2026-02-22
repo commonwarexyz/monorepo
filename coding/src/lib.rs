@@ -20,7 +20,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub use no_coding::{Error as NoCodingError, NoCoding};
 
     mod reed_solomon;
-    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+    pub use reed_solomon::{Error as ReedSolomonError, Gf16, Gf8, ReedSolomon, ReedSolomon8};
 
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
