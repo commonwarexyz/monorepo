@@ -1468,6 +1468,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
+ "criterion",
  "either",
  "futures",
  "num-bigint",

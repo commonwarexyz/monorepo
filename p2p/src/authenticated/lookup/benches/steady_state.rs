@@ -1,14 +1,13 @@
 use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
 use commonware_p2p::{
-    authenticated::lookup::{self, Config as LookupConfig},
+    authenticated::lookup::{self, Config as LookupConfig, Receiver as LookupReceiver, Sender as LookupSender},
     Address, AddressableManager as _, Receiver as _, Recipients, Sender as _,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
     Clock as _,
-    IoBuf, Quota,
-    Spawner as _,
+    IoBuf, Metrics as _, Quota,
 };
 use commonware_utils::ordered::Map;
 use criterion::{criterion_group, Criterion, Throughput};
@@ -19,7 +18,7 @@ use std::{
 };
 
 const NAMESPACE: &[u8] = b"p2p_lookup_steady_state_bench";
-const CHANNEL: u32 = 0;
+const CHANNEL: u64 = 0;
 const MAILBOX_SIZE: usize = 8_192;
 const RECEIVER_BACKLOG: usize = 8_192;
 const MESSAGES_PER_ITERATION: u64 = 128;
@@ -88,13 +87,13 @@ fn bench_steady_state(c: &mut Criterion) {
                     Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
                 let quota_1 =
                     Quota::per_second(NonZeroU32::new(100_000).expect("non-zero quota"));
-                let (mut sender0, _receiver0) =
+                let (mut sender0, _receiver0): (LookupSender<_, Context>, LookupReceiver<_>) =
                     network0.register(CHANNEL, quota_0, RECEIVER_BACKLOG);
-                let (_sender1, mut receiver1) =
+                let (_sender1, mut receiver1): (LookupSender<_, Context>, LookupReceiver<_>) =
                     network1.register(CHANNEL, quota_1, RECEIVER_BACKLOG);
 
-                let handle0 = network0.start();
-                let handle1 = network1.start();
+                network0.start();
+                network1.start();
 
                 let payload = IoBuf::from(vec![0xCD; message_size]);
 
@@ -125,9 +124,6 @@ fn bench_steady_state(c: &mut Criterion) {
                     }
                 }
                 let elapsed = start.elapsed();
-
-                handle0.abort();
-                handle1.abort();
 
                 elapsed
             });

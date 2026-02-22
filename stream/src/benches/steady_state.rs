@@ -2,7 +2,9 @@ use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
+    IoBuf,
     Listener as _,
+    Metrics as _,
     Network as _,
     Spawner as _,
 };
@@ -81,14 +83,15 @@ fn bench_steady_state(c: &mut Criterion) {
                 .await
                 .expect("dialer handshake failed");
 
-                let (_peer, _sender, mut receiver) =
-                    listener_task.await.expect("listener task failed");
+                let (_peer, _sender, mut receiver) = listener_task
+                    .await
+                    .expect("listener task failed");
 
-                let payload = vec![0xABu8; message_size];
+                let payload = IoBuf::from(vec![0xABu8; message_size]);
                 let start = Instant::now();
                 for _ in 0..iters {
                     for _ in 0..MESSAGES_PER_ITERATION {
-                        sender.send(payload.as_slice()).await.expect("send failed");
+                        sender.send(payload.clone()).await.expect("send failed");
                         let received = receiver.recv().await.expect("recv failed");
                         debug_assert_eq!(received.len(), message_size);
                     }
