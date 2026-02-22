@@ -354,18 +354,23 @@ impl<I: Stream> Receiver<I> {
     /// Receives ciphertext, allocates a buffer from the pool, copies ciphertext,
     /// and decrypts in-place.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let mut encrypted = recv_frame(
+        let encrypted = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
-        let ciphertext_len = encrypted.len();
 
-        // Allocate buffer from pool for decryption.
-        let mut decryption_buf = self.pool.alloc(ciphertext_len);
-
-        // Copy ciphertext into buffer.
-        decryption_buf.put(&mut encrypted);
+        // Coalesce once and recover a mutable buffer when possible. This avoids
+        // an extra allocation + copy on the common single-buffer path.
+        let coalesced = encrypted.coalesce_with_pool(&self.pool);
+        let mut decryption_buf = match coalesced.try_into_mut() {
+            Ok(buf) => buf,
+            Err(buf) => {
+                let mut copy = self.pool.alloc(buf.len());
+                copy.put_slice(buf.as_ref());
+                copy
+            }
+        };
 
         // Decrypt in-place, get plaintext length back.
         let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
