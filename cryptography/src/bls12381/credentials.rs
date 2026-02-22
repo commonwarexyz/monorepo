@@ -35,6 +35,22 @@
 //!   via [`ops::verify_message`](super::primitives::ops::verify_message). No validator
 //!   interaction is needed at redemption.
 //!
+//! # Key Separation
+//!
+//! The threshold key used for credential issuance **must not** be reused for any
+//! other signing purpose (e.g., consensus certificates, regular message signing).
+//!
+//! In a blind signature scheme, validators sign an arbitrary group element without
+//! knowing what it represents. A malicious requester could construct a blinded point
+//! that, when unblinded, yields a valid signature in a different domain (e.g., a
+//! consensus certificate). No cryptographic mechanism within the blind signing
+//! protocol can prevent this -- it is fundamental to the blindness property.
+//!
+//! The standard mitigation (used by Privacy Pass, RFC 9576) is to dedicate a
+//! separate key to credential issuance. A signature produced by the credential key
+//! is then useless in any other context because no other protocol verifies against
+//! that key.
+//!
 //! # Concurrent Session Limitation
 //!
 //! This scheme is vulnerable to Wagner's generalized birthday attack when many concurrent
