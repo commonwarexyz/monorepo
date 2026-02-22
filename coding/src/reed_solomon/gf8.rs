@@ -9,7 +9,7 @@
 
 use super::{
     gf8_arithmetic::{inv, mul},
-    gf8_simd::{gf_vect_mad, gf_vect_mad_multi_raw},
+    gf8_simd::{gf_matrix_mul_zeroed_group, gf_vect_mad, gf_vect_mad_multi_raw},
     Engine,
 };
 use thiserror::Error;
@@ -183,6 +183,18 @@ fn encode_matrix_mul(
     for group_start in (0..num_rows).step_by(GROUP_SIZE) {
         let group_end = (group_start + GROUP_SIZE).min(num_rows);
         let group_len = group_end - group_start;
+        let matrix_rows = &matrix[group_start * num_cols..group_end * num_cols];
+
+        // Fast path: GFNI+AVX2 fused matrix multiply for zero-initialized output.
+        // This avoids repeated destination read-modify-write cycles in the inner loop.
+        if gf_matrix_mul_zeroed_group(
+            matrix_rows,
+            num_cols,
+            &mut output[group_start..group_end],
+            input,
+        ) {
+            continue;
+        }
 
         for j in 0..num_cols {
             // Pre-filter: collect only non-zero coefficients and their destination

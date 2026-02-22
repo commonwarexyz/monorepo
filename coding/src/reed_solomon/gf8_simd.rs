@@ -86,6 +86,49 @@ pub(crate) unsafe fn gf_vect_mad_multi_raw(
     get_mad_multi_fn()(slice_refs, src, coeffs);
 }
 
+/// Fused matrix multiply for zero-initialized destinations.
+///
+/// Computes:
+/// `output[r][i] = sum_j gf_mul(matrix_rows[r][j], input[j][i])`
+///
+/// for all rows `r` in `output` and all byte positions `i`.
+///
+/// Returns `true` if the fused SIMD path was used, `false` otherwise.
+#[inline]
+pub(crate) fn gf_matrix_mul_zeroed_group(
+    matrix_rows: &[u8],
+    num_cols: usize,
+    output: &mut [Vec<u8>],
+    input: &[&[u8]],
+) -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if has_gfni_avx2() {
+            // SAFETY: feature detection above guarantees AVX2+GFNI availability.
+            unsafe {
+                avx2::matrix_mul_zeroed_group(matrix_rows, num_cols, output, input);
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+fn has_gfni_avx2() -> bool {
+    static HAS: OnceLock<bool> = OnceLock::new();
+    *HAS.get_or_init(|| {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            std::is_x86_feature_detected!("gfni") && std::is_x86_feature_detected!("avx2")
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            false
+        }
+    })
+}
+
 // ======================================================================
 // Function pointer caching for runtime dispatch
 // ======================================================================
@@ -338,6 +381,112 @@ mod avx2 {
         } else {
             for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
                 gf_vect_mad_scalar(&mut d[tail_start..], &src[tail_start..], coeff);
+            }
+        }
+    }
+
+    /// Fused matrix multiply for zero-initialized destination rows.
+    ///
+    /// This avoids repeated destination read-modify-write cycles by accumulating
+    /// each destination chunk in registers across all source columns, then storing
+    /// each destination chunk exactly once.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and GFNI are available.
+    #[target_feature(enable = "avx2,gfni")]
+    pub(super) unsafe fn matrix_mul_zeroed_group(
+        matrix_rows: &[u8],
+        num_cols: usize,
+        output: &mut [Vec<u8>],
+        input: &[&[u8]],
+    ) {
+        const MAX_ROWS: usize = 16;
+        const MAX_COLS: usize = 255;
+
+        let rows = output.len();
+        if rows == 0 || num_cols == 0 {
+            return;
+        }
+        debug_assert!(rows <= MAX_ROWS);
+        debug_assert!(num_cols <= MAX_COLS);
+        debug_assert_eq!(input.len(), num_cols);
+        debug_assert_eq!(matrix_rows.len(), rows * num_cols);
+
+        let len = output[0].len();
+        if len == 0 {
+            return;
+        }
+        debug_assert!(output.iter().all(|r| r.len() == len));
+        debug_assert!(input.iter().all(|s| s.len() == len));
+
+        let mut dst_ptrs = [core::ptr::null_mut(); MAX_ROWS];
+        for r in 0..rows {
+            dst_ptrs[r] = output[r].as_mut_ptr();
+        }
+
+        // Precompute broadcast coefficients once per destination row/column.
+        let mut coeff_vs = [[_mm256_setzero_si256(); MAX_COLS]; MAX_ROWS];
+        for r in 0..rows {
+            let row = &matrix_rows[r * num_cols..(r + 1) * num_cols];
+            for j in 0..num_cols {
+                coeff_vs[r][j] = _mm256_set1_epi8(row[j] as i8);
+            }
+        }
+
+        let chunks = len / 64;
+        for i in 0..chunks {
+            let offset = i * 64;
+
+            let mut acc0 = [_mm256_setzero_si256(); MAX_ROWS];
+            let mut acc1 = [_mm256_setzero_si256(); MAX_ROWS];
+
+            for j in 0..num_cols {
+                let src_ptr = input[j].as_ptr().add(offset);
+                let s0 = _mm256_loadu_si256(src_ptr.cast());
+                let s1 = _mm256_loadu_si256(src_ptr.add(32).cast());
+
+                for r in 0..rows {
+                    acc0[r] =
+                        _mm256_xor_si256(acc0[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s0));
+                    acc1[r] =
+                        _mm256_xor_si256(acc1[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s1));
+                }
+            }
+
+            for r in 0..rows {
+                let dst_ptr = dst_ptrs[r].add(offset);
+                _mm256_storeu_si256(dst_ptr.cast(), acc0[r]);
+                _mm256_storeu_si256(dst_ptr.add(32).cast(), acc1[r]);
+            }
+        }
+
+        let tail_start = chunks * 64;
+        let mut scalar_start = tail_start;
+
+        if tail_start + 32 <= len {
+            let mut acc = [_mm256_setzero_si256(); MAX_ROWS];
+            for j in 0..num_cols {
+                let s = _mm256_loadu_si256(input[j].as_ptr().add(tail_start).cast());
+                for r in 0..rows {
+                    acc[r] = _mm256_xor_si256(acc[r], _mm256_gf2p8mul_epi8(coeff_vs[r][j], s));
+                }
+            }
+            for r in 0..rows {
+                _mm256_storeu_si256(dst_ptrs[r].add(tail_start).cast(), acc[r]);
+            }
+            scalar_start += 32;
+        }
+
+        if scalar_start < len {
+            for r in 0..rows {
+                let row = &matrix_rows[r * num_cols..(r + 1) * num_cols];
+                let dst_tail = std::slice::from_raw_parts_mut(
+                    dst_ptrs[r].add(scalar_start),
+                    len - scalar_start,
+                );
+                for j in 0..num_cols {
+                    gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
+                }
             }
         }
     }
