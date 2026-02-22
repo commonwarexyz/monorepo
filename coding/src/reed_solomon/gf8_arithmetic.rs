@@ -87,7 +87,7 @@ pub const fn inv(a: u8) -> u8 {
 /// This identity holds because GF(2^8) multiplication distributes over XOR
 /// (addition in the field).
 #[inline]
-pub fn init_mul_table(c: u8) -> ([u8; 16], [u8; 16]) {
+pub const fn init_mul_table(c: u8) -> ([u8; 16], [u8; 16]) {
     let mut low = [0u8; 16];
     let mut high = [0u8; 16];
     let mut i = 0;
