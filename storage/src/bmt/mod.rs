@@ -1548,10 +1548,7 @@ mod tests {
             }
             let fast_root = builder_root.root();
 
-            assert_eq!(
-                full_root, fast_root,
-                "root mismatch for n={n}"
-            );
+            assert_eq!(full_root, fast_root, "root mismatch for n={n}");
         }
     }
 

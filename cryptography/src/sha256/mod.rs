@@ -98,8 +98,8 @@ impl Hasher for Sha256 {
     fn hash_node(&mut self, left: &Digest, right: &Digest) -> Digest {
         // SHA-256 IV (FIPS 180-4 section 5.3.3)
         let mut state: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ce935,
-            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ce935, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
         ];
         let mut block = [0u8; 64];
         block[..32].copy_from_slice(left.as_ref());
