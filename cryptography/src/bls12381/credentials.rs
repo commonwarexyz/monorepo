@@ -34,6 +34,11 @@
 //! * **Public verifiability**: Anyone with the group public key can verify the credential
 //!   via [`ops::verify_message`](super::primitives::ops::verify_message). No validator
 //!   interaction is needed at redemption.
+//! * **One-more unforgeability**: After `l` blind signing interactions, an attacker
+//!   cannot produce `l + 1` valid credentials. This holds under the one-more CDH
+//!   assumption regardless of whether sessions are sequential or concurrent, because
+//!   the signer's response (`sk * P`) is deterministic -- unlike blind Schnorr, there
+//!   are no signer commitments for an attacker to correlate across sessions.
 //!
 //! # Key Separation
 //!
@@ -50,26 +55,6 @@
 //! separate key to credential issuance. A signature produced by the credential key
 //! is then useless in any other context because no other protocol verifies against
 //! that key.
-//!
-//! # Concurrent Session Limitation
-//!
-//! This scheme is vulnerable to Wagner's generalized birthday attack when many concurrent
-//! blind signing sessions are permitted. The attack complexity for `l` concurrent sessions
-//! is `O(l * p^(1 / (1 + floor(log2(l)))))` where `p` is the BLS12-381 scalar field
-//! order (~2^255).
-//!
-//! Approximate security levels:
-//!
-//! * 1 concurrent session: ~2^128
-//! * 2-3 concurrent sessions: ~2^85
-//! * 4-7 concurrent sessions: ~2^64
-//! * 128+ concurrent sessions: ~2^32 (insecure)
-//!
-//! **The application layer must limit concurrent blind signing sessions per user.**
-//!
-//! This is a fundamental property of publicly-verifiable algebraic blind signatures.
-//! Schemes that resist this attack (e.g., VOPRF from Privacy Pass) do so by adding
-//! a final hash that destroys public verifiability.
 //!
 //! # Example
 //!
@@ -118,11 +103,11 @@
 //!
 //! The following resources were used as references when implementing this module:
 //!
-//! * Boldyreva, "Threshold Signatures, Multisignatures and Blind Signatures Based on
-//!   the Gap-Diffie-Hellman-Group Signature Scheme" (PKC 2003)
-//! * Benhamouda et al., "One-More Discrete Logarithm Assumption" (EUROCRYPT 2021)
-//! * Jarecki and Nazarian, "Adaptively Secure Threshold Blind BLS Signatures"
-//!   (ASIACRYPT 2025)
+//! * <https://link.springer.com/chapter/10.1007/3-540-36288-6_3>: Boldyreva,
+//!   "Threshold Signatures, Multisignatures and Blind Signatures Based on the
+//!   Gap-Diffie-Hellman-Group Signature Scheme" (PKC 2003)
+//! * <https://eprint.iacr.org/2025/483>: Jarecki and Nazarian, "Adaptively Secure
+//!   Threshold Blind BLS Signatures and Threshold Oblivious PRF" (ASIACRYPT 2025)
 
 use super::primitives::{
     group::{Scalar, Share},
