@@ -1843,8 +1843,8 @@ mod test_plan {
         dealers: Vec<u32>,
         players: Vec<u32>,
         crash_resume_players: BTreeSet<(u32, u32)>,
-        resume_missing_dealer_msg_fails: BTreeSet<(u32, u32)>,
-        finalize_missing_dealer_msg_fails: BTreeSet<(u32, u32)>,
+        resume_missing_dealer_msg: BTreeSet<(u32, u32)>,
+        finalize_missing_dealer_msg: BTreeSet<(u32, u32)>,
         no_acks: BTreeSet<(u32, u32)>,
         bad_shares: BTreeSet<(u32, u32)>,
         bad_player_sigs: BTreeMap<(u32, u32), Masks>,
@@ -1873,22 +1873,22 @@ mod test_plan {
             self
         }
 
-        pub fn resume_missing_dealer_msg_fails(
+        pub fn resume_missing_dealer_msg(
             mut self,
             after_dealer: u32,
             missing_dealer: u32,
         ) -> Self {
-            self.resume_missing_dealer_msg_fails
+            self.resume_missing_dealer_msg
                 .insert((after_dealer, missing_dealer));
             self
         }
 
-        pub fn finalize_missing_dealer_msg_fails(
+        pub fn finalize_missing_dealer_msg(
             mut self,
             player: u32,
             missing_dealer: u32,
         ) -> Self {
-            self.finalize_missing_dealer_msg_fails
+            self.finalize_missing_dealer_msg
                 .insert((player, missing_dealer));
             self
         }
@@ -1969,23 +1969,7 @@ mod test_plan {
                 .map(|(idx, &dealer)| (dealer, idx))
                 .collect();
             let previous_successful_round = previous_players.is_some();
-            let required_commitments = previous_players
-                .map(|players| N3f1::quorum(players.len()))
-                .unwrap_or_default()
-                .max(N3f1::quorum(self.dealers.len()))
-                as usize;
-            let mut good_dealers = self
-                .dealers
-                .iter()
-                .copied()
-                .filter(|&dealer| !self.bad(previous_successful_round, dealer))
-                .collect::<Vec<_>>();
-            good_dealers.sort_unstable();
-            let selected_good_dealers: BTreeSet<u32> = good_dealers
-                .into_iter()
-                .take(required_commitments)
-                .collect();
-            for &(after_dealer, missing_dealer) in &self.resume_missing_dealer_msg_fails {
+            for &(after_dealer, missing_dealer) in &self.resume_missing_dealer_msg {
                 if !self.dealers.contains(&after_dealer) {
                     return Err(anyhow!("resume_missing dealer {after_dealer} not in round"));
                 }
@@ -2003,7 +1987,7 @@ mod test_plan {
                 }
                 if self.bad(previous_successful_round, missing_dealer) {
                     return Err(anyhow!(
-                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                        "resume_missing_dealer_msg requires dealer {missing_dealer} to be good"
                     ));
                 }
                 let any_valid_ack = self.players.iter().any(|&player| {
@@ -2017,11 +2001,11 @@ mod test_plan {
                 });
                 if !any_valid_ack {
                     return Err(anyhow!(
-                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack at least one player"
+                        "resume_missing_dealer_msg requires dealer {missing_dealer} to ack at least one player"
                     ));
                 }
             }
-            for &(player, missing_dealer) in &self.finalize_missing_dealer_msg_fails {
+            for &(player, missing_dealer) in &self.finalize_missing_dealer_msg {
                 if !self.players.contains(&player) {
                     return Err(anyhow!("finalize_missing player {player} not in round"));
                 }
@@ -2032,12 +2016,7 @@ mod test_plan {
                 }
                 if self.bad(previous_successful_round, missing_dealer) {
                     return Err(anyhow!(
-                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
-                    ));
-                }
-                if !selected_good_dealers.contains(&missing_dealer) {
-                    return Err(anyhow!(
-                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be selected"
+                        "finalize_missing_dealer_msg requires dealer {missing_dealer} to be good"
                     ));
                 }
                 let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
@@ -2048,7 +2027,7 @@ mod test_plan {
                         .is_some_and(Masks::modifies_player_ack);
                 if ack_corrupted {
                     return Err(anyhow!(
-                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to ack player {player}"
+                        "finalize_missing_dealer_msg requires dealer {missing_dealer} to ack player {player}"
                     ));
                 }
             }
@@ -2250,7 +2229,7 @@ mod test_plan {
                         .push(player);
                 }
                 let mut resume_missing_msg_by_dealer: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-                for &(after_dealer, missing_dealer) in &round.resume_missing_dealer_msg_fails {
+                for &(after_dealer, missing_dealer) in &round.resume_missing_dealer_msg {
                     resume_missing_msg_by_dealer
                         .entry(after_dealer)
                         .or_default()
@@ -2427,7 +2406,7 @@ mod test_plan {
                     {
                         assert!(
                             !round.bad(previous_successful_round.is_some(), missing_dealer),
-                            "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                            "resume_missing_dealer_msg requires dealer {missing_dealer} to be good"
                         );
                         let missing_pk = keys[missing_dealer as usize].public_key();
                         let missing_log = dealer_logs
@@ -2555,14 +2534,10 @@ mod test_plan {
                     .map(|&i| keys[i as usize].public_key())
                     .try_collect()
                     .expect("players are unique");
-                for &(i_player, missing_dealer) in &round.finalize_missing_dealer_msg_fails {
-                    assert!(
-                        selected_dealers.contains(&missing_dealer),
-                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be selected"
-                    );
+                for &(i_player, missing_dealer) in &round.finalize_missing_dealer_msg {
                     assert!(
                         !round.bad(previous_successful_round.is_some(), missing_dealer),
-                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                        "finalize_missing_dealer_msg requires dealer {missing_dealer} to be good"
                     );
                     let player_pk = keys[i_player as usize].public_key();
                     let player_sk = keys[i_player as usize].clone();
@@ -2582,23 +2557,27 @@ mod test_plan {
                     let replay_without = replay
                         .into_iter()
                         .filter(|(dealer, _, _)| dealer != &missing_pk);
-                    let resume_logs = dealer_logs
-                        .iter()
-                        .filter(|(dealer, _)| *dealer != &missing_pk)
-                        .map(|(dealer, log)| (dealer.clone(), log.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    let (resumed, _) = Player::resume::<N3f1>(
+                    match Player::resume::<N3f1>(
                         info.clone(),
                         player_sk,
-                        &resume_logs,
+                        &dealer_logs,
                         replay_without,
-                    )
-                    .expect("resume should succeed with stale logs");
-                    let finalize_res = resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
-                    assert!(
-                        matches!(finalize_res, Err(Error::PlayerCorrupted)),
-                        "finalize without dealer {missing_dealer} message should return PlayerCorrupted for player {i_player}"
-                    );
+                    ) {
+                        Err(Error::PlayerCorrupted) => {}
+                        Ok((resumed, _)) => {
+                            let finalize_res =
+                                resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
+                            assert!(
+                                matches!(finalize_res, Err(Error::PlayerCorrupted)),
+                                "missing dealer {missing_dealer} message should be detected during finalize for player {i_player}"
+                            );
+                        }
+                        Err(err) => {
+                            panic!(
+                                "missing dealer {missing_dealer} message should return PlayerCorrupted, got {err:?} for player {i_player}"
+                            );
+                        }
+                    }
                 }
 
                 // Compute expected reveals
@@ -2780,8 +2759,8 @@ mod test_plan {
             };
             let round = Round {
                 crash_resume_players: BTreeSet::new(),
-                resume_missing_dealer_msg_fails: BTreeSet::new(),
-                finalize_missing_dealer_msg_fails: BTreeSet::new(),
+                resume_missing_dealer_msg: BTreeSet::new(),
+                finalize_missing_dealer_msg: BTreeSet::new(),
                 no_acks: pick_pair_set(u)?,
                 bad_shares: pick_pair_set(u)?,
                 bad_player_sigs: {
@@ -2888,7 +2867,7 @@ mod test {
         Plan::new(NZU32!(4))
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg(2, 1),
             )
             .run::<MinPk>(0)
     }
@@ -2899,7 +2878,7 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg(2, 1),
             )
             .run::<MinPk>(0)
     }
@@ -2907,7 +2886,7 @@ mod test {
     #[test]
     fn finalize_fails_after_resume_without_good_dealer_message() -> anyhow::Result<()> {
         Plan::new(NZU32!(1))
-            .with(Round::new(vec![0], vec![0]).finalize_missing_dealer_msg_fails(0, 0))
+            .with(Round::new(vec![0], vec![0]).finalize_missing_dealer_msg(0, 0))
             .run::<MinPk>(0)
     }
 
@@ -2928,7 +2907,7 @@ mod test {
         assert!(Plan::new(NZU32!(4))
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
+                    .resume_missing_dealer_msg(1, 2),
             )
             .validate()
             .is_err());
@@ -2936,7 +2915,7 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
+                    .resume_missing_dealer_msg(2, 1),
             )
             .validate()
             .is_err());
@@ -2944,17 +2923,17 @@ mod test {
             .with(
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(1, 0)
-                    .finalize_missing_dealer_msg_fails(0, 1),
+                    .finalize_missing_dealer_msg(0, 1),
             )
             .validate()
             .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .finalize_missing_dealer_msg_fails(0, 3),
-            )
-            .validate()
-            .is_err());
+    }
+
+    #[test]
+    fn finalize_detects_missing_non_selected_dealer_message() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).finalize_missing_dealer_msg(0, 3))
+            .run::<MinPk>(0)
     }
 
     #[test]
