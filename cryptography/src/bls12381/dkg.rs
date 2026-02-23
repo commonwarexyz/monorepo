@@ -1972,7 +1972,8 @@ mod test_plan {
             let required_commitments = previous_players
                 .map(|players| N3f1::quorum(players.len()))
                 .unwrap_or_default()
-                .max(N3f1::quorum(self.dealers.len())) as usize;
+                .max(N3f1::quorum(self.dealers.len()))
+                as usize;
             let mut good_dealers = self
                 .dealers
                 .iter()
