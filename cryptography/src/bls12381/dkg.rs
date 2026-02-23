@@ -1545,10 +1545,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         logs: &BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
     ) -> Result<(Self, BTreeMap<S::PublicKey, PlayerAck<S::PublicKey>>), Error> {
-        // We want to check our own behavior. Other things get resolved by `select`
-        // later, and we want to avoid treading on its behavior.
-        // So, we want to see if the logs contain acks that we've posted which
-        // are not matched by things here.
+        // Record all acks we've emitted (by dealer).
         let mut this = Self::new(info, me)?;
         let mut acks = BTreeMap::new();
         for (dealer, pub_msg, priv_msg) in msgs {
