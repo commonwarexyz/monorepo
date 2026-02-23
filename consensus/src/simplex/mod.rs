@@ -138,9 +138,11 @@
 //!
 //! This "speculative finality" is available after just 2 network hops (proposal + notarization),
 //! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
-//! The only scenario in which a notarized-but-not-yet-finalized payload could be excluded is if
-//! `f+1` or more honest participants timed out, enabling a nullification certificate to form.
-//! In the common case (no faults, no timeouts), this cannot happen.
+//! A notarized-but-not-yet-finalized payload can only be excluded in two scenarios:
+//! `f+1` or more honest participants timed out, or certification failed. Because
+//! certification is deterministic, it either fails for all honest participants or none,
+//! so a certification failure always produces a nullification. In the common case
+//! (no faults, no timeouts, certification succeeds), exclusion cannot happen.
 //!
 //! ### Unchained Finalization
 //!
