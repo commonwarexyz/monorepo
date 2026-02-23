@@ -1776,6 +1776,35 @@ mod test_plan {
         modified
     }
 
+    fn assert_missing_dealer_message_detected<V: Variant>(
+        info: Info<V, ed25519::PublicKey>,
+        player_sk: ed25519::PrivateKey,
+        dealer_logs: &BTreeMap<ed25519::PublicKey, DealerLog<V, ed25519::PublicKey>>,
+        replay: Vec<(ed25519::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+        missing_pk: &ed25519::PublicKey,
+        player: u32,
+        missing_dealer: u32,
+    ) {
+        let replay_without = replay
+            .into_iter()
+            .filter(|(dealer, _, _)| dealer != missing_pk);
+        match Player::resume::<N3f1>(info, player_sk, dealer_logs, replay_without) {
+            Err(Error::PlayerCorrupted) => {}
+            Ok((resumed, _)) => {
+                let finalize_res = resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
+                assert!(
+                    matches!(finalize_res, Err(Error::PlayerCorrupted)),
+                    "missing dealer {missing_dealer} message should be detected during finalize for player {player}"
+                );
+            }
+            Err(err) => {
+                panic!(
+                    "missing dealer {missing_dealer} message should return PlayerCorrupted, got {err:?} for player {player}"
+                );
+            }
+        }
+    }
+
     #[derive(Clone, Default, Debug)]
     pub struct Masks {
         pub info_summary: Vec<u8>,
@@ -2142,12 +2171,10 @@ mod test_plan {
 
             let mut rng = StdRng::seed_from_u64(seed);
 
-            // Generate keys and assign participant indices by public-key order
-            // so numeric indices match deterministic dealer selection order.
-            let mut keys = (0..self.num_participants.get())
+            // Generate keys.
+            let keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
-            keys.sort_unstable_by(|left, right| left.public_key().cmp(&right.public_key()));
 
             // Precompute mapping from public key to key index to avoid confusion
             // between key indices and positions in sorted Sets.
@@ -2554,30 +2581,15 @@ mod test_plan {
                         .get(&player_pk)
                         .cloned()
                         .expect("player should be present");
-                    let replay_without = replay
-                        .into_iter()
-                        .filter(|(dealer, _, _)| dealer != &missing_pk);
-                    match Player::resume::<N3f1>(
+                    assert_missing_dealer_message_detected(
                         info.clone(),
                         player_sk,
                         &dealer_logs,
-                        replay_without,
-                    ) {
-                        Err(Error::PlayerCorrupted) => {}
-                        Ok((resumed, _)) => {
-                            let finalize_res =
-                                resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
-                            assert!(
-                                matches!(finalize_res, Err(Error::PlayerCorrupted)),
-                                "missing dealer {missing_dealer} message should be detected during finalize for player {i_player}"
-                            );
-                        }
-                        Err(err) => {
-                            panic!(
-                                "missing dealer {missing_dealer} message should return PlayerCorrupted, got {err:?} for player {i_player}"
-                            );
-                        }
-                    }
+                        replay,
+                        &missing_pk,
+                        i_player,
+                        missing_dealer,
+                    );
                 }
 
                 // Compute expected reveals
