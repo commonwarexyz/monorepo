@@ -44,13 +44,12 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 /// We always pass exactly one destination buffer to `read_at_buf`, so chunked output indicates
 /// a violated contract in the blob implementation.
 fn read_at_buf_single(bufs: IoBufsMut) -> Result<IoBuf, Error> {
-    match bufs {
-        IoBufsMut::Single(buf) => Ok(buf.freeze()),
-        IoBufsMut::Chunked(_) => {
-            error!("blob.read_at_buf returned chunked output for single-buffer input");
-            Err(Error::ReadFailed)
-        }
+    if bufs.is_single() {
+        return Ok(bufs.freeze().coalesce());
     }
+
+    error!("blob.read_at_buf returned chunked output for single-buffer input");
+    Err(Error::ReadFailed)
 }
 
 /// Read the designated page from the underlying blob and return its logical bytes as an `IoBuf` if

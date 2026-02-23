@@ -378,13 +378,9 @@ mod tests {
             assert!(first.is_single());
             assert_eq!(first.coalesce(), b"ABC");
 
-            // This read spans refill boundaries and should be chunked.
+            // This read spans refill boundaries and should be multi-chunk.
             let second = read_exact_bufs(&mut reader, 7).await.unwrap();
             assert!(!second.is_single());
-            match &second {
-                crate::IoBufs::Single(_) => panic!("expected chunked"),
-                crate::IoBufs::Chunked(chunks) => assert!(chunks.len() >= 2),
-            }
             assert_eq!(second.coalesce(), b"DEFGHIJ");
         });
     }
