@@ -171,7 +171,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Result<Vec<u8>, Error> {
     // Extract length prefix
     let mut length_prefix = [0u8; u32::SIZE];
     for byte in &mut length_prefix {
-        *byte = *data.next().ok_or(Error::Inconsistent)?;
+        *byte = *data.next().expect("data must contain length prefix");
     }
     let data_len = u32::from_be_bytes(length_prefix) as usize;
     if data_len > available {
