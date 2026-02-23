@@ -1,0 +1,448 @@
+use super::{
+    scheme,
+    types::{Ack, AckSubject, Chunk},
+};
+use crate::types::{Epoch, Participant};
+use commonware_cryptography::{
+    certificate::{Scheme, Verification},
+    Digest, PublicKey,
+};
+use commonware_parallel::Strategy;
+use rand_core::CryptoRngCore;
+use std::collections::HashMap;
+
+/// Key for grouping acks that share the same signing subject.
+///
+/// Acks with the same chunk and epoch produce identical `AckSubject` values
+/// and can be batch-verified together.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BatchKey<P: PublicKey, D: Digest> {
+    chunk: Chunk<P, D>,
+    epoch: Epoch,
+}
+
+/// Per-subject batch of pending acks.
+struct Batch<P: PublicKey, S: Scheme, D: Digest> {
+    /// Acks waiting for verification.
+    pending: Vec<Ack<P, S, D>>,
+
+    /// Count of acks that have already been verified for this subject.
+    verified: usize,
+}
+
+impl<P: PublicKey, S: Scheme, D: Digest> Default for Batch<P, S, D> {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            verified: 0,
+        }
+    }
+}
+
+/// Result of a batch verification round.
+pub struct Verified<P: PublicKey, S: Scheme, D: Digest> {
+    /// Acks whose signatures were successfully verified.
+    pub acks: Vec<Ack<P, S, D>>,
+
+    /// Participant indices whose signatures failed verification.
+    pub invalid: Vec<Participant>,
+}
+
+/// Buffers acks and batch-verifies their signatures.
+///
+/// For batchable schemes (ed25519, BLS multisig, BLS threshold), acks are
+/// buffered per subject until enough accumulate to potentially reach a quorum,
+/// then verified in a single batch call. For non-batchable schemes (secp256r1),
+/// verification happens eagerly as acks arrive.
+pub struct Verifier<P: PublicKey, S: Scheme, D: Digest> {
+    batches: HashMap<BatchKey<P, D>, Batch<P, S, D>>,
+    quorum: usize,
+}
+
+impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
+    /// Creates a new `Verifier` with the given quorum size.
+    pub fn new(quorum: u32) -> Self {
+        Self {
+            batches: HashMap::new(),
+            quorum: quorum as usize,
+        }
+    }
+
+    /// Adds an ack to the pending batch for its subject.
+    ///
+    /// The ack must have already passed cheap validation (epoch bounds,
+    /// sender/signer match, height range). Only signature verification is
+    /// deferred.
+    ///
+    /// If `verified` is true, the ack counts toward the verified total
+    /// without being buffered for batch verification.
+    pub fn add(&mut self, ack: Ack<P, S, D>, verified: bool) {
+        let key = BatchKey {
+            chunk: ack.chunk.clone(),
+            epoch: ack.epoch,
+        };
+        let batch = self.batches.entry(key).or_default();
+        if verified {
+            batch.verified += 1;
+        } else {
+            batch.pending.push(ack);
+        }
+    }
+
+    /// Returns true if any batch is ready for verification.
+    ///
+    /// A batch is ready when:
+    /// - It has pending acks, AND
+    /// - Either the scheme is non-batchable (verify eagerly), OR
+    ///   the sum of verified + pending could reach the quorum.
+    pub fn ready(&self) -> bool {
+        self.batches.values().any(|batch| {
+            if batch.pending.is_empty() {
+                return false;
+            }
+            // Already have enough verified for this subject.
+            if batch.verified >= self.quorum {
+                return false;
+            }
+            // For non-batchable schemes, verify immediately.
+            if !S::is_batchable() {
+                return true;
+            }
+            // For batchable schemes, wait until we have enough.
+            batch.verified + batch.pending.len() >= self.quorum
+        })
+    }
+
+    /// Batch-verifies all ready batches and returns verified acks and invalid signers.
+    ///
+    /// Drains pending acks from all ready batches, calls
+    /// `scheme.verify_attestations()` on each batch, and returns the results.
+    pub fn verify<R>(
+        &mut self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Verified<P, S, D>
+    where
+        R: CryptoRngCore,
+        S: scheme::Scheme<P, D>,
+    {
+        let mut all_acks = Vec::new();
+        let mut all_invalid = Vec::new();
+
+        // Collect keys for ready batches.
+        let ready_keys: Vec<_> = self
+            .batches
+            .iter()
+            .filter(|(_, batch)| {
+                if batch.pending.is_empty() {
+                    return false;
+                }
+                if batch.verified >= self.quorum {
+                    return false;
+                }
+                if !S::is_batchable() {
+                    return true;
+                }
+                batch.verified + batch.pending.len() >= self.quorum
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for key in ready_keys {
+            let batch = self.batches.get_mut(&key).unwrap();
+            let pending = std::mem::take(&mut batch.pending);
+
+            // Separate attestations from acks for batch verification.
+            let (acks, attestations): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .map(|ack| {
+                    let attestation = ack.attestation.clone();
+                    (ack, attestation)
+                })
+                .unzip();
+
+            let ctx = AckSubject {
+                chunk: &key.chunk,
+                epoch: key.epoch,
+            };
+
+            let Verification { verified, invalid } =
+                scheme.verify_attestations::<_, D, _>(rng, ctx, attestations, strategy);
+
+            // Count newly verified.
+            batch.verified += verified.len();
+
+            // Map verified attestations back to their acks.
+            // Build a set of verified signer indices for quick lookup.
+            let verified_signers: std::collections::HashSet<Participant> =
+                verified.iter().map(|a| a.signer).collect();
+
+            for ack in acks {
+                if verified_signers.contains(&ack.attestation.signer) {
+                    all_acks.push(ack);
+                }
+            }
+
+            all_invalid.extend(invalid);
+        }
+
+        // Remove batches that are fully resolved (verified >= quorum and no pending).
+        self.batches
+            .retain(|_, batch| !batch.pending.is_empty() || batch.verified < self.quorum);
+
+        Verified {
+            acks: all_acks,
+            invalid: all_invalid,
+        }
+    }
+
+    /// Update the quorum size.
+    ///
+    /// This is used when the validator set changes across epochs.
+    pub const fn set_quorum(&mut self, quorum: u32) {
+        self.quorum = quorum as usize;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ordered_broadcast::{
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        types::AckSubject,
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
+        ed25519::PublicKey,
+        Hasher, Sha256,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_utils::{test_rng, Faults, N3f1};
+    use rand::rngs::StdRng;
+
+    type Sha256Digest = <Sha256 as Hasher>::Digest;
+
+    const NAMESPACE: &[u8] = b"1234";
+
+    fn create_ack<S>(
+        scheme: &S,
+        chunk: Chunk<PublicKey, Sha256Digest>,
+        epoch: Epoch,
+    ) -> Ack<PublicKey, S, Sha256Digest>
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+    {
+        let context = AckSubject {
+            chunk: &chunk,
+            epoch,
+        };
+        let attestation = scheme
+            .sign::<Sha256Digest>(context)
+            .expect("Failed to sign vote");
+        Ack::new(chunk, epoch, attestation)
+    }
+
+    /// Test that batch verification works for batchable schemes.
+    fn batch_verify_batchable<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Add acks one at a time. Not ready until quorum is reachable.
+        for i in 0..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk.clone(), epoch);
+            verifier.add(ack, false);
+
+            if S::is_batchable() {
+                // Should only be ready once we have enough for quorum.
+                assert_eq!(verifier.ready(), i + 1 >= quorum as usize);
+            } else {
+                // Non-batchable: always ready when pending > 0.
+                assert!(verifier.ready());
+            }
+        }
+
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+        assert_eq!(result.acks.len(), quorum as usize);
+        assert!(result.invalid.is_empty());
+    }
+
+    #[test]
+    fn test_batch_verify() {
+        batch_verify_batchable(ed25519::fixture);
+        batch_verify_batchable(secp256r1::fixture);
+        batch_verify_batchable(bls12381_multisig::fixture::<MinPk, _>);
+        batch_verify_batchable(bls12381_multisig::fixture::<MinSig, _>);
+        batch_verify_batchable(bls12381_threshold::fixture::<MinPk, _>);
+        batch_verify_batchable(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that pre-verified acks count toward quorum readiness.
+    fn pre_verified_acks<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Add one as pre-verified (e.g., our own ack).
+        let ack = create_ack(&fixture.schemes[0], chunk.clone(), epoch);
+        verifier.add(ack, true);
+
+        // Add remaining acks as unverified.
+        for i in 1..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk.clone(), epoch);
+            verifier.add(ack, false);
+        }
+
+        assert!(verifier.ready());
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+        // quorum - 1 because one was pre-verified and not buffered.
+        assert_eq!(result.acks.len(), quorum as usize - 1);
+        assert!(result.invalid.is_empty());
+    }
+
+    #[test]
+    fn test_pre_verified_acks() {
+        pre_verified_acks(ed25519::fixture);
+        pre_verified_acks(secp256r1::fixture);
+        pre_verified_acks(bls12381_multisig::fixture::<MinPk, _>);
+        pre_verified_acks(bls12381_multisig::fixture::<MinSig, _>);
+        pre_verified_acks(bls12381_threshold::fixture::<MinPk, _>);
+        pre_verified_acks(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that batches for different subjects are independent.
+    fn different_subjects<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk1 = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload1"),
+        );
+        let chunk2 = Chunk::new(
+            fixture.participants[1].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload2"),
+        );
+
+        // Add 2 acks for chunk1 and quorum acks for chunk2.
+        for i in 0..2 {
+            let ack = create_ack(&fixture.schemes[i], chunk1.clone(), epoch);
+            verifier.add(ack, false);
+        }
+        for i in 0..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk2.clone(), epoch);
+            verifier.add(ack, false);
+        }
+
+        // For batchable schemes, only chunk2 should be ready.
+        // For non-batchable, both are ready since they have pending acks.
+        assert!(verifier.ready());
+
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+        if S::is_batchable() {
+            // Only chunk2's batch was ready.
+            assert_eq!(result.acks.len(), quorum as usize);
+            // chunk1 acks still pending.
+            let key1 = BatchKey {
+                chunk: chunk1,
+                epoch,
+            };
+            assert_eq!(verifier.batches.get(&key1).unwrap().pending.len(), 2);
+        } else {
+            // Non-batchable: all pending acks were verified.
+            assert_eq!(result.acks.len(), 2 + quorum as usize);
+        }
+        assert!(result.invalid.is_empty());
+    }
+
+    #[test]
+    fn test_different_subjects() {
+        different_subjects(ed25519::fixture);
+        different_subjects(secp256r1::fixture);
+        different_subjects(bls12381_multisig::fixture::<MinPk, _>);
+        different_subjects(bls12381_multisig::fixture::<MinSig, _>);
+        different_subjects(bls12381_threshold::fixture::<MinPk, _>);
+        different_subjects(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that already-quorum batches stop accepting new verification work.
+    fn already_quorum<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Pre-verify enough to reach quorum.
+        for i in 0..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk.clone(), epoch);
+            verifier.add(ack, true);
+        }
+
+        // Add one more unverified.
+        let ack = create_ack(&fixture.schemes[quorum as usize], chunk, epoch);
+        verifier.add(ack, false);
+
+        // Should not be ready since quorum is already reached.
+        assert!(!verifier.ready());
+    }
+
+    #[test]
+    fn test_already_quorum() {
+        already_quorum(ed25519::fixture);
+        already_quorum(secp256r1::fixture);
+        already_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        already_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        already_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        already_quorum(bls12381_threshold::fixture::<MinSig, _>);
+    }
+}
