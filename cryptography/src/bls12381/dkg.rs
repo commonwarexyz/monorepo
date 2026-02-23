@@ -332,7 +332,7 @@ const SIG_LOG: &[u8] = b"log";
 /// The only error which can happen through no fault of your own is
 /// [`Error::DkgFailed`].
 ///
-/// [`Error::MissingPlayerShare`] happens through mistakes or faults when the state
+/// [`Error::MissingDealing`] happens through mistakes or faults when the state
 /// of a player is restored after a crash.
 ///
 /// The other errors are due to issues with configuration.
@@ -350,15 +350,15 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
-    /// The player's state is missing a share it should have.
+    /// The player's state is missing a dealing it should have.
     ///
-    /// This error is emitted when the player is missing shares that it should
-    /// otherwise have based on the flow of the protocol. This can only happen
-    /// if the code in this module is used in a stateful way, restoring the
+    /// This error is emitted when the player is missing dealings that it should
+    /// otherwise have based on the flow of the protocol. This can only happen if
+    /// the code in this module is used in a stateful way, restoring the
     /// state of the player from saved information. If this state is corrupted
     /// on disk, or missing, then this error can happen.
     #[error("missing player's share")]
-    MissingPlayerShare,
+    MissingDealing,
 }
 
 /// The output of a successful DKG.
@@ -1526,7 +1526,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     ///
     /// All messages the player should have received must be passed into this method,
     /// and if any messages which should be present based on this player's actions
-    /// in the log are missing, this method will return [`Error::MissingPlayerShare`].
+    /// in the log are missing, this method will return [`Error::MissingDealing`].
     ///
     /// For example, if a particular private message containing a share is not
     /// present in `msgs`, but we've already acknowledged it, and this has been
@@ -1567,7 +1567,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         }) {
             // If so, we have a problem, because we're missing a share that we're
             // supposed to have, and that we publicly committed to having.
-            return Err(Error::MissingPlayerShare);
+            return Err(Error::MissingDealing);
         }
 
         Ok((this, acks))
@@ -1610,7 +1610,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The exception is that if this function returns [`Error::MissingPlayerShare`],
+    /// The exception is that if this function returns [`Error::MissingDealing`],
     /// then [`observe`] will return `Ok`, because this error indicates that this
     /// player's state has been corrupted, but the DKG has otherwise succeeded.
     /// However, this player's share is not recoverable without external intervention.
@@ -1630,7 +1630,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             .iter_pairs()
             .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
         {
-            return Err(Error::MissingPlayerShare);
+            return Err(Error::MissingDealing);
         }
 
         // We are extracting the private scalars from `Secret` protection
@@ -2385,8 +2385,8 @@ mod test_plan {
                             );
                             if was_acked {
                                 assert!(
-                                    matches!(resumed, Err(Error::MissingPlayerShare)),
-                                    "resume without dealer {missing_dealer} message should report MissingPlayerShare for player {i_player}"
+                                    matches!(resumed, Err(Error::MissingDealing)),
+                                    "resume without dealer {missing_dealer} message should report MissingDealing for player {i_player}"
                                 );
                             } else {
                                 assert!(
@@ -2524,8 +2524,8 @@ mod test_plan {
                         let finalize_res =
                             resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
                         assert!(
-                            matches!(finalize_res, Err(Error::MissingPlayerShare)),
-                            "finalize without dealer {dealer_idx} message should return MissingPlayerShare for player {i_player}"
+                            matches!(finalize_res, Err(Error::MissingDealing)),
+                            "finalize without dealer {dealer_idx} message should return MissingDealing for player {i_player}"
                         );
                         tested += 1;
                     }
