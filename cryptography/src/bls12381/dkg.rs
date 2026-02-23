@@ -1936,6 +1936,12 @@ mod test_plan {
             if self.players.is_empty() {
                 return Err(anyhow!("players is empty"));
             }
+            if self.dealers.iter().copied().collect::<BTreeSet<_>>().len() != self.dealers.len() {
+                return Err(anyhow!("dealers contains duplicates"));
+            }
+            if self.players.iter().copied().collect::<BTreeSet<_>>().len() != self.players.len() {
+                return Err(anyhow!("players contains duplicates"));
+            }
             // Check dealer/player ranges
             for &d in &self.dealers {
                 if d >= num_participants {
@@ -2908,6 +2914,14 @@ mod test {
     fn invalid_checkpoint_configs_fail_validation() {
         assert!(Plan::new(NZU32!(4))
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+            .validate()
+            .is_err());
+        assert!(Plan::new(NZU32!(4))
+            .with(Round::new(vec![0, 0, 1], vec![0, 1, 2]))
+            .validate()
+            .is_err());
+        assert!(Plan::new(NZU32!(4))
+            .with(Round::new(vec![0, 1, 2], vec![0, 0, 1]))
             .validate()
             .is_err());
         assert!(Plan::new(NZU32!(4))
