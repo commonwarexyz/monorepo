@@ -1,7 +1,7 @@
 //! `Read` implementations for operations with variable-length keys.
 //!
 //! The `EncodeSize` and `Write` implementations are shared across all variable-size operation
-//! encodings in [super::var_common]. Only `Read` differs per encoding type because the `Cfg`
+//! encodings in [super::variable_codec]. Only `Read` differs per encoding type because the `Cfg`
 //! types are different.
 
 use crate::{

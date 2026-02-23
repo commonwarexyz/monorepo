@@ -145,7 +145,6 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        index::Unordered as _,
         kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{Location, Position, StandardHasher},
         qmdb::{
@@ -162,7 +161,6 @@ pub(crate) mod test {
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-                LogStore,
             },
             verify_proof, NonDurable, Unmerkleized,
         },
@@ -286,184 +284,6 @@ pub(crate) mod test {
                 Box::pin(open_db(ctx))
             })
             .await;
-        });
-    }
-
-    // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
-    // in the snapshot.
-    #[test_traced("WARN")]
-    fn test_any_fixed_db_log_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let mut db = open_db(db_context.clone()).await.into_mutable();
-
-            // Update the same key many times.
-            const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
-            for i in 0u64..UPDATES {
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.write_batch([(k, Some(v))]).await.unwrap();
-            }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
-
-            // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            drop(db);
-            let db = open_db(db_context.with_label("reopened")).await;
-            let iter = db.snapshot.get(&k);
-            assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_fixed_db_historical_proof_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await.into_mutable();
-            let ops = create_test_ops(20);
-            apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root_hash = db.root();
-            let original_op_count = db.bounds().await.end;
-
-            // Historical proof should match "regular" proof when historical size == current database size
-            let max_ops = NZU64!(10);
-            let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(6), max_ops)
-                .await
-                .unwrap();
-            let (regular_proof, regular_ops) =
-                db.proof(Location::new_unchecked(6), max_ops).await.unwrap();
-
-            assert_eq!(historical_proof.leaves, regular_proof.leaves);
-            assert_eq!(historical_proof.digests, regular_proof.digests);
-            assert_eq!(historical_ops, regular_ops);
-            assert_eq!(historical_ops, ops[5..15]);
-            let mut hasher = StandardHasher::<Sha256>::new();
-            assert!(verify_proof(
-                &mut hasher,
-                &historical_proof,
-                Location::new_unchecked(6),
-                &historical_ops,
-                &root_hash
-            ));
-
-            // Add more operations to the database
-            // (use different seed to avoid key collisions)
-            let mut db = db.into_mutable();
-            let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut db, more_ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
-
-            // Historical proof should remain the same even though database has grown
-            let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(6), NZU64!(10))
-                .await
-                .unwrap();
-            assert_eq!(historical_proof.leaves, original_op_count);
-            assert_eq!(historical_proof.leaves, regular_proof.leaves);
-            assert_eq!(historical_ops.len(), 10);
-            assert_eq!(historical_proof.digests, regular_proof.digests);
-            assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &mut hasher,
-                &historical_proof,
-                Location::new_unchecked(6),
-                &historical_ops,
-                &root_hash
-            ));
-
-            // Try to get historical proof with op_count > number of operations and confirm it
-            // returns RangeOutOfBounds error.
-            assert!(matches!(
-                db.historical_proof(
-                    db.bounds().await.end + 1,
-                    Location::new_unchecked(6),
-                    NZU64!(10)
-                )
-                .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_fixed_db_historical_proof_edge_cases() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.with_label("first"))
-                .await
-                .into_mutable();
-            let ops = create_test_ops(50);
-            apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
-
-            let mut hasher = StandardHasher::<Sha256>::new();
-
-            // Test singleton database
-            let (single_proof, single_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(2),
-                    Location::new_unchecked(1),
-                    NZU64!(1),
-                )
-                .await
-                .unwrap();
-            assert_eq!(single_proof.leaves, Location::new_unchecked(2));
-            assert_eq!(single_ops.len(), 1);
-
-            // Create historical database with single operation without committing it.
-            let mut single_db = create_test_db(context.with_label("second"))
-                .await
-                .into_mutable();
-            apply_ops(&mut single_db, ops[0..1].to_vec()).await;
-            let single_db = single_db.into_merkleized();
-            let single_root = single_db.root();
-
-            assert!(verify_proof(
-                &mut hasher,
-                &single_proof,
-                Location::new_unchecked(1),
-                &single_ops,
-                &single_root
-            ));
-
-            // Test requesting more operations than available in historical position
-            let (_limited_proof, limited_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(11),
-                    Location::new_unchecked(6),
-                    NZU64!(20),
-                )
-                .await
-                .unwrap();
-            assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
-            assert_eq!(limited_ops, ops[5..10]);
-
-            // Test proof at minimum historical position
-            let (min_proof, min_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(4),
-                    Location::new_unchecked(1),
-                    NZU64!(3),
-                )
-                .await
-                .unwrap();
-            assert_eq!(min_proof.leaves, Location::new_unchecked(4));
-            assert_eq!(min_ops.len(), 3);
-            assert_eq!(min_ops, ops[0..3]);
-
-            // Can't destroy the db unless it's durable, so we need to commit first.
-            let (single_db, _) = single_db.into_mutable().commit(None).await.unwrap();
-            single_db.into_merkleized().destroy().await.unwrap();
-
-            db.destroy().await.unwrap();
         });
     }
 

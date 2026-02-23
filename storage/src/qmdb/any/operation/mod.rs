@@ -11,8 +11,8 @@ use std::fmt;
 
 pub(crate) mod fixed;
 pub(crate) mod update;
-mod var_common;
 pub(crate) mod variable;
+mod variable_codec;
 pub(crate) mod varkey;
 pub(crate) use update::Update;
 

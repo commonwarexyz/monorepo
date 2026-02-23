@@ -1,9 +1,11 @@
-//! Shared `EncodeSize` and `Write` implementations for all variable-size operation encodings
-//! ([VariableEncoding], [VarKeyEncoding], [VarKeyFixedEncoding]).
+//! Shared `EncodeSize` and `Write` implementations for all variable-size operation encodings:
+//! - [VariableEncoding](super::super::value::VariableEncoding)
+//! - [VarKeyEncoding](super::super::value::VarKeyEncoding)
+//! - [VarKeyFixedEncoding](super::super::value::VarKeyFixedEncoding)
 //!
-//! These encodings all produce variable-size operations with the same wire format:
-//! a context byte followed by the payload. The `Read` implementations remain separate
-//! in [super::variable] and [super::varkey] because their `Cfg` types differ.
+//! These encodings all produce variable-size operations with the same wire format: a context byte
+//! followed by the payload. The `Read` implementations remain separate in [super::variable] and
+//! [super::varkey] because their `Cfg` types differ.
 
 use crate::qmdb::{
     any::{
