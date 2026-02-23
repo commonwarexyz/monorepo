@@ -185,30 +185,51 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 }
 
 /// Extract data from encoded shards.
+///
+/// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
+/// This function reads the 4-byte big-endian length prefix and copies out exactly
+/// that many data bytes using bulk memcpy operations.
 fn extract_data(shards: Vec<&[u8]>, k: usize) -> Result<Vec<u8>, Error> {
-    // Concatenate shards
-    let mut data = shards.into_iter().take(k).flatten();
-
-    // Extract length prefix
-    let mut length_prefix = [0u8; u32::SIZE];
-    for byte in &mut length_prefix {
-        *byte = *data.next().ok_or(Error::Inconsistent)?;
+    let shard_len = shards
+        .first()
+        .map(|shard| shard.len())
+        .ok_or(Error::NotEnoughChunks)?;
+    if shards.len() < k {
+        return Err(Error::NotEnoughChunks);
     }
-    let data_len = u32::from_be_bytes(length_prefix) as usize;
 
-    // Extract payload
-    let mut payload: Vec<_> = data.copied().collect();
-    if payload.len() < data_len {
+    // Concatenate original shards into a contiguous buffer.
+    let mut buf = Vec::with_capacity(k * shard_len);
+    for shard in &shards[..k] {
+        if shard.len() != shard_len {
+            return Err(Error::Inconsistent);
+        }
+        buf.extend_from_slice(shard);
+    }
+    if buf.len() < u32::SIZE {
+        return Err(Error::Inconsistent);
+    }
+
+    // Read the 4-byte big-endian length prefix.
+    let data_len = u32::from_be_bytes(
+        buf[..u32::SIZE]
+            .try_into()
+            .expect("slice length must match u32::SIZE"),
+    ) as usize;
+    let payload_start = u32::SIZE;
+    let payload_end = payload_start
+        .checked_add(data_len)
+        .ok_or(Error::Inconsistent)?;
+    if payload_end > buf.len() {
         return Err(Error::Inconsistent);
     }
 
     // Canonical encoding requires all trailing bytes to be zero.
-    if !payload[data_len..].iter().all(|byte| *byte == 0) {
+    if !buf[payload_end..].iter().all(|byte| *byte == 0) {
         return Err(Error::Inconsistent);
     }
 
-    payload.truncate(data_len);
-    Ok(payload)
+    Ok(buf[payload_start..payload_end].to_vec())
 }
 
 /// Type alias for the internal encoding result.
@@ -894,7 +915,7 @@ mod tests {
         let mut pieces = Vec::with_capacity(k);
         for (i, shard) in shards.iter().take(k).enumerate() {
             let proof = tree.proof(i as u32).unwrap();
-            pieces.push(Chunk::new(shard.clone().into(), i as u16, proof));
+            pieces.push(checked(Chunk::new(shard.clone().into(), i as u16, proof)));
         }
 
         let result = decode::<Sha256, _>(total, min, &non_canonical_root, &pieces, &STRATEGY);
