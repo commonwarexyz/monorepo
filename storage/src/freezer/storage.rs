@@ -7,7 +7,9 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer, Blob, Buf, BufMut, BufferPooler, Clock, IoBufMut, Metrics, Storage,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -431,11 +433,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(buf: &[u8]) -> Result<(Entry, Entry), Error> {
-        let mut buf1 = &buf[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &buf[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
+    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
+        let entry1 = Entry::read(&mut buf)?;
+        let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))
     }
 
@@ -444,7 +444,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let offset = Self::table_offset(table_index);
         let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
-        Self::parse_entries(read_buf.coalesce().as_ref())
+        Self::parse_entries(read_buf)
     }
 
     /// Recover a single table entry and update tracking.
@@ -507,14 +507,13 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let mut resizable = 0u32;
+        let mut entry_buf = IoBufMut::with_capacity(Entry::FULL_SIZE);
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
-            // Read both entries from the buffer
-            let mut buf = [0u8; Entry::FULL_SIZE];
-            let mut read_buf = reader.read_exact(Entry::FULL_SIZE).await?;
-            read_buf.copy_to_slice(&mut buf);
-            let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
+            // Read both entries from the buffer.
+            entry_buf = reader.read_exact_buf(Entry::FULL_SIZE, entry_buf).await?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf.as_ref())?;
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(

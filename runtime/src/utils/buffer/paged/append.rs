@@ -400,14 +400,9 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Snapshot full logical pages to cache from the physical write payload.
-        let cached_pages = if pages_to_cache > 0 {
-            let mut pages = Vec::with_capacity(pages_to_cache);
-            for page in 0..pages_to_cache {
-                let page_start = page * physical_page_size;
-                pages.push(physical_pages.slice(page_start..page_start + logical_page_size));
-            }
-            Some((buffer.offset, pages))
+        // Remember the logical start offset for best-effort caching of flushed full pages.
+        let cache_offset = if pages_to_cache > 0 {
+            Some(buffer.offset)
         } else {
             None
         };
@@ -420,8 +415,13 @@ impl<B: Blob> Append<B> {
         // Best-effort cache population for full pages before we release the tip lock.
         // This matches main's lock ordering and keeps reads from observing stale persisted bytes
         // during the handoff from tip to cache.
-        if let Some((cache_offset, pages)) = cached_pages {
-            self.cache_ref.cache(self.id, pages, cache_offset);
+        if let Some(cache_offset) = cache_offset {
+            self.cache_ref.cache_from_physical_prefix(
+                self.id,
+                &physical_pages,
+                cache_offset,
+                pages_to_cache,
+            );
         }
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while

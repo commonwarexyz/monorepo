@@ -113,7 +113,7 @@ mod tests {
             size <= buf.len(),
             "provided buffer is too small for requested size"
         );
-        let read = reader.read_exact(size).await?.coalesce();
+        let read = reader.read_exact(size).await?;
         buf[..size].copy_from_slice(read.as_ref());
         Ok(())
     }
@@ -121,7 +121,7 @@ mod tests {
     async fn read_exact_bufs<B: crate::Blob>(
         reader: &mut Read<B>,
         size: usize,
-    ) -> Result<crate::IoBufs, Error> {
+    ) -> Result<crate::IoBuf, Error> {
         reader.read_exact(size).await
     }
 
@@ -375,13 +375,11 @@ mod tests {
 
             // First read fits in one fetched chunk.
             let first = read_exact_bufs(&mut reader, 3).await.unwrap();
-            assert!(first.is_single());
-            assert_eq!(first.coalesce(), b"ABC");
+            assert_eq!(first.as_ref(), b"ABC");
 
-            // This read spans refill boundaries and should be multi-chunk.
+            // This read spans refill boundaries and is returned as one contiguous buffer.
             let second = read_exact_bufs(&mut reader, 7).await.unwrap();
-            assert!(!second.is_single());
-            assert_eq!(second.coalesce(), b"DEFGHIJ");
+            assert_eq!(second.as_ref(), b"DEFGHIJ");
         });
     }
 
@@ -517,7 +515,7 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(10));
 
             // First read triggers a single refill of 10 bytes.
-            let first = reader.read_exact(6).await.unwrap().coalesce();
+            let first = reader.read_exact(6).await.unwrap();
             assert_eq!(first.as_ref(), b"ABCDEF");
             assert_eq!(reader.position(), 6);
             assert_eq!(reader.buffer_remaining(), 4);
@@ -528,7 +526,7 @@ mod tests {
             assert_eq!(reader.buffer_remaining(), 3);
 
             // Consume only from the already buffered window.
-            let second = reader.read_exact(3).await.unwrap().coalesce();
+            let second = reader.read_exact(3).await.unwrap();
             assert_eq!(second.as_ref(), b"HIJ");
             assert_eq!(reader.position(), 10);
             assert_eq!(reader.buffer_remaining(), 0);
@@ -547,8 +545,8 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(4));
 
             // max_len larger than remaining: return remaining bytes only.
-            let first = reader.read_up_to(32).await.unwrap().coalesce();
-            assert_eq!(first, b"hello world");
+            let first = reader.read_up_to(32).await.unwrap();
+            assert_eq!(first.as_ref(), b"hello world");
             assert_eq!(reader.position(), data.len() as u64);
 
             // Now at EOF: returns BlobInsufficientLength.
@@ -576,11 +574,11 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(4));
 
             // Prime internal buffer with a partial consume from the first refill.
-            let head = reader.read_exact(3).await.unwrap().coalesce();
+            let head = reader.read_exact(3).await.unwrap();
             assert_eq!(head.as_ref(), b"hel");
 
             // Now read up to 5 bytes; this should include buffered remainder + refill.
-            let next = reader.read_up_to(5).await.unwrap().coalesce();
+            let next = reader.read_up_to(5).await.unwrap();
             assert_eq!(next.as_ref(), b"lo wo");
             assert_eq!(reader.position(), 8);
         });

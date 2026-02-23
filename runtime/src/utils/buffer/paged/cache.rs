@@ -14,6 +14,7 @@ use futures::{future::Shared, FutureExt};
 use std::{
     collections::HashMap,
     future::Future,
+    iter::ExactSizeIterator,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
@@ -32,6 +33,14 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>
 /// Shared state for one in-flight page fetch.
 struct PageFetchState {
     future: PageFetchFut,
+    cleanup_claimed: AtomicBool,
+}
+
+impl PageFetchState {
+    #[inline]
+    fn try_claim_cleanup(&self) -> bool {
+        !self.cleanup_claimed.swap(true, Ordering::AcqRel)
+    }
 }
 
 /// A [Cache] caches pages of [Blob] data in memory after verifying the integrity of each.
@@ -295,7 +304,7 @@ impl CacheRef {
         trace!(page_num, blob_id, "page fault");
 
         let key = (blob_id, page_num);
-        let fetch_state = {
+        let (fetch_state, is_fetch_owner) = {
             // Create or clone a future that retrieves the desired page from the underlying blob.
             // This requires a write lock on the page cache since we may need to modify
             // `page_fetches`.
@@ -335,9 +344,12 @@ impl CacheRef {
             };
             let create_and_track_fetch = |cache: &mut Cache| {
                 let future = create_fetch();
-                let state = Arc::new(PageFetchState { future });
+                let state = Arc::new(PageFetchState {
+                    future,
+                    cleanup_claimed: AtomicBool::new(false),
+                });
                 cache.page_fetches.insert(key, state.clone());
-                state
+                (state, true)
             };
 
             if let Some(existing) = cache.page_fetches.get(&key).cloned() {
@@ -369,7 +381,7 @@ impl CacheRef {
                         }
                     }
                 } else {
-                    existing
+                    (existing, false)
                 }
             } else {
                 create_and_track_fetch(&mut cache)
@@ -379,23 +391,42 @@ impl CacheRef {
         // Await the shared future result.
         let fetch_result = fetch_state.future.clone().await;
 
+        let should_cleanup = if is_fetch_owner {
+            fetch_state.try_claim_cleanup()
+        } else {
+            // Fast path: if another task already cleaned this fetch entry, avoid write-locking.
+            let still_tracked = {
+                let cache = self.cache.read();
+                cache
+                    .page_fetches
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &fetch_state))
+            };
+            still_tracked && fetch_state.try_claim_cleanup()
+        };
+
         let page_for_return = match fetch_result {
             Ok(page_buf) => {
-                let mut cache = self.cache.write();
-                cache.remove_fetch_if_matches(key, &fetch_state);
-                if cache.index.contains_key(&key) {
-                    debug!(
-                        blob_id,
-                        page_num, "dropping stale fetched page because key already has cached data"
-                    );
-                } else if cache.insert_page(key, page_buf.clone()).is_err() {
-                    error!(blob_id, page_num, "failed to insert fetched page");
+                if should_cleanup {
+                    let mut cache = self.cache.write();
+                    cache.remove_fetch_if_matches(key, &fetch_state);
+                    if cache.index.contains_key(&key) {
+                        debug!(
+                            blob_id,
+                            page_num,
+                            "dropping stale fetched page because key already has cached data"
+                        );
+                    } else if cache.insert_page(key, page_buf.clone()).is_err() {
+                        error!(blob_id, page_num, "failed to insert fetched page");
+                    }
                 }
                 page_buf
             }
             Err(err) => {
-                let mut cache = self.cache.write();
-                cache.remove_fetch_if_matches(key, &fetch_state);
+                if should_cleanup {
+                    let mut cache = self.cache.write();
+                    cache.remove_fetch_if_matches(key, &fetch_state);
+                }
                 error!(page_num, ?err, "Page fetch failed");
                 return Err(Error::ReadFailed);
             }
@@ -420,13 +451,69 @@ impl CacheRef {
     /// This method is best effort. If insertion unexpectedly fails, remaining pages are dropped
     /// after logging an error.
     pub fn cache(&self, blob_id: u64, pages: Vec<IoBuf>, offset: u64) {
+        self.cache_pages(blob_id, pages, offset);
+    }
+
+    /// Cache full logical pages from a contiguous physical write payload.
+    ///
+    /// `page_count` counts logical pages at the front of `physical_pages` where each physical page
+    /// has size [`Self::physical_page_size`]. CRC trailers are skipped.
+    pub(super) fn cache_from_physical_prefix(
+        &self,
+        blob_id: u64,
+        physical_pages: &IoBuf,
+        offset: u64,
+        page_count: usize,
+    ) {
+        if page_count == 0 {
+            return;
+        }
+        let logical_page_size = self.logical_page_size as usize;
+        let physical_page_size = self.physical_page_size as usize;
+        let required_len = page_count
+            .checked_mul(physical_page_size)
+            .expect("physical page length overflow while caching");
+        assert!(required_len <= physical_pages.len());
+
+        // Fast path: if this payload is exactly one physical page, we can cache a zero-copy
+        // logical slice without risking multi-page retention amplification.
+        if page_count == 1 && required_len == physical_pages.len() {
+            self.cache_pages(
+                blob_id,
+                std::iter::once(physical_pages.slice(..logical_page_size)),
+                offset,
+            );
+            return;
+        }
+
+        let physical_bytes = physical_pages.as_ref();
+
+        let pages = (0..page_count).map(|page_idx| {
+            let page_start = page_idx * physical_page_size;
+            // Materialize each logical page into its own owned buffer so cache residency
+            // is bounded by logical-page count, not by the size of the source flush payload.
+            let mut owned = self.pool.alloc_zeroed(logical_page_size);
+            owned
+                .as_mut()
+                .copy_from_slice(&physical_bytes[page_start..page_start + logical_page_size]);
+            owned.freeze()
+        });
+        self.cache_pages(blob_id, pages, offset);
+    }
+
+    fn cache_pages<I>(&self, blob_id: u64, pages: I, offset: u64)
+    where
+        I: IntoIterator<Item = IoBuf>,
+        I::IntoIter: ExactSizeIterator,
+    {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
+        let pages = pages.into_iter();
         let total_pages = pages.len();
         let mut cache = self.cache.write();
 
-        for (idx, page) in pages.into_iter().enumerate() {
+        for (idx, page) in pages.enumerate() {
             let current_page = page_num;
             if cache.insert_page((blob_id, current_page), page).is_err() {
                 error!(
@@ -862,9 +949,13 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache
-                    .page_fetches
-                    .insert((0, 0), Arc::new(PageFetchState { future: stale }));
+                cache.page_fetches.insert(
+                    (0, 0),
+                    Arc::new(PageFetchState {
+                        future: stale,
+                        cleanup_claimed: AtomicBool::new(false),
+                    }),
+                );
             }
 
             let read = cache_ref.read(&blob, 0, 0, 64).await.unwrap().coalesce();
@@ -898,9 +989,13 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache
-                    .page_fetches
-                    .insert((0, 0), Arc::new(PageFetchState { future: stale }));
+                cache.page_fetches.insert(
+                    (0, 0),
+                    Arc::new(PageFetchState {
+                        future: stale,
+                        cleanup_claimed: AtomicBool::new(false),
+                    }),
+                );
             }
 
             let read = cache_ref
@@ -941,9 +1036,13 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache
-                    .page_fetches
-                    .insert((7, 7), Arc::new(PageFetchState { future: stale }));
+                cache.page_fetches.insert(
+                    (7, 7),
+                    Arc::new(PageFetchState {
+                        future: stale,
+                        cleanup_claimed: AtomicBool::new(false),
+                    }),
+                );
             }
 
             let read = cache_ref.read(&blob, 0, 0, 64).await.unwrap().coalesce();
@@ -973,9 +1072,13 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache
-                    .page_fetches
-                    .insert((0, 0), Arc::new(PageFetchState { future: stale }));
+                cache.page_fetches.insert(
+                    (0, 0),
+                    Arc::new(PageFetchState {
+                        future: stale,
+                        cleanup_claimed: AtomicBool::new(false),
+                    }),
+                );
             }
 
             // Insert on another key. This should not affect stale fetch-map entries for key (0, 0).
@@ -1311,9 +1414,13 @@ mod tests {
             .shared();
             {
                 let mut cache = cache_ref.cache.write();
-                cache
-                    .page_fetches
-                    .insert((42, 7), Arc::new(PageFetchState { future: stranded }));
+                cache.page_fetches.insert(
+                    (42, 7),
+                    Arc::new(PageFetchState {
+                        future: stranded,
+                        cleanup_claimed: AtomicBool::new(false),
+                    }),
+                );
             }
 
             cache_ref.cache(0, vec![vec![0xAAu8; PAGE_SIZE.get() as usize].into()], 0);

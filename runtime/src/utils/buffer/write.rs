@@ -30,7 +30,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
-///     let buf = reader.read_exact(size as usize).await.expect("read failed").coalesce();
+///     let buf = reader.read_exact(size as usize).await.expect("read failed");
 ///     assert_eq!(buf.as_ref(), b"hello world!");
 /// });
 /// ```
@@ -175,8 +175,8 @@ impl<B: Blob> Write<B> {
             // write directly. Note that we may end up writing an intersecting range twice:
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
-            let owned = IoBuf::from(buf.copy_to_bytes(chunk_len));
-            self.blob.write_at(current_offset, owned).await?;
+            let direct = buf.split_to(chunk_len);
+            self.blob.write_at(current_offset, direct).await?;
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this

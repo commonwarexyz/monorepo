@@ -1,4 +1,4 @@
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBufMut, IoBufs};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, BufferPooler, buffer::Read, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Read data sequentially
 ///     let header = reader.read_exact(16).await.expect("unable to read data");
-///     println!("Read header: {:?}", header.coalesce());
+///     println!("Read header: {:?}", header.as_ref());
 ///
 ///     // Position is still at 16 (after header)
 ///     assert_eq!(reader.position(), 16);
@@ -98,21 +98,21 @@ impl<B: Blob> Read<B> {
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
     async fn refill(&mut self) -> Result<usize, Error> {
-        // Update blob position to account for consumed bytes.
+        // Update blob position to account for consumed bytes
         self.blob_position += self.buffer_position as u64;
         self.buffer_position = 0;
         self.buffer_valid_len = 0;
 
-        // Calculate how many bytes remain in the blob.
+        // Calculate how many bytes remain in the blob
         let blob_remaining = self.blob_size.saturating_sub(self.blob_position);
         if blob_remaining == 0 {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Calculate how much to read (minimum of buffer size and remaining bytes).
+        // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Reuse existing buffer if it has enough capacity, otherwise allocate new.
+        // Reuse existing buffer if it has enough capacity, otherwise allocate new
         let mut buf = std::mem::take(&mut self.buffer);
         buf.clear();
         let buf = if buf.capacity() >= bytes_to_read {
@@ -130,50 +130,66 @@ impl<B: Blob> Read<B> {
         Ok(bytes_to_read)
     }
 
-    /// Reads exactly `size` bytes and returns them as immutable buffers.
-    pub async fn read_exact(&mut self, size: usize) -> Result<IoBufs, Error> {
-        if size == 0 {
-            return Ok(IoBufs::default());
+    /// Reads exactly `len` bytes into `out`, returning the filled buffer.
+    ///
+    /// If `out.capacity() < len`, a new pooled buffer is allocated.
+    pub async fn read_exact_buf(
+        &mut self,
+        len: usize,
+        mut out: IoBufMut,
+    ) -> Result<IoBufMut, Error> {
+        if len == 0 {
+            out.clear();
+            return Ok(out);
         }
 
+        if out.capacity() < len {
+            out = self.pool.alloc(len);
+        } else {
+            out.clear();
+        }
+
+        // SAFETY: `len` is <= `out.capacity()` by construction above.
+        unsafe { out.set_len(len) };
         // Quick check if we have enough bytes total before attempting reads.
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
+        if (self.buffer_remaining() + self.blob_remaining() as usize) < len {
             return Err(Error::BlobInsufficientLength);
         }
 
-        let mut out = IoBufs::default();
-        let mut remaining = size;
-
-        // Read until we have enough bytes.
-        while remaining > 0 {
+        let mut bytes_read = 0;
+        while bytes_read < len {
             // Check if we need to refill.
             if self.buffer_position >= self.buffer_valid_len {
                 self.refill().await?;
             }
 
             // Calculate how many bytes we can copy from the buffer.
-            let bytes_to_copy = std::cmp::min(remaining, self.buffer_remaining());
-
-            // Copy this segment into its own output chunk.
-            let mut chunk = self.pool.alloc(bytes_to_copy);
-            // SAFETY: `bytes_to_copy` is <= `chunk.capacity()` by construction.
-            unsafe { chunk.set_len(bytes_to_copy) };
-            chunk.as_mut().copy_from_slice(
+            let bytes_to_copy = std::cmp::min(len - bytes_read, self.buffer_remaining());
+            out.as_mut()[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
                 &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
-            out.append(chunk.freeze());
 
             self.buffer_position += bytes_to_copy;
-            remaining -= bytes_to_copy;
+            bytes_read += bytes_to_copy;
         }
-
         Ok(out)
     }
 
-    /// Reads up to `max_len` bytes and returns available bytes as immutable buffers.
-    pub async fn read_up_to(&mut self, max_len: usize) -> Result<IoBufs, Error> {
+    /// Reads exactly `len` bytes and returns them as immutable contiguous bytes.
+    /// Returns an error if not enough bytes are available.
+    pub async fn read_exact(&mut self, len: usize) -> Result<IoBuf, Error> {
+        if len == 0 {
+            return Ok(IoBuf::default());
+        }
+
+        let out = self.read_exact_buf(len, self.pool.alloc(len)).await?;
+        Ok(out.freeze())
+    }
+
+    /// Reads up to `max_len` bytes and returns available bytes as immutable contiguous bytes.
+    pub async fn read_up_to(&mut self, max_len: usize) -> Result<IoBuf, Error> {
         if max_len == 0 {
-            return Ok(IoBufs::default());
+            return Ok(IoBuf::default());
         }
         let available = std::cmp::min(max_len, self.blob_remaining() as usize);
         if available == 0 {
