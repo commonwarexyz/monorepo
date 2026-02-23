@@ -20,7 +20,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub use no_coding::{Error as NoCodingError, NoCoding};
 
     mod reed_solomon;
-    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+    pub use reed_solomon::{Engine, Error as ReedSolomonError, Gf16, Gf8, ReedSolomon, ReedSolomon8};
 
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
@@ -251,7 +251,7 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::reed_solomon::ReedSolomon;
+    use crate::reed_solomon::{ReedSolomon, ReedSolomon8};
     use arbitrary::Unstructured;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
@@ -355,6 +355,7 @@ mod test {
         let selected: Vec<u16> = (0..30).collect();
 
         roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+        roundtrip::<ReedSolomon8<Sha256>>(&config, b"", &selected);
         roundtrip::<NoCoding<Sha256>>(&config, b"", &selected);
         roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
     }
@@ -370,6 +371,7 @@ mod test {
         let selected: Vec<u16> = (0..8).collect();
 
         roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+        roundtrip::<ReedSolomon8<Sha256>>(&config, &data, &selected);
         roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
     }
@@ -394,6 +396,18 @@ mod test {
             .test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn minifuzz_roundtrip_reed_solomon_8() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<ReedSolomon8<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
     }

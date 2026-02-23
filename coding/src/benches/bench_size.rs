@@ -1,5 +1,5 @@
 use commonware_codec::EncodeSize as _;
-use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
+use commonware_coding::{Config, NoCoding, ReedSolomon, ReedSolomon8, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
@@ -10,7 +10,7 @@ const STRATEGY: Sequential = Sequential;
 
 fn bench_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [8, 12, 16, 19, 20, 22, 24].map(|i| 2usize.pow(i));
 
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
@@ -57,6 +57,7 @@ fn bench_size<S: Scheme>(name: &str) {
 
 fn main() {
     bench_size::<ReedSolomon<Sha256>>("reed_solomon size");
+    bench_size::<ReedSolomon8<Sha256>>("reed_solomon_gf8 size");
     bench_size::<NoCoding<Sha256>>("no_coding size");
     bench_size::<Zoda<Sha256>>("zoda size");
 }

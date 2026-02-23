@@ -42,3 +42,10 @@ path = "fuzz_targets/zoda.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reed_solomon_gf8"
+path = "fuzz_targets/reed_solomon_gf8.rs"
+test = false
+doc = false
+bench = false
