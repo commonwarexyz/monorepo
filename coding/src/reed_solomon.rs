@@ -5,8 +5,53 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{collections::HashSet, marker::PhantomData};
+use std::{cell::RefCell, collections::HashSet, marker::PhantomData};
 use thiserror::Error;
+
+// Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
+// instances across calls. Constructing these objects is expensive because
+// the underlying engine initializes GF lookup tables. The `reset()` method
+// reconfigures the work buffers without rebuilding those tables.
+thread_local! {
+    static CACHED_ENCODER: RefCell<Option<ReedSolomonEncoder>> = const { RefCell::new(None) };
+    static CACHED_DECODER: RefCell<Option<ReedSolomonDecoder>> = const { RefCell::new(None) };
+}
+
+/// Takes the cached encoder (if any), resets it to the given parameters,
+/// and returns it. Falls back to constructing a new one if the cache is empty.
+fn take_encoder(k: usize, m: usize, shard_len: usize) -> Result<ReedSolomonEncoder, RsError> {
+    let cached = CACHED_ENCODER.with(|cell| cell.borrow_mut().take());
+    match cached {
+        Some(mut enc) => {
+            enc.reset(k, m, shard_len)?;
+            Ok(enc)
+        }
+        None => ReedSolomonEncoder::new(k, m, shard_len),
+    }
+}
+
+/// Returns an encoder back to the cache for future reuse.
+fn return_encoder(enc: ReedSolomonEncoder) {
+    CACHED_ENCODER.with(|cell| *cell.borrow_mut() = Some(enc));
+}
+
+/// Takes the cached decoder (if any), resets it to the given parameters,
+/// and returns it. Falls back to constructing a new one if the cache is empty.
+fn take_decoder(k: usize, m: usize, shard_len: usize) -> Result<ReedSolomonDecoder, RsError> {
+    let cached = CACHED_DECODER.with(|cell| cell.borrow_mut().take());
+    match cached {
+        Some(mut dec) => {
+            dec.reset(k, m, shard_len)?;
+            Ok(dec)
+        }
+        None => ReedSolomonDecoder::new(k, m, shard_len),
+    }
+}
+
+/// Returns a decoder back to the cache for future reuse.
+fn return_decoder(dec: ReedSolomonDecoder) {
+    CACHED_DECODER.with(|cell| *cell.borrow_mut() = Some(dec));
+}
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -256,8 +301,8 @@ fn encode_inner<H: Hasher, S: Strategy>(
     let mut shards = prepare_data(data, k, m);
     let shard_len = shards[0].len();
 
-    // Create encoder
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    // Create or reuse encoder
+    let mut encoder = take_encoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
     for shard in &shards {
         encoder
             .add_original_shard(shard)
@@ -271,6 +316,10 @@ fn encode_inner<H: Hasher, S: Strategy>(
         .map(|shard| shard.to_vec())
         .collect();
     shards.extend(recovery_shards);
+
+    // Drop EncoderResult (auto-resets received shards), then return encoder to cache
+    drop(encoding);
+    return_encoder(encoder);
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
@@ -378,7 +427,7 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Decode original data
-    let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    let mut decoder = take_decoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
     for (idx, ref shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
@@ -401,15 +450,14 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Encode recovered data to get recovery shards
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    let mut encoder = take_encoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
     for shard in shards.iter().take(k) {
         encoder
             .add_original_shard(shard)
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<&[u8]> = encoding.recovery_iter().collect();
-    shards.extend(recovery_shards);
+    shards.extend(encoding.recovery_iter());
 
     // Build Merkle tree
     let missing_digest_indices = shard_digests
@@ -438,7 +486,15 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    extract_data(shards, k)
+    let data = extract_data(shards, k);
+
+    // Return the encoder and decoder
+    drop(encoding);
+    return_encoder(encoder);
+    drop(decoding);
+    return_decoder(decoder);
+
+    data
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
