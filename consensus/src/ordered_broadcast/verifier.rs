@@ -76,12 +76,21 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
     ///
     /// If `verified` is true, the ack counts toward the verified total
     /// without being buffered for batch verification.
+    ///
+    /// Acks for subjects that have already reached quorum are dropped
+    /// since they cannot contribute to certificate formation.
     pub fn add(&mut self, ack: Ack<P, S, D>, verified: bool) {
         let key = BatchKey {
             chunk: ack.chunk.clone(),
             epoch: ack.epoch,
         };
         let batch = self.batches.entry(key).or_default();
+
+        // Drop acks for subjects that have already reached quorum.
+        if batch.verified >= self.quorum {
+            return;
+        }
+
         if verified {
             batch.verified += 1;
         } else {
@@ -444,5 +453,53 @@ mod tests {
         already_quorum(bls12381_multisig::fixture::<MinSig, _>);
         already_quorum(bls12381_threshold::fixture::<MinPk, _>);
         already_quorum(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that acks arriving while the batch entry still has verified >= quorum
+    /// (before cleanup) are dropped by the quorum guard in `add()`.
+    fn quorum_guard_drops_late_acks<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 5;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Pre-verify enough to reach quorum.
+        for i in 0..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk.clone(), epoch);
+            verifier.add(ack, true);
+        }
+
+        // Late acks should be dropped by the quorum guard.
+        let late_ack = create_ack(&fixture.schemes[quorum as usize], chunk.clone(), epoch);
+        verifier.add(late_ack, false);
+        assert!(!verifier.ready());
+
+        // The batch entry should have no pending acks.
+        let key = BatchKey { chunk, epoch };
+        let batch = verifier.batches.get(&key).unwrap();
+        assert!(batch.pending.is_empty());
+        assert_eq!(batch.verified, quorum as usize);
+    }
+
+    #[test]
+    fn test_quorum_guard_drops_late_acks() {
+        quorum_guard_drops_late_acks(ed25519::fixture);
+        quorum_guard_drops_late_acks(secp256r1::fixture);
+        quorum_guard_drops_late_acks(bls12381_multisig::fixture::<MinPk, _>);
+        quorum_guard_drops_late_acks(bls12381_multisig::fixture::<MinSig, _>);
+        quorum_guard_drops_late_acks(bls12381_threshold::fixture::<MinPk, _>);
+        quorum_guard_drops_late_acks(bls12381_threshold::fixture::<MinSig, _>);
     }
 }
