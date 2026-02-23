@@ -100,25 +100,16 @@
 //!
 //! ## State
 //!
-//! The structs in this module are stateful. They maintain state, and assume that
-//! they exist from the start of the DKG to the end of the DKG. Nevertheless,
-//! it is possible to use this code while allowing this state to persist, allowing
-//! nodes to come and go offline.
+//! The structs in this module are stateful and they assume that they exist from the
+//! start of the DKG to the end of the DKG.
 //!
-//! The suggested pattern for doing so is to replay the messages that dealers and
-//! players would process. For the dealer, it's important to use a seeded form of
-//! randomness, so that way the same messages can be generated on a second run.
-//! For the player, using [`Player::resume`] is more robust than just [`Player::new`],
-//! because it allows checking the integrity of the messages you're replaying
-//! against the publicly committed transcript (so far). This can detect some recoverable
-//! operator errors, like the disk where messages are stored not being attached,
-//! resulting in there being no private messages for the player to replay,
-//! despite their being publicly committed state suggesting the opposite.
-//!
-//! Besides a few cases like this that can be caught, in general it's very important
-//! that whatever means are used to allow nodes participating in the DKG to crash,
-//! the abstraction provided is nonetheless as if the nodes have a continuous state
-//! updated throughout the protocol.
+//! During restart, state should be restored by replaying all messages that
+//! dealers and players previously processed. For the dealer, it's important to use a
+//! seeded form of randomness, so that way the same messages can be generated on a second run.
+//! For the player, using [`Player::resume`] is more robust than just [`Player::new`], because it
+//! checks the integrity of the replayed messages against the publicly committed transcript (so far).
+//! This can detect some recoverable operator errors, like storage misconfiguration (where a player has publicly
+//! acknowledged a private message but has no record of it in storage).
 //!
 //! # Caveats
 //!
@@ -1537,17 +1528,16 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// and if any messages which should be present based on this player's actions
     /// in the log are missing, this method will return [`Error::PlayerCorrupted`].
     ///
-    /// The returned map contains the acknowledgements generated while replaying
-    /// `msgs`, keyed by dealer.
-    ///
     /// For example, if a particular private message containing a share is not
     /// present in `msgs`, but we've already acknowledged it, and this has been
     /// included in a public log, then this method will fail.
-    ///
     /// This method cannot catch all cases where state has been corrupted. In
     /// particular, if a dealer has not posted their log publicly yet, but has
     /// already received an ack, then this method cannot help in that case,
     /// but the issue still remains.
+    ///
+    /// The returned map contains the acknowledgements generated while replaying
+    /// `msgs`, keyed by dealer.
     #[allow(clippy::type_complexity)]
     pub fn resume<M: Faults>(
         info: Info<V, S::PublicKey>,
@@ -1555,17 +1545,18 @@ impl<V: Variant, S: Signer> Player<V, S> {
         logs: &BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
     ) -> Result<(Self, BTreeMap<S::PublicKey, PlayerAck<S::PublicKey>>), Error> {
-        let mut this = Self::new(info, me)?;
-        let mut acks = BTreeMap::new();
         // We want to check our own behavior. Other things get resolved by `select`
         // later, and we want to avoid treading on its behavior.
         // So, we want to see if the logs contain acks that we've posted which
         // are not matched by things here.
+        let mut this = Self::new(info, me)?;
+        let mut acks = BTreeMap::new();
         for (dealer, pub_msg, priv_msg) in msgs {
             if let Some(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
                 acks.insert(dealer, ack);
             }
         }
+
         // Have we emitted any valid acks, publicly recorded, for which we do
         // not have the private message?
         if logs.iter().any(|(dealer, log)| {
@@ -1634,11 +1625,11 @@ impl<V: Variant, S: Signer> Player<V, S> {
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
-        let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
         // `select` verifies ack signatures, so any ack present in `selected`
         // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
         // then we're corrupted.
+        let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
         if selected
             .iter_pairs()
             .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
