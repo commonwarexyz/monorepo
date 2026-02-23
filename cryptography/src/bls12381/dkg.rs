@@ -2167,7 +2167,7 @@ mod test_plan {
                     .collect::<anyhow::Result<Vec<_>>>()?
                     .try_into()
                     .unwrap();
-                let mut persisted_msgs: BTreeMap<
+                let mut acked_dealings: BTreeMap<
                     ed25519::PublicKey,
                     Vec<(ed25519::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
                 > = player_set
@@ -2282,7 +2282,7 @@ mod test_plan {
                             player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg);
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);
                         if let Some(ack) = ack {
-                            persisted_msgs
+                            acked_dealings
                                 .get_mut(&player_pk)
                                 .expect("player should be present")
                                 .push((pk.clone(), pub_msg.clone(), persisted));
@@ -2370,7 +2370,7 @@ mod test_plan {
                             let player_pk = keys[i_player as usize].public_key();
                             let was_acked = missing_log.get_ack(&player_pk).is_some();
 
-                            let replay = persisted_msgs
+                            let replay = acked_dealings
                                 .get(&player_pk)
                                 .cloned()
                                 .expect("player should be present");
@@ -2402,7 +2402,7 @@ mod test_plan {
                     for &i_player in crash_resume_by_dealer.get(&i_dealer).into_iter().flatten() {
                         let player_pk = keys[i_player as usize].public_key();
                         let player_sk = keys[i_player as usize].clone();
-                        let replay = persisted_msgs
+                        let replay = acked_dealings
                             .get(&player_pk)
                             .cloned()
                             .expect("player should be present");
@@ -2503,7 +2503,7 @@ mod test_plan {
                         if dealer_log.get_ack(&player_pk).is_none() {
                             continue;
                         }
-                        let replay = persisted_msgs
+                        let replay = acked_dealings
                             .get(&player_pk)
                             .cloned()
                             .expect("player should be present");
