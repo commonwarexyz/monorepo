@@ -14,9 +14,7 @@ use commonware_cryptography::{
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-pub type CheckResult = Result<(), String>;
-
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
+pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
@@ -36,11 +34,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
 
         if let Some((first_idx, first_digest)) = finalizations_for_view.first() {
             for (idx, digest) in &finalizations_for_view[1..] {
-                if digest != first_digest {
-                    return Err(format!(
-                        "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {digest:?} but replica {first_idx} has {first_digest:?}",
-                    ));
-                }
+                assert_eq!(
+                    digest, first_digest,
+                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {digest:?} but replica {first_idx} has {first_digest:?}",
+                );
             }
         }
     }
@@ -53,11 +50,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
         .collect();
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
-            if nullifications.contains_key(finalized_view) {
-                return Err(format!(
-                    "Invariant violation: replica {idx} nullified view {finalized_view} but it is finalized",
-                ));
-            }
+            assert!(
+                !nullifications.contains_key(finalized_view),
+                "Invariant violation: replica {idx} nullified view {finalized_view} but it is finalized",
+            );
         }
     }
 
@@ -66,12 +62,11 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
     for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
         for (&view, data) in notarizations.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
-                if finalized_digest != data.payload {
-                    return Err(format!(
-                        "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_digest:?}",
-                        data.payload
-                    ));
-                }
+                assert_eq!(
+                    finalized_digest, data.payload,
+                    "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_digest:?}",
+                    data.payload
+                );
             }
         }
     }
@@ -88,11 +83,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
         }
     }
     for (v, payloads) in per_view {
-        if payloads.len() > 1 {
-            return Err(format!(
-                "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
-            ));
-        }
+        assert!(
+            payloads.len() <= 1,
+            "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
+        );
     }
 
     // Invariant: no_finalization_for_nullified_view
@@ -103,11 +97,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
         .collect();
     for (idx, (_, _, finals)) in replicas.iter().enumerate() {
         for v in finals.keys() {
-            if nullified.contains(v) {
-                return Err(format!(
-                    "Invariant violation: replica {idx} finalized view {v} which is nullified"
-                ));
-            }
+            assert!(
+                !nullified.contains(v),
+                "Invariant violation: replica {idx} finalized view {v} which is nullified"
+            );
         }
     }
 
@@ -119,12 +112,11 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
         .collect();
     for (_, _, finalizations) in replicas.iter() {
         for (&v, d) in finalizations.iter() {
-            if !notarized.contains(&(v, d.payload)) {
-                return Err(format!(
-                    "Invariant violation: finalization without notarization: view {v}, payload={:?}",
-                    d.payload
-                ));
-            }
+            assert!(
+                notarized.contains(&(v, d.payload)),
+                "Invariant violation: finalization without notarization: view {v}, payload={:?}",
+                d.payload
+            );
         }
     }
 
@@ -134,84 +126,63 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) -> CheckResult {
         // Certificates have the correct number of signatures.
         for (view, data) in nullifications.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
-                let Some(count) = data.signature_count else {
-                    return Err(
-                        "Invariant violation: Attributable scheme must have signature count"
-                            .to_string(),
-                    );
-                };
-                if count < threshold {
-                    return Err(format!(
-                        "Invariant violation: nullification in view {view} has {count} < {threshold} signatures"
-                    ));
-                }
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
+                assert!(
+                    count >= threshold,
+                    "Invariant violation: nullification in view {view} has {count} < {threshold} signatures"
+                );
             } else {
-                if data.signature_count.is_some() {
-                    return Err(
-                        "Invariant violation: non-attributable scheme should not expose signature count"
-                            .to_string(),
-                    );
-                }
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
+                );
             }
         }
 
         for (view, data) in notarizations.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
-                let Some(count) = data.signature_count else {
-                    return Err(
-                        "Invariant violation: Attributable scheme must have signature count"
-                            .to_string(),
-                    );
-                };
-                if count < threshold {
-                    return Err(format!(
-                        "Invariant violation: notarization in view {view} has {count} < {threshold} signatures"
-                    ));
-                }
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
+                assert!(
+                    count >= threshold,
+                    "Invariant violation: notarization in view {view} has {count} < {threshold} signatures"
+                );
             } else {
-                if data.signature_count.is_some() {
-                    return Err(
-                        "Invariant violation: non-attributable scheme should not expose signature count"
-                            .to_string(),
-                    );
-                }
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
+                );
             }
         }
 
         for (view, data) in finalizations.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
-                let Some(count) = data.signature_count else {
-                    return Err(
-                        "Invariant violation: Attributable scheme must have signature count"
-                            .to_string(),
-                    );
-                };
-                if count < threshold {
-                    return Err(format!(
-                        "Invariant violation: finalization in view {view} has {count} < {threshold} signatures"
-                    ));
-                }
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
+                assert!(
+                    count >= threshold,
+                    "Invariant violation: finalization in view {view} has {count} < {threshold} signatures"
+                );
             } else {
-                if data.signature_count.is_some() {
-                    return Err(
-                        "Invariant violation: non-attributable scheme should not expose signature count"
-                            .to_string(),
-                    );
-                }
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
+                );
             }
         }
 
         // Invariant: no_nullification_and_finalization_in_the_same_view
         for view in nullifications.keys() {
-            if finalizations.contains_key(view) {
-                return Err(format!(
-                    "Invariant violation: view {view} has both nullification and finalization",
-                ));
-            }
+            assert!(
+                !finalizations.contains_key(view),
+                "Invariant violation: view {view} has both nullification and finalization",
+            );
         }
     }
-
-    Ok(())
 }
 
 fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
@@ -224,7 +195,8 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 
     let encoded = certificate.encode();
     let mut cursor = encoded.as_ref();
-    let signers = Signers::read_cfg(&mut cursor, &max_participants).ok()?;
+    let signers =
+        Signers::read_cfg(&mut cursor, &max_participants).expect("certificate signers must decode");
     Some(signers.count())
 }
 
