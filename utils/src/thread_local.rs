@@ -10,13 +10,13 @@
 //! [`Cached`] is an RAII guard whose [`Drop`] automatically returns the
 //! value to the thread-local slot, so forgetting the return is impossible.
 //!
-//! # Avoiding `.await`
+//! # Synchronization
 //!
-//! Do not hold a [`Cached`] guard across `.await` points. While the guard
-//! is live the thread-local slot is empty, so any other task that runs on
-//! the same thread during the suspension will pay the full construction
-//! cost instead of reusing the cached instance. Prefer scoping the guard
-//! tightly around the synchronous work that needs the cached object.
+//! This cache provides no synchronization guarantees across threads.
+//! Each thread has an independent slot.
+//!
+//! Within one thread, only one guard per cache can be held at a time.
+//! Attempting to acquire a second guard before dropping the first will panic.
 //!
 //! # Examples
 //!
@@ -44,7 +44,7 @@ use std::{
 /// on drop.
 pub struct Cached<T: 'static> {
     value: Option<T>,
-    cache: &'static LocalKey<RefCell<Option<T>>>,
+    cache: &'static LocalKey<RefCell<(bool, Option<T>)>>,
 }
 
 impl<T: 'static> Cached<T> {
@@ -54,16 +54,20 @@ impl<T: 'static> Cached<T> {
     /// On a miss the `create` closure constructs a new one. Both closures may
     /// fail with `E`.
     ///
-    /// While the guard is live the thread-local slot is empty. Avoid holding
-    /// the guard across `.await` points: any other task that runs on the same
-    /// thread during the suspension will see an empty cache and pay the full
-    /// construction cost.
+    /// This cache provides no synchronization guarantees.
+    /// Attempting to take a second guard from the same cache on the same
+    /// thread while one is already held will panic.
     pub fn take<E>(
-        cache: &'static LocalKey<RefCell<Option<T>>>,
+        cache: &'static LocalKey<RefCell<(bool, Option<T>)>>,
         create: impl FnOnce() -> Result<T, E>,
         reset: impl FnOnce(&mut T) -> Result<(), E>,
     ) -> Result<Self, E> {
-        let cached = cache.with(|cell| cell.borrow_mut().take());
+        let cached = cache.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            assert!(!slot.0, "cache already held on this thread");
+            slot.0 = true;
+            slot.1.take()
+        });
         let value = match cached {
             Some(mut v) => {
                 if let Err(err) = reset(&mut v) {
@@ -71,15 +75,26 @@ impl<T: 'static> Cached<T> {
                     // do not permanently evict the cache entry.
                     cache.with(|cell| {
                         let mut slot = cell.borrow_mut();
-                        if slot.is_none() {
-                            *slot = Some(v);
-                        }
+                        debug_assert!(slot.0, "cache expected to be held");
+                        slot.0 = false;
+                        slot.1 = Some(v);
                     });
                     return Err(err);
                 }
                 v
             }
-            None => create()?,
+            None => match create() {
+                Ok(v) => v,
+                Err(err) => {
+                    // Return to uninitialized state if creation fails.
+                    cache.with(|cell| {
+                        let mut slot = cell.borrow_mut();
+                        debug_assert!(slot.0, "cache expected to be held");
+                        slot.0 = false;
+                    });
+                    return Err(err);
+                }
+            },
         };
         Ok(Self {
             value: Some(value),
@@ -105,7 +120,12 @@ impl<T: 'static> DerefMut for Cached<T> {
 impl<T: 'static> Drop for Cached<T> {
     fn drop(&mut self) {
         if let Some(v) = self.value.take() {
-            self.cache.with(|cell| *cell.borrow_mut() = Some(v));
+            self.cache.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                debug_assert!(slot.0, "cache expected to be held");
+                slot.0 = false;
+                slot.1 = Some(v);
+            });
         }
     }
 }
@@ -116,13 +136,17 @@ impl<T: 'static> Drop for Cached<T> {
 /// thread_local_cache!(static SLOT: MyType);
 /// ```
 ///
-/// Expands to a `thread_local!` declaration wrapping `RefCell<Option<MyType>>`.
+/// Expands to a `thread_local!` declaration wrapping
+/// `RefCell<(bool, Option<MyType>)>` where:
+/// - `(false, None)` means uninitialized
+/// - `(false, Some(_))` means available
+/// - `(true, None)` means held
 #[macro_export]
 macro_rules! thread_local_cache {
     (static $name:ident : $ty:ty) => {
         ::std::thread_local! {
-            static $name: ::std::cell::RefCell<::core::option::Option<$ty>> =
-                const { ::std::cell::RefCell::new(::core::option::Option::None) };
+            static $name: ::std::cell::RefCell<(bool, ::core::option::Option<$ty>)> =
+                const { ::std::cell::RefCell::new((false, ::core::option::Option::None)) };
         }
     };
 }
@@ -184,7 +208,7 @@ mod tests {
         }
 
         // Cache should now hold the value
-        let has_value = DROP_CACHE.with(|cell| cell.borrow().is_some());
+        let has_value = DROP_CACHE.with(|cell| cell.borrow().1.is_some());
         assert!(has_value, "drop should return value to cache");
     }
 
@@ -194,6 +218,10 @@ mod tests {
     fn test_create_error_propagates() {
         let result = Cached::take(&ERR_CACHE, || Err::<u32, &str>("create failed"), |_| Ok(()));
         assert!(result.is_err());
+
+        // A failed create should not leave the cache marked as held.
+        let guard = Cached::take(&ERR_CACHE, || Ok::<u32, &str>(7), |_| Ok(())).unwrap();
+        assert_eq!(*guard, 7);
     }
 
     thread_local_cache!(static RESET_ERR_CACHE: u32);
@@ -214,28 +242,26 @@ mod tests {
         assert!(result.is_err());
 
         // Failed reset should not evict the cached value.
-        let cached = RESET_ERR_CACHE.with(|cell| *cell.borrow());
+        let cached = RESET_ERR_CACHE.with(|cell| cell.borrow().1);
         assert_eq!(cached, Some(42));
     }
 
     thread_local_cache!(static NESTED_CACHE: Vec<u8>);
 
     #[test]
-    fn test_nested_guards_last_drop_wins() {
-        NESTED_CACHE.with(|cell| *cell.borrow_mut() = None);
+    fn test_nested_guards_rejected() {
+        NESTED_CACHE.with(|cell| *cell.borrow_mut() = (false, None));
 
-        let mut outer = Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![1]), |_| Ok(())).unwrap();
-        outer.push(10);
+        let result = std::panic::catch_unwind(|| {
+            let mut outer =
+                Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![1]), |_| Ok(())).unwrap();
+            outer.push(10);
+            let _inner = Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![2]), |_| Ok(())).unwrap();
+        });
+        assert!(result.is_err(), "nested take on same thread should panic");
 
-        {
-            let mut inner =
-                Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![2]), |_| Ok(())).unwrap();
-            inner.push(20);
-        }
-
-        drop(outer);
-
-        let cached = NESTED_CACHE.with(|cell| cell.borrow().clone());
+        // Outer guard should have returned its value while unwinding.
+        let cached = NESTED_CACHE.with(|cell| cell.borrow().1.clone());
         assert_eq!(cached, Some(vec![1, 10]));
     }
 }
