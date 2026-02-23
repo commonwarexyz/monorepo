@@ -148,11 +148,11 @@ pub trait SequencersProvider: Clone + Send + Sync + 'static {
 
 /// Suffix used to identify a chunk namespace for domain separation.
 /// Used when signing and verifying chunks to prevent signature reuse across different message types.
-pub const CHUNK_SUFFIX: &[u8] = b"_COMMONWARE_CONSENSUS_ORDERED_BROADCAST_CHUNK";
+pub const CHUNK_SUFFIX: &[u8] = b"_CHUNK";
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
-pub const ACK_SUFFIX: &[u8] = b"_COMMONWARE_CONSENSUS_ORDERED_BROADCAST_ACK";
+pub const ACK_SUFFIX: &[u8] = b"_ACK";
 
 /// Returns a suffixed namespace for signing a chunk.
 ///
