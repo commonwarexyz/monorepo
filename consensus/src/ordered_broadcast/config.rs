@@ -4,6 +4,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{
@@ -21,6 +22,7 @@ pub struct Config<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = C::PublicKey>,
     T: Strategy,
 > {
     /// The signer used when this engine acts as a sequencer.
@@ -52,6 +54,11 @@ pub struct Config<
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
     pub monitor: M,
+
+    /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
+    pub blocker: B,
 
     /// Whether proposals are sent as priority.
     pub priority_proposals: bool,

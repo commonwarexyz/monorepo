@@ -209,6 +209,7 @@ mod tests {
         fixture: &Fixture<S>,
         sequencer_pks: &[PublicKey],
         registrations: &mut Registrations<PublicKey>,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(Height) -> bool,
         misses_allowed: Option<usize>,
@@ -254,6 +255,7 @@ mod tests {
                     relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
+                    blocker: oracle.control(validator.clone()),
                     priority_proposals: false,
                     priority_acks: false,
                     rebroadcast_timeout,
@@ -360,7 +362,7 @@ mod tests {
             let num_validators = 4;
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-            let (_oracle, mut registrations) =
+            let (oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
@@ -369,6 +371,7 @@ mod tests {
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
+                &oracle,
                 Duration::from_secs(5),
                 |_| false,
                 Some(5),
@@ -436,6 +439,7 @@ mod tests {
                     &fixture,
                     &fixture.participants,
                     &mut registrations,
+                    &oracle,
                     Duration::from_secs(5),
                     |_| false,
                     None,
@@ -503,6 +507,7 @@ mod tests {
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
+                &oracle,
                 Duration::from_secs(1),
                 |_| false,
                 None,
@@ -585,6 +590,7 @@ mod tests {
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
+                &oracle,
                 Duration::from_millis(150),
                 |_| false,
                 None,
@@ -685,7 +691,7 @@ mod tests {
             let num_validators = 4;
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-            let (_oracle, mut registrations) =
+            let (oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
@@ -694,6 +700,7 @@ mod tests {
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
+                &oracle,
                 Duration::from_secs(5),
                 |i| i.get() % 10 == 0,
                 None,
@@ -780,6 +787,7 @@ mod tests {
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
+                        blocker: oracle.control(validator.clone()),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(1),
@@ -942,6 +950,7 @@ mod tests {
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
+                        blocker: oracle.control(validator.clone()),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(5),
@@ -997,6 +1006,7 @@ mod tests {
                         automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),
+                        blocker: oracle.control(sequencer.public_key()),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(5),
@@ -1085,6 +1095,7 @@ mod tests {
                 &fixture,
                 &sequencers,
                 &mut registrations,
+                &oracle,
                 Duration::from_millis(150),
                 |_| false,
                 None,

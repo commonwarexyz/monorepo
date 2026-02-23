@@ -27,7 +27,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -74,6 +74,7 @@ pub struct Engine<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = C::PublicKey>,
     T: Strategy,
 > {
     ////////////////////////////////////////
@@ -87,6 +88,7 @@ pub struct Engine<
     relay: R,
     monitor: M,
     reporter: Z,
+    blocker: B,
     strategy: T,
 
     ////////////////////////////////////////
@@ -215,11 +217,12 @@ impl<
         R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
+        B: Blocker<PublicKey = C::PublicKey>,
         T: Strategy,
-    > Engine<E, C, S, P, D, A, R, Z, M, T>
+    > Engine<E, C, S, P, D, A, R, Z, M, B, T>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, B, T>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -232,6 +235,7 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
+            blocker: cfg.blocker,
             strategy: cfg.strategy,
             chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
@@ -426,11 +430,17 @@ impl<
                     Ok(node) => node,
                     Err(err) => {
                         debug!(?err, ?sender, "node decode failed");
+                        self.blocker.block(sender).await;
                         continue;
                     }
                 };
                 let result = match self.validate_node(&node, &sender) {
                     Ok(result) => result,
+                    Err(ref err) if err.is_blockable() => {
+                        warn!(?err, ?sender, "blocking peer for invalid node");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
                     Err(err) => {
                         debug!(?err, ?sender, "node validate failed");
                         continue;
@@ -475,11 +485,17 @@ impl<
                     Err(err) => {
                         debug!(?err, ?sender, "ack decode failed");
                         self.metrics.acks.inc(Status::Invalid);
+                        self.blocker.block(sender).await;
                         continue;
                     }
                 };
-                if let Err(err) = self.validate_ack(&ack, &sender) {
-                    debug!(?err, ?sender, "ack validate failed");
+                if let Err(ref err) = self.validate_ack(&ack, &sender) {
+                    if err.is_blockable() {
+                        warn!(?err, ?sender, "blocking peer for invalid ack");
+                        self.blocker.block(sender).await;
+                    } else {
+                        debug!(?err, ?sender, "ack validate failed");
+                    }
                     self.metrics.acks.inc(Status::Dropped);
                     continue;
                 };
@@ -535,9 +551,12 @@ impl<
                             }
                         }
 
-                        // Log invalid signers
+                        // Block invalid signers
                         for invalid in &result.invalid {
-                            debug!(?invalid, "invalid ack signature");
+                            if let Some(signer) = scheme.participants().key(*invalid) {
+                                warn!(?signer, "blocking peer for invalid signature");
+                                self.blocker.block(signer.clone()).await;
+                            }
                             self.metrics.acks.inc(Status::Invalid);
                         }
                     }
