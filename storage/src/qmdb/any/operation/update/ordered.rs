@@ -1,6 +1,6 @@
 use crate::qmdb::any::{
     operation::{update::sealed::Sealed, Update as UpdateTrait},
-    value::{FixedEncoding, ValueEncoding, VarOperationEncoding, VariableEncoding},
+    value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
 use commonware_codec::{
@@ -50,12 +50,6 @@ impl<K: Array, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
     }
 }
 
-impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
-    const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
-}
-
-// --- Write: shared across all encoding types ---
-
 impl<K: Array, V: ValueEncoding> Write for Update<K, V>
 where
     K: Write,
@@ -66,6 +60,10 @@ where
         self.value.write(buf);
         self.next_key.write(buf);
     }
+}
+
+impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
+    const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
 }
 
 impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
@@ -83,13 +81,7 @@ impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     }
 }
 
-// --- EncodeSize: shared across variable-operation encoding types ---
-
-impl<K: Array, V> EncodeSize for Update<K, V>
-where
-    V: VarOperationEncoding,
-    V::Value: EncodeSize,
-{
+impl<K: Array, V: VariableValue> EncodeSize for Update<K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
         K::SIZE + self.value.encode_size() + K::SIZE
     }

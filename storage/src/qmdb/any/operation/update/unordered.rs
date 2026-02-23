@@ -56,8 +56,6 @@ where
     }
 }
 
-// --- EncodeSize: shared across variable-operation encoding types ---
-
 impl<K, V> EncodeSize for Update<K, V>
 where
     K: Key + EncodeSize,
@@ -69,13 +67,9 @@ where
     }
 }
 
-// --- Fixed key + Fixed value (FixedSize only; Write and EncodeSize are shared above) ---
-
 impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
     const SIZE: usize = K::SIZE + V::SIZE;
 }
-
-// --- Read: per-encoding (Cfg types differ) ---
 
 impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     type Cfg = ();
