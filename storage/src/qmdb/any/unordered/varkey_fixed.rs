@@ -13,7 +13,10 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, unordered, value::VarKeyFixedEncoding, FixedValue},
+        any::{
+            encoding::{FixedVal, VariableKey},
+            init_variable, unordered,
+        },
         operation::Key,
         Durable, Error, Merkleized,
     },
@@ -23,8 +26,8 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 
-pub type Update<K, V> = unordered::Update<K, VarKeyFixedEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, VarKeyFixedEncoding<V>>;
+pub type Update<K, V> = unordered::Update<VariableKey<K, V>>;
+pub type Operation<K, V> = unordered::Operation<VariableKey<K, V>>;
 
 /// A key-value QMDB with variable-length keys and fixed-size values.
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
@@ -34,7 +37,7 @@ impl<E, K, V, H, T> Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key + Codec,
-    V: FixedValue,
+    V: FixedVal,
     H: Hasher,
     T: Translator,
     Operation<K, V>: Codec,
@@ -73,7 +76,7 @@ mod test {
     /// Test with actual variable-length Vec<u8> keys and fixed-size u64 values.
     #[test_traced("INFO")]
     fn test_varkey_fixed_db_variable_length_keys() {
-        type VarKeyFixedDb = Db<deterministic::Context, Vec<u8>, u64, Sha256, TwoCap>;
+        type VariableKeyFixedDb = Db<deterministic::Context, Vec<u8>, u64, Sha256, TwoCap>;
         type Cfg = VariableConfig<TwoCap, (RangeCfg<usize>, ())>;
 
         let executor = deterministic::Runner::default();
@@ -92,7 +95,7 @@ mod test {
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut db = VarKeyFixedDb::init(context.with_label("db"), cfg)
+            let mut db = VariableKeyFixedDb::init(context.with_label("db"), cfg)
                 .await
                 .unwrap()
                 .into_mutable();
@@ -129,11 +132,11 @@ mod test {
         test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
     };
 
-    type DigestVarKeyFixedDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    type DigestVariableKeyFixedDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
-    async fn open_digest_db(context: Context) -> DigestVarKeyFixedDb {
+    async fn open_digest_db(context: Context) -> DigestVariableKeyFixedDb {
         let cfg = variable_db_config::<TwoCap>("partition", &context);
-        DigestVarKeyFixedDb::init(context, cfg).await.unwrap()
+        DigestVariableKeyFixedDb::init(context, cfg).await.unwrap()
     }
 
     #[inline]

@@ -1,6 +1,6 @@
 //! Shared implementation for ordered Current QMDB variants.
 //!
-//! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
+//! This module contains impl blocks that are generic over `Encoding`, allowing them to be
 //! used by both fixed and variable ordered QMDB implementations.
 
 use crate::{
@@ -10,8 +10,8 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{
+            encoding::Encoding,
             ordered::{Operation, Update},
-            ValueEncoding,
         },
         current::{
             db::{Merkleized, State, Unmerkleized},
@@ -37,27 +37,27 @@ pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<E, C, K, V, I, H, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N, S, D>;
+pub type Db<E, C, KV, I, H, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
+    crate::qmdb::current::db::Db<E, C, I, H, Update<KV>, N, S, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
+        C: Contiguous<Item = Operation<KV>>,
+        KV: Encoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
         S: State<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, K, V, I, H, N, S, D>
+    > Db<E, C, KV, I, H, N, S, D>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    KV::Key: Array,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &KV::Key) -> Result<Option<KV::Value>, Error> {
         self.any.get(key).await
     }
 
@@ -65,9 +65,9 @@ where
     /// the provided `root`.
     pub fn verify_key_value_proof(
         hasher: &mut H,
-        key: K,
-        value: V::Value,
-        proof: &KeyValueProof<K, H::Digest, N>,
+        key: KV::Key,
+        value: KV::Value,
+        proof: &KeyValueProof<KV::Key, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let op = Operation::Update(Update {
@@ -81,7 +81,7 @@ where
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, Update<K, V>)>, Error> {
+    pub async fn get_span(&self, key: &KV::Key) -> Result<Option<(Location, Update<KV>)>, Error> {
         self.any.get_span(key).await
     }
 
@@ -89,10 +89,10 @@ where
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
         &'a self,
-        start: K,
-    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
+        start: KV::Key,
+    ) -> Result<impl Stream<Item = Result<(KV::Key, KV::Value), Error>> + 'a, Error>
     where
-        V: 'a,
+        KV: 'a,
     {
         self.any.stream_range(start).await
     }
@@ -101,8 +101,8 @@ where
     /// provided `root`.
     pub fn verify_exclusion_proof(
         hasher: &mut H,
-        key: &K,
-        proof: &super::ExclusionProof<K, V, H::Digest, N>,
+        key: &KV::Key,
+        proof: &super::ExclusionProof<KV, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let (op_proof, op) = match proof {
@@ -111,7 +111,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, S::MerkleizationState, D>::span_contains(
+                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<KV>, S::MerkleizationState, D>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -142,17 +142,17 @@ where
 // Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
         E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
+        C: Mutable<Item = Operation<KV>>,
+        KV: Encoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
         D: store::State,
-    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, D>
+    > Db<E, C, KV, I, H, N, Merkleized<DigestOf<H>>, D>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    KV::Key: Array,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
@@ -164,8 +164,8 @@ where
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,
-        key: K,
-    ) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
+        key: KV::Key,
+    ) -> Result<KeyValueProof<KV::Key, H::Digest, N>, Error> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((data, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
@@ -186,8 +186,8 @@ where
     pub async fn exclusion_proof(
         &self,
         hasher: &mut H,
-        key: &K,
-    ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
+        key: &KV::Key,
+    ) -> Result<super::ExclusionProof<KV, H::Digest, N>, Error> {
         match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
@@ -227,16 +227,16 @@ where
 // Functionality for the Mutable state.
 impl<
         E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
+        C: Mutable<Item = Operation<KV>>,
+        KV: Encoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
+    > Db<E, C, KV, I, H, N, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    KV::Key: Array,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     /// Writes a batch of key-value pairs to the database.
     ///
@@ -245,7 +245,7 @@ where
     /// - `(key, None)` deletes the key
     pub async fn write_batch(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (KV::Key, Option<KV::Value>)>,
     ) -> Result<(), Error> {
         let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
         let status = &mut self.status;
@@ -268,21 +268,21 @@ where
 // Store implementation for all states
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
+        C: Contiguous<Item = Operation<KV>>,
+        KV: Encoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
         S: State<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, I, H, N, S, D>
+    > kv::Gettable for Db<E, C, KV, I, H, N, S, D>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    KV::Key: Array,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
-    type Key = K;
-    type Value = V::Value;
+    type Key = KV::Key;
+    type Value = KV::Value;
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
@@ -291,21 +291,20 @@ where
 }
 
 // Batchable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<E, C, K, V, I, H, const N: usize> Batchable
-    for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
+impl<E, C, KV, I, H, const N: usize> Batchable for Db<E, C, KV, I, H, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    C: Mutable<Item = Operation<K, V>>,
-    K: Array,
-    V: ValueEncoding,
+    C: Mutable<Item = Operation<KV>>,
+    KV: Encoding,
+    KV::Key: Array,
     I: OrderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (KV::Key, Option<KV::Value>)> + Send + 'a,
         Iter::IntoIter: Send,
     {
         self.write_batch(iter).await

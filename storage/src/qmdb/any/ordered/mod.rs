@@ -12,7 +12,7 @@ use crate::{
     kv::{self, Batchable},
     mmr::Location,
     qmdb::{
-        any::{db::Db, ValueEncoding},
+        any::{db::Db, Encoding},
         delete_known_loc,
         operation::Operation as OperationTrait,
         update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
@@ -39,26 +39,25 @@ pub mod variable;
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
 
 /// Type alias for a location and its associated key data.
-type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
+type LocatedKey<KV> = Option<(Location, Update<KV>)>;
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        KV: Encoding<Key: Array>,
+        C: Contiguous<Item = Operation<KV>>,
         I: Index<Value = Location>,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, I, H, Update<K, V>, M, D>
+    > Db<E, C, I, H, Update<KV>, M, D>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     async fn get_update_op(
-        reader: &impl Reader<Item = Operation<K, V>>,
+        reader: &impl Reader<Item = Operation<KV>>,
         loc: Location,
-    ) -> Result<Update<K, V>, Error> {
+    ) -> Result<Update<KV>, Error> {
         match reader.read(*loc).await? {
             Operation::Update(key_data) => Ok(key_data),
             _ => unreachable!("expected update operation at location {}", loc),
@@ -66,7 +65,7 @@ where
     }
 
     /// Whether the span defined by `span_start` and `span_end` contains `key`.
-    pub fn span_contains(span_start: &K, span_end: &K, key: &K) -> bool {
+    pub fn span_contains(span_start: &KV::Key, span_end: &KV::Key, key: &KV::Key) -> bool {
         if span_start >= span_end {
             // cyclic span case
             if key >= span_start || key < span_end {
@@ -86,8 +85,8 @@ where
     async fn find_span(
         &self,
         locs: impl IntoIterator<Item = Location>,
-        key: &K,
-    ) -> Result<LocatedKey<K, V>, Error> {
+        key: &KV::Key,
+    ) -> Result<LocatedKey<KV>, Error> {
         let reader = self.log.reader().await;
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
@@ -102,7 +101,7 @@ where
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<K, V>, Error> {
+    pub async fn get_span(&self, key: &KV::Key) -> Result<LocatedKey<KV>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -131,7 +130,7 @@ where
     }
 
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, Error> {
+    pub async fn get_all(&self, key: &KV::Key) -> Result<Option<(KV::Value, KV::Key)>, Error> {
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
@@ -140,8 +139,8 @@ where
     /// Returns the key data for `key` with its location, or None if the key is not active.
     pub(crate) async fn get_with_loc(
         &self,
-        key: &K,
-    ) -> Result<Option<(Update<K, V>, Location)>, Error> {
+        key: &KV::Key,
+    ) -> Result<Option<(Update<KV>, Location)>, Error> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         let reader = self.log.reader().await;
@@ -163,7 +162,7 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &KV::Key) -> Result<Option<KV::Value>, Error> {
         self.get_with_loc(key)
             .await
             .map(|op| op.map(|(data, _)| data.value))
@@ -173,11 +172,11 @@ where
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
         &'a self,
-        start: K,
-    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
+        start: KV::Key,
+    ) -> Result<impl Stream<Item = Result<(KV::Key, KV::Value), Error>> + 'a, Error>
     where
-        V: 'a,
-        V::Value: Send + Sync,
+        KV: 'a,
+        KV::Value: Send + Sync,
     {
         let start_iter = self.snapshot.get(&start);
         let mut init_pending = self.fetch_all_updates(start_iter).await?;
@@ -185,7 +184,7 @@ where
 
         Ok(stream::unfold(
             (start, init_pending),
-            move |(driver_key, mut pending): (K, Vec<Update<K, V>>)| async move {
+            move |(driver_key, mut pending): (KV::Key, Vec<Update<KV>>)| async move {
                 if !pending.is_empty() {
                     let item = pending.pop().expect("pending is not empty");
                     return Some((Ok((item.key, item.value)), (driver_key, pending)));
@@ -217,7 +216,7 @@ where
     async fn fetch_all_updates(
         &self,
         locs: impl IntoIterator<Item = &Location>,
-    ) -> Result<Vec<Update<K, V>>, Error> {
+    ) -> Result<Vec<Update<KV>>, Error> {
         let reader = self.log.reader().await;
         let futures = locs
             .into_iter()
@@ -231,22 +230,21 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<K, V>>,
+        KV: Encoding<Key: Array>,
+        C: Mutable<Item = Operation<KV>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+    > Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     /// Performs a batch update, invoking the callback for each resulting operation. The first
     /// argument of the callback is the activity status of the operation, and the second argument is
     /// the location of the operation it inactivates (if any).
     pub(crate) async fn write_batch_with_callback<F>(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (KV::Key, Option<KV::Value>)>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -460,7 +458,7 @@ where
     /// - `(key, None)` deletes the key
     pub async fn write_batch(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (KV::Key, Option<KV::Value>)>,
     ) -> Result<(), Error> {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
@@ -468,19 +466,18 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        KV: Encoding<Key: Array>,
+        C: Contiguous<Item = Operation<KV>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
+    > kv::Gettable for Db<E, C, I, H, Update<KV>, M, D>
 where
-    Operation<K, V>: CodecShared,
+    Operation<KV>: CodecShared,
 {
-    type Key = K;
-    type Value = V::Value;
+    type Key = KV::Key;
+    type Value = KV::Value;
     type Error = Error;
 
     fn get(
@@ -529,20 +526,19 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .expect("possible_previous should not be empty")
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, KV, C, I, H> Batchable for Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>,
+    KV: Encoding<Key: Array>,
+    C: Mutable<Item = Operation<KV>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (KV::Key, Option<KV::Value>)> + Send + 'a,
         Iter::IntoIter: Send,
     {
         self.write_batch(iter).await
@@ -550,18 +546,17 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+impl<E, KV, C, I, H> CleanAny for Db<E, C, I, H, Update<KV>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding<Key: Array>,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -569,22 +564,20 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> UnmerkleizedDurableAny
-    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
+impl<E, KV, C, I, H> UnmerkleizedDurableAny for Db<E, C, I, H, Update<KV>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding<Key: Array>,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+    type Operation = Operation<KV>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<KV>, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -596,19 +589,18 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
+impl<E, KV, C, I, H> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<KV>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding<Key: Array>,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -616,25 +608,24 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, KV, C, I, H> MutableAny for Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding<Key: Array>,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+    type Operation = Operation<KV>;
+    type Durable = Db<E, C, I, H, Update<KV>, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<KV>, Merkleized<H>, NonDurable>;
 
     async fn commit(
         self,
-        metadata: Option<V::Value>,
+        metadata: Option<KV::Value>,
     ) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
     }

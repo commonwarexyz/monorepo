@@ -10,10 +10,10 @@ use crate::{
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
-            ValueEncoding,
+            Encoding,
         },
         build_snapshot_from_log, delete_known_loc,
-        operation::{Committable, Key, Operation as OperationTrait},
+        operation::{Committable, Operation as OperationTrait},
         update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
         NonDurable, Unmerkleized,
     },
@@ -33,22 +33,21 @@ pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as 
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        KV: Encoding,
+        C: Contiguous<Item = Operation<KV>>,
         I: Index<Value = Location>,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, I, H, Update<K, V>, M, D>
+    > Db<E, C, I, H, Update<KV>, M, D>
 where
-    Operation<K, V>: Codec,
+    Operation<KV>: Codec,
 {
     /// Returns the value for `key` and its location, or None if the key is not active.
     pub(crate) async fn get_with_loc(
         &self,
-        key: &K,
-    ) -> Result<Option<(V::Value, Location)>, Error> {
+        key: &KV::Key,
+    ) -> Result<Option<(KV::Value, Location)>, Error> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
 
@@ -69,7 +68,7 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &KV::Key) -> Result<Option<KV::Value>, Error> {
         self.get_with_loc(key)
             .await
             .map(|op| op.map(|(value, _)| value))
@@ -78,22 +77,21 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<K, V>>,
+        KV: Encoding,
+        C: Mutable<Item = Operation<KV>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+    > Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     /// Performs a batch update, invoking the callback for each resulting operation. The first
     /// argument of the callback is the activity status of the operation, and the second argument is
     /// the location of the operation it inactivates (if any).
     pub(crate) async fn write_batch_with_callback<F>(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (KV::Key, Option<KV::Value>)>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -164,7 +162,7 @@ where
     /// - `(key, None)` deletes the key
     pub async fn write_batch(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (KV::Key, Option<KV::Value>)>,
     ) -> Result<(), Error> {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
@@ -217,20 +215,19 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        KV: Encoding,
+        C: Contiguous<Item = Operation<KV>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
+    > kv::Gettable for Db<E, C, I, H, Update<KV>, M, D>
 where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
-    type Key = K;
-    type Value = V::Value;
+    type Key = KV::Key;
+    type Value = KV::Value;
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
@@ -238,19 +235,18 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, KV, C, I, H> Batchable for Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>,
+    KV: Encoding,
+    C: Mutable<Item = Operation<KV>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: CodecShared,
+    Operation<KV>: CodecShared,
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (KV::Key, Option<KV::Value>)> + Send + 'a,
         Iter::IntoIter: Send,
     {
         self.write_batch(iter).await
@@ -258,17 +254,16 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+impl<E, KV, C, I, H> CleanAny for Db<E, C, I, H, Update<KV>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: CodecShared,
+    Operation<KV>: CodecShared,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -276,22 +271,20 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> UnmerkleizedDurableAny
-    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
+impl<E, KV, C, I, H> UnmerkleizedDurableAny for Db<E, C, I, H, Update<KV>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+    type Operation = Operation<KV>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<KV>, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -303,19 +296,18 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
+impl<E, KV, C, I, H> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<KV>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -323,25 +315,24 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, KV, C, I, H> MutableAny for Db<E, C, I, H, Update<KV>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
+    KV: Encoding,
+    C: PersistableMutableLog<Operation<KV>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+    Operation<KV>: Codec,
+    KV::Value: Send + Sync,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+    type Operation = Operation<KV>;
+    type Durable = Db<E, C, I, H, Update<KV>, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<KV>, Merkleized<H>, NonDurable>;
 
     async fn commit(
         self,
-        metadata: Option<V::Value>,
+        metadata: Option<KV::Value>,
     ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
         self.commit(metadata).await
     }
@@ -363,6 +354,7 @@ pub(super) mod test {
         kv::Gettable as _,
         mmr::StandardHasher,
         qmdb::{
+            any::encoding::VariableVal,
             store::{LogStore, MerkleizedStore},
             verify_proof,
         },
@@ -467,7 +459,7 @@ pub(super) mod test {
 
     pub(crate) async fn test_any_db_build_and_authenticate<
         D: TestableAnyDb<V>,
-        V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
+        V: VariableVal + Eq + std::hash::Hash + std::fmt::Debug,
     >(
         context: Context,
         db: D,

@@ -9,7 +9,10 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
+        any::{
+            encoding::{VariableVal, VariableValue},
+            init_variable, unordered, VariableConfig,
+        },
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -19,15 +22,15 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
+pub type Update<K, V> = unordered::Update<VariableValue<K, V>>;
+pub type Operation<K, V> = unordered::Operation<VariableValue<K, V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableVal, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
@@ -70,7 +73,7 @@ pub mod partitioned {
         journal::contiguous::variable::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_variable, VariableConfig, VariableValue},
+            any::{encoding::VariableVal, init_variable, VariableConfig},
             Durable, Error, Merkleized,
         },
         translator::Translator,
@@ -103,7 +106,7 @@ pub mod partitioned {
     impl<
             E: Storage + Clock + Metrics,
             K: Array,
-            V: VariableValue,
+            V: VariableVal,
             H: Hasher,
             T: Translator,
             const P: usize,
@@ -244,7 +247,7 @@ pub(crate) mod test {
     /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(
         n: usize,
-    ) -> Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>> {
+    ) -> Vec<unordered::Operation<VariableValue<Digest, Vec<u8>>>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -253,7 +256,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_ops_seeded(
         n: usize,
         seed: u64,
-    ) -> Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>> {
+    ) -> Vec<unordered::Operation<VariableValue<Digest, Vec<u8>>>> {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -273,7 +276,7 @@ pub(crate) mod test {
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
         db: &mut MutableAnyTest,
-        ops: Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+        ops: Vec<unordered::Operation<VariableValue<Digest, Vec<u8>>>>,
     ) {
         for op in ops {
             match op {

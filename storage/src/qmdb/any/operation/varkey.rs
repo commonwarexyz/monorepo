@@ -8,9 +8,8 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{
+            encoding::{FixedVal, VariableBoth, VariableKey, VariableVal},
             operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-            value::{VarKeyEncoding, VarKeyFixedEncoding},
-            FixedValue, VariableValue,
         },
         operation::Key,
     },
@@ -18,11 +17,11 @@ use crate::{
 use commonware_codec::{varint::UInt, Error as CodecError, Read, ReadExt as _};
 use commonware_runtime::Buf;
 
-impl<K, V, S> Read for Operation<K, VarKeyEncoding<V>, S>
+impl<K, V, S> Read for Operation<VariableBoth<K, V>, S>
 where
     K: Key + Read,
-    V: VariableValue,
-    S: Update<K, VarKeyEncoding<V>> + Read<Cfg = (<K as Read>::Cfg, <V as Read>::Cfg)>,
+    V: VariableVal,
+    S: Update<VariableBoth<K, V>> + Read<Cfg = (<K as Read>::Cfg, <V as Read>::Cfg)>,
 {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
@@ -54,11 +53,11 @@ where
 
 // --- Variable key + Fixed value ---
 
-impl<K, V, S> Read for Operation<K, VarKeyFixedEncoding<V>, S>
+impl<K, V, S> Read for Operation<VariableKey<K, V>, S>
 where
     K: Key + Read,
-    V: FixedValue,
-    S: Update<K, VarKeyFixedEncoding<V>> + Read<Cfg = <K as Read>::Cfg>,
+    V: FixedVal,
+    S: Update<VariableKey<K, V>> + Read<Cfg = <K as Read>::Cfg>,
 {
     type Cfg = <K as Read>::Cfg;
 
@@ -92,15 +91,13 @@ where
 mod tests {
     use super::*;
     use crate::qmdb::any::{
-        operation::update::Unordered as UnorderedUpdate, value::VarKeyEncoding,
+        encoding::{VariableBoth, VariableKey},
+        operation::update::Unordered as UnorderedUpdate,
     };
     use commonware_codec::{Codec, RangeCfg, Read};
 
-    type Op = Operation<
-        Vec<u8>,
-        VarKeyEncoding<Vec<u8>>,
-        UnorderedUpdate<Vec<u8>, VarKeyEncoding<Vec<u8>>>,
-    >;
+    type Op =
+        Operation<VariableBoth<Vec<u8>, Vec<u8>>, UnorderedUpdate<VariableBoth<Vec<u8>, Vec<u8>>>>;
 
     fn roundtrip<T>(value: &T, cfg: &<T as Read>::Cfg)
     where
@@ -154,11 +151,7 @@ mod tests {
 
     // --- Variable key + Fixed value ---
 
-    type FixedOp = Operation<
-        Vec<u8>,
-        VarKeyFixedEncoding<u64>,
-        UnorderedUpdate<Vec<u8>, VarKeyFixedEncoding<u64>>,
-    >;
+    type FixedOp = Operation<VariableKey<Vec<u8>, u64>, UnorderedUpdate<VariableKey<Vec<u8>, u64>>>;
 
     fn fixed_cfg() -> <FixedOp as Read>::Cfg {
         (RangeCfg::from(..), ())

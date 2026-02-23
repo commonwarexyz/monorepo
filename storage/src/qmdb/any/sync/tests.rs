@@ -1258,7 +1258,7 @@ where
 
 mod harnesses {
     use super::SyncTestHarness;
-    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
+    use crate::{qmdb::any::encoding::VariableValue, translator::TwoCap};
     use commonware_cryptography::sha256::Digest;
     use commonware_runtime::{deterministic::Context, BufferPooler};
 
@@ -1456,8 +1456,7 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>
-        {
+        ) -> Vec<crate::qmdb::any::unordered::Operation<VariableValue<Digest, Vec<u8>>>> {
             crate::qmdb::any::unordered::variable::test::create_test_ops(n)
         }
 
@@ -1478,7 +1477,7 @@ mod harnesses {
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+            ops: Vec<crate::qmdb::any::unordered::Operation<VariableValue<Digest, Vec<u8>>>>,
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;

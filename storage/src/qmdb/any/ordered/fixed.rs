@@ -9,7 +9,10 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_fixed, ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+        any::{
+            encoding::{Fixed, FixedVal},
+            init_fixed, ordered, FixedConfig as Config,
+        },
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -18,15 +21,15 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
-pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
+pub type Update<K, V> = ordered::Update<Fixed<K, V>>;
+pub type Operation<K, V> = ordered::Operation<Fixed<K, V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: FixedVal, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -66,7 +69,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_fixed, FixedConfig as Config, FixedValue},
+            any::{encoding::FixedVal, init_fixed, FixedConfig as Config},
             Durable, Error, Merkleized,
         },
         translator::Translator,
@@ -98,7 +101,7 @@ pub mod partitioned {
     impl<
             E: Storage + Clock + Metrics,
             K: Array,
-            V: FixedValue,
+            V: FixedVal,
             H: Hasher,
             T: Translator,
             const P: usize,

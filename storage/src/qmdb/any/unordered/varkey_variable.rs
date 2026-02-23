@@ -13,7 +13,10 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, unordered, value::VarKeyEncoding, VariableValue},
+        any::{
+            encoding::{VariableBoth, VariableVal},
+            init_variable, unordered,
+        },
         operation::Key,
         Durable, Error, Merkleized,
     },
@@ -23,8 +26,8 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 
-pub type Update<K, V> = unordered::Update<K, VarKeyEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, VarKeyEncoding<V>>;
+pub type Update<K, V> = unordered::Update<VariableBoth<K, V>>;
+pub type Operation<K, V> = unordered::Operation<VariableBoth<K, V>>;
 
 /// A key-value QMDB with variable-length keys and variable-length values.
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
@@ -34,7 +37,7 @@ impl<E, K, V, H, T> Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key + Codec,
-    V: VariableValue,
+    V: VariableVal,
     H: Hasher,
     T: Translator,
     Operation<K, V>: Codec,
@@ -67,11 +70,11 @@ mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    type VarKeyDb = Db<deterministic::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
+    type VariableKeyDb = Db<deterministic::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
 
-    type VarKeyCfg = VariableConfig<TwoCap, ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>;
+    type VariableKeyCfg = VariableConfig<TwoCap, ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>;
 
-    fn create_config(suffix: &str, pooler: &impl BufferPooler) -> VarKeyCfg {
+    fn create_config(suffix: &str, pooler: &impl BufferPooler) -> VariableKeyCfg {
         VariableConfig {
             mmr_journal_partition: format!("vk-journal-{suffix}"),
             mmr_metadata_partition: format!("vk-metadata-{suffix}"),
@@ -91,9 +94,9 @@ mod test {
         }
     }
 
-    async fn open_db(context: Context) -> VarKeyDb {
+    async fn open_db(context: Context) -> VariableKeyDb {
         let cfg = create_config("partition", &context);
-        VarKeyDb::init(context, cfg).await.unwrap()
+        VariableKeyDb::init(context, cfg).await.unwrap()
     }
 
     /// Test with actual variable-length Vec<u8> keys of varying sizes. This is the unique
@@ -143,11 +146,11 @@ mod test {
     };
     use commonware_cryptography::sha256::Digest;
 
-    type DigestVarKeyDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    type DigestVariableKeyDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
-    async fn open_digest_db(context: Context) -> DigestVarKeyDb {
+    async fn open_digest_db(context: Context) -> DigestVariableKeyDb {
         let cfg = varkey_db_config::<TwoCap>("partition", &context);
-        DigestVarKeyDb::init(context, cfg).await.unwrap()
+        DigestVariableKeyDb::init(context, cfg).await.unwrap()
     }
 
     #[inline]

@@ -12,7 +12,10 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
+        any::{
+            encoding::VariableValue as VariableValueEncoding, unordered::variable::Operation,
+            VariableValue,
+        },
         current::{db::Merkleized, VariableConfig as Config},
         Durable, Error,
     },
@@ -27,8 +30,7 @@ pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Dura
     super::db::Db<
         E,
         Journal<E, Operation<K, V>>,
-        K,
-        VariableEncoding<V>,
+        VariableValueEncoding<K, V>,
         Index<T, Location>,
         H,
         N,
@@ -68,7 +70,8 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{
-                unordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
+                encoding::VariableValue as VariableValueEncoding,
+                unordered::variable::partitioned::Operation, VariableValue,
             },
             current::{db::Merkleized, VariableConfig as Config},
             Durable, Error,
@@ -99,8 +102,7 @@ pub mod partitioned {
     > = crate::qmdb::current::unordered::db::Db<
         E,
         Journal<E, Operation<K, V>>,
-        K,
-        VariableEncoding<V>,
+        VariableValueEncoding<K, V>,
         Index<T, Location, P>,
         H,
         N,

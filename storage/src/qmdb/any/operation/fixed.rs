@@ -1,9 +1,8 @@
 use crate::{
     mmr::Location,
     qmdb::any::{
+        encoding::{Fixed, FixedVal},
         operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        value::FixedEncoding,
-        FixedValue,
     },
 };
 use commonware_codec::{
@@ -13,22 +12,22 @@ use commonware_codec::{
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
-impl<K, V, S> Operation<K, FixedEncoding<V>, S>
+impl<K, V, S> Operation<Fixed<K, V>, S>
 where
     K: Array,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize,
+    V: FixedVal,
+    S: Update<Fixed<K, V>> + FixedSize,
 {
     const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
-impl<K, V, S> FixedSize for Operation<K, FixedEncoding<V>, S>
+impl<K, V, S> FixedSize for Operation<Fixed<K, V>, S>
 where
     K: Array,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize,
+    V: FixedVal,
+    S: Update<Fixed<K, V>> + FixedSize,
 {
     // Self::DELETE_OP_SIZE
     const SIZE: usize = {
@@ -45,11 +44,11 @@ where
     };
 }
 
-impl<K, V, S> Write for Operation<K, FixedEncoding<V>, S>
+impl<K, V, S> Write for Operation<Fixed<K, V>, S>
 where
     K: Array + Codec,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + CodecFixed<Cfg = ()>,
+    V: FixedVal,
+    S: Update<Fixed<K, V>> + CodecFixed<Cfg = ()>,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -78,11 +77,11 @@ where
     }
 }
 
-impl<K, V, S> Read for Operation<K, FixedEncoding<V>, S>
+impl<K, V, S> Read for Operation<Fixed<K, V>, S>
 where
     K: Array + Codec,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
+    V: FixedVal,
+    S: Update<Fixed<K, V>> + FixedSize + Read<Cfg = ()>,
 {
     type Cfg = ();
 

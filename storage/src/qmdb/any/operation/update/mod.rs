@@ -1,4 +1,4 @@
-use crate::qmdb::{any::value::ValueEncoding, operation::Key};
+use crate::qmdb::any::encoding::Encoding;
 use std::fmt;
 
 mod sealed {
@@ -12,9 +12,9 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update<K: Key, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync {
+pub trait Update<E: Encoding>: sealed::Sealed + Clone + Send + Sync {
     /// The updated key.
-    fn key(&self) -> &K;
+    fn key(&self) -> &E::Key;
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -24,8 +24,8 @@ pub trait Update<K: Key, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync
 mod tests {
     use super::ordered::Update as OrderedUpdate;
     use crate::qmdb::any::{
+        encoding::{Fixed, VariableValue},
         unordered::Update as UnorderedUpdate,
-        value::{FixedEncoding, VariableEncoding},
     };
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
@@ -47,7 +47,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = u64;
 
-        let upd = OrderedUpdate::<K, FixedEncoding<V>> {
+        let upd = OrderedUpdate::<Fixed<K, V>> {
             key: FixedBytes::from([1, 2, 3, 4]),
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([4, 3, 2, 1]),
@@ -61,7 +61,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
 
-        let upd = OrderedUpdate::<K, VariableEncoding<V>> {
+        let upd = OrderedUpdate::<VariableValue<K, V>> {
             key: FixedBytes::from([1, 2, 3, 4]),
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([4, 3, 2, 1]),
@@ -75,7 +75,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = u64;
 
-        let upd = UnorderedUpdate::<K, FixedEncoding<V>>(FixedBytes::from([7, 7, 7, 7]), 42u64);
+        let upd = UnorderedUpdate::<Fixed<K, V>>(FixedBytes::from([7, 7, 7, 7]), 42u64);
 
         roundtrip(&upd, &());
     }
@@ -85,7 +85,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
 
-        let upd = UnorderedUpdate::<K, VariableEncoding<V>>(
+        let upd = UnorderedUpdate::<VariableValue<K, V>>(
             FixedBytes::from([0, 1, 2, 3]),
             vec![10, 11, 12, 13],
         );
@@ -100,10 +100,10 @@ mod tests {
         use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OrderedUpdate<U64, FixedEncoding<U64>>>,
-            CodecConformance<OrderedUpdate<U64, VariableEncoding<Vec<u8>>>>,
-            CodecConformance<UnorderedUpdate<U64, FixedEncoding<U64>>>,
-            CodecConformance<UnorderedUpdate<U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<OrderedUpdate<Fixed<U64, U64>>>,
+            CodecConformance<OrderedUpdate<VariableValue<U64, Vec<u8>>>>,
+            CodecConformance<UnorderedUpdate<Fixed<U64, U64>>>,
+            CodecConformance<UnorderedUpdate<VariableValue<U64, Vec<u8>>>>,
         }
     }
 }

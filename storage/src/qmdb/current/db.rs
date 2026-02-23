@@ -20,8 +20,8 @@ use crate::{
     qmdb::{
         any::{
             self,
+            encoding::Encoding,
             operation::{update::Update, Operation},
-            ValueEncoding,
         },
         current::{
             grafting,
@@ -124,18 +124,17 @@ pub struct Db<
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, C, I, H, U, const N: usize, S, D> Db<E, C, I, H, U, N, S, D>
+impl<E, KV, C, I, H, U, const N: usize, S, D> Db<E, C, I, H, U, N, S, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     S: State<DigestOf<H>>,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -149,7 +148,7 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<KV::Value>, Error> {
         self.any.get_metadata().await
     }
 
@@ -159,7 +158,7 @@ where
         hasher: &mut H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<K, V, U>],
+        ops: &[Operation<KV, U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -168,17 +167,16 @@ where
 }
 
 // Functionality shared across Merkleized states with non-mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+impl<E, KV, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     pub const fn root(&self) -> H::Digest {
         self.state.root
@@ -219,7 +217,7 @@ where
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<KV, U>>, Vec<[u8; N]>), Error> {
         let storage = self.grafted_storage();
         RangeProof::new_with_ops(
             hasher,
@@ -234,17 +232,16 @@ where
 }
 
 // Functionality shared across Merkleized states with mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+impl<E, KV, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -300,16 +297,15 @@ where
 }
 
 // Functionality specific to (Merkleized, Durable) state, such as ability to persist the database.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, KV, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
@@ -345,17 +341,16 @@ where
 }
 
 // Functionality shared across Unmerkleized states.
-impl<E, K, V, U, C, I, H, const N: usize, D> Db<E, C, I, H, U, N, Unmerkleized, D>
+impl<E, KV, U, C, I, H, const N: usize, D> Db<E, C, I, H, U, N, Unmerkleized, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Merkleize the database and transition to the provable state.
     pub async fn into_merkleized(
@@ -445,16 +440,15 @@ where
 }
 
 // Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
+impl<E, KV, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
@@ -472,23 +466,22 @@ where
 }
 
 // Functionality specific to (Unmerkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, NonDurable>
+impl<E, KV, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Raises the activity floor according to policy followed by appending a commit operation with
     /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
     /// end_loc)` location range of committed operations.
     async fn apply_commit_op(
         &mut self,
-        metadata: Option<V::Value>,
+        metadata: Option<KV::Value>,
     ) -> Result<Range<Location>, Error> {
         let start_loc = self.any.last_commit_loc + 1;
         let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
@@ -527,7 +520,7 @@ where
     /// and the `[start_loc, end_loc)` range of committed operations.
     pub async fn commit(
         mut self,
-        metadata: Option<V::Value>,
+        metadata: Option<KV::Value>,
     ) -> Result<(Db<E, C, I, H, U, N, Unmerkleized, Durable>, Range<Location>), Error> {
         let range = self.apply_commit_op(metadata).await?;
 
@@ -559,16 +552,15 @@ where
 }
 
 // Functionality specific to (Merkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, NonDurable>
+impl<E, KV, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
@@ -585,17 +577,16 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> Persistable
+impl<E, KV, U, C, I, H, const N: usize> Persistable
     for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     type Error = Error;
 
@@ -617,21 +608,20 @@ where
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, D, const N: usize> MerkleizedStore
+impl<E, KV, U, C, I, H, D, const N: usize> MerkleizedStore
     for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, U>;
+    type Operation = Operation<KV, U>;
 
     fn root(&self) -> H::Digest {
         self.root()
@@ -649,42 +639,40 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize, S, D> LogStore for Db<E, C, I, H, U, N, S, D>
+impl<E, KV, U, C, I, H, const N: usize, S, D> LogStore for Db<E, C, I, H, U, N, S, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     S: State<DigestOf<H>>,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
-    type Value = V::Value;
+    type Value = KV::Value;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         self.any.bounds().await
     }
 
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    async fn get_metadata(&self) -> Result<Option<KV::Value>, Error> {
         self.get_metadata().await
     }
 }
 
-impl<E, K, V, U, C, I, H, D, const N: usize> PrunableStore
+impl<E, KV, U, C, I, H, D, const N: usize> PrunableStore
     for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding<Key: Array>,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

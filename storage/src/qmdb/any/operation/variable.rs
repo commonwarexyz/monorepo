@@ -1,22 +1,21 @@
 use crate::{
     mmr::Location,
     qmdb::any::{
+        encoding::{VariableVal, VariableValue},
         operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        value::VariableEncoding,
-        VariableValue,
     },
 };
-use commonware_codec::{varint::UInt, Codec, Error as CodecError, Read, ReadExt as _};
+use commonware_codec::{varint::UInt, Error as CodecError, Read, ReadExt as _};
 use commonware_runtime::Buf;
 use commonware_utils::Array;
 
 // Note: `EncodeSize` and `Write` impls are in `var_common.rs`, shared with the varkey encodings.
 
-impl<K, V, S> Read for Operation<K, VariableEncoding<V>, S>
+impl<K, V, S> Read for Operation<VariableValue<K, V>, S>
 where
-    K: Array + Codec,
-    V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
+    K: Array + commonware_codec::Codec,
+    V: VariableVal,
+    S: Update<VariableValue<K, V>> + Read<Cfg = <V as Read>::Cfg>,
 {
     type Cfg = <V as Read>::Cfg;
 

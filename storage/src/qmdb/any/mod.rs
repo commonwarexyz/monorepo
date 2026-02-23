@@ -23,7 +23,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
-        operation::{Committable, Key},
+        operation::Committable,
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -37,11 +37,12 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
 pub(crate) mod db;
+pub(crate) mod encoding;
 pub(crate) mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod states;
-pub(crate) mod value;
-pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
+pub(crate) use encoding::{Encoding, FixedVal as FixedValue, VariableVal as VariableValue};
+
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
@@ -121,24 +122,23 @@ pub struct VariableConfig<T: Translator, C> {
 }
 
 /// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_fixed<E, KV, U, H, T, I, F, NewIndex>(
     context: E,
     cfg: FixedConfig<T>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<KV, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    KV: Encoding<Key: Array>,
+    U: Update<KV> + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: CodecFixedShared + Committable,
+    Operation<KV, U>: CodecFixedShared + Committable,
 {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
@@ -181,24 +181,23 @@ where
 }
 
 /// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_variable<E, KV, U, H, T, I, F, NewIndex>(
     context: E,
-    cfg: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    cfg: VariableConfig<T, <Operation<KV, U> as Read>::Cfg>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<KV, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    KV: Encoding,
+    U: Update<KV> + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: Codec + Committable,
+    Operation<KV, U>: Codec + Committable,
 {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
@@ -869,10 +868,10 @@ pub(crate) mod test {
     // Type aliases for all 14 variants (all use OneCap for collision coverage).
     type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
-    // Varkey variants: use VarKeyEncoding/VarKeyFixedEncoding with Digest keys.
-    type UnorderedVarKeyVariable =
+    // Varkey variants: use VariableKeyEncoding/VariableKeyFixed with Digest keys.
+    type UnorderedVariableKeyVariable =
         unordered::varkey_variable::Db<Context, Digest, Digest, Sha256, OneCap>;
-    type UnorderedVarKeyFixed =
+    type UnorderedVariableKeyFixed =
         unordered::varkey_fixed::Db<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
@@ -904,8 +903,8 @@ pub(crate) mod test {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
             $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "uvkv", UnorderedVarKeyVariable, varkey_db_config);
-            $cb!($($args)*, "uvkf", UnorderedVarKeyFixed, variable_db_config);
+            $cb!($($args)*, "uvkv", UnorderedVariableKeyVariable, varkey_db_config);
+            $cb!($($args)*, "uvkf", UnorderedVariableKeyFixed, variable_db_config);
             $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
             $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
             $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);

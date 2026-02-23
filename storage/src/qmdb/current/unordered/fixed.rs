@@ -12,7 +12,7 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
+        any::{encoding::Fixed, unordered::fixed::Operation, FixedValue},
         current::{db::Merkleized, FixedConfig as Config},
         Durable, Error,
     },
@@ -24,17 +24,7 @@ use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    super::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
-        Index<T, Location>,
-        H,
-        N,
-        S,
-        D,
-    >;
+    super::db::Db<E, Journal<E, Operation<K, V>>, Fixed<K, V>, Index<T, Location>, H, N, S, D>;
 
 // Functionality for the Merkleized state - init only.
 impl<
@@ -65,7 +55,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{unordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
+            any::{encoding::Fixed, unordered::fixed::partitioned::Operation, FixedValue},
             current::{db::Merkleized, FixedConfig as Config},
             Durable, Error,
         },
@@ -94,8 +84,7 @@ pub mod partitioned {
     > = crate::qmdb::current::unordered::db::Db<
         E,
         Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
+        Fixed<K, V>,
         Index<T, Location, P>,
         H,
         N,

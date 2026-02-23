@@ -9,7 +9,7 @@
 //! - [variable]: Variant for values of variable size.
 
 use crate::qmdb::{
-    any::{ordered::Update, ValueEncoding},
+    any::{encoding::Encoding, ordered::Update},
     current::proof::OperationProof,
 };
 use commonware_cryptography::Digest;
@@ -146,14 +146,17 @@ pub mod tests {
 ///
 /// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProof<K: Array, V: ValueEncoding, D: Digest, const N: usize> {
+pub enum ExclusionProof<KV: Encoding, D: Digest, const N: usize>
+where
+    KV::Key: Array,
+{
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
-    KeyValue(OperationProof<D, N>, Update<K, V>),
+    KeyValue(OperationProof<D, N>, Update<KV>),
 
     /// Proves that the database has no active keys, allowing any key to be proven excluded.
     /// Specifically, the proof establishes the most recent Commit operation has an activity floor
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
-    Commit(OperationProof<D, N>, Option<V::Value>),
+    Commit(OperationProof<D, N>, Option<KV::Value>),
 }

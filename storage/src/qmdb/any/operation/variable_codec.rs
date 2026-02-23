@@ -1,27 +1,24 @@
 //! Shared `EncodeSize` and `Write` implementations for all variable-size operation encodings:
-//! - [VariableEncoding](super::super::value::VariableEncoding)
-//! - [VarKeyEncoding](super::super::value::VarKeyEncoding)
-//! - [VarKeyFixedEncoding](super::super::value::VarKeyFixedEncoding)
+//! - [VariableValue](super::super::encoding::VariableValue)
+//! - [VariableBoth](super::super::encoding::VariableBoth)
+//! - [VariableKey](super::super::encoding::VariableKey)
 //!
 //! These encodings all produce variable-size operations with the same wire format: a context byte
 //! followed by the payload. The `Read` implementations remain separate in [super::variable] and
 //! [super::varkey] because their `Cfg` types differ.
 
-use crate::qmdb::{
-    any::{
-        operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        value::VarOperationEncoding,
-    },
-    operation::Key,
+use crate::qmdb::any::{
+    encoding::VariableEncoding,
+    operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
 };
 use commonware_codec::{varint::UInt, EncodeSize, Write};
 use commonware_runtime::BufMut;
 
-impl<K, V, S> EncodeSize for Operation<K, V, S>
+impl<E, S> EncodeSize for Operation<E, S>
 where
-    K: Key + EncodeSize,
-    V: VarOperationEncoding,
-    S: Update<K, V> + EncodeSize,
+    E: VariableEncoding,
+    E::Key: EncodeSize,
+    S: Update<E> + EncodeSize,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
@@ -32,11 +29,11 @@ where
     }
 }
 
-impl<K, V, S> Write for Operation<K, V, S>
+impl<E, S> Write for Operation<E, S>
 where
-    K: Key + Write,
-    V: VarOperationEncoding,
-    S: Update<K, V> + Write,
+    E: VariableEncoding,
+    E::Key: Write,
+    S: Update<E> + Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {

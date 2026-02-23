@@ -1,7 +1,7 @@
 use crate::{
     mmr::Location,
     qmdb::{
-        any::value::ValueEncoding,
+        any::encoding::Encoding,
         operation::{Committable, Key},
     },
 };
@@ -20,21 +20,21 @@ const DELETE_CONTEXT: u8 = 0xD1;
 const UPDATE_CONTEXT: u8 = 0xD2;
 const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
-pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
+pub type Ordered<E> = Operation<E, update::Ordered<E>>;
+pub type Unordered<E> = Operation<E, update::Unordered<E>>;
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Operation<K: Key, V: ValueEncoding, S: Update<K, V>> {
-    Delete(K),
+pub enum Operation<E: Encoding, S: Update<E>> {
+    Delete(E::Key),
     Update(S),
-    CommitFloor(Option<V::Value>, Location),
+    CommitFloor(Option<E::Value>, Location),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Key, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
+impl<E: Encoding, S: Update<E>> arbitrary::Arbitrary<'_> for Operation<E, S>
 where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    E::Key: for<'a> arbitrary::Arbitrary<'a>,
+    E::Value: for<'a> arbitrary::Arbitrary<'a>,
     S: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -48,14 +48,13 @@ where
     }
 }
 
-impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
+impl<E, S> crate::qmdb::operation::Operation for Operation<E, S>
 where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
+    E: Encoding,
+    E::Value: Codec,
+    S: Update<E>,
 {
-    type Key = K;
+    type Key = E::Key;
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
@@ -81,23 +80,22 @@ where
     }
 }
 
-impl<K, V, S> Committable for Operation<K, V, S>
+impl<E, S> Committable for Operation<E, S>
 where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
+    E: Encoding,
+    E::Value: Codec,
+    S: Update<E>,
 {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
+impl<E> fmt::Display for Operation<E, update::Ordered<E>>
 where
-    K: Array + fmt::Display,
-    V: ValueEncoding,
-    V::Value: Codec,
+    E: Encoding,
+    E::Key: Array + fmt::Display,
+    E::Value: Codec,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -118,11 +116,11 @@ where
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, update::Unordered<K, V>>
+impl<E> fmt::Display for Operation<E, update::Unordered<E>>
 where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
+    E: Encoding,
+    E::Key: Key,
+    E::Value: Codec,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -146,7 +144,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
+    use crate::qmdb::any::encoding::{Fixed, VariableValue};
     use commonware_codec::{Codec, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
 
@@ -165,7 +163,7 @@ mod tests {
     fn ordered_fixed_roundtrip() {
         type K = FixedBytes<4>;
         type V = u64;
-        type Op = Ordered<K, FixedEncoding<V>>;
+        type Op = Ordered<Fixed<K, V>>;
 
         let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
         let update = Op::Update(update::Ordered {
@@ -186,7 +184,7 @@ mod tests {
     fn unordered_fixed_roundtrip() {
         type K = FixedBytes<4>;
         type V = u64;
-        type Op = Unordered<K, FixedEncoding<V>>;
+        type Op = Unordered<Fixed<K, V>>;
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
         let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
@@ -201,7 +199,7 @@ mod tests {
     fn ordered_variable_roundtrip() {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
-        type Op = Ordered<K, VariableEncoding<V>>;
+        type Op = Ordered<VariableValue<K, V>>;
         let cfg = (RangeCfg::from(..), ());
 
         let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
@@ -224,7 +222,7 @@ mod tests {
     fn unordered_variable_roundtrip() {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
-        type Op = Unordered<K, VariableEncoding<V>>;
+        type Op = Unordered<VariableValue<K, V>>;
         let cfg = (RangeCfg::from(..), ());
 
         let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
@@ -242,17 +240,14 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::qmdb::any::{
-            ordered::Operation as OrderedOperation, unordered::Operation as UnorderedOperation,
-        };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OrderedOperation<U64, FixedEncoding<U64>>>,
-            CodecConformance<OrderedOperation<U64, VariableEncoding<Vec<u8>>>>,
-            CodecConformance<UnorderedOperation<U64, FixedEncoding<U64>>>,
-            CodecConformance<UnorderedOperation<U64, VariableEncoding<Vec<u8>>>>,
+            CodecConformance<Ordered<Fixed<U64, U64>>>,
+            CodecConformance<Ordered<VariableValue<U64, Vec<u8>>>>,
+            CodecConformance<Unordered<Fixed<U64, U64>>>,
+            CodecConformance<Unordered<VariableValue<U64, Vec<u8>>>>,
         }
     }
 }

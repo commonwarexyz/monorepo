@@ -12,9 +12,9 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
-        any::ValueEncoding,
+        any::encoding::Encoding,
         build_snapshot_from_log,
-        operation::{Committable, Key, Operation as OperationTrait},
+        operation::{Committable, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
@@ -84,18 +84,17 @@ pub struct Db<
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
+impl<E, KV, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -109,7 +108,7 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<KV::Value>, Error> {
         match self.log.reader().await.read(*self.last_commit_loc).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
@@ -119,17 +118,16 @@ where
 
 // Functionality shared across Merkleized states, such as the ability to prune the log, retrieve the
 // state root, and compute proofs.
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, KV, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     pub fn root(&self) -> H::Digest {
         self.log.root()
@@ -139,7 +137,7 @@ where
         &self,
         loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<KV, U>>), Error> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
     }
@@ -149,7 +147,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<KV, U>>), Error> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -178,16 +176,15 @@ where
 }
 
 // Functionality specific to (Merkleized,Durable) state, such as ability to initialize and persist.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
+impl<E, KV, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -266,17 +263,16 @@ where
 }
 
 // Functionality shared across Unmerkleized states.
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
+impl<E, KV, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
         Db {
@@ -292,16 +288,15 @@ where
 }
 
 // Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
+impl<E, KV, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
@@ -318,16 +313,15 @@ where
 }
 
 // Functionality specific to (Merkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, NonDurable>
+impl<E, KV, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
@@ -344,18 +338,17 @@ where
 }
 
 // Funtionality shared across NonDurable states.
-impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
+impl<E, KV, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
-    Operation<K, V, U>: Codec,
-    AuthenticatedLog<E, C, H, M>: Mutable<Item = Operation<K, V, U>>,
+    Operation<KV, U>: Codec,
+    AuthenticatedLog<E, C, H, M>: Mutable<Item = Operation<KV, U>>,
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -363,7 +356,7 @@ where
     /// # Panics
     ///
     /// Panics if the given operation is not a commit operation.
-    pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
+    pub(crate) async fn apply_commit_op(&mut self, op: Operation<KV, U>) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
         self.last_commit_loc = self.log.size().await;
         self.log.append(op).await?;
@@ -376,7 +369,7 @@ where
     /// `[start_loc, end_loc)` location range of committed operations.
     pub async fn commit(
         mut self,
-        metadata: Option<V::Value>,
+        metadata: Option<KV::Value>,
     ) -> Result<(Db<E, C, I, H, U, M, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
@@ -490,16 +483,15 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Merkleized<H>, Durable>
+impl<E, KV, U, C, I, H> Persistable for Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     type Error = Error;
 
@@ -517,20 +509,19 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, KV, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, U>;
+    type Operation = Operation<KV, U>;
 
     fn root(&self) -> H::Digest {
         self.root()
@@ -541,48 +532,46 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<KV, U>>), Error> {
         self.historical_proof(historical_size, start_loc, max_ops)
             .await
     }
 }
 
-impl<E, K, V, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
+impl<E, KV, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Contiguous<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
-    type Value = V::Value;
+    type Value = KV::Value;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
         Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
     }
 
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    async fn get_metadata(&self) -> Result<Option<KV::Value>, Error> {
         self.get_metadata().await
     }
 }
 
-impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, KV, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    KV: Encoding,
+    U: Update<KV>,
+    C: Mutable<Item = Operation<KV, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<KV, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

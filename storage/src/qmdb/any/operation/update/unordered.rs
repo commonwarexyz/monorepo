@@ -1,11 +1,10 @@
 use crate::qmdb::{
     any::{
-        operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{
-            FixedEncoding, ValueEncoding, VarKeyEncoding, VarKeyFixedEncoding,
-            VarOperationEncoding, VariableEncoding,
+        encoding::{
+            Encoding, Fixed, FixedVal, VariableBoth, VariableEncoding, VariableKey, VariableVal,
+            VariableValue,
         },
-        FixedValue, VariableValue,
+        operation::{update::sealed::Sealed, Update as UpdateTrait},
     },
     operation::Key,
 };
@@ -17,23 +16,23 @@ use commonware_utils::{hex, Array};
 use std::fmt;
 
 #[derive(Clone, PartialEq, Debug, Eq)]
-pub struct Update<K: Key, V: ValueEncoding>(pub K, pub V::Value);
+pub struct Update<E: Encoding>(pub E::Key, pub E::Value);
 
 #[cfg(feature = "arbitrary")]
-impl<K: Key, V: ValueEncoding> arbitrary::Arbitrary<'_> for Update<K, V>
+impl<E: Encoding> arbitrary::Arbitrary<'_> for Update<E>
 where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    E::Key: for<'a> arbitrary::Arbitrary<'a>,
+    E::Value: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self(u.arbitrary()?, u.arbitrary()?))
     }
 }
 
-impl<K: Key, V: ValueEncoding> Sealed for Update<K, V> {}
+impl<E: Encoding> Sealed for Update<E> {}
 
-impl<K: Key, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
-    fn key(&self) -> &K {
+impl<E: Encoding> UpdateTrait<E> for Update<E> {
+    fn key(&self) -> &E::Key {
         &self.0
     }
 
@@ -44,11 +43,11 @@ impl<K: Key, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
 
 // --- Write: shared across all encoding types ---
 
-impl<K, V> Write for Update<K, V>
+impl<E> Write for Update<E>
 where
-    K: Key + Write,
-    V: ValueEncoding,
-    V::Value: Write,
+    E: Encoding,
+    E::Key: Write,
+    E::Value: Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
@@ -56,22 +55,22 @@ where
     }
 }
 
-impl<K, V> EncodeSize for Update<K, V>
+impl<E> EncodeSize for Update<E>
 where
-    K: Key + EncodeSize,
-    V: VarOperationEncoding,
-    V::Value: EncodeSize,
+    E: VariableEncoding,
+    E::Key: EncodeSize,
+    E::Value: EncodeSize,
 {
     fn encode_size(&self) -> usize {
         self.0.encode_size() + self.1.encode_size()
     }
 }
 
-impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedVal> FixedSize for Update<Fixed<K, V>> {
     const SIZE: usize = K::SIZE + V::SIZE;
 }
 
-impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
+impl<K: Array, V: FixedVal> Read for Update<Fixed<K, V>> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -81,7 +80,7 @@ impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     }
 }
 
-impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
+impl<K: Array, V: VariableVal> Read for Update<VariableValue<K, V>> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -91,10 +90,10 @@ impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
     }
 }
 
-impl<K, V> Read for Update<K, VarKeyEncoding<V>>
+impl<K, V> Read for Update<VariableBoth<K, V>>
 where
     K: Key + Read,
-    V: VariableValue,
+    V: VariableVal,
 {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
@@ -105,10 +104,10 @@ where
     }
 }
 
-impl<K, V> Read for Update<K, VarKeyFixedEncoding<V>>
+impl<K, V> Read for Update<VariableKey<K, V>>
 where
     K: Key + Read,
-    V: FixedValue,
+    V: FixedVal,
 {
     type Cfg = <K as Read>::Cfg;
 

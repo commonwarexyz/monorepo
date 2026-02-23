@@ -137,8 +137,9 @@ use crate::{
     qmdb::{
         any::{
             self,
+            encoding::Encoding,
             operation::{Operation, Update},
-            FixedConfig as AnyFixedConfig, ValueEncoding, VariableConfig as AnyVariableConfig,
+            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
         operation::Committable,
         Durable, Error,
@@ -274,24 +275,23 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
 }
 
 /// Shared initialization logic for fixed-sized value Current [db::Db].
-pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+pub(super) async fn init_fixed<E, KV, U, H, T, I, const N: usize, NewIndex>(
     context: E,
     config: FixedConfig<T>,
     new_index: NewIndex,
 ) -> Result<
-    db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
+    db::Db<E, FJournal<E, Operation<KV, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
     Error,
 >
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    KV: Encoding<Key: Array>,
+    U: Update<KV> + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: CodecFixedShared + Committable,
+    Operation<KV, U>: CodecFixedShared + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -361,24 +361,23 @@ where
 }
 
 /// Shared initialization logic for variable-sized value Current [db::Db].
-pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+pub(super) async fn init_variable<E, KV, U, H, T, I, const N: usize, NewIndex>(
     context: E,
-    config: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    config: VariableConfig<T, <Operation<KV, U> as Read>::Cfg>,
     new_index: NewIndex,
 ) -> Result<
-    db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
+    db::Db<E, VJournal<E, Operation<KV, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
     Error,
 >
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    KV: Encoding<Key: Array>,
+    U: Update<KV> + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: Codec + Committable,
+    Operation<KV, U>: Codec + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
