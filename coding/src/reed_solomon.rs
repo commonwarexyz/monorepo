@@ -4,54 +4,17 @@ use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
+use commonware_utils::Cached;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{cell::RefCell, collections::HashSet, marker::PhantomData};
+use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
 
 // Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
 // instances across calls. Constructing these objects is expensive because
 // the underlying engine initializes GF lookup tables. The `reset()` method
 // reconfigures the work buffers without rebuilding those tables.
-thread_local! {
-    static CACHED_ENCODER: RefCell<Option<ReedSolomonEncoder>> = const { RefCell::new(None) };
-    static CACHED_DECODER: RefCell<Option<ReedSolomonDecoder>> = const { RefCell::new(None) };
-}
-
-/// Takes the cached encoder (if any), resets it to the given parameters,
-/// and returns it. Falls back to constructing a new one if the cache is empty.
-fn take_encoder(k: usize, m: usize, shard_len: usize) -> Result<ReedSolomonEncoder, RsError> {
-    let cached = CACHED_ENCODER.with(|cell| cell.borrow_mut().take());
-    match cached {
-        Some(mut enc) => {
-            enc.reset(k, m, shard_len)?;
-            Ok(enc)
-        }
-        None => ReedSolomonEncoder::new(k, m, shard_len),
-    }
-}
-
-/// Returns an encoder back to the cache for future reuse.
-fn return_encoder(enc: ReedSolomonEncoder) {
-    CACHED_ENCODER.with(|cell| *cell.borrow_mut() = Some(enc));
-}
-
-/// Takes the cached decoder (if any), resets it to the given parameters,
-/// and returns it. Falls back to constructing a new one if the cache is empty.
-fn take_decoder(k: usize, m: usize, shard_len: usize) -> Result<ReedSolomonDecoder, RsError> {
-    let cached = CACHED_DECODER.with(|cell| cell.borrow_mut().take());
-    match cached {
-        Some(mut dec) => {
-            dec.reset(k, m, shard_len)?;
-            Ok(dec)
-        }
-        None => ReedSolomonDecoder::new(k, m, shard_len),
-    }
-}
-
-/// Returns a decoder back to the cache for future reuse.
-fn return_decoder(dec: ReedSolomonDecoder) {
-    CACHED_DECODER.with(|cell| *cell.borrow_mut() = Some(dec));
-}
+commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
+commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -332,23 +295,27 @@ fn encode<H: Hasher, S: Strategy>(
     let (padded, shard_len) = prepare_data(&data, k);
 
     // Create or reuse encoder
-    let mut encoder = take_encoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in padded.chunks(shard_len) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
+    let recovery_buf = {
+        let mut encoder = Cached::take(
+            &CACHED_ENCODER,
+            || ReedSolomonEncoder::new(k, m, shard_len),
+            |enc| enc.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+        for shard in padded.chunks(shard_len) {
+            encoder
+                .add_original_shard(shard)
+                .map_err(Error::ReedSolomon)?;
+        }
 
-    // Compute recovery shards and collect into a contiguous buffer
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let mut recovery_buf = Vec::with_capacity(m * shard_len);
-    for shard in encoding.recovery_iter() {
-        recovery_buf.extend_from_slice(shard);
-    }
-
-    // Drop EncoderResult (auto-resets received shards), then return encoder to cache
-    drop(encoding);
-    return_encoder(encoder);
+        // Compute recovery shards and collect into a contiguous buffer
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        let mut buf = Vec::with_capacity(m * shard_len);
+        for shard in encoding.recovery_iter() {
+            buf.extend_from_slice(shard);
+        }
+        buf
+    };
 
     // Create zero-copy Bytes views into the original and recovery buffers
     let originals: Bytes = padded.into();
@@ -437,7 +404,12 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Decode original data
-    let mut decoder = take_decoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
     for (idx, ref shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
@@ -459,8 +431,13 @@ fn decode<H: Hasher, S: Strategy>(
         shards[idx] = shard;
     }
 
-    // Encode recovered data to get recovery shards
-    let mut encoder = take_encoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    // Re-encode recovered data to get recovery shards
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || ReedSolomonEncoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
     for shard in shards.iter().take(k) {
         encoder
             .add_original_shard(shard)
@@ -496,15 +473,7 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    let data = extract_data(&shards, k);
-
-    // Return the encoder and decoder
-    drop(encoding);
-    return_encoder(encoder);
-    drop(decoding);
-    return_decoder(decoder);
-
-    data
+    extract_data(&shards, k)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
@@ -680,17 +649,11 @@ mod tests {
 
     const STRATEGY: Sequential = Sequential;
 
-    fn shard_digest(shard: &[u8]) -> <Sha256 as Hasher>::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(shard);
-        hasher.finalize()
-    }
-
     fn checked(
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
-        let digest = shard_digest(&shard);
+        let digest = Sha256::hash(&shard);
         CheckedChunk::new(shard, index, digest)
     }
 
@@ -874,7 +837,7 @@ mod tests {
             let mut shard = pieces[1].shard.to_vec();
             shard[0] ^= 0xFF; // Flip bits in first byte
             pieces[1].shard = shard.into();
-            pieces[1].digest = shard_digest(&pieces[1].shard);
+            pieces[1].digest = Sha256::hash(&pieces[1].shard);
         }
 
         // Try to decode with the tampered chunk
