@@ -8,7 +8,7 @@
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod rng;
-    pub use rng::{test_rng, test_rng_seeded, BytesRng};
+    pub use rng::{test_rng, test_rng_seeded, FuzzRng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
