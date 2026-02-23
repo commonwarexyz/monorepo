@@ -1,4 +1,4 @@
-use crate::{BufferPool, IoBufMut};
+use crate::{BufferPool, IoBuf, IoBufMut};
 use bytes::BufMut;
 
 /// A buffer for caching data written to the tip of a blob.
@@ -7,7 +7,7 @@ use bytes::BufMut;
 /// extending for `data.len()` bytes.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
-    pub(super) data: IoBufMut,
+    pub(super) data: IoBuf,
 
     /// The offset in the blob where the buffered data starts.
     ///
@@ -32,7 +32,7 @@ impl Buffer {
     /// The backing buffer starts empty and is allocated lazily on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
         Self {
-            data: IoBufMut::default(),
+            data: IoBuf::default(),
             offset,
             capacity,
             immutable: false,
@@ -62,7 +62,7 @@ impl Buffer {
     ///
     /// If the new size is less than the current offset, the buffer is reset to the empty state with
     /// an updated offset positioned at the end of the logical blob.
-    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBufMut, u64)> {
+    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBuf, u64)> {
         // Handle case where the buffer is empty.
         if self.is_empty() {
             self.offset = len;
@@ -75,10 +75,10 @@ impl Buffer {
             self.offset = len;
             Some(previous)
         } else if len >= self.offset {
-            self.data.truncate((len - self.offset) as usize);
+            self.data = self.data.slice(..(len - self.offset) as usize);
             None
         } else {
-            self.data.clear();
+            self.data = IoBuf::default();
             self.offset = len;
             None
         }
@@ -89,7 +89,7 @@ impl Buffer {
     ///
     /// The buffer is reset to the empty state with an updated offset positioned at the end of the
     /// logical blob.
-    pub(super) fn take(&mut self) -> Option<(IoBufMut, u64)> {
+    pub(super) fn take(&mut self) -> Option<(IoBuf, u64)> {
         if self.is_empty() {
             return None;
         }
@@ -99,28 +99,47 @@ impl Buffer {
         Some((buf, offset))
     }
 
-    /// Ensure `self.data` can hold at least `needed` bytes without reallocation.
-    ///
-    /// The first allocation grows to at least configured `capacity` to avoid repeated small
-    /// reallocations. Subsequent expansions use geometric growth.
-    fn ensure_capacity(&mut self, needed: usize) {
-        if self.data.capacity() >= needed {
-            return;
+    fn growth_target(&self, current: usize, needed: usize) -> usize {
+        if current == 0 {
+            return self.capacity.max(needed);
         }
-        let current = self.data.capacity();
-        let target = if current == 0 {
-            self.capacity.max(needed)
-        } else {
-            let mut next = current.max(self.capacity);
-            while next < needed {
-                next = next.checked_mul(2).unwrap_or(needed);
-            }
-            next
-        };
+        let mut next = current.max(self.capacity);
+        while next < needed {
+            next = next.checked_mul(2).unwrap_or(needed);
+        }
+        next
+    }
 
-        let mut grown = self.pool.alloc(target);
-        grown.put_slice(self.data.as_ref());
-        self.data = grown;
+    fn mutable_for_write(&mut self, needed: usize) -> IoBufMut {
+        let current = std::mem::take(&mut self.data);
+        let current_len = current.len();
+        match current.try_into_mut() {
+            Ok(writable) => {
+                if writable.capacity() >= needed {
+                    return writable;
+                }
+                let target = self.growth_target(writable.capacity(), needed);
+                let mut grown = self.pool.alloc(target);
+                grown.put_slice(writable.as_ref());
+                grown
+            }
+            Err(shared) => {
+                let target = self.growth_target(current_len, needed);
+                let mut grown = self.pool.alloc(target);
+                grown.put_slice(shared.as_ref());
+                grown
+            }
+        }
+    }
+
+    fn append_zeros(dst: &mut IoBufMut, len: usize) {
+        const ZERO_CHUNK: [u8; 256] = [0; 256];
+        let mut remaining = len;
+        while remaining > 0 {
+            let take = remaining.min(ZERO_CHUNK.len());
+            dst.put_slice(&ZERO_CHUNK[..take]);
+            remaining -= take;
+        }
     }
 
     /// Merges the provided `data` into the buffer at the provided blob `offset` if it falls
@@ -141,17 +160,17 @@ impl Buffer {
         let start = (offset - self.offset) as usize;
         let end = start + data.len();
 
+        let mut writable = self.mutable_for_write(end);
+        let prev = writable.len();
+
         // Expand buffer if necessary (fills with zeros).
-        if end > self.data.len() {
-            self.ensure_capacity(end);
-            let prev = self.data.len();
-            // SAFETY: We initialize the newly exposed bytes below.
-            unsafe { self.data.set_len(end) };
-            self.data.as_mut()[prev..end].fill(0);
+        if end > prev {
+            Self::append_zeros(&mut writable, end - prev);
         }
 
         // Copy the provided data into the buffer.
-        self.data.as_mut()[start..end].copy_from_slice(data.as_ref());
+        writable.as_mut()[start..end].copy_from_slice(data.as_ref());
+        self.data = writable.freeze();
 
         true
     }
@@ -163,15 +182,11 @@ impl Buffer {
     /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.data.len() + data.len();
-        self.ensure_capacity(end);
-        self.data.put_slice(data);
-
-        self.over_capacity()
-    }
-
-    /// Whether the buffer is over capacity and should be taken & flushed to the underlying blob.
-    fn over_capacity(&self) -> bool {
-        self.data.len() > self.capacity
+        let mut writable = self.mutable_for_write(end);
+        writable.put_slice(data);
+        let over_capacity = writable.len() > self.capacity;
+        self.data = writable.freeze();
+        over_capacity
     }
 
     /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
@@ -186,11 +201,15 @@ impl Buffer {
         }
         let current_len = self.data.len();
         if len == current_len {
-            self.data.clear();
+            self.data = IoBuf::default();
             return;
         }
-        self.data.as_mut().copy_within(len..current_len, 0);
-        self.data.truncate(current_len - len);
+        self.data = self.data.slice(len..current_len);
+    }
+
+    /// Clears buffered data while preserving offset.
+    pub(super) fn clear(&mut self) {
+        self.data = IoBuf::default();
     }
 }
 
@@ -206,12 +225,10 @@ mod tests {
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
-        assert_eq!(buffer.data.capacity(), 0);
         assert!(buffer.take().is_none());
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
-        assert!(buffer.data.capacity() >= 100);
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
@@ -279,10 +296,9 @@ mod tests {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
         let mut buffer = Buffer::new(0, 16, pool);
-        assert_eq!(buffer.data.capacity(), 0);
+        assert!(buffer.data.is_empty());
 
         assert!(buffer.merge(b"abc", 0));
         assert_eq!(buffer.data.as_ref(), b"abc");
-        assert!(buffer.data.capacity() >= 16);
     }
 }

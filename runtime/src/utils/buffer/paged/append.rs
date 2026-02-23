@@ -34,7 +34,7 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, BufferPool, Error, IoBuf, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -250,11 +250,11 @@ impl<B: Blob> Append<B> {
             let mut buf_guard = self.buffer.write().await;
             let len = buf_guard.data.len();
             if len > 0 {
-                let mut shrunk = IoBufMut::with_capacity(len);
+                let mut shrunk = self.cache_ref.pool().alloc(len);
                 shrunk.put_slice(buf_guard.data.as_ref());
-                buf_guard.data = shrunk;
+                buf_guard.data = shrunk.freeze();
             } else {
-                buf_guard.data = IoBufMut::default();
+                buf_guard.data = IoBuf::default();
             }
         }
 
@@ -564,11 +564,11 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Entirely in buffered tip: return copied immutable bytes.
+        // Entirely in buffered tip.
         if logical_offset >= buffer.offset {
             let start = (logical_offset - buffer.offset) as usize;
             let end = start + len;
-            return Ok(IoBuf::copy_from_slice(&buffer.data.as_ref()[start..end]).into());
+            return Ok(buffer.data.slice(start..end).into());
         }
 
         // Entirely persisted: serve through page cache + blob.
@@ -601,7 +601,7 @@ impl<B: Blob> Append<B> {
         // Overlaps persisted range and buffered tip.
         let persisted_len = (buffer.offset - logical_offset) as usize;
         let tip_len = len - persisted_len;
-        let tip = IoBuf::copy_from_slice(&buffer.data.as_ref()[..tip_len]);
+        let tip = buffer.data.slice(..tip_len);
         drop(buffer);
 
         let (mut cached, cached_len) =
@@ -939,12 +939,12 @@ impl<B: Blob> Append<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            buf_guard.data.clear();
+            buf_guard.clear();
             let over_capacity = buf_guard.append(&page_data.as_ref()[..partial_bytes as usize]);
             assert!(!over_capacity);
         } else {
             // No partial page - all pages are full or blob is empty.
-            buf_guard.data.clear();
+            buf_guard.clear();
         }
 
         Ok(())

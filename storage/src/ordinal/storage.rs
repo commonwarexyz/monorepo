@@ -6,7 +6,7 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, IoBufMut, Metrics, Storage,
+    Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
@@ -166,7 +166,6 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             }
             let mut replay_blob =
                 ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
-            let mut record_buf = IoBufMut::with_capacity(Record::<V>::SIZE);
 
             // Iterate over all records in the blob
             let mut offset = 0;
@@ -194,14 +193,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
-                record_buf = replay_blob
-                    .read_exact_buf(Record::<V>::SIZE, record_buf)
-                    .await?;
+                let mut record_buf = replay_blob.read_exact(Record::<V>::SIZE).await?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                let mut read_slice = record_buf.as_ref();
-                if let Ok(record) = Record::<V>::read(&mut read_slice) {
+                if let Ok(record) = Record::<V>::read(&mut record_buf) {
                     if record.is_valid() {
                         items += 1;
                         intervals.insert(index);

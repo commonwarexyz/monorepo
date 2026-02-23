@@ -7,9 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{
-    buffer, Blob, Buf, BufMut, BufferPooler, Clock, IoBuf, IoBufMut, Metrics, Storage,
-};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, IoBuf, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -507,13 +505,12 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let mut resizable = 0u32;
-        let mut entry_buf = IoBufMut::with_capacity(Entry::FULL_SIZE);
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
             // Read both entries from the buffer.
-            entry_buf = reader.read_exact_buf(Entry::FULL_SIZE, entry_buf).await?;
-            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf.as_ref())?;
+            let entry_buf = reader.read_exact(Entry::FULL_SIZE).await?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(
