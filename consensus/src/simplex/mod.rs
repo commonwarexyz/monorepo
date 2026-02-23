@@ -142,7 +142,7 @@
 //! `f+1` or more honest participants timed out, or certification failed. Because
 //! certification is deterministic, it either fails for all honest participants or none,
 //! so a certification failure always produces a nullification. In the common case
-//! (no faults, no timeouts, certification succeeds), exclusion cannot happen.
+//! (no faults, no timeouts), exclusion cannot happen.
 //!
 //! ### Unchained Finalization
 //!
