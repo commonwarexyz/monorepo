@@ -112,7 +112,7 @@
 //!
 //! ## Protocol Properties
 //!
-//! ### Forced Inclusion (Tail-Forking Resistant)
+//! ### Forced Inclusion (Tail-Forking Resistance)
 //!
 //! A notarized payload in view `v` must appear in the canonical chain if no nullification
 //! certificate exists for `v`. This follows directly from the protocol rules:
