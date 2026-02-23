@@ -109,16 +109,16 @@
 //!
 //! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
 //! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the root is
-//! computed as:
+//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the partial
+//! chunk's digest and bit count are folded into the canonical root hash:
 //!
 //! ```text
-//! root = hash(mmr_root || next_bit || hash(partial_chunk))
+//! root = hash(ops_root || grafted_mmr_root || next_bit || hash(partial_chunk))
 //! ```
 //!
-//! where `next_bit` is the index of the next unset position in the partial chunk and `mmr_root`
-//! is the root over the grafted MMR (which covers only complete chunks). When all chunks are
-//! complete, `root = mmr_root` with no additional hashing.
+//! where `next_bit` is the index of the next unset position in the partial chunk and
+//! `grafted_mmr_root` is the root of the grafted MMR (which covers only complete chunks).
+//! When all chunks are complete, the partial chunk components are omitted.
 //!
 //! ## Incremental updates
 //!
@@ -139,18 +139,26 @@
 //! The canonical root of a `current` database is:
 //!
 //! ```text
-//! root = hash(grafted_root || ops_root)
+//! root = hash(ops_root || grafted_mmr_root [|| next_bit || hash(partial_chunk)])
 //! ```
 //!
-//! This combines two components:
+//! where `grafted_mmr_root` is the root of the grafted MMR (covering only complete
+//! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
+//! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
+//! components are only present when the last bitmap chunk is incomplete.
 //!
-//! - **Grafted root**: The root of the grafted MMR (overlaying bitmap chunks with ops subtree
-//!   roots, plus any partial chunk). Used for proofs about operation values and their activity
-//!   status. See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//! This combines two (or three) components into a single hash:
 //!
 //! - **Ops root**: The root of the raw operations MMR (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
 //!   against this root using standard MMR range proofs.
+//!
+//! - **Grafted MMR root**: The root of the grafted MMR (overlaying bitmap chunks
+//!   with ops subtree roots). Used for proofs about operation values and their activity status.
+//!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//!
+//! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
+//!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root) and
 //! [MerkleizedStore](crate::qmdb::store::MerkleizedStore)`::`[root()](crate::qmdb::store::MerkleizedStore::root).
@@ -160,8 +168,7 @@
 //! For state sync, the sync engine targets the ops root and verifies each batch against it.
 //! After sync, the bitmap and grafted MMR are reconstructed deterministically from the
 //! operations, and the canonical root is computed. Validating that the ops root is part of the
-//! canonical root (i.e. that `hash(grafted_root || ops_root) == canonical_root`) is the
-//! caller's responsibility; the sync engine does not perform this check.
+//! canonical root is the caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
     index::Unordered as UnorderedIndex,

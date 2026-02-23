@@ -3,16 +3,16 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
 //! variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database is `hash(grafted_root || ops_root)` (see the
-//! [Root structure](super) section in the module documentation). The sync engine operates on
-//! the **ops root**, not the canonical root: it downloads operations and verifies each batch
-//! against the ops root using standard MMR range proofs (identical to `any` sync).
-//! Validating that the ops root is part of the canonical root is the caller's responsibility;
-//! the sync engine does not perform this check.
+//! The canonical root of a `current` database combines the ops root, grafted MMR root, and
+//! optional partial chunk into a single hash (see the [Root structure](super) section in the
+//! module documentation). The sync engine operates on the **ops root**, not the canonical root:
+//! it downloads operations and verifies each batch against the ops root using standard MMR
+//! range proofs (identical to `any` sync). Validating that the ops root is part of the
+//! canonical root is the caller's responsibility; the sync engine does not perform this check.
 //!
 //! After all operations are synced, the bitmap and grafted MMR are reconstructed
 //! deterministically from the operations. The canonical root is then computed from the
-//! reconstructed grafted root and the ops root.
+//! ops root, the reconstructed grafted MMR root, and any partial chunk.
 //!
 //! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
 //! implementation returns the **ops root** (not the canonical root) because that is what the
@@ -30,7 +30,10 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{self, journaled::Config as MmrConfig, mem::Clean, Location, Position, StandardHasher},
+    mmr::{
+        self, hasher::Hasher as _, journaled::Config as MmrConfig, mem::Clean, Location, Position,
+        StandardHasher,
+    },
     qmdb::{
         self,
         any::{
@@ -230,9 +233,18 @@ where
     // from the ops).
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial = db::partial_chunk(&status);
-    let grafted_root = db::compute_grafted_root(&mut hasher, &storage, partial).await?;
+    let grafted_mmr_root = db::compute_grafted_mmr_root(&mut hasher, &storage).await?;
     let ops_root = any.log.root();
-    let root = db::combine_roots(&mut hasher, &grafted_root, &ops_root);
+    let partial_digest = partial.map(|(chunk, next_bit)| {
+        let digest = hasher.digest(chunk);
+        (next_bit, digest)
+    });
+    let root = db::combine_roots(
+        &mut hasher,
+        &ops_root,
+        &grafted_mmr_root,
+        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
+    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =

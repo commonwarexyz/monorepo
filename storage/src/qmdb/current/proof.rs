@@ -5,7 +5,6 @@
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
-    bitmap::partial_chunk_root,
     journal::contiguous::{Contiguous, Reader as _},
     mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
     qmdb::{current::grafting, Error},
@@ -28,7 +27,7 @@ pub struct RangeProof<D: Digest> {
     pub partial_chunk_digest: Option<D>,
 
     /// The ops MMR root at the time of proof generation.
-    /// Needed by the verifier to reconstruct the canonical root (`hash(grafted_root || ops_root)`).
+    /// Needed by the verifier to reconstruct the canonical root.
     pub ops_root: D,
 }
 
@@ -164,30 +163,18 @@ impl<D: Digest> RangeProof<D> {
         let mut verifier =
             grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
-        // Reconstruct the grafted root from the proof.
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
-        let grafted_root = if next_bit == 0 {
-            // All chunks complete: reconstruct directly.
-            match self
-                .proof
-                .reconstruct_root(&mut verifier, &elements, start_loc)
-            {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(error = ?error, "invalid proof input");
-                    return false;
-                }
-            }
-        } else {
-            // The proof must contain the partial chunk digest.
+        let has_partial_chunk = next_bit != 0;
+
+        // For partial chunks, validate the last chunk digest from the proof.
+        if has_partial_chunk {
             let Some(last_chunk_digest) = self.partial_chunk_digest else {
                 debug!("proof has no partial chunk digest");
                 return false;
             };
 
-            // If the proof is over an operation in the partial chunk, we need to verify the last
-            // chunk digest from the proof matches the digest of chunk, since these bits are not
-            // part of the mmr.
+            // If the proof covers an operation in the partial chunk, verify that the
+            // chunk provided by the caller matches the digest embedded in the proof.
             if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS
                 == *leaves / BitMap::<N>::CHUNK_SIZE_BITS
             {
@@ -201,25 +188,28 @@ impl<D: Digest> RangeProof<D> {
                     return false;
                 }
             }
+        }
 
-            // Reconstruct the MMR root and combine with partial chunk to get the grafted root.
-            let mmr_root = match self
-                .proof
-                .reconstruct_root(&mut verifier, &elements, start_loc)
-            {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(error = ?error, "invalid proof input");
-                    return false;
-                }
-            };
-
-            partial_chunk_root::<H, N>(hasher, &mmr_root, next_bit, &last_chunk_digest)
+        // Reconstruct the grafted MMR root from the proof.
+        let mmr_root = match self
+            .proof
+            .reconstruct_root(&mut verifier, &elements, start_loc)
+        {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
+            }
         };
 
-        // Combine grafted root with ops root to get the canonical root, then compare.
-        hasher.update(&grafted_root);
+        // Compute the canonical root and compare.
         hasher.update(&self.ops_root);
+        hasher.update(&mmr_root);
+        if has_partial_chunk {
+            // partial_chunk_digest is guaranteed Some by the check above.
+            hasher.update(&next_bit.to_be_bytes());
+            hasher.update(&self.partial_chunk_digest.as_ref().unwrap());
+        }
         let reconstructed_root = hasher.finalize();
         reconstructed_root == *root
     }

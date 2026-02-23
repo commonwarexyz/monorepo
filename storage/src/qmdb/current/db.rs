@@ -3,7 +3,6 @@
 //! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
-    bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, Mutable},
@@ -63,7 +62,7 @@ pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
 
 /// Merkleized state: the database has been merkleized and its root is cached.
 pub struct Merkleized<D: Digest> {
-    /// The cached canonical root: `hash(grafted_root || ops_root)`.
+    /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: D,
 }
@@ -182,7 +181,7 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    /// Returns the canonical root: `hash(grafted_root || ops_root)`.
+    /// Returns the canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub const fn root(&self) -> H::Digest {
         self.state.root
@@ -741,20 +740,25 @@ pub(super) fn partial_chunk<const N: usize>(bitmap: &BitMap<N>) -> Option<(&[u8;
     }
 }
 
-/// Compute the canonical root from the grafted root and ops root.
+/// Compute the canonical root from the ops root, grafted MMR root, and optional partial chunk.
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) fn combine_roots<H: Hasher>(
     hasher: &mut StandardHasher<H>,
-    grafted_root: &H::Digest,
     ops_root: &H::Digest,
+    grafted_mmr_root: &H::Digest,
+    partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    hasher.inner().update(grafted_root);
     hasher.inner().update(ops_root);
+    hasher.inner().update(grafted_mmr_root);
+    if let Some((next_bit, last_chunk_digest)) = partial {
+        hasher.inner().update(&next_bit.to_be_bytes());
+        hasher.inner().update(last_chunk_digest);
+    }
     hasher.inner().finalize()
 }
 
-/// Compute the canonical root digest of a [Db]: `hash(grafted_root || ops_root)`.
+/// Compute the canonical root digest of a [Db].
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
@@ -767,22 +771,25 @@ pub(super) async fn compute_db_root<
     partial_chunk: Option<(&[u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error> {
-    let grafted_root = compute_grafted_root(hasher, storage, partial_chunk).await?;
-    Ok(combine_roots(hasher, &grafted_root, ops_root))
+    let grafted_mmr_root = compute_grafted_mmr_root(hasher, storage).await?;
+    let partial = partial_chunk.map(|(chunk, next_bit)| {
+        let digest = hasher.digest(chunk);
+        (next_bit, digest)
+    });
+    Ok(combine_roots(
+        hasher,
+        ops_root,
+        &grafted_mmr_root,
+        partial.as_ref().map(|(nb, d)| (*nb, d)),
+    ))
 }
 
-/// Compute the root digest of the grafted MMR of a [Db].
+/// Compute the root of the grafted MMR.
+///
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
-/// `partial_chunk` is `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk,
-/// or `None` if all bits fall on complete chunk boundaries.
-pub(super) async fn compute_grafted_root<
-    H: Hasher,
-    S: mmr::storage::Storage<H::Digest>,
-    const N: usize,
->(
+pub(super) async fn compute_grafted_mmr_root<H: Hasher, S: mmr::storage::Storage<H::Digest>>(
     hasher: &mut StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, S>,
-    partial_chunk: Option<(&[u8; N], u64)>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
     let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
@@ -798,22 +805,7 @@ pub(super) async fn compute_grafted_root<
         peaks.push(digest);
     }
 
-    let mmr_root = hasher.root(leaves, peaks.iter());
-
-    let Some((last_chunk, next_bit)) = partial_chunk else {
-        return Ok(mmr_root);
-    };
-
-    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that information
-    // into the root digest to fully capture the database state.
-    let last_chunk_digest = hasher.digest(last_chunk);
-
-    Ok(partial_chunk_root::<H, N>(
-        hasher.inner(),
-        &mmr_root,
-        next_bit,
-        &last_chunk_digest,
-    ))
+    Ok(hasher.root(leaves, peaks.iter()))
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(ops_pos, digest)` pairs.
