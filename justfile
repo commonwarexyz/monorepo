@@ -45,15 +45,23 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, publish order, benchmark names, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-benchmark-names check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, publish order, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
 # Tests benchmarks in a given crate
 test-benches crate *args='':
-    cargo test --benches -p {{ crate }} {{ args }} -- --verbose
+    #!/usr/bin/env bash
+    set -euo pipefail
+    output="$(mktemp)"
+    cleanup() {
+        rm -f "$output"
+    }
+    trap cleanup EXIT
+    cargo bench -p {{ crate }} {{ args }} --benches -- --list | tee "$output"
+    python3 .github/scripts/lint_benchmark_names.py "$output"
 
 # Run tests
 test *args='':
@@ -66,10 +74,6 @@ test-docs *args='--all':
 # Lint the Rust documentation
 check-docs *args='':
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items $@
-
-# Lint benchmark naming conventions
-check-benchmark-names:
-    python3 .github/scripts/lint_benchmark_names.py
 
 # Check publish workflow ordering against workspace dependencies
 check-publish-order:
