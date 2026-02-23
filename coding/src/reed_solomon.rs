@@ -205,7 +205,11 @@ where
 }
 
 /// Prepare data for encoding.
-fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
+///
+/// Returns a contiguous buffer of `k` padded shards and the shard length.
+/// The buffer layout is `[length_prefix | data | zero_padding]` split into
+/// `k` equal-sized shards of `shard_len` bytes each.
+fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
     let data_len = data.len();
     let prefixed_len = u32::SIZE + data_len;
@@ -220,13 +224,9 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     let length_bytes = (data_len as u32).to_be_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
-    padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(&data);
+    padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(data);
 
-    let mut shards = Vec::with_capacity(k + m); // assume recovery shards will be added later
-    for chunk in padded.chunks(shard_len) {
-        shards.push(chunk.to_vec());
-    }
-    shards
+    (padded, shard_len)
 }
 
 /// Extract data from encoded shards.
@@ -297,13 +297,12 @@ fn encode_inner<H: Hasher, S: Strategy>(
         return Err(Error::InvalidDataLength(data.len()));
     }
 
-    // Prepare data
-    let mut shards = prepare_data(data, k, m);
-    let shard_len = shards[0].len();
+    // Prepare data as a contiguous buffer of k shards
+    let (padded, shard_len) = prepare_data(&data, k);
 
     // Create or reuse encoder
     let mut encoder = take_encoder(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in &shards {
+    for shard in padded.chunks(shard_len) {
         encoder
             .add_original_shard(shard)
             .map_err(Error::ReedSolomon)?;
@@ -311,11 +310,13 @@ fn encode_inner<H: Hasher, S: Strategy>(
 
     // Compute recovery shards
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
-    shards.extend(recovery_shards);
+    let mut shards: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for shard in padded.chunks(shard_len) {
+        shards.push(shard.to_vec());
+    }
+    for shard in encoding.recovery_iter() {
+        shards.push(shard.to_vec());
+    }
 
     // Drop EncoderResult (auto-resets received shards), then return encoder to cache
     drop(encoding);
@@ -880,12 +881,11 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let shards = prepare_data(data.to_vec(), min as usize, total as usize - min as usize);
-        let shard_size = shards[0].len();
+        let (padded, shard_size) = prepare_data(data, min as usize);
 
         // Re-encode the data
         let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
-        for shard in &shards {
+        for shard in padded.chunks(shard_size) {
             encoder.add_original_shard(shard).unwrap();
         }
         let recovery_result = encoder.encode().unwrap();
@@ -900,7 +900,8 @@ mod tests {
         }
 
         // Build malicious shards
-        let mut malicious_shards = shards.clone();
+        let mut malicious_shards: Vec<Vec<u8>> =
+            padded.chunks(shard_size).map(|s| s.to_vec()).collect();
         malicious_shards.extend(recovery_shards);
 
         // Build malicious tree
