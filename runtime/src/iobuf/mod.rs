@@ -108,26 +108,31 @@ impl IoBuf {
         }
     }
 
-    /// Split off the first `len` bytes (zero-copy) and advance `self`.
+    /// Splits the buffer into two at the given index.
     ///
-    /// Panics if `len > self.len()`.
-    pub fn split_to(&mut self, len: usize) -> Self {
-        assert!(
-            len <= self.len(),
-            "split_to out of bounds: len={} remaining={}",
-            len,
-            self.len()
-        );
-        if len == 0 {
+    /// Afterwards `self` contains bytes `[at, len)`, and the returned [`IoBuf`]
+    /// contains bytes `[0, at)`.
+    ///
+    /// This is an `O(1)` zero-copy operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    pub fn split_to(&mut self, at: usize) -> Self {
+        if at == 0 {
             return Self::default();
         }
-        if len == self.len() {
+
+        if at == self.len() {
             return std::mem::take(self);
         }
 
-        let prefix = self.slice(..len);
-        self.advance(len);
-        prefix
+        match &mut self.inner {
+            IoBufInner::Bytes(b) => Self {
+                inner: IoBufInner::Bytes(b.split_to(at)),
+            },
+            IoBufInner::Pooled(p) => Self::from_pooled(p.split_to(at)),
+        }
     }
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
@@ -874,88 +879,59 @@ impl IoBufs {
         };
     }
 
-    /// Extend with all readable chunks from `other`, moving ownership without copying.
-    pub fn extend(&mut self, other: Self) {
-        match other.inner {
-            IoBufsInner::Single(buf) => self.append(buf),
-            IoBufsInner::Pair([a, b]) => {
-                self.append(a);
-                self.append(b);
-            }
-            IoBufsInner::Triple([a, b, c]) => {
-                self.append(a);
-                self.append(b);
-                self.append(c);
-            }
-            IoBufsInner::Chunked(mut other) => {
-                let inner =
-                    std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
-                self.inner = match inner {
-                    IoBufsInner::Single(existing) if existing.is_empty() => {
-                        IoBufsInner::Chunked(other)
-                    }
-                    IoBufsInner::Single(existing) => {
-                        other.push_front(existing);
-                        IoBufsInner::Chunked(other)
-                    }
-                    IoBufsInner::Pair([a, b]) => {
-                        other.push_front(b);
-                        other.push_front(a);
-                        IoBufsInner::Chunked(other)
-                    }
-                    IoBufsInner::Triple([a, b, c]) => {
-                        other.push_front(c);
-                        other.push_front(b);
-                        other.push_front(a);
-                        IoBufsInner::Chunked(other)
-                    }
-                    IoBufsInner::Chunked(mut bufs) => {
-                        bufs.append(&mut other);
-                        IoBufsInner::Chunked(bufs)
-                    }
-                };
-            }
-        }
-    }
-
-    /// Split off the first `len` bytes and leave the remainder in `self`.
+    /// Splits the buffer(s) into two at the given index.
     ///
-    /// Whole chunks are moved without copying. Partial chunks are shared via slicing.
-    pub fn split_to(&mut self, len: usize) -> Self {
-        if len == 0 {
+    /// Afterwards `self` contains bytes `[at, len)`, and the returned
+    /// [`IoBufs`] contains bytes `[0, at)`.
+    ///
+    /// Whole chunks are moved without copying. If the split point lands inside
+    /// a chunk, the chunk is split zero-copy via [`IoBuf::split_to`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    pub fn split_to(&mut self, at: usize) -> Self {
+        if at == 0 {
             return Self::default();
         }
 
         let remaining = self.remaining();
-        assert!(len <= remaining, "split_to out of bounds");
-        if len == remaining {
+        assert!(
+            at <= remaining,
+            "split_to out of bounds: {:?} <= {:?}",
+            at,
+            remaining,
+        );
+
+        if at == remaining {
             return std::mem::take(self);
         }
 
         let inner = std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
         match inner {
             IoBufsInner::Single(mut buf) => {
-                let prefix = buf.slice(..len);
-                buf.advance(len);
+                // Delegate directly and keep remainder as single
+                let prefix = buf.split_to(at);
                 self.inner = IoBufsInner::Single(buf);
                 Self::from(prefix)
             }
             IoBufsInner::Pair([mut a, mut b]) => {
                 let a_len = a.remaining();
-                if len < a_len {
-                    let prefix = a.slice(..len);
-                    a.advance(len);
+                if at < a_len {
+                    // Split stays entirely in chunk `a`.
+                    let prefix = a.split_to(at);
                     self.inner = IoBufsInner::Pair([a, b]);
                     return Self::from(prefix);
                 }
-                if len == a_len {
+                if at == a_len {
+                    // Exact chunk boundary: move `a` out, keep `b`.
                     self.inner = IoBufsInner::Single(b);
                     return Self::from(a);
                 }
 
-                let b_prefix_len = len - a_len;
-                let b_prefix = b.slice(..b_prefix_len);
-                b.advance(b_prefix_len);
+                // Split crosses from `a` into `b`.
+                let b_prefix_len = at - a_len;
+                let b_prefix = b.split_to(b_prefix_len);
                 self.inner = IoBufsInner::Single(b);
                 Self {
                     inner: IoBufsInner::Pair([a, b_prefix]),
@@ -963,62 +939,81 @@ impl IoBufs {
             }
             IoBufsInner::Triple([mut a, mut b, mut c]) => {
                 let a_len = a.remaining();
-                if len < a_len {
-                    let prefix = a.slice(..len);
-                    a.advance(len);
+                if at < a_len {
+                    // Split stays entirely in chunk `a`.
+                    let prefix = a.split_to(at);
                     self.inner = IoBufsInner::Triple([a, b, c]);
                     return Self::from(prefix);
                 }
-                if len == a_len {
+                if at == a_len {
+                    // Exact boundary after `a`.
                     self.inner = IoBufsInner::Pair([b, c]);
                     return Self::from(a);
                 }
 
-                let mut remaining = len - a_len;
+                let mut remaining = at - a_len;
                 let b_len = b.remaining();
                 if remaining < b_len {
-                    let b_prefix = b.slice(..remaining);
-                    b.advance(remaining);
+                    // Split lands inside `b`.
+                    let b_prefix = b.split_to(remaining);
                     self.inner = IoBufsInner::Pair([b, c]);
                     return Self {
                         inner: IoBufsInner::Pair([a, b_prefix]),
                     };
                 }
                 if remaining == b_len {
+                    // Exact boundary after `b`.
                     self.inner = IoBufsInner::Single(c);
                     return Self {
                         inner: IoBufsInner::Pair([a, b]),
                     };
                 }
 
+                // Split reaches into `c`.
                 remaining -= b_len;
-                let c_prefix = c.slice(..remaining);
-                c.advance(remaining);
+                let c_prefix = c.split_to(remaining);
                 self.inner = IoBufsInner::Single(c);
                 Self {
                     inner: IoBufsInner::Triple([a, b, c_prefix]),
                 }
             }
             IoBufsInner::Chunked(mut bufs) => {
-                let mut remaining = len;
+                let mut remaining = at;
                 let mut out = VecDeque::new();
 
                 while remaining > 0 {
                     let mut front = bufs.pop_front().expect("split_to out of bounds");
                     let avail = front.remaining();
+                    if avail == 0 {
+                        // Canonical chunked state should not contain empties.
+                        continue;
+                    }
                     if remaining < avail {
-                        let prefix = front.slice(..remaining);
-                        front.advance(remaining);
-                        bufs.push_front(front);
+                        // Split inside this chunk: keep suffix in `self`, move prefix to output.
+                        let prefix = front.split_to(remaining);
                         out.push_back(prefix);
+                        bufs.push_front(front);
                         break;
                     }
+
+                    // Consume this full chunk into the output prefix.
                     out.push_back(front);
                     remaining -= avail;
                 }
 
-                self.inner = Self::from_chunks_iter(bufs).inner;
-                Self::from_chunks_iter(out)
+                self.inner = if bufs.len() >= 4 {
+                    IoBufsInner::Chunked(bufs)
+                } else {
+                    Self::from_chunks_iter(bufs).inner
+                };
+
+                if out.len() >= 4 {
+                    Self {
+                        inner: IoBufsInner::Chunked(out),
+                    }
+                } else {
+                    Self::from_chunks_iter(out)
+                }
             }
         }
     }
@@ -2013,6 +2008,8 @@ mod tests {
         assert_ne!(eq, b"world");
         assert_eq!(IoBuf::from(b"hello"), IoBuf::from(b"hello"));
         assert_ne!(IoBuf::from(b"hello"), IoBuf::from(b"world"));
+        let bytes: Bytes = IoBuf::from(b"bytes").into();
+        assert_eq!(bytes.as_ref(), b"bytes");
 
         // Buf trait operations keep `len()` and `remaining()` in sync.
         let mut buf = IoBuf::from(b"hello world");
@@ -2067,20 +2064,35 @@ mod tests {
     }
 
     #[test]
-    fn test_iobuf_split_to_zero_partial_and_full() {
-        let mut buf = IoBuf::from(b"hello world");
+    fn test_iobuf_split_to_consistent_across_backings() {
+        let pool = test_pool();
+        let mut pooled = pool.try_alloc(256).expect("pooled allocation");
+        pooled.put_slice(b"hello world");
+        let mut pooled_buf = pooled.freeze();
+        let mut bytes_buf = IoBuf::from(b"hello world");
 
-        let empty = buf.split_to(0);
-        assert!(empty.is_empty());
-        assert_eq!(buf, b"hello world");
+        assert!(pooled_buf.is_pooled());
+        assert!(!bytes_buf.is_pooled());
 
-        let prefix = buf.split_to(5);
-        assert_eq!(prefix, b"hello");
-        assert_eq!(buf, b" world");
+        let pooled_empty = pooled_buf.split_to(0);
+        let bytes_empty = bytes_buf.split_to(0);
+        assert_eq!(pooled_empty, bytes_empty);
+        assert_eq!(pooled_buf, bytes_buf);
+        assert!(!pooled_empty.is_pooled());
 
-        let rest = buf.split_to(buf.len());
-        assert_eq!(rest, b" world");
-        assert!(buf.is_empty());
+        let pooled_prefix = pooled_buf.split_to(5);
+        let bytes_prefix = bytes_buf.split_to(5);
+        assert_eq!(pooled_prefix, bytes_prefix);
+        assert_eq!(pooled_buf, bytes_buf);
+        assert!(pooled_prefix.is_pooled());
+
+        let pooled_rest = pooled_buf.split_to(pooled_buf.len());
+        let bytes_rest = bytes_buf.split_to(bytes_buf.len());
+        assert_eq!(pooled_rest, bytes_rest);
+        assert_eq!(pooled_buf, bytes_buf);
+        assert!(pooled_buf.is_empty());
+        assert!(bytes_buf.is_empty());
+        assert!(!pooled_buf.is_pooled());
     }
 
     #[test]
@@ -2099,6 +2111,7 @@ mod tests {
         buf.put_slice(b"hello");
         buf.put_slice(b" world");
         assert_eq!(buf, b"hello world");
+        assert_eq!(buf, &b"hello world"[..]);
         assert_eq!(buf.freeze(), b"hello world");
 
         // `zeroed` creates readable initialized bytes; `set_len` can shrink safely.
@@ -2127,6 +2140,7 @@ mod tests {
         let empty = IoBufs::from(Vec::<u8>::new());
         assert!(empty.is_empty());
         assert!(empty.is_single());
+        assert!(empty.as_single().is_some());
 
         // Single-buffer read path.
         let mut single = IoBufs::from(b"hello world");
@@ -2141,6 +2155,7 @@ mod tests {
         let mut pair = IoBufs::from(IoBuf::from(b"a"));
         pair.append(IoBuf::from(b"b"));
         assert!(matches!(pair.inner, IoBufsInner::Pair(_)));
+        assert!(pair.as_single().is_none());
 
         let mut triple = IoBufs::from(IoBuf::from(b"a"));
         triple.append(IoBuf::from(b"b"));
@@ -2158,34 +2173,27 @@ mod tests {
         joined.prepend(IoBuf::from(b"start "));
         joined.append(IoBuf::from(b" end"));
         assert_eq!(joined.coalesce(), b"start middle end");
+
+        // prepending empty is a no-op, and prepending into pair upgrades to triple.
+        let mut prepend_noop = IoBufs::from(b"x");
+        prepend_noop.prepend(IoBuf::default());
+        assert_eq!(prepend_noop.coalesce(), b"x");
+
+        let mut prepend_pair = IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]);
+        prepend_pair.prepend(IoBuf::from(b"a"));
+        assert!(matches!(prepend_pair.inner, IoBufsInner::Triple(_)));
+        assert_eq!(prepend_pair.coalesce(), b"abc");
+
+        // canonicalizing a non-empty single should keep the same representation.
+        let mut canonical_single = IoBufs::from(b"q");
+        canonical_single.canonicalize();
+        assert!(canonical_single.is_single());
+        assert_eq!(canonical_single.coalesce(), b"q");
     }
 
     #[test]
-    fn test_iobufs_extend_preserves_order_and_shapes() {
-        let mut left = IoBufs::from(IoBuf::from(b"a"));
-        left.extend(IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]));
-        assert!(matches!(left.inner, IoBufsInner::Triple(_)));
-        assert_eq!(left.coalesce(), b"abc");
-
-        let mut left = IoBufs::from(vec![
-            IoBuf::from(b"a"),
-            IoBuf::from(b"b"),
-            IoBuf::from(b"c"),
-            IoBuf::from(b"d"),
-        ]);
-        let right = IoBufs::from(vec![
-            IoBuf::from(b"e"),
-            IoBuf::from(b"f"),
-            IoBuf::from(b"g"),
-            IoBuf::from(b"h"),
-        ]);
-        left.extend(right);
-        assert!(matches!(left.inner, IoBufsInner::Chunked(_)));
-        assert_eq!(left.coalesce(), b"abcdefgh");
-    }
-
-    #[test]
-    fn test_iobufs_split_to_zero_and_full() {
+    fn test_iobufs_split_to_cases() {
+        // Zero and full split on a single chunk.
         let mut bufs = IoBufs::from(b"hello");
 
         let empty = bufs.split_to(0);
@@ -2197,16 +2205,81 @@ mod tests {
         assert_eq!(all.coalesce(), b"hello");
         assert!(bufs.is_single());
         assert!(bufs.is_empty());
-    }
 
-    #[test]
-    fn test_iobufs_split_to_pair_and_triple_paths() {
+        // Single split in the middle.
+        let mut single_mid = IoBufs::from(b"hello");
+        let single_prefix = single_mid.split_to(2);
+        assert!(single_prefix.is_single());
+        assert_eq!(single_prefix.coalesce(), b"he");
+        assert_eq!(single_mid.coalesce(), b"llo");
+
+        // Pair split paths: in-first, boundary-after-first, crossing-into-second.
+        let mut pair = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let pair_prefix = pair.split_to(1);
+        assert!(pair_prefix.is_single());
+        assert_eq!(pair_prefix.coalesce(), b"a");
+        assert!(matches!(pair.inner, IoBufsInner::Pair(_)));
+        assert_eq!(pair.coalesce(), b"bcd");
+
+        let mut pair = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let pair_prefix = pair.split_to(2);
+        assert!(pair_prefix.is_single());
+        assert_eq!(pair_prefix.coalesce(), b"ab");
+        assert!(pair.is_single());
+        assert_eq!(pair.coalesce(), b"cd");
+
         let mut pair = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
         let pair_prefix = pair.split_to(3);
         assert!(matches!(pair_prefix.inner, IoBufsInner::Pair(_)));
         assert_eq!(pair_prefix.coalesce(), b"abc");
         assert!(pair.is_single());
         assert_eq!(pair.coalesce(), b"d");
+
+        // Triple split paths: in-first, boundary-after-first, in-second, boundary-after-second,
+        // and reaching into third.
+        let mut triple = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+        ]);
+        let triple_prefix = triple.split_to(1);
+        assert!(triple_prefix.is_single());
+        assert_eq!(triple_prefix.coalesce(), b"a");
+        assert!(matches!(triple.inner, IoBufsInner::Triple(_)));
+        assert_eq!(triple.coalesce(), b"bcdef");
+
+        let mut triple = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+        ]);
+        let triple_prefix = triple.split_to(2);
+        assert!(triple_prefix.is_single());
+        assert_eq!(triple_prefix.coalesce(), b"ab");
+        assert!(matches!(triple.inner, IoBufsInner::Pair(_)));
+        assert_eq!(triple.coalesce(), b"cdef");
+
+        let mut triple = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+        ]);
+        let triple_prefix = triple.split_to(3);
+        assert!(matches!(triple_prefix.inner, IoBufsInner::Pair(_)));
+        assert_eq!(triple_prefix.coalesce(), b"abc");
+        assert!(matches!(triple.inner, IoBufsInner::Pair(_)));
+        assert_eq!(triple.coalesce(), b"def");
+
+        let mut triple = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+        ]);
+        let triple_prefix = triple.split_to(4);
+        assert!(matches!(triple_prefix.inner, IoBufsInner::Pair(_)));
+        assert_eq!(triple_prefix.coalesce(), b"abcd");
+        assert!(triple.is_single());
+        assert_eq!(triple.coalesce(), b"ef");
 
         let mut triple = IoBufs::from(vec![
             IoBuf::from(b"ab"),
@@ -2218,10 +2291,8 @@ mod tests {
         assert_eq!(triple_prefix.coalesce(), b"abcde");
         assert!(triple.is_single());
         assert_eq!(triple.coalesce(), b"f");
-    }
 
-    #[test]
-    fn test_iobufs_split_to_chunked_canonicalizes_remainder() {
+        // Chunked split can canonicalize remainder/prefix shapes.
         let mut bufs = IoBufs::from(vec![
             IoBuf::from(b"ab"),
             IoBuf::from(b"cd"),
@@ -2233,6 +2304,50 @@ mod tests {
         assert_eq!(prefix.coalesce(), b"abcd");
         assert!(matches!(bufs.inner, IoBufsInner::Pair(_)));
         assert_eq!(bufs.coalesce(), b"efgh");
+
+        // Chunked split inside a chunk.
+        let mut bufs = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::from(b"gh"),
+        ]);
+        let prefix = bufs.split_to(5);
+        assert!(matches!(prefix.inner, IoBufsInner::Triple(_)));
+        assert_eq!(prefix.coalesce(), b"abcde");
+        assert!(matches!(bufs.inner, IoBufsInner::Pair(_)));
+        assert_eq!(bufs.coalesce(), b"fgh");
+
+        // Chunked split can remain chunked on both sides when both have >= 4 chunks.
+        let mut bufs = IoBufs::from(vec![
+            IoBuf::from(b"a"),
+            IoBuf::from(b"b"),
+            IoBuf::from(b"c"),
+            IoBuf::from(b"d"),
+            IoBuf::from(b"e"),
+            IoBuf::from(b"f"),
+            IoBuf::from(b"g"),
+            IoBuf::from(b"h"),
+        ]);
+        let prefix = bufs.split_to(4);
+        assert!(matches!(prefix.inner, IoBufsInner::Chunked(_)));
+        assert_eq!(prefix.coalesce(), b"abcd");
+        assert!(matches!(bufs.inner, IoBufsInner::Chunked(_)));
+        assert_eq!(bufs.coalesce(), b"efgh");
+
+        // Defensive path: tolerate accidental empty chunks in non-canonical chunked input.
+        let mut bufs = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([
+                IoBuf::default(),
+                IoBuf::from(b"ab"),
+                IoBuf::from(b"cd"),
+                IoBuf::from(b"ef"),
+                IoBuf::from(b"gh"),
+            ])),
+        };
+        let prefix = bufs.split_to(3);
+        assert_eq!(prefix.coalesce(), b"abc");
+        assert_eq!(bufs.coalesce(), b"defgh");
     }
 
     #[test]
@@ -2795,6 +2910,19 @@ mod tests {
         let rest = bufs.copy_to_bytes(1);
         assert_eq!(&rest[..], b"h");
         assert_eq!(bufs.remaining(), 0);
+
+        // Enter copy_to_bytes while still in chunked representation.
+        let mut bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+            IoBufMut::from(b"d"),
+            IoBufMut::from(b"e"),
+        ]);
+        assert!(matches!(bufs.inner, IoBufsMutInner::Chunked(_)));
+        let first = bufs.copy_to_bytes(1);
+        assert_eq!(&first[..], b"a");
+        assert_eq!(bufs.remaining(), 4);
     }
 
     #[test]
@@ -3217,6 +3345,14 @@ mod tests {
             ]),
         };
         assert_eq!(triple_third.chunk(), &[3u8]);
+        let triple_second = IoBufs {
+            inner: IoBufsInner::Triple([
+                IoBuf::default(),
+                IoBuf::from(vec![2u8]),
+                IoBuf::default(),
+            ]),
+        };
+        assert_eq!(triple_second.chunk(), &[2u8]);
         let triple_empty = IoBufs {
             inner: IoBufsInner::Triple([IoBuf::default(), IoBuf::default(), IoBuf::default()]),
         };
@@ -3241,8 +3377,9 @@ mod tests {
         single.canonicalize();
         assert!(single.is_single());
 
-        let pair = IoBufsMut::from(vec![IoBufMut::from(b"a"), IoBufMut::from(b"b")]);
+        let mut pair = IoBufsMut::from(vec![IoBufMut::from(b"a"), IoBufMut::from(b"b")]);
         assert!(pair.as_single().is_none());
+        assert!(pair.as_single_mut().is_none());
 
         // Constructor coverage for raw vec and BytesMut sources.
         let from_vec = IoBufsMut::from(vec![1u8, 2u8]);
@@ -3342,6 +3479,14 @@ mod tests {
             ]),
         };
         assert_eq!(triple_third.chunk(), b"c");
+        let triple_second = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::from(b"b"),
+                IoBufMut::default(),
+            ]),
+        };
+        assert_eq!(triple_second.chunk(), b"b");
         let triple_empty = IoBufsMut {
             inner: IoBufsMutInner::Triple([
                 IoBufMut::default(),
@@ -3365,7 +3510,7 @@ mod tests {
 
         // `chunk_mut()` should skip non-writable fronts and return first writable chunk.
         let mut pair_chunk_mut = IoBufsMut {
-            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::with_capacity(2)]),
+            inner: IoBufsMutInner::Pair([no_spare_capacity_buf(&pool), IoBufMut::with_capacity(2)]),
         };
         assert!(pair_chunk_mut.chunk_mut().len() >= 2);
 
@@ -3379,12 +3524,20 @@ mod tests {
 
         let mut triple_chunk_mut = IoBufsMut {
             inner: IoBufsMutInner::Triple([
-                IoBufMut::default(),
-                IoBufMut::default(),
+                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(&pool),
                 IoBufMut::with_capacity(3),
             ]),
         };
         assert!(triple_chunk_mut.chunk_mut().len() >= 3);
+        let mut triple_chunk_mut_second = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                no_spare_capacity_buf(&pool),
+                IoBufMut::with_capacity(2),
+                no_spare_capacity_buf(&pool),
+            ]),
+        };
+        assert!(triple_chunk_mut_second.chunk_mut().len() >= 2);
 
         let mut triple_chunk_mut_empty = IoBufsMut {
             inner: IoBufsMutInner::Triple([
@@ -3477,6 +3630,19 @@ mod tests {
         let mut remaining = 3usize;
         // SAFETY: We do not read from advanced bytes in this test.
         let all_advanced = unsafe { advance_mut_in_chunks(&mut writable, &mut remaining) };
+        assert!(all_advanced);
+        assert_eq!(remaining, 0);
+
+        // `advance_mut_in_chunks` should skip non-writable chunks.
+        let pool = test_pool();
+        let mut full = pool.alloc(1);
+        // SAFETY: We only mark initialized capacity; bytes are not read.
+        unsafe { full.set_len(full.capacity()) };
+        let mut writable_after_full = [full, IoBufMut::with_capacity(2)];
+        let mut remaining = 2usize;
+        // SAFETY: We do not read from advanced bytes in this test.
+        let all_advanced =
+            unsafe { advance_mut_in_chunks(&mut writable_after_full, &mut remaining) };
         assert!(all_advanced);
         assert_eq!(remaining, 0);
 
@@ -3678,6 +3844,14 @@ mod tests {
             IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
         // SAFETY: this will panic before any read.
         unsafe { bufs.set_len(9) };
+    }
+
+    #[test]
+    #[should_panic(expected = "set_len(9) exceeds capacity(8)")]
+    fn test_iobufmut_set_len_overflow() {
+        let mut buf = IoBufMut::with_capacity(8);
+        // SAFETY: this will panic before any read.
+        unsafe { buf.set_len(9) };
     }
 
     #[test]
