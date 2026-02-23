@@ -368,7 +368,9 @@ pub struct Batch {
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl BatchVerifier<PublicKey> for Batch {
+impl BatchVerifier for Batch {
+    type PublicKey = PublicKey;
+
     fn new() -> Self {
         Self {
             publics: Vec::new(),
