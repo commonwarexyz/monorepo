@@ -281,6 +281,21 @@
 //! a nullification certificate to form. In the common case (no faults, no timeouts), this
 //! cannot happen.
 //!
+//! ## Asynchronous Finalization
+//!
+//! Finalization does not require consecutive honest views. When a participant certifies
+//! `notarization(c,v)`, it broadcasts `finalize(c,v)` and immediately enters `v+1`,
+//! regardless of what happens in subsequent views. These `finalize(c,v)` votes accumulate
+//! independently of the current view: even if views `v+1` through `v+k` all time out
+//! (producing nullifications), the `finalize(c,v)` votes still count toward the `2f+1`
+//! threshold needed to form `finalization(c,v)`.
+//!
+//! This means a payload notarized in view `v` can be finalized while the network is
+//! in view `v+k` for any `k >= 1`. There is no requirement that a particular view
+//! after `v` succeeds or that any subsequent leader cooperates. As long as `2f+1`
+//! participants eventually certify and broadcast `finalize(c,v)`, the finalization
+//! certificate will form.
+//!
 //! ## Persistence
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
