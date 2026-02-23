@@ -2,10 +2,10 @@
 //!
 //! # Overview
 //!
-//! When an object is expensive to construct but cheap to reset, keeping
-//! one instance per thread avoids repeated allocation. The manual
-//! take-then-return pattern is fragile: forgetting the return silently
-//! degrades to constructing a new instance.
+//! When an object is expensive to construct but cheap to reset and must be
+//! used within a stateless function, keeping one instance per thread avoids
+//! repeated allocation. The manual take-then-return pattern is fragile:
+//! forgetting the return silently degrades to constructing a new instance.
 //!
 //! [`Cached`] is an RAII guard whose [`Drop`] automatically returns the
 //! value to the thread-local slot, so forgetting the return is impossible.
