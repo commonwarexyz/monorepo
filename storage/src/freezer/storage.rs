@@ -1009,22 +1009,13 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = self
-            .table
-            .read_at(read_offset, chunk_bytes)
-            .await?
-            .coalesce();
+        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
-        for i in 0..chunk_size {
-            // Get the entry
-            let entry_offset = i as usize * Entry::FULL_SIZE;
-            let entry_end = entry_offset + Entry::FULL_SIZE;
-            let entry_buf = &read_buf.as_ref()[entry_offset..entry_end];
-
-            // Parse the two slots
-            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
+        for _ in 0..chunk_size {
+            // Parse the next two slots directly from the read stream.
+            let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
 
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);

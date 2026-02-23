@@ -8,7 +8,7 @@
 //! pages can remain live until all readers drop their references.
 
 use super::{read_page_from_blob_into, CHECKSUM_SIZE};
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
+use crate::{Blob, BufMut, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -492,10 +492,8 @@ impl CacheRef {
             let page_start = page_idx * physical_page_size;
             // Materialize each logical page into its own owned buffer so cache residency
             // is bounded by logical-page count, not by the size of the source flush payload.
-            let mut owned = self.pool.alloc_zeroed(logical_page_size);
-            owned
-                .as_mut()
-                .copy_from_slice(&physical_bytes[page_start..page_start + logical_page_size]);
+            let mut owned = self.pool.alloc(logical_page_size);
+            owned.put_slice(&physical_bytes[page_start..page_start + logical_page_size]);
             owned.freeze()
         });
         self.cache_pages(blob_id, pages, offset);
