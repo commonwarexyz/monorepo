@@ -19,9 +19,10 @@ bytes.workspace = true
 cfg-if.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
+commonware-coding.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
-commonware-math = { workspace = true, optional = true }
+commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
@@ -39,12 +40,12 @@ commonware-storage = { workspace = true, features = ["std"] }
 pin-project.workspace = true
 prometheus-client.workspace = true
 rand_distr.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
-commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 rand_chacha.workspace = true
@@ -60,9 +61,9 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 mocks = [ "commonware-cryptography/mocks" ]
-fuzz = [ "dep:commonware-math", "mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-coding/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-math/arbitrary",
 	"commonware-p2p/arbitrary",

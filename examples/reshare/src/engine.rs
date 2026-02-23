@@ -9,8 +9,12 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
+    marshal::{
+        self,
+        core::Actor as MarshalActor,
+        resolver::handler,
+        standard::{Deferred, Standard},
+    },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
@@ -95,9 +99,9 @@ where
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     #[allow(clippy::type_complexity)]
-    marshal: marshal::Actor<
+    marshal: MarshalActor<
         E,
-        Block<H, C, V>,
+        Standard<Block<H, C, V>>,
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
@@ -111,7 +115,7 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
+        Deferred<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
         T,
@@ -252,8 +256,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-
-        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
+        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -280,7 +283,7 @@ where
         )
         .await;
 
-        let application = Marshaled::new(
+        let application = Deferred::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
@@ -339,8 +342,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -383,8 +386,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {

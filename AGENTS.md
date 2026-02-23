@@ -172,10 +172,11 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Testing Strategy
 
-- Unit tests: Core logic validation
-- Integration tests: Cross-primitive interaction
-- Fuzz tests: Input validation and edge cases
-- MIRI tests: Memory safety verification for unsafe code
+- Property: Core logic and invariant validation (use "minifuzz" from the invariants crate)
+- Unit: Testing edge cases or particular scenarios.
+- Integration: Cross-primitive interaction
+- Fuzz: Extending property tests (cf. "Plan" pattern in dkg.rs or the math crate).
+- MIRI: Memory safety verification for unsafe code
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
 

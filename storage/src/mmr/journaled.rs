@@ -17,7 +17,10 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr, State},
+        mem::{
+            Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr,
+            State as MemState,
+        },
         position::Position,
         storage::Storage,
         verification,
@@ -42,6 +45,36 @@ use tracing::{debug, error, warn};
 
 pub type DirtyMmr<E, D> = Mmr<E, D, Dirty>;
 pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
+
+/// Trait for valid journaled MMR type states.
+pub trait State<D: Digest>: MemState<D> + Send + Sync {
+    type MerkleizedSize: Send + Sync;
+}
+
+impl<D: Digest> State<D> for Dirty {
+    type MerkleizedSize = Position;
+}
+
+impl<D: Digest> State<D> for Clean<D> {
+    type MerkleizedSize = ();
+}
+
+/// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
+struct Inner<D: Digest, S: State<D>> {
+    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
+    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
+    /// the journaled MMR's pruning boundary.
+    mem_mmr: MemMmr<D, S>,
+
+    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// pruned.
+    pruned_to_pos: Position,
+
+    /// The historical size up to which this MMR has been merkleized.
+    ///
+    /// In [DirtyMmr] state this is a [Position]. In [CleanMmr] state this is `()`.
+    merkleized_size: S::MerkleizedSize,
+}
 
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
@@ -87,20 +120,8 @@ pub struct SyncConfig<D: Digest> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
-/// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
-struct Inner<D: Digest, S: State<D> + Send + Sync> {
-    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
-    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
-    /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D, S>,
-
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pruned_to_pos: Position,
-}
-
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
+pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
     /// Lock-protected mutable state.
     inner: RwLock<Inner<D, S>>,
 
@@ -122,10 +143,12 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sy
 impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
     fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
         let inner = clean.inner.into_inner();
+        let size = inner.mem_mmr.size();
         Self {
             inner: RwLock::new(Inner {
                 mem_mmr: inner.mem_mmr.into(),
                 pruned_to_pos: inner.pruned_to_pos,
+                merkleized_size: size,
             }),
             journal: clean.journal,
             metadata: clean.metadata,
@@ -141,7 +164,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E, D, S> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -175,7 +198,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
                     err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
-                return Err(Error::MissingNode(pos));
+                return Err(Error::DataCorrupted(
+                    "could not read digest at requested pos",
+                ));
             };
             return Ok(digest);
         }
@@ -256,6 +281,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 inner: RwLock::new(Inner {
                     mem_mmr,
                     pruned_to_pos: Position::new(0),
+                    merkleized_size: (),
                 }),
                 journal,
                 metadata,
@@ -370,6 +396,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             inner: RwLock::new(Inner {
                 mem_mmr,
                 pruned_to_pos: prune_pos,
+                merkleized_size: (),
             }),
             journal,
             metadata,
@@ -478,6 +505,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             inner: RwLock::new(Inner {
                 mem_mmr,
                 pruned_to_pos: cfg.range.start,
+                merkleized_size: (),
             }),
             journal,
             metadata,
@@ -616,13 +644,60 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         *self.inner.read().mem_mmr.root()
     }
 
-    /// Return an inclusion proof for the element at the location `loc`.
+    /// Return an inclusion proof for the element at the location `loc` against a historical MMR
+    /// state with `leaves` leaves.
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
+    ///   is not provable at that historical size.
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    pub async fn historical_proof(
+        &self,
+        leaves: Location,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
+        self.historical_range_proof(leaves, loc..loc + 1).await
+    }
+
+    /// Return an inclusion proof for the elements in `range` against a historical MMR state with
+    /// `leaves` leaves.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
+    ///   is not provable at that historical size.
+    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
+    pub async fn historical_range_proof(
+        &self,
+        leaves: Location,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        if leaves > self.leaves() {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        verification::historical_range_proof(self, leaves, range).await
+    }
+
+    /// Return an inclusion proof for the element at the location `loc` that can be verified against
+    /// the current root.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
     pub async fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
@@ -637,29 +712,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
+    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
-        verification::range_proof(self, range).await
-    }
-
-    /// Analogous to range_proof but for a previous database state. Specifically, the state when the
-    /// MMR had `leaves` leaves.
-    ///
-    /// Locations are validated by [verification::historical_range_proof].
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
-    pub async fn historical_range_proof(
-        &self,
-        leaves: Location,
-        range: Range<Location>,
-    ) -> Result<Proof<D>, Error> {
-        verification::historical_range_proof(self, leaves, range).await
+        self.historical_range_proof(self.leaves(), range).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -734,6 +793,94 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
+    /// Return the largest fully-merkleized historical size in leaves.
+    pub fn merkleized_leaves(&self) -> Location {
+        let size = self.inner.read().merkleized_size;
+        Location::try_from(size).expect("merkleized size should be valid")
+    }
+
+    /// Return an inclusion proof for the element at the location `loc` against a historical MMR
+    /// state with `leaves` leaves if the MMR is sufficiently merkleized, returning
+    /// [Error::Unmerkleized] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
+    ///   is not provable at that historical size.
+    /// - Returns [Error::Unmerkleized] if `leaves` is greater than `self.merkleized_leaves()`.
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    pub async fn historical_proof(
+        &self,
+        leaves: Location,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
+        self.historical_range_proof(leaves, loc..loc + 1).await
+    }
+
+    /// Return an inclusion proof for the elements in `range` against a historical MMR state with
+    /// `leaves` leaves if the MMR is sufficiently merkleized, returning [Error::Unmerkleized]
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
+    ///   is not provable at that historical size.
+    /// - Returns [Error::Unmerkleized] if generating the proof requires nodes at or beyond the
+    ///   current merkleized frontier.
+    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
+    pub async fn historical_range_proof(
+        &self,
+        leaves: Location,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        // Validate requested range.  Even though historical_range_proof performs most of these
+        // validations, we'd like to return the other potential errors if they hold instead of
+        // [Error::Unmerkleized] to avoid a fruitless retry after merkleizing.
+        let (size, merkleized_size, pruned_to_pos) = {
+            let inner = self.inner.read();
+            (
+                inner.mem_mmr.size(),
+                inner.merkleized_size,
+                inner.pruned_to_pos,
+            )
+        };
+        let requested_size = Position::try_from(leaves)?;
+        let end_pos = Position::try_from(range.end)?;
+        if requested_size > size {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        if range.is_empty() {
+            return Err(Error::Empty);
+        }
+        if range.end > leaves {
+            return Err(Error::RangeOutOfBounds(range.end));
+        }
+        if end_pos > size {
+            return Err(Error::RangeOutOfBounds(range.end));
+        }
+        let start_pos = Position::try_from(range.start)?;
+        if start_pos < pruned_to_pos {
+            return Err(Error::ElementPruned(start_pos));
+        }
+
+        // Finally if no other error conditions hold, check that the requested range is merkleized.
+        if requested_size > merkleized_size {
+            return Err(Error::Unmerkleized);
+        }
+
+        verification::historical_range_proof(self, leaves, range).await
+    }
+
     /// Merkleize the MMR and compute the root digest.
     pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();
@@ -741,6 +888,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             inner: RwLock::new(Inner {
                 mem_mmr: inner.mem_mmr.merkleize(h, self.pool.clone()),
                 pruned_to_pos: inner.pruned_to_pos,
+                merkleized_size: (),
             }),
             journal: self.journal,
             metadata: self.metadata,
@@ -749,47 +897,56 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         }
     }
 
-    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
-    /// aren't persisted to disk until `sync` is called.
-    pub fn add(
-        &mut self,
-        h: &mut impl Hasher<Digest = D>,
-        element: &[u8],
-    ) -> Result<Position, Error> {
-        Ok(self.inner.get_mut().mem_mmr.add(h, element))
+    /// Add an element to the MMR and return its position in the MMR.
+    ///
+    /// # Warnings
+    ///
+    /// - Added nodes are not guaranteed to be durable until the MMR is merkleized and a `sync` call
+    ///   succeeds.
+    /// - Memory usage grows by O(log2(n)) with each node added until data is flushed to disk by
+    ///   `sync`.
+    pub fn add(&self, h: &mut impl Hasher<Digest = D>, element: &[u8]) -> Result<Position, Error> {
+        Ok(self.inner.write().mem_mmr.add(h, element))
     }
 
     /// Pop elements while staying in Dirty state. No root recomputation occurs until merkleize.
     pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
-        {
+        let new_size = {
             let inner = self.inner.get_mut();
+
+            // First pop as many leaves as possible from the in-memory MMR.
             while leaves_to_pop > 0 {
                 match inner.mem_mmr.pop() {
                     Ok(_) => leaves_to_pop -= 1,
-                    Err(ElementPruned(_)) => break,
-                    Err(Empty) => return Err(Error::Empty),
-                    Err(e) => return Err(e),
+                    Err(ElementPruned(_)) | Err(Empty) => break,
+                    Err(err) => return Err(err), // propagate unexpected errors
                 }
             }
-        }
-        if leaves_to_pop == 0 {
-            return Ok(());
-        }
+            if leaves_to_pop == 0 {
+                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                return Ok(());
+            }
 
-        let new_size = {
-            let inner = self.inner.get_mut();
-            let mut new_size = inner.mem_mmr.size();
-            while leaves_to_pop > 0 {
-                if new_size == 0 {
-                    return Err(Error::Empty);
+            // Compute the rewind size for the remaining leaves to pop.
+            let destination_leaf = match inner.mem_mmr.leaves().checked_sub(leaves_to_pop as u64) {
+                Some(destination_leaf) => destination_leaf,
+                None => {
+                    let pruned_to_pos = inner.pruned_to_pos;
+                    inner.merkleized_size =
+                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                    return Err(if pruned_to_pos == 0 {
+                        Error::Empty
+                    } else {
+                        Error::ElementPruned(pruned_to_pos - 1)
+                    });
                 }
-                new_size -= 1;
-                if new_size < inner.pruned_to_pos {
-                    return Err(Error::ElementPruned(new_size));
-                }
-                if new_size.is_mmr_size() {
-                    leaves_to_pop -= 1;
-                }
+            };
+            let new_size =
+                Position::try_from(destination_leaf).expect("valid leaf should convert to size");
+
+            if new_size < inner.pruned_to_pos {
+                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                return Err(Error::ElementPruned(new_size));
             }
             new_size
         };
@@ -817,6 +974,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             inner.pruned_to_pos,
         )
         .await?;
+        inner.merkleized_size = std::cmp::min(inner.merkleized_size, new_size);
 
         Ok(())
     }
@@ -869,6 +1027,37 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E,
     }
 }
 
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for DirtyMmr<E, D> {
+    async fn size(&self) -> Position {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+        {
+            let inner = self.inner.read();
+
+            // Return None for unmerkleized nodes should they be requested.
+            if position >= inner.merkleized_size {
+                return Ok(None);
+            }
+
+            // If the requested node is in the mem mmr, use that.
+            let mem_bounds = inner.mem_mmr.bounds();
+            if position >= mem_bounds.start && position < mem_bounds.end {
+                return Ok(Some(*inner.mem_mmr.get_node_unchecked(position)));
+            }
+        }
+
+        // Otherwise get the node from the metadata+journal. If it's missing it must be due to
+        // pruning, so we swallow MissingNode errors.
+        match Self::get_from_metadata_or_journal(&self.metadata, &self.journal, position).await {
+            Ok(digest) => Ok(Some(digest)),
+            Err(Error::MissingNode(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,7 +1105,7 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let mut journaled_mmr = Mmr::init(
+            let journaled_mmr = Mmr::init(
                 context.clone(),
                 &mut Standard::<Sha256>::new(),
                 test_config(&context),
@@ -997,7 +1186,7 @@ mod tests {
             ));
 
             // Confirm empty proof no longer verifies after adding an element.
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             mmr.add(&mut hasher, &test_digest(0)).unwrap();
             let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
@@ -1126,6 +1315,54 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_journaled_mmr_pop_error_clamps_merkleized_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
+
+            // Case 1: pop partially succeeds, then returns ElementPruned.
+            let element_pruned_context = context.with_label("element_pruned_case");
+            let mmr = Mmr::init(
+                element_pruned_context.clone(),
+                &mut hasher,
+                test_config(&element_pruned_context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+            for i in 0u64..32 {
+                mmr.add(&mut hasher, &i.to_be_bytes()).unwrap();
+            }
+            let mut mmr = mmr.merkleize(&mut hasher);
+            mmr.prune_to_pos(Position::try_from(Location::new_unchecked(8)).unwrap())
+                .await
+                .unwrap();
+            let mut mmr = mmr.into_dirty();
+            assert_eq!(mmr.merkleized_leaves(), mmr.leaves());
+            assert!(matches!(mmr.pop(128).await, Err(Error::ElementPruned(_))));
+            assert_eq!(mmr.merkleized_leaves(), mmr.leaves());
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+
+            // Case 2: pop partially succeeds, then returns Empty.
+            let empty_context = context.with_label("empty_case");
+            let cfg = test_config(&empty_context);
+            let mmr = Mmr::init(empty_context, &mut hasher, cfg)
+                .await
+                .unwrap()
+                .into_dirty();
+            for i in 0u64..8 {
+                mmr.add(&mut hasher, &i.to_be_bytes()).unwrap();
+            }
+            let mut mmr = mmr.merkleize(&mut hasher).into_dirty();
+            assert_eq!(mmr.merkleized_leaves(), mmr.leaves());
+            assert!(matches!(mmr.pop(9).await, Err(Error::Empty)));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
+            assert_eq!(mmr.merkleized_leaves(), Location::new_unchecked(0));
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_journaled_mmr_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1136,7 +1373,7 @@ mod tests {
             const LEAF_COUNT: usize = 255;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
@@ -1189,7 +1426,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.with_label("first"),
                 &mut hasher,
                 test_config(&context),
@@ -1280,13 +1517,13 @@ mod tests {
                 thread_pool: None,
                 page_cache: cfg_pruned.page_cache.clone(),
             };
-            let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
+            let mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
                 .await
                 .unwrap()
                 .into_dirty();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
-            let mut pruned_mmr = pruned_mmr.into_dirty();
+            let pruned_mmr = pruned_mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
@@ -1313,11 +1550,11 @@ mod tests {
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
+                let dirty_pruned_mmr = pruned_mmr.into_dirty();
                 let pos = dirty_pruned_mmr.add(&mut hasher, last_leaf).unwrap();
                 pruned_mmr = dirty_pruned_mmr.merkleize(&mut hasher);
                 positions.push(pos);
-                let mut dirty_mmr = mmr.into_dirty();
+                let dirty_mmr = mmr.into_dirty();
                 dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                 mmr = dirty_mmr.merkleize(&mut hasher);
                 assert_eq!(pruned_mmr.root(), mmr.root());
@@ -1349,10 +1586,10 @@ mod tests {
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             mmr.add(&mut hasher, &test_digest(LEAF_COUNT)).unwrap();
             let mmr = mmr.merkleize(&mut hasher);
-            let mut dirty_pruned = pruned_mmr.into_dirty();
+            let dirty_pruned = pruned_mmr.into_dirty();
             dirty_pruned
                 .add(&mut hasher, &test_digest(LEAF_COUNT))
                 .unwrap();
@@ -1379,7 +1616,7 @@ mod tests {
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
             while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
-                let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
+                let dirty_pruned_mmr = pruned_mmr.into_dirty();
                 dirty_pruned_mmr
                     .add(&mut hasher, &test_digest(LEAF_COUNT))
                     .unwrap();
@@ -1401,7 +1638,7 @@ mod tests {
             // Build MMR with 2000 leaves.
             let mut hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.with_label("init"),
                 &mut hasher,
                 test_config(&context),
@@ -1447,7 +1684,7 @@ mod tests {
                     let digest = test_digest(100 * (i + 1) + j);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let mut dirty_mmr = mmr.into_dirty();
+                    let dirty_mmr = mmr.into_dirty();
                     let pos = dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     positions.push(pos);
                     dirty_mmr.add(&mut hasher, last_leaf).unwrap();
@@ -1455,7 +1692,7 @@ mod tests {
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let mut dirty_mmr = mmr.into_dirty();
+                    let dirty_mmr = mmr.into_dirty();
                     let pos = dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     positions.push(pos);
                     dirty_mmr.add(&mut hasher, last_leaf).unwrap();
@@ -1481,13 +1718,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_historical_range_proof_basic() {
+    fn test_journaled_mmr_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create MMR with 10 elements
             let mut hasher = Standard::<Sha256>::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg)
+            let mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap()
                 .into_dirty();
@@ -1524,7 +1761,7 @@ mod tests {
             assert_eq!(regular_proof.digests, historical_proof.digests);
 
             // Add more elements to the MMR
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 10..20 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
@@ -1545,7 +1782,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_historical_range_proof_with_pruning() {
+    fn test_journaled_mmr_historical_proof_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1560,7 +1797,7 @@ mod tests {
             // Add many elements
             let mut elements = Vec::new();
             let mut positions = Vec::new();
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..50 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
@@ -1587,7 +1824,7 @@ mod tests {
             .await
             .unwrap();
 
-            let mut ref_mmr = ref_mmr.into_dirty();
+            let ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(41) {
                 ref_mmr.add(&mut hasher, elt).unwrap();
             }
@@ -1599,7 +1836,7 @@ mod tests {
             let historical_proof = mmr
                 .historical_range_proof(
                     historical_leaves,
-                    Location::new_unchecked(35)..Location::new_unchecked(39), // Start after prune point to end at historical size
+                    Location::new_unchecked(35)..Location::new_unchecked(39),
                 )
                 .await
                 .unwrap();
@@ -1620,7 +1857,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_historical_range_proof_large() {
+    fn test_journaled_mmr_historical_proof_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1642,7 +1879,7 @@ mod tests {
 
             let mut elements = Vec::new();
             let mut positions = Vec::new();
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..100 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
@@ -1668,7 +1905,7 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
-            let mut ref_mmr = ref_mmr.into_dirty();
+            let ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(*range.end as usize) {
                 ref_mmr.add(&mut hasher, elt).unwrap();
             }
@@ -1695,12 +1932,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_historical_range_proof_singleton() {
+    fn test_journaled_mmr_historical_proof_singleton() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg)
+            let mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap()
                 .into_dirty();
@@ -1756,7 +1993,7 @@ mod tests {
 
             // Should be able to add new elements
             let new_element = test_digest(999);
-            let mut sync_mmr = sync_mmr.into_dirty();
+            let sync_mmr = sync_mmr.into_dirty();
             sync_mmr.add(&mut hasher, &new_element).unwrap();
             let sync_mmr = sync_mmr.merkleize(&mut hasher);
 
@@ -1782,7 +2019,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
@@ -1849,7 +2086,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..30 {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
@@ -1923,7 +2160,7 @@ mod tests {
             .unwrap();
 
             // Add 50 elements
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
@@ -1980,7 +2217,7 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.with_label("init"),
                 &mut hasher,
                 test_config(&context),
@@ -2047,7 +2284,7 @@ mod tests {
             let mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..100 {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
@@ -2079,6 +2316,573 @@ mod tests {
             assert_eq!(sync_mmr.bounds().start, prune_pos);
 
             sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_requires_merkleization() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..64 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let historical_leaves = Location::new_unchecked(11);
+            let range = Location::new_unchecked(3)..Location::new_unchecked(9);
+            let result = mmr
+                .historical_range_proof(historical_leaves, range.clone())
+                .await;
+            assert!(matches!(result, Err(Error::Unmerkleized)));
+
+            let clean = mmr.merkleize(&mut hasher);
+            let proof = clean
+                .historical_range_proof(historical_leaves, range.clone())
+                .await
+                .unwrap();
+            let expected = clean
+                .historical_range_proof(historical_leaves, range)
+                .await
+                .unwrap();
+            assert_eq!(proof, expected);
+
+            clean.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_get_node_unmerkleized_returns_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            mmr.add(&mut hasher, &test_digest(0)).unwrap();
+            let mmr = mmr.merkleize(&mut hasher).into_dirty();
+
+            let pos = mmr.add(&mut hasher, &test_digest(1)).unwrap();
+            let node = mmr.get_node(pos).await.unwrap();
+            assert!(
+                node.is_none(),
+                "unmerkleized position should not be readable"
+            );
+
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_pruned_precedes_unmerkleized() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..64 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let mut clean = mmr.merkleize(&mut hasher);
+            let prune_pos = Position::try_from(Location::new_unchecked(16)).unwrap();
+            clean.prune_to_pos(prune_pos).await.unwrap();
+
+            let historical_leaves = clean.leaves();
+            let mut pruned_loc = None;
+            for loc_u64 in 0..*historical_leaves {
+                let loc = Location::new_unchecked(loc_u64);
+                let result = clean
+                    .historical_range_proof(historical_leaves, loc..loc + 1)
+                    .await;
+                if matches!(result, Err(Error::ElementPruned(_))) {
+                    pruned_loc = Some(loc);
+                    break;
+                }
+            }
+            let pruned_loc = pruned_loc.expect("expected at least one pruned location");
+
+            let dirty = clean.into_dirty();
+            for i in 0..8 {
+                dirty.add(&mut hasher, &test_digest(10_000 + i)).unwrap();
+            }
+
+            let requested = dirty.leaves();
+            let result = dirty
+                .historical_range_proof(requested, pruned_loc..pruned_loc + 1)
+                .await;
+            assert!(matches!(result, Err(Error::ElementPruned(_))));
+
+            dirty.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_append_while_historical_proof_is_available() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..20 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let historical_leaves = Location::new_unchecked(10);
+            let range = Location::new_unchecked(2)..Location::new_unchecked(8);
+            // Transition through clean and back to dirty so historical proofs are available.
+            let mmr = mmr.merkleize(&mut hasher).into_dirty();
+
+            // Appends should remain allowed while historical proofs are available.
+            mmr.add(&mut hasher, &test_digest(100)).unwrap();
+            mmr.add(&mut hasher, &test_digest(101)).unwrap();
+
+            let proof = mmr
+                .historical_range_proof(historical_leaves, range.clone())
+                .await
+                .unwrap();
+
+            let clean = mmr.merkleize(&mut hasher);
+            let expected = clean
+                .historical_range_proof(historical_leaves, range)
+                .await
+                .unwrap();
+            assert_eq!(proof, expected);
+
+            clean.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_after_sync_reads_from_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..64 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let clean = mmr.merkleize(&mut hasher);
+            clean.sync().await.unwrap();
+
+            let historical_leaves = Location::new_unchecked(20);
+            let range = Location::new_unchecked(5)..Location::new_unchecked(15);
+            let expected = clean
+                .historical_range_proof(historical_leaves, range.clone())
+                .await
+                .unwrap();
+
+            let dirty = clean.into_dirty();
+            let (mem_start, journal_start) = {
+                let inner = dirty.inner.read();
+                (inner.mem_mmr.bounds().start, inner.pruned_to_pos)
+            };
+            assert!(mem_start > journal_start);
+
+            let actual = dirty
+                .historical_range_proof(historical_leaves, range)
+                .await
+                .unwrap();
+            assert_eq!(actual, expected);
+
+            dirty.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_proof_after_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..30 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+            let mut mmr = mmr.merkleize(&mut hasher);
+
+            let prune_loc = Location::new_unchecked(10);
+            let prune_pos = Position::try_from(prune_loc).unwrap();
+            mmr.prune_to_pos(prune_pos).await.unwrap();
+
+            let requested = Location::new_unchecked(20);
+            let range = prune_loc..requested;
+            let clean_proof = mmr
+                .historical_range_proof(requested, range.clone())
+                .await
+                .unwrap();
+
+            let dirty = mmr.into_dirty();
+            let dirty_proof = dirty
+                .historical_range_proof(requested, range)
+                .await
+                .unwrap();
+            assert_eq!(dirty_proof, clean_proof);
+
+            dirty.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_proof_edge_cases() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Case 1: Empty MMR.
+            let mmr = Mmr::init(
+                context.with_label("empty"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            let empty_end = Location::new_unchecked(0);
+            let clean_empty = mmr
+                .historical_range_proof(empty_end, empty_end..empty_end)
+                .await;
+            assert!(matches!(clean_empty, Err(Error::Empty)));
+            let clean_oob = mmr
+                .historical_range_proof(empty_end + 1, empty_end..empty_end + 1)
+                .await;
+            assert!(matches!(
+                clean_oob,
+                Err(Error::RangeOutOfBounds(loc)) if loc == empty_end + 1
+            ));
+
+            let mmr = mmr.into_dirty();
+            let dirty_empty = mmr
+                .historical_range_proof(empty_end, empty_end..empty_end)
+                .await;
+            assert!(matches!(dirty_empty, Err(Error::Empty)));
+            let dirty_oob = mmr
+                .historical_range_proof(empty_end + 1, empty_end..empty_end + 1)
+                .await;
+            assert!(matches!(
+                dirty_oob,
+                Err(Error::RangeOutOfBounds(loc)) if loc == empty_end + 1
+            ));
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+
+            // Case 2: MMR has nodes but is fully pruned.
+            let mmr = Mmr::init(
+                context.with_label("fully_pruned"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+            for i in 0..20 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+            let mut mmr = mmr.merkleize(&mut hasher);
+            let end = mmr.leaves();
+            let size = mmr.size();
+            mmr.prune_to_pos(size).await.unwrap();
+            assert!(mmr.bounds().is_empty());
+            let clean_pruned = mmr.historical_range_proof(end, end - 1..end).await;
+            assert!(matches!(clean_pruned, Err(Error::ElementPruned(_))));
+            let clean_oob = mmr.historical_range_proof(end + 1, end - 1..end).await;
+            assert!(matches!(
+                clean_oob,
+                Err(Error::RangeOutOfBounds(loc)) if loc == end + 1
+            ));
+
+            let mmr = mmr.into_dirty();
+            let dirty_pruned = mmr.historical_range_proof(end, end - 1..end).await;
+            assert!(matches!(dirty_pruned, Err(Error::ElementPruned(_))));
+            let dirty_oob = mmr.historical_range_proof(end + 1, end - 1..end).await;
+            assert!(matches!(
+                dirty_oob,
+                Err(Error::RangeOutOfBounds(loc)) if loc == end + 1
+            ));
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+
+            // Case 3: All nodes but one (single leaf) are pruned.
+            let mmr = Mmr::init(
+                context.with_label("single_leaf"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+            for i in 0..11 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+            let mut mmr = mmr.merkleize(&mut hasher);
+            let end = mmr.leaves();
+            let keep_loc = end - 1;
+            let prune_pos = Position::try_from(keep_loc).unwrap();
+            mmr.prune_to_pos(prune_pos).await.unwrap();
+            let clean_ok = mmr.historical_range_proof(end, keep_loc..end).await;
+            assert!(clean_ok.is_ok());
+            let pruned_end = keep_loc - 1;
+            // make sure this is in a pruned range, considering blob boundaries.
+            let start_loc = Location::new_unchecked(1);
+            let clean_pruned = mmr
+                .historical_range_proof(end, start_loc..pruned_end + 1)
+                .await;
+            assert!(matches!(clean_pruned, Err(Error::ElementPruned(_))));
+            let clean_oob = mmr.historical_range_proof(end + 1, keep_loc..end).await;
+            assert!(matches!(clean_oob, Err(Error::RangeOutOfBounds(_))));
+
+            let mmr = mmr.into_dirty();
+            let dirty_ok = mmr.historical_range_proof(end, keep_loc..end).await;
+            assert!(dirty_ok.is_ok());
+            let dirty_pruned = mmr
+                .historical_range_proof(end, start_loc..pruned_end + 1)
+                .await;
+            assert!(matches!(dirty_pruned, Err(Error::ElementPruned(_))));
+            let dirty_oob = mmr.historical_range_proof(end + 1, keep_loc..end).await;
+            assert!(matches!(dirty_oob, Err(Error::RangeOutOfBounds(_))));
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_proof_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("oob"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..8 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+            let mmr = mmr.merkleize(&mut hasher);
+            let requested = mmr.leaves() + 1;
+
+            let clean_result = mmr
+                .historical_range_proof(requested, Location::new_unchecked(0)..requested)
+                .await;
+            assert!(matches!(
+                clean_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == requested
+            ));
+
+            let mmr = mmr.into_dirty();
+            let dirty_result = mmr
+                .historical_range_proof(requested, Location::new_unchecked(0)..requested)
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == requested
+            ));
+
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_range_validation_precedes_unmerkleized() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("dirty_range_validation_precedes_unmerkleized"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            // Keep state dirty and unmerkleized by appending without merkleizing.
+            for i in 0..32 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let requested_unmerkleized = Location::new_unchecked(5);
+            let valid_range = Location::new_unchecked(0)..Location::new_unchecked(1);
+            let unmerkleized = mmr
+                .historical_range_proof(requested_unmerkleized, valid_range.clone())
+                .await;
+            assert!(matches!(unmerkleized, Err(Error::Unmerkleized)));
+
+            // Empty range should report Empty before Unmerkleized.
+            let empty_range = requested_unmerkleized..requested_unmerkleized;
+            let empty_result = mmr
+                .historical_range_proof(requested_unmerkleized, empty_range)
+                .await;
+            assert!(matches!(empty_result, Err(Error::Empty)));
+
+            // Requested historical size is out of bounds; this should win over Unmerkleized.
+            let leaves_oob = mmr.leaves() + 1;
+            let dirty_result = mmr
+                .historical_range_proof(leaves_oob, valid_range.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == leaves_oob
+            ));
+
+            // Requested range end is out of bounds for the current MMR; this should also win over
+            // Unmerkleized.
+            let end_oob = mmr.leaves() + 1;
+            let range_oob = Location::new_unchecked(0)..end_oob;
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, range_oob.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == end_oob
+            ));
+
+            // Requested range end can also be out of bounds for the requested historical size
+            // while still being within the current MMR size. This should also beat Unmerkleized.
+            let range_end_gt_requested = requested_unmerkleized + 1;
+            let range_oob_at_requested = Location::new_unchecked(0)..range_end_gt_requested;
+            assert!(range_end_gt_requested <= mmr.leaves());
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, range_oob_at_requested)
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == range_end_gt_requested
+            ));
+
+            // Range location overflow should be returned before Unmerkleized.
+            let overflow_loc = Location::new_unchecked(u64::MAX);
+            let overflow_range = Location::new_unchecked(0)..overflow_loc;
+            let dirty_result = mmr
+                .historical_range_proof(requested_unmerkleized, overflow_range.clone())
+                .await;
+            assert!(matches!(
+                dirty_result,
+                Err(Error::LocationOverflow(loc)) if loc == overflow_loc
+            ));
+
+            let clean = mmr.merkleize(&mut hasher);
+            let clean_result = clean.historical_range_proof(leaves_oob, valid_range).await;
+            assert!(matches!(
+                clean_result,
+                Err(Error::RangeOutOfBounds(loc)) if loc == leaves_oob
+            ));
+
+            clean.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_proof_non_size_prune_excludes_pruned_leaves() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("non_size_prune"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..16 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let mut mmr = mmr.merkleize(&mut hasher);
+            let end = mmr.leaves();
+            let size = mmr.size();
+            let mut failures = Vec::new();
+            for raw_pos in 1..*size {
+                let prune_pos = Position::new(raw_pos);
+                mmr.prune_to_pos(prune_pos).await.unwrap();
+                for loc_u64 in 0..*end {
+                    let loc = Location::new_unchecked(loc_u64);
+                    let loc_pos = Position::try_from(loc).expect("test loc should be valid");
+                    let range_includes_pruned_leaf = loc_pos < prune_pos;
+                    match mmr.historical_proof(end, loc).await {
+                        Ok(_) => {}
+                        Err(Error::ElementPruned(_)) if range_includes_pruned_leaf => {}
+                        Err(Error::ElementPruned(_)) => failures.push(format!(
+                            "clean prune_pos={prune_pos} loc={loc} returned ElementPruned without a pruned range element"
+                        )),
+                        Err(err) => failures
+                            .push(format!("clean prune_pos={prune_pos} loc={loc} err={err}")),
+                    }
+                }
+
+                let dirty = mmr.into_dirty();
+                for loc_u64 in 0..*end {
+                    let loc = Location::new_unchecked(loc_u64);
+                    let loc_pos = Position::try_from(loc).expect("test loc should be valid");
+                    let range_includes_pruned_leaf = loc_pos < prune_pos;
+                    match dirty.historical_proof(end, loc).await {
+                        Ok(_) => {}
+                        Err(Error::ElementPruned(_)) if range_includes_pruned_leaf => {}
+                        Err(Error::ElementPruned(_)) => failures.push(format!(
+                            "dirty prune_pos={prune_pos} loc={loc} returned ElementPruned without a pruned range element"
+                        )),
+                        Err(err) => failures
+                            .push(format!("dirty prune_pos={prune_pos} loc={loc} err={err}")),
+                    }
+                }
+                mmr = dirty.merkleize(&mut hasher);
+            }
+
+            assert!(
+                failures.is_empty(),
+                "historical proof generation returned unexpected errors: {failures:?}"
+            );
+
+            mmr.destroy().await.unwrap();
         });
     }
 }
