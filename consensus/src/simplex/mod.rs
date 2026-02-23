@@ -250,7 +250,7 @@
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
 //!
-//! ## Forced Notarization Inclusion
+//! ## Forced Notarization Inclusion (Tail-Forking Resistant)
 //!
 //! A notarized payload in view `v` must appear in the canonical chain if no nullification
 //! certificate exists for `v`. This follows directly from the protocol rules:
