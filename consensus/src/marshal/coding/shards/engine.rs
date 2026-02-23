@@ -187,7 +187,6 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::OptionFuture,
     ordered::Quorum,
     Participant,
 };
@@ -259,14 +258,14 @@ where
     /// The size of the mailbox buffer.
     pub mailbox_size: usize,
 
-    /// Number of pre-leader shards to buffer per peer.
+    /// Number of shards to buffer per peer.
     ///
     /// Shards for commitments without a reconstruction state are buffered per
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
     /// [`Discovered`](super::Message::Discovered).
     ///
-    /// The worst-case total memory usage for pre-leader buffers is
+    /// The worst-case total memory usage for the set of shard buffers is
     /// `num_participants * peer_buffer_size * max_shard_size`.
     pub peer_buffer_size: NonZeroUsize,
 
@@ -277,10 +276,9 @@ where
     /// capacity.
     pub background_channel_capacity: usize,
 
-    /// Optional subscription to peer set changes. When provided, per-peer
-    /// pre-leader shard buffers are freed when a peer leaves all tracked
-    /// peer sets.
-    pub peer_set_subscription: Option<PeerSetSubscription<P>>,
+    /// Subscription to peer set changes. Per-peer shard buffers
+    /// are freed when a peer leaves all tracked peer sets.
+    pub peer_set_subscription: PeerSetSubscription<P>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -329,8 +327,8 @@ where
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
 
-    /// Optional subscription to peer set changes.
-    peer_set_subscription: Option<PeerSetSubscription<P>>,
+    /// Subscription to peer set changes.
+    peer_set_subscription: PeerSetSubscription<P>,
 
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
@@ -444,10 +442,6 @@ where
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
-
-                let peer_set_future = OptionFuture::from(
-                    self.peer_set_subscription.as_mut().map(|rx| rx.recv()),
-                );
             },
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
@@ -540,12 +534,11 @@ where
                     self.buffer_peer_shard(peer, shard);
                 }
             },
-            result = peer_set_future => {
-                if let Some((_, _, tracked_peers)) = result {
-                    self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
-                } else {
-                    self.peer_set_subscription = None;
-                }
+            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                return;
+            } => {
+                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
             },
         }
     }
@@ -1509,7 +1502,10 @@ mod tests {
         Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{self, Control, Link, Oracle};
+    use commonware_p2p::{
+        simulated::{self, Control, Link, Oracle},
+        Provider as _,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::{
@@ -1714,7 +1710,7 @@ mod tests {
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
-                        peer_set_subscription: None,
+                        peer_set_subscription: oracle.manager().subscribe().await,
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -3623,7 +3619,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: None,
+                peer_set_subscription: oracle.manager().subscribe().await,
             };
 
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
@@ -4215,7 +4211,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: Some(peer_set_rx),
+                peer_set_subscription: peer_set_rx,
             };
 
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);

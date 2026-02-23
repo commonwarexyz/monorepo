@@ -14,7 +14,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::OptionFuture,
     ordered::Set,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -68,8 +67,8 @@ where
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
 
-    /// Optional subscription to peer set changes.
-    peer_set_subscription: Option<PeerSetSubscription<P>>,
+    /// Subscription to peer set changes.
+    peer_set_subscription: PeerSetSubscription<P>,
 
     ////////////////////////////////////////
     // Cache
@@ -153,9 +152,6 @@ where
                 // Cleanup waiters
                 self.cleanup_waiters();
                 let _ = self.metrics.waiters.try_set(self.waiters.len());
-                let peer_set_future = OptionFuture::from(
-                    self.peer_set_subscription.as_mut().map(|rx| rx.recv()),
-                );
             },
             on_stopped => {
                 debug!("shutdown");
@@ -211,12 +207,11 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            result = peer_set_future => {
-                if let Some((_, _, tracked_peers)) = result {
-                    self.evict_disconnected_peers(&tracked_peers);
-                } else {
-                    self.peer_set_subscription = None;
-                }
+            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                self.evict_disconnected_peers(&tracked_peers);
             },
         }
     }

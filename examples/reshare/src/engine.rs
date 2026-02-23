@@ -160,7 +160,7 @@ where
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
-                peer_set_subscription: Some(config.manager.subscribe().await),
+                peer_set_subscription: config.manager.subscribe().await,
             },
         );
 

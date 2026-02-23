@@ -11,7 +11,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
+use commonware_p2p::{simulated::Network, Provider, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
@@ -206,7 +206,7 @@ fn fuzz(input: FuzzInput) {
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: None,
+                peer_set_subscription: oracle.manager().subscribe().await,
             };
 
             // Create engine
