@@ -1963,6 +1963,21 @@ mod test_plan {
                 .map(|(idx, &dealer)| (dealer, idx))
                 .collect();
             let previous_successful_round = previous_players.is_some();
+            let required_commitments = previous_players
+                .map(|players| N3f1::quorum(players.len()))
+                .unwrap_or_default()
+                .max(N3f1::quorum(self.dealers.len())) as usize;
+            let mut good_dealers = self
+                .dealers
+                .iter()
+                .copied()
+                .filter(|&dealer| !self.bad(previous_successful_round, dealer))
+                .collect::<Vec<_>>();
+            good_dealers.sort_unstable();
+            let selected_good_dealers: BTreeSet<u32> = good_dealers
+                .into_iter()
+                .take(required_commitments)
+                .collect();
             for &(after_dealer, missing_dealer) in &self.resume_missing_dealer_msg_fails {
                 if !self.dealers.contains(&after_dealer) {
                     return Err(anyhow!("resume_missing dealer {after_dealer} not in round"));
@@ -2011,6 +2026,11 @@ mod test_plan {
                 if self.bad(previous_successful_round, missing_dealer) {
                     return Err(anyhow!(
                         "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                    ));
+                }
+                if !selected_good_dealers.contains(&missing_dealer) {
+                    return Err(anyhow!(
+                        "finalize_missing_dealer_msg_fails requires dealer {missing_dealer} to be selected"
                     ));
                 }
                 let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
@@ -2136,10 +2156,12 @@ mod test_plan {
 
             let mut rng = StdRng::seed_from_u64(seed);
 
-            // Generate keys for all participants (1-indexed to num_participants)
-            let keys = (0..self.num_participants.get())
+            // Generate keys and assign participant indices by public-key order
+            // so numeric indices match deterministic dealer selection order.
+            let mut keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::random(&mut rng))
                 .collect::<Vec<_>>();
+            keys.sort_unstable_by(|left, right| left.public_key().cmp(&right.public_key()));
 
             // Precompute mapping from public key to key index to avoid confusion
             // between key indices and positions in sorted Sets.
@@ -2908,6 +2930,13 @@ mod test {
                 Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
                     .no_ack(1, 0)
                     .finalize_missing_dealer_msg_fails(0, 1),
+            )
+            .validate()
+            .is_err());
+        assert!(Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .finalize_missing_dealer_msg_fails(0, 3),
             )
             .validate()
             .is_err());
