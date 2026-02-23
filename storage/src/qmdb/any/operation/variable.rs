@@ -6,51 +6,11 @@ use crate::{
         VariableValue,
     },
 };
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
-use commonware_runtime::{Buf, BufMut};
+use commonware_codec::{varint::UInt, Codec, Error as CodecError, Read, ReadExt as _};
+use commonware_runtime::Buf;
 use commonware_utils::Array;
 
-impl<K, V, S> EncodeSize for Operation<K, VariableEncoding<V>, S>
-where
-    K: Array,
-    V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(_) => K::SIZE,
-            Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
-
-impl<K, V, S> Write for Operation<K, VariableEncoding<V>, S>
-where
-    K: Array + Codec,
-    V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(p) => {
-                UPDATE_CONTEXT.write(buf);
-                p.write(buf);
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
-        }
-    }
-}
+// Note: `EncodeSize` and `Write` impls are in `var_common.rs`, shared with the varkey encodings.
 
 impl<K, V, S> Read for Operation<K, VariableEncoding<V>, S>
 where

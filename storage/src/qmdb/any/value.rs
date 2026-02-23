@@ -59,3 +59,11 @@ impl<T: CodecFixedShared + Clone> FixedValue for T {}
 /// A variable-size, clonable value.
 pub trait VariableValue: CodecShared + Clone {}
 impl<T: CodecShared + Clone> VariableValue for T {}
+
+/// Marker for encoding types that produce variable-size operations (as opposed to [FixedEncoding]
+/// which pads all operations to a uniform size). Used to share `EncodeSize` and `Write`
+/// implementations across encoding variants.
+pub(crate) trait VarOperationEncoding: ValueEncoding {}
+impl<V: VariableValue> VarOperationEncoding for VariableEncoding<V> {}
+impl<V: VariableValue> VarOperationEncoding for VarKeyEncoding<V> {}
+impl<V: FixedValue> VarOperationEncoding for VarKeyFixedEncoding<V> {}

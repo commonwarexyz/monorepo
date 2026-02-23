@@ -1,8 +1,8 @@
-//! Codec implementations for operations with variable-length keys.
+//! `Read` implementations for operations with variable-length keys.
 //!
-//! This parallels [super::variable] (fixed key + variable value) but supports variable-length
-//! keys by using `EncodeSize` for the key instead of `FixedSize`. Both variable-value
-//! ([VarKeyEncoding]) and fixed-value ([VarKeyFixedEncoding]) variants are supported.
+//! The `EncodeSize` and `Write` implementations are shared across all variable-size operation
+//! encodings in [super::var_common]. Only `Read` differs per encoding type because the `Cfg`
+//! types are different.
 
 use crate::{
     mmr::Location,
@@ -15,48 +15,8 @@ use crate::{
         operation::Key,
     },
 };
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-use commonware_runtime::{Buf, BufMut};
-
-impl<K, V, S> EncodeSize for Operation<K, VarKeyEncoding<V>, S>
-where
-    K: Key + EncodeSize,
-    V: VariableValue,
-    S: Update<K, VarKeyEncoding<V>> + EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(k) => k.encode_size(),
-            Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
-
-impl<K, V, S> Write for Operation<K, VarKeyEncoding<V>, S>
-where
-    K: Key + Write,
-    V: VariableValue,
-    S: Update<K, VarKeyEncoding<V>> + Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(p) => {
-                UPDATE_CONTEXT.write(buf);
-                p.write(buf);
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
-        }
-    }
-}
+use commonware_codec::{varint::UInt, Error as CodecError, Read, ReadExt as _};
+use commonware_runtime::Buf;
 
 impl<K, V, S> Read for Operation<K, VarKeyEncoding<V>, S>
 where
@@ -93,46 +53,6 @@ where
 }
 
 // --- Variable key + Fixed value ---
-
-impl<K, V, S> EncodeSize for Operation<K, VarKeyFixedEncoding<V>, S>
-where
-    K: Key + EncodeSize,
-    V: FixedValue,
-    S: Update<K, VarKeyFixedEncoding<V>> + EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Delete(k) => k.encode_size(),
-            Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
-        }
-    }
-}
-
-impl<K, V, S> Write for Operation<K, VarKeyFixedEncoding<V>, S>
-where
-    K: Key + Write,
-    V: FixedValue,
-    S: Update<K, VarKeyFixedEncoding<V>> + Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
-                DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(p) => {
-                UPDATE_CONTEXT.write(buf);
-                p.write(buf);
-            }
-            Self::CommitFloor(metadata, floor_loc) => {
-                COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
-        }
-    }
-}
 
 impl<K, V, S> Read for Operation<K, VarKeyFixedEncoding<V>, S>
 where

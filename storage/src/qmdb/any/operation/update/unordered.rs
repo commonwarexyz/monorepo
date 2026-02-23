@@ -1,7 +1,10 @@
 use crate::qmdb::{
     any::{
         operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VarKeyEncoding, VarKeyFixedEncoding, VariableEncoding},
+        value::{
+            FixedEncoding, ValueEncoding, VarKeyEncoding, VarKeyFixedEncoding,
+            VarOperationEncoding, VariableEncoding,
+        },
         FixedValue, VariableValue,
     },
     operation::Key,
@@ -39,18 +42,40 @@ impl<K: Key, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
     }
 }
 
-// --- Fixed key + Fixed value ---
+// --- Write: shared across all encoding types ---
 
-impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
-    const SIZE: usize = K::SIZE + V::SIZE;
-}
-
-impl<K: Array, V: FixedValue> Write for Update<K, FixedEncoding<V>> {
+impl<K, V> Write for Update<K, V>
+where
+    K: Key + Write,
+    V: ValueEncoding,
+    V::Value: Write,
+{
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
         self.1.write(buf);
     }
 }
+
+// --- EncodeSize: shared across variable-operation encoding types ---
+
+impl<K, V> EncodeSize for Update<K, V>
+where
+    K: Key + EncodeSize,
+    V: VarOperationEncoding,
+    V::Value: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.0.encode_size() + self.1.encode_size()
+    }
+}
+
+// --- Fixed key + Fixed value (FixedSize only; Write and EncodeSize are shared above) ---
+
+impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
+    const SIZE: usize = K::SIZE + V::SIZE;
+}
+
+// --- Read: per-encoding (Cfg types differ) ---
 
 impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     type Cfg = ();
@@ -62,21 +87,6 @@ impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     }
 }
 
-// --- Fixed key + Variable value ---
-
-impl<K: Array, V: VariableValue> EncodeSize for Update<K, VariableEncoding<V>> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.1.encode_size()
-    }
-}
-
-impl<K: Array, V: VariableValue> Write for Update<K, VariableEncoding<V>> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
-    }
-}
-
 impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
     type Cfg = <V as Read>::Cfg;
 
@@ -84,29 +94,6 @@ impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
         Ok(Self(key, value))
-    }
-}
-
-// --- Variable key + Variable value ---
-
-impl<K, V> EncodeSize for Update<K, VarKeyEncoding<V>>
-where
-    K: Key + EncodeSize,
-    V: VariableValue,
-{
-    fn encode_size(&self) -> usize {
-        self.0.encode_size() + self.1.encode_size()
-    }
-}
-
-impl<K, V> Write for Update<K, VarKeyEncoding<V>>
-where
-    K: Key + Write,
-    V: VariableValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
     }
 }
 
@@ -121,29 +108,6 @@ where
         let key = K::read_cfg(buf, &cfg.0)?;
         let value = V::read_cfg(buf, &cfg.1)?;
         Ok(Self(key, value))
-    }
-}
-
-// --- Variable key + Fixed value ---
-
-impl<K, V> EncodeSize for Update<K, VarKeyFixedEncoding<V>>
-where
-    K: Key + EncodeSize,
-    V: FixedValue,
-{
-    fn encode_size(&self) -> usize {
-        self.0.encode_size() + V::SIZE
-    }
-}
-
-impl<K, V> Write for Update<K, VarKeyFixedEncoding<V>>
-where
-    K: Key + Write,
-    V: FixedValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
     }
 }
 

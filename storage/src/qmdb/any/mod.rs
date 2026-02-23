@@ -980,7 +980,7 @@ pub(crate) mod test {
         }};
     }
 
-    // Macro to run a test on all 13 DB variants. Each half is boxed separately to keep the
+    // Macro to run a test on all 14 DB variants. Each half is boxed separately to keep the
     // async state machine small enough to avoid stack overflow.
     macro_rules! for_all_variants {
         ($ctx:expr, $sfx:expr, simple: $f:expr) => {{
