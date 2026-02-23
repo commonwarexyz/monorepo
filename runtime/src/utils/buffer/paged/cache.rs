@@ -14,7 +14,6 @@ use futures::{future::Shared, FutureExt};
 use std::{
     collections::HashMap,
     future::Future,
-    iter::ExactSizeIterator,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
@@ -88,6 +87,9 @@ struct Cache {
     /// Entries are removed when a fetcher completes cleanup. If a fetcher is cancelled before
     /// cleanup, a stale resolved entry is removed lazily when the same key is touched again.
     page_fetches: HashMap<(u64, u64), Arc<PageFetchState>>,
+
+    /// Pool used for replacement allocations when a slot buffer is shared by readers.
+    pool: BufferPool,
 }
 
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
@@ -475,43 +477,66 @@ impl CacheRef {
             .expect("physical page length overflow while caching");
         assert!(required_len <= physical_pages.len());
 
-        // Fast path: if this payload is exactly one physical page, we can cache a zero-copy
-        // logical slice without risking multi-page retention amplification.
-        if page_count == 1 && required_len == physical_pages.len() {
-            self.cache_pages(
-                blob_id,
-                std::iter::once(physical_pages.slice(..logical_page_size)),
-                offset,
-            );
-            return;
+        // Zero-copy fast path when the input covers only the cached physical prefix itself.
+        // For very small page counts this is worth it and bounded, while larger counts use owned
+        // per-page materialization below to avoid retention amplification.
+        if required_len == physical_pages.len() {
+            const MAX_SHARED_ZERO_COPY_PAGES: usize = 2;
+            if page_count <= MAX_SHARED_ZERO_COPY_PAGES {
+                let pages = (0..page_count).map(|page_idx| {
+                    let page_start = page_idx * physical_page_size;
+                    physical_pages.slice(page_start..page_start + logical_page_size)
+                });
+                self.cache_pages(blob_id, pages, offset);
+                return;
+            }
         }
 
         let physical_bytes = physical_pages.as_ref();
+        let (mut page_num, offset_in_page) = self.offset_to_page(offset);
+        assert_eq!(offset_in_page, 0);
+        let mut cache = self.cache.write();
 
-        let pages = (0..page_count).map(|page_idx| {
+        for page_idx in 0..page_count {
+            let current_page = page_num;
             let page_start = page_idx * physical_page_size;
-            // Materialize each logical page into its own owned buffer so cache residency
-            // is bounded by logical-page count, not by the size of the source flush payload.
-            let mut owned = self.pool.alloc(logical_page_size);
-            owned.put_slice(&physical_bytes[page_start..page_start + logical_page_size]);
-            owned.freeze()
-        });
-        self.cache_pages(blob_id, pages, offset);
+            let page = &physical_bytes[page_start..page_start + logical_page_size];
+            if cache
+                .insert_page_bytes((blob_id, current_page), page)
+                .is_err()
+            {
+                error!(
+                    blob_id,
+                    page_num = current_page,
+                    dropped_pages = page_count - page_idx,
+                    "failed to cache pages"
+                );
+                break;
+            }
+            if page_idx + 1 < page_count {
+                page_num = page_num
+                    .checked_add(1)
+                    .expect("page number overflow while caching");
+            }
+        }
     }
 
     fn cache_pages<I>(&self, blob_id: u64, pages: I, offset: u64)
     where
         I: IntoIterator<Item = IoBuf>,
-        I::IntoIter: ExactSizeIterator,
     {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
-        let pages = pages.into_iter();
+        // Materialize page ownership before taking the write lock to minimize lock hold time.
+        let pages: Vec<IoBuf> = pages.into_iter().collect();
         let total_pages = pages.len();
+        if total_pages == 0 {
+            return;
+        }
         let mut cache = self.cache.write();
 
-        for (idx, page) in pages.enumerate() {
+        for (idx, page) in pages.into_iter().enumerate() {
             let current_page = page_num;
             if cache.insert_page((blob_id, current_page), page).is_err() {
                 error!(
@@ -550,6 +575,7 @@ impl Cache {
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
+            pool,
         }
     }
 
@@ -589,6 +615,29 @@ impl Cache {
         };
         assert_eq!(page.len(), self.page_size);
         self.slots[slot] = page;
+        Ok(())
+    }
+
+    /// Put a page into the cache by copying bytes into the target slot.
+    ///
+    /// If the destination slot is uniquely owned, its existing allocation is reused.
+    /// If the slot is shared by readers, a replacement allocation is taken from `pool`.
+    fn insert_page_bytes(&mut self, key: (u64, u64), page: &[u8]) -> Result<(), ()> {
+        let Some(slot) = self.prepare_slot(key) else {
+            return Err(());
+        };
+        assert_eq!(page.len(), self.page_size);
+
+        let current = std::mem::take(&mut self.slots[slot]);
+        let mut dst = match current.try_into_mut() {
+            Ok(mut writable) => {
+                writable.clear();
+                writable
+            }
+            Err(_) => self.pool.alloc(self.page_size),
+        };
+        dst.put_slice(page);
+        self.slots[slot] = dst.freeze();
         Ok(())
     }
 
