@@ -29,15 +29,15 @@
 //!
 //! * [`Info`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
 //! * [`Output`]: The public result of a successful DKG round, containing the public polynomial and player list
-//! * [`Share`]: A player's private share of the distributed key (from `primitives::group`)
+//! * [`Share`]: A player's final private share of the distributed key (from `primitives::group`)
 //! * [`Dealer`]: State machine for a dealer participating in the protocol
-//! * [`Player`]: State machine for a player receiving shares
+//! * [`Player`]: State machine for a player receiving dealings
 //! * [`SignedDealerLog`]: A dealer's signed transcript of their interactions with players
 //!
 //! ## Message Types
 //!
 //! * [`DealerPubMsg`]: Public commitment polynomial sent from dealer to all players
-//! * [`DealerPrivMsg`]: Private share sent from dealer to a specific player
+//! * [`DealerPrivMsg`]: Private dealing sent from dealer to a specific player
 //! * [`PlayerAck`]: Acknowledgement sent from player back to dealer
 //! * [`DealerLog`]: Complete log of a dealer's interactions (commitments and acks/reveals)
 //!
@@ -49,7 +49,7 @@
 //! - Round number (should increment sequentially, including for failed rounds)
 //! - Optional previous [`Output`] (for resharing)
 //! - List of dealers (must be >= quorum of previous round if resharing)
-//! - List of players who will receive shares
+//! - List of players who will receive dealings
 //!
 //! ### Step 2: Dealer Phase
 //!
@@ -66,7 +66,7 @@
 //! Each player creates a [`Player`] instance via [`Player::new`], then for each dealer message:
 //! - Call [`Player::dealer_message`] with the [`DealerPubMsg`] and [`DealerPrivMsg`]
 //! - If valid, this returns a [`PlayerAck`] containing a signature over `(dealer, commitment)`
-//! - The player verifies that the private share matches the public commitment evaluation
+//! - The player verifies that the private dealing matches the public commitment evaluation
 //!
 //! ### Step 4: Dealer Collection
 //!
@@ -84,7 +84,7 @@
 //!
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
-//! - The list of dealers who distributed shares,
+//! - The list of dealers who distributed dealings,
 //! - The list of players who received shares,
 //! - The set of players whose shares may have been revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
@@ -332,7 +332,7 @@ const SIG_LOG: &[u8] = b"log";
 /// The only error which can happen through no fault of your own is
 /// [`Error::DkgFailed`].
 ///
-/// [`Error::MissingDealing`] happens through mistakes or faults when the state
+/// [`Error::MissingPlayerDealing`] happens through mistakes or faults when the state
 /// of a player is restored after a crash.
 ///
 /// The other errors are due to issues with configuration.
@@ -357,8 +357,8 @@ pub enum Error {
     /// the code in this module is used in a stateful way, restoring the
     /// state of the player from saved information. If this state is corrupted
     /// on disk, or missing, then this error can happen.
-    #[error("missing player's share")]
-    MissingDealing,
+    #[error("missing player's dealing")]
+    MissingPlayerDealing,
 }
 
 /// The output of a successful DKG.
@@ -1526,7 +1526,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     ///
     /// All messages the player should have received must be passed into this method,
     /// and if any messages which should be present based on this player's actions
-    /// in the log are missing, this method will return [`Error::MissingDealing`].
+    /// in the log are missing, this method will return [`Error::MissingPlayerDealing`].
     ///
     /// For example, if a particular private message containing a share is not
     /// present in `msgs`, but we've already acknowledged it, and this has been
@@ -1565,9 +1565,9 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 .verify(&this.me_pub, &ack.sig)
                 && !acks.contains_key(dealer)
         }) {
-            // If so, we have a problem, because we're missing a share that we're
+            // If so, we have a problem, because we're missing a dealing that we're
             // supposed to have, and that we publicly committed to having.
-            return Err(Error::MissingDealing);
+            return Err(Error::MissingPlayerDealing);
         }
 
         Ok((this, acks))
@@ -1610,7 +1610,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The exception is that if this function returns [`Error::MissingDealing`],
+    /// The exception is that if this function returns [`Error::MissingPlayerDealing`],
     /// then [`observe`] will return `Ok`, because this error indicates that this
     /// player's state has been corrupted, but the DKG has otherwise succeeded.
     /// However, this player's share is not recoverable without external intervention.
@@ -1624,13 +1624,13 @@ impl<V: Variant, S: Signer> Player<V, S> {
         // `select` verifies ack signatures, so any ack present in `selected`
         // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
-        // then we're missing a share.
+        // then we're missing a dealing.
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
         if selected
             .iter_pairs()
             .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
         {
-            return Err(Error::MissingDealing);
+            return Err(Error::MissingPlayerDealing);
         }
 
         // We are extracting the private scalars from `Secret` protection
@@ -2385,8 +2385,8 @@ mod test_plan {
                             );
                             if was_acked {
                                 assert!(
-                                    matches!(resumed, Err(Error::MissingDealing)),
-                                    "resume without dealer {missing_dealer} message should report MissingDealing for player {i_player}"
+                                    matches!(resumed, Err(Error::MissingPlayerDealing)),
+                                    "resume without dealer {missing_dealer} message should report MissingPlayerDealing for player {i_player}"
                                 );
                             } else {
                                 assert!(
@@ -2524,8 +2524,8 @@ mod test_plan {
                         let finalize_res =
                             resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
                         assert!(
-                            matches!(finalize_res, Err(Error::MissingDealing)),
-                            "finalize without dealer {dealer_idx} message should return MissingDealing for player {i_player}"
+                            matches!(finalize_res, Err(Error::MissingPlayerDealing)),
+                            "finalize without dealer {dealer_idx} message should return MissingPlayerDealing for player {i_player}"
                         );
                         tested += 1;
                     }
