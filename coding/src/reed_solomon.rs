@@ -159,36 +159,28 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 
 /// Extract data from encoded shards.
 fn extract_data(shards: Vec<&[u8]>, k: usize) -> Result<Vec<u8>, Error> {
-    let shard_len = shards[0].len();
-    let total_len = k.checked_mul(shard_len).ok_or(Error::Inconsistent)?;
-    let available = total_len
-        .checked_sub(u32::SIZE)
-        .ok_or(Error::Inconsistent)?;
-
     // Concatenate shards
     let mut data = shards.into_iter().take(k).flatten();
 
     // Extract length prefix
     let mut length_prefix = [0u8; u32::SIZE];
     for byte in &mut length_prefix {
-        *byte = *data.next().expect("data must contain length prefix");
+        *byte = *data.next().ok_or(Error::Inconsistent)?;
     }
     let data_len = u32::from_be_bytes(length_prefix) as usize;
-    if data_len > available {
-        return Err(Error::Inconsistent);
-    }
 
     // Extract payload
-    let payload: Vec<_> = (&mut data).take(data_len).copied().collect();
-    if payload.len() != data_len {
+    let mut payload: Vec<_> = data.copied().collect();
+    if payload.len() < data_len {
         return Err(Error::Inconsistent);
     }
 
     // Canonical encoding requires all trailing bytes to be zero.
-    if !data.all(|byte| *byte == 0) {
+    if !payload[data_len..].iter().all(|byte| *byte == 0) {
         return Err(Error::Inconsistent);
     }
 
+    payload.truncate(data_len);
     Ok(payload)
 }
 
