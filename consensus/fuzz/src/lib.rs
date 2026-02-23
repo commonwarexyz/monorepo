@@ -551,7 +551,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
     // Partition will be connected, but we will randomly delete messages in the adversarial network wrapper.
     input.partition = Partition::Connected;
 
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 

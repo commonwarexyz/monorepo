@@ -24,7 +24,7 @@ use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::FutureExt;
 use rand::Rng;
 use std::{
@@ -1481,7 +1481,7 @@ fn run<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
 }
 
 fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
