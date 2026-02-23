@@ -42,7 +42,7 @@ const BLOCK_BYTES: usize = size_of::<u64>();
 ///
 /// block ctr = i:
 ///   word_i bytes = [b(i+0)%N, b(i+1)%N, ... b(i+7)%N]
-///   word_i       = little-endian u64 of those bytes
+///   word_i       = big-endian u64 of those bytes
 ///   out_i        = mix64(word_i ^ i ^ DOMAIN)
 /// ```
 ///
@@ -114,7 +114,7 @@ impl FuzzRng {
                 *byte = self.bytes[(self.ctr.wrapping_add(i as u64) % len) as usize];
             }
         }
-        let word = u64::from_le_bytes(bytes);
+        let word = u64::from_be_bytes(bytes);
 
         // Mix the structured word into a high-quality output block without
         // hashing the entire seed into an avalanche-style global state.
@@ -134,13 +134,13 @@ impl RngCore for FuzzRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
+        u32::from_be_bytes(buf)
     }
 
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; BLOCK_BYTES];
         self.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
+        u64::from_be_bytes(buf)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -151,7 +151,7 @@ impl RngCore for FuzzRng {
                 // callers pull randomness as bytes or words:
                 //
                 // next_u64() stream bytes == fill_bytes() stream bytes.
-                self.cache = self.next_block_u64().to_le_bytes();
+                self.cache = self.next_block_u64().to_be_bytes();
                 self.cache_pos = 0;
             }
 
@@ -287,7 +287,7 @@ mod tests {
         let mut from_u64_rng = FuzzRng::new(bytes.clone());
         let mut from_u64 = Vec::with_capacity(128);
         for _ in 0..16 {
-            from_u64.extend_from_slice(&from_u64_rng.next_u64().to_le_bytes());
+            from_u64.extend_from_slice(&from_u64_rng.next_u64().to_be_bytes());
         }
 
         let mut from_fill_rng = FuzzRng::new(bytes);
@@ -311,7 +311,7 @@ mod tests {
         let mut from_u32_rng = FuzzRng::new(bytes.clone());
         let mut from_u32 = Vec::with_capacity(64);
         for _ in 0..16 {
-            from_u32.extend_from_slice(&from_u32_rng.next_u32().to_le_bytes());
+            from_u32.extend_from_slice(&from_u32_rng.next_u32().to_be_bytes());
         }
 
         let mut from_fill_rng = FuzzRng::new(bytes);
@@ -347,7 +347,7 @@ mod tests {
 
         let mut source = [0u8; BLOCK_BYTES];
         source.copy_from_slice(&bytes[..BLOCK_BYTES]);
-        let word = u64::from_le_bytes(source);
+        let word = u64::from_be_bytes(source);
 
         let mix = |mut x: u64| {
             x ^= x >> 30;
@@ -392,7 +392,7 @@ mod tests {
                 // Generate enough output to exercise wrapping and mixing.
                 let mut output = Vec::with_capacity(CONFORMANCE_BLOCKS * BLOCK_BYTES);
                 for _ in 0..CONFORMANCE_BLOCKS {
-                    output.extend_from_slice(&rng.next_u64().to_le_bytes());
+                    output.extend_from_slice(&rng.next_u64().to_be_bytes());
                 }
                 output
             }
