@@ -208,7 +208,7 @@ impl<D: Digest> RangeProof<D> {
         if has_partial_chunk {
             // partial_chunk_digest is guaranteed Some by the check above.
             hasher.update(&next_bit.to_be_bytes());
-            hasher.update(&self.partial_chunk_digest.as_ref().unwrap());
+            hasher.update(self.partial_chunk_digest.as_ref().unwrap());
         }
         let reconstructed_root = hasher.finalize();
         reconstructed_root == *root
