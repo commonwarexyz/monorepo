@@ -148,11 +148,11 @@ pub trait SequencersProvider: Clone + Send + Sync + 'static {
 
 /// Suffix used to identify a chunk namespace for domain separation.
 /// Used when signing and verifying chunks to prevent signature reuse across different message types.
-pub const CHUNK_SUFFIX: &[u8] = b"_CHUNK";
+pub const CHUNK_SUFFIX: &[u8] = b"_COMMONWARE_CONSENSUS_ORDERED_BROADCAST_CHUNK";
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
-pub const ACK_SUFFIX: &[u8] = b"_ACK";
+pub const ACK_SUFFIX: &[u8] = b"_COMMONWARE_CONSENSUS_ORDERED_BROADCAST_ACK";
 
 /// Returns a suffixed namespace for signing a chunk.
 ///
@@ -515,7 +515,7 @@ pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
 
     /// Information about the parent chunk (previous height)
     ///
-    /// This part is not signed over, but it is used to verif that the previous chunk
+    /// This part is not signed over, but it is used to verify that the previous chunk
     /// in the chain was correctly broadcast. It contains the certificate that proves
     /// a quorum of validators acknowledged the parent.
     ///
