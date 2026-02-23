@@ -1,7 +1,7 @@
 use crate::qmdb::{
     any::{
         operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VarKeyEncoding, VariableEncoding},
+        value::{FixedEncoding, ValueEncoding, VarKeyEncoding, VarKeyFixedEncoding, VariableEncoding},
         FixedValue, VariableValue,
     },
     operation::Key,
@@ -120,6 +120,43 @@ where
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let key = K::read_cfg(buf, &cfg.0)?;
         let value = V::read_cfg(buf, &cfg.1)?;
+        Ok(Self(key, value))
+    }
+}
+
+// --- Variable key + Fixed value ---
+
+impl<K, V> EncodeSize for Update<K, VarKeyFixedEncoding<V>>
+where
+    K: Key + EncodeSize,
+    V: FixedValue,
+{
+    fn encode_size(&self) -> usize {
+        self.0.encode_size() + V::SIZE
+    }
+}
+
+impl<K, V> Write for Update<K, VarKeyFixedEncoding<V>>
+where
+    K: Key + Write,
+    V: FixedValue,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+        self.1.write(buf);
+    }
+}
+
+impl<K, V> Read for Update<K, VarKeyFixedEncoding<V>>
+where
+    K: Key + Read,
+    V: FixedValue,
+{
+    type Cfg = <K as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let key = K::read_cfg(buf, cfg)?;
+        let value = V::read(buf)?;
         Ok(Self(key, value))
     }
 }

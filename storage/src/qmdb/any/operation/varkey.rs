@@ -1,15 +1,16 @@
-//! Codec implementations for operations with variable-length keys and variable-length values.
+//! Codec implementations for operations with variable-length keys.
 //!
 //! This parallels [super::variable] (fixed key + variable value) but supports variable-length
-//! keys by using `EncodeSize` for the key instead of `FixedSize`.
+//! keys by using `EncodeSize` for the key instead of `FixedSize`. Both variable-value
+//! ([VarKeyEncoding]) and fixed-value ([VarKeyFixedEncoding]) variants are supported.
 
 use crate::{
     mmr::Location,
     qmdb::{
         any::{
             operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-            value::VarKeyEncoding,
-            VariableValue,
+            value::{VarKeyEncoding, VarKeyFixedEncoding},
+            FixedValue, VariableValue,
         },
         operation::Key,
     },
@@ -91,6 +92,82 @@ where
     }
 }
 
+// --- Variable key + Fixed value ---
+
+impl<K, V, S> EncodeSize for Operation<K, VarKeyFixedEncoding<V>, S>
+where
+    K: Key + EncodeSize,
+    V: FixedValue,
+    S: Update<K, VarKeyFixedEncoding<V>> + EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Delete(k) => k.encode_size(),
+            Self::Update(p) => p.encode_size(),
+            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+        }
+    }
+}
+
+impl<K, V, S> Write for Operation<K, VarKeyFixedEncoding<V>, S>
+where
+    K: Key + Write,
+    V: FixedValue,
+    S: Update<K, VarKeyFixedEncoding<V>> + Write,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Delete(k) => {
+                DELETE_CONTEXT.write(buf);
+                k.write(buf);
+            }
+            Self::Update(p) => {
+                UPDATE_CONTEXT.write(buf);
+                p.write(buf);
+            }
+            Self::CommitFloor(metadata, floor_loc) => {
+                COMMIT_CONTEXT.write(buf);
+                metadata.write(buf);
+                UInt(**floor_loc).write(buf);
+            }
+        }
+    }
+}
+
+impl<K, V, S> Read for Operation<K, VarKeyFixedEncoding<V>, S>
+where
+    K: Key + Read,
+    V: FixedValue,
+    S: Update<K, VarKeyFixedEncoding<V>> + Read<Cfg = <K as Read>::Cfg>,
+{
+    type Cfg = <K as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            DELETE_CONTEXT => {
+                let key = K::read_cfg(buf, cfg)?;
+                Ok(Self::Delete(key))
+            }
+            UPDATE_CONTEXT => {
+                let payload = S::read_cfg(buf, cfg)?;
+                Ok(Self::Update(payload))
+            }
+            COMMIT_CONTEXT => {
+                let metadata = Option::<V>::read(buf)?;
+                let floor_loc = UInt::read(buf)?;
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::operation::varkey::Operation",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +230,40 @@ mod tests {
         let value = vec![0xCD; 2048];
         let update = Op::Update(UnorderedUpdate(key, value));
         roundtrip(&update, &cfg());
+    }
+
+    // --- Variable key + Fixed value ---
+
+    type FixedOp = Operation<
+        Vec<u8>,
+        VarKeyFixedEncoding<u64>,
+        UnorderedUpdate<Vec<u8>, VarKeyFixedEncoding<u64>>,
+    >;
+
+    fn fixed_cfg() -> <FixedOp as Read>::Cfg {
+        (RangeCfg::from(..), ())
+    }
+
+    #[test]
+    fn varkey_fixed_delete_roundtrip() {
+        roundtrip(&FixedOp::Delete(vec![1, 2, 3]), &fixed_cfg());
+    }
+
+    #[test]
+    fn varkey_fixed_update_roundtrip() {
+        let update = FixedOp::Update(UnorderedUpdate(vec![10, 20], 0xdead_beef_u64));
+        roundtrip(&update, &fixed_cfg());
+    }
+
+    #[test]
+    fn varkey_fixed_commit_roundtrip() {
+        roundtrip(
+            &FixedOp::CommitFloor(Some(42u64), Location::new_unchecked(5)),
+            &fixed_cfg(),
+        );
+        roundtrip(
+            &FixedOp::CommitFloor(None, Location::new_unchecked(7)),
+            &fixed_cfg(),
+        );
     }
 }

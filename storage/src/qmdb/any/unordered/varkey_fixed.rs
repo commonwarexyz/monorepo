@@ -1,19 +1,19 @@
 //! An authenticated database that provides succinct proofs of _any_ value ever associated with a
-//! key, where both keys and values can have varying sizes.
+//! key, where keys have varying sizes but values are fixed-size.
 //!
 //! Unlike other QMDB variants that require fixed-size keys (`K: Array`), this variant accepts any
 //! key type implementing the [`Key`] trait (such as `Vec<u8>`), supporting arbitrary-length byte
 //! sequences as keys.
 //!
-//! _If your keys are all the same fixed size, use [super::fixed] or [super::variable] instead for
-//! better performance._
+//! _If your keys are all the same fixed size, use [super::fixed] instead for better performance.
+//! If your values are also variable-size, use [super::varkey_variable] instead._
 
 use crate::{
     index::unordered::Index,
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, unordered, value::VarKeyEncoding, VariableValue},
+        any::{init_variable, unordered, value::VarKeyFixedEncoding, FixedValue},
         operation::Key,
         Durable, Error, Merkleized,
     },
@@ -23,11 +23,10 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 
-pub type Update<K, V> = unordered::Update<K, VarKeyEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, VarKeyEncoding<V>>;
+pub type Update<K, V> = unordered::Update<K, VarKeyFixedEncoding<V>>;
+pub type Operation<K, V> = unordered::Operation<K, VarKeyFixedEncoding<V>>;
 
-/// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
-/// value ever associated with a variable-length key.
+/// A key-value QMDB with variable-length keys and fixed-size values.
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
@@ -35,7 +34,7 @@ impl<E, K, V, H, T> Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key + Codec,
-    V: VariableValue,
+    V: FixedValue,
     H: Hasher,
     T: Translator,
     Operation<K, V>: Codec,
@@ -53,14 +52,17 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{qmdb::any::VariableConfig, translator::TwoCap};
+    use crate::{
+        qmdb::any::{test::variable_db_config, VariableConfig},
+        translator::TwoCap,
+    };
     use commonware_codec::RangeCfg;
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _,
+        Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -68,64 +70,51 @@ mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    type VarKeyDb = Db<deterministic::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
-
-    type VarKeyCfg = VariableConfig<TwoCap, ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>;
-
-    fn create_config(suffix: &str, pooler: &impl BufferPooler) -> VarKeyCfg {
-        VariableConfig {
-            mmr_journal_partition: format!("vk-journal-{suffix}"),
-            mmr_metadata_partition: format!("vk-metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(13),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("vk-log-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (
-                (RangeCfg::from(0..=10000), ()),
-                (RangeCfg::from(0..=10000), ()),
-            ),
-            translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
-
-    async fn open_db(context: Context) -> VarKeyDb {
-        let cfg = create_config("partition", &context);
-        VarKeyDb::init(context, cfg).await.unwrap()
-    }
-
-    /// Test with actual variable-length Vec<u8> keys of varying sizes. This is the unique
-    /// capability of the varkey variant that the generic (Digest-keyed) tests don't cover.
+    /// Test with actual variable-length Vec<u8> keys and fixed-size u64 values.
     #[test_traced("INFO")]
-    fn test_varkey_db_variable_length_keys() {
+    fn test_varkey_fixed_db_variable_length_keys() {
+        type VarKeyFixedDb = Db<deterministic::Context, Vec<u8>, u64, Sha256, TwoCap>;
+        type Cfg = VariableConfig<TwoCap, (RangeCfg<usize>, ())>;
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await.into_mutable();
+            let cfg: Cfg = VariableConfig {
+                mmr_journal_partition: "vkf-journal".into(),
+                mmr_metadata_partition: "vkf-metadata".into(),
+                mmr_items_per_blob: NZU64!(13),
+                mmr_write_buffer: NZUsize!(1024),
+                log_partition: "vkf-log".into(),
+                log_items_per_blob: NZU64!(7),
+                log_write_buffer: NZUsize!(1024),
+                log_compression: None,
+                log_codec_config: (RangeCfg::from(0..=10000), ()),
+                translator: TwoCap,
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut db = VarKeyFixedDb::init(context.with_label("db"), cfg)
+                .await
+                .unwrap()
+                .into_mutable();
 
             let keys: Vec<Vec<u8>> =
                 vec![vec![], vec![1], vec![1, 2], vec![0; 100], vec![0xFF; 1000]];
 
             for (i, key) in keys.iter().enumerate() {
-                let value = format!("value_{i}").into_bytes();
-                db.write_batch([(key.clone(), Some(value))]).await.unwrap();
+                db.write_batch([(key.clone(), Some(i as u64))])
+                    .await
+                    .unwrap();
             }
 
             for (i, key) in keys.iter().enumerate() {
-                let expected = format!("value_{i}").into_bytes();
-                assert_eq!(db.get(key).await.unwrap().unwrap(), expected);
+                assert_eq!(db.get(key).await.unwrap().unwrap(), i as u64);
             }
 
             let (db, _) = db.commit(None).await.unwrap();
-            let root = db.into_merkleized().root();
-            let db = open_db(context.with_label("db_reopen")).await;
-            assert_eq!(db.root(), root);
+            let db = db.into_merkleized();
 
             for (i, key) in keys.iter().enumerate() {
-                let expected = format!("value_{i}").into_bytes();
-                assert_eq!(db.get(key).await.unwrap().unwrap(), expected);
+                assert_eq!(db.get(key).await.unwrap().unwrap(), i as u64);
             }
 
             db.destroy().await.unwrap();
@@ -136,19 +125,15 @@ mod test {
     // Generic test helpers (using Digest keys to match TestableAnyDb<Digest> interface)
     // ---------------------------------------------------------------------------------
 
-    use crate::qmdb::any::{
-        test::varkey_db_config,
-        unordered::test::{
-            test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
-        },
+    use crate::qmdb::any::unordered::test::{
+        test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
     };
-    use commonware_cryptography::sha256::Digest;
 
-    type DigestVarKeyDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    type DigestVarKeyFixedDb = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
-    async fn open_digest_db(context: Context) -> DigestVarKeyDb {
-        let cfg = varkey_db_config::<TwoCap>("partition", &context);
-        DigestVarKeyDb::init(context, cfg).await.unwrap()
+    async fn open_digest_db(context: Context) -> DigestVarKeyFixedDb {
+        let cfg = variable_db_config::<TwoCap>("partition", &context);
+        DigestVarKeyFixedDb::init(context, cfg).await.unwrap()
     }
 
     #[inline]
@@ -157,7 +142,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_varkey_generic_empty() {
+    fn test_varkey_fixed_generic_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_digest_db(context.with_label("db_0")).await;
@@ -171,7 +156,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_varkey_generic_basic() {
+    fn test_varkey_fixed_generic_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_digest_db(context.with_label("db_0")).await;
@@ -185,7 +170,7 @@ mod test {
     }
 
     #[test_traced("WARN")]
-    fn test_varkey_generic_build_and_authenticate() {
+    fn test_varkey_fixed_generic_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db_context = context.with_label("db");

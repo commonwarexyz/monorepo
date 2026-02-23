@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 
 pub mod fixed;
 pub mod variable;
-pub mod varkey;
+pub mod varkey_fixed;
+pub mod varkey_variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 

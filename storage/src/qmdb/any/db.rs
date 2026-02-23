@@ -38,7 +38,8 @@ pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Jo
 /// - [crate::qmdb::any::ordered::variable::Db]
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
-/// - [crate::qmdb::any::unordered::varkey::Db]
+/// - [crate::qmdb::any::unordered::varkey_variable::Db]
+/// - [crate::qmdb::any::unordered::varkey_fixed::Db]
 pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: CodecShared>,

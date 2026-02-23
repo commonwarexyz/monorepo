@@ -5,6 +5,7 @@
 //! - Unordered: The database does not maintain or require any ordering over the key space.
 //!   - Fixed-size keys with fixed-size values
 //!   - Fixed-size keys with variable-size values
+//!   - Variable-size keys with fixed-size values
 //!   - Variable-size keys with variable-size values
 //! - Ordered: The database maintains a total order over active keys.
 //!   - Fixed-size keys with fixed-size values
@@ -865,11 +866,14 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
 
-    // Type aliases for all 13 variants (all use OneCap for collision coverage).
+    // Type aliases for all 14 variants (all use OneCap for collision coverage).
     type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
-    // Varkey variant: uses VarKeyEncoding with Digest keys for generic test compatibility.
-    type UnorderedVarKey = unordered::varkey::Db<Context, Digest, Digest, Sha256, OneCap>;
+    // Varkey variants: use VarKeyEncoding/VarKeyFixedEncoding with Digest keys.
+    type UnorderedVarKeyVariable =
+        unordered::varkey_variable::Db<Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedVarKeyFixed =
+        unordered::varkey_fixed::Db<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedFixedP1 =
@@ -894,22 +898,23 @@ pub(crate) mod test {
         Sha256::hash(&i.to_be_bytes())
     }
 
-    // Defines all 13 variants in two groups. Split into halves so the combined async state
+    // Defines all 14 variants in two groups. Split into halves so the combined async state
     // machine of each group fits on the stack.
     macro_rules! with_variants_a {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
             $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
-            $cb!($($args)*, "uvk", UnorderedVarKey, varkey_db_config);
+            $cb!($($args)*, "uvkv", UnorderedVarKeyVariable, varkey_db_config);
+            $cb!($($args)*, "uvkf", UnorderedVarKeyFixed, variable_db_config);
             $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
             $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
             $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
         };
     }
 
     macro_rules! with_variants_b {
         ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
             $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
             $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
             $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
