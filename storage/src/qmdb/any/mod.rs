@@ -894,8 +894,9 @@ pub(crate) mod test {
         Sha256::hash(&i.to_be_bytes())
     }
 
-    // Defines all 13 variants in one place. Calls $cb!($($args)*, $label, $type, $config) for each.
-    macro_rules! with_all_variants {
+    // Defines all 13 variants in two groups. Split into halves so the combined async state
+    // machine of each group fits on the stack.
+    macro_rules! with_variants_a {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
             $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
@@ -904,6 +905,11 @@ pub(crate) mod test {
             $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
             $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
             $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
+        };
+    }
+
+    macro_rules! with_variants_b {
+        ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
             $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
             $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
@@ -969,16 +975,20 @@ pub(crate) mod test {
         }};
     }
 
-    // Macro to run a test on all 12 DB variants.
+    // Macro to run a test on all 13 DB variants. Each half is boxed separately to keep the
+    // async state machine small enough to avoid stack overflow.
     macro_rules! for_all_variants {
         ($ctx:expr, $sfx:expr, simple: $f:expr) => {{
-            with_all_variants!(test_simple!($ctx, $sfx, $f));
+            Box::pin(async { with_variants_a!(test_simple!($ctx, $sfx, $f)); }).await;
+            Box::pin(async { with_variants_b!(test_simple!($ctx, $sfx, $f)); }).await;
         }};
         ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            with_all_variants!(test_with_reopen!($ctx, $sfx, $f));
+            Box::pin(async { with_variants_a!(test_with_reopen!($ctx, $sfx, $f)); }).await;
+            Box::pin(async { with_variants_b!(test_with_reopen!($ctx, $sfx, $f)); }).await;
         }};
         ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            with_all_variants!(test_with_make_value!($ctx, $sfx, $f));
+            Box::pin(async { with_variants_a!(test_with_make_value!($ctx, $sfx, $f)); }).await;
+            Box::pin(async { with_variants_b!(test_with_make_value!($ctx, $sfx, $f)); }).await;
         }};
     }
 
