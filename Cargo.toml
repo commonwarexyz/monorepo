@@ -193,7 +193,3 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
-
-[profile.samply]
-inherits = "release"
-debug = true

@@ -232,56 +232,87 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
 /// Extract data from encoded shards.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
-/// This function reads the 4-byte big-endian length prefix and copies out exactly
-/// that many data bytes using bulk memcpy operations.
-fn extract_data(shards: Vec<&[u8]>, k: usize) -> Result<Vec<u8>, Error> {
-    let shard_len = shards
-        .first()
-        .map(|shard| shard.len())
-        .ok_or(Error::NotEnoughChunks)?;
-    if shards.len() < k {
-        return Err(Error::NotEnoughChunks);
+/// This function bulk-copies shard slices while skipping the 4-byte prefix.
+fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
+    let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
+    let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
+    let mut payload = copy_payload_after_prefix(shards, payload_len);
+    validate_zero_padding(&payload, data_len)?;
+    payload.truncate(data_len);
+    Ok(payload)
+}
+
+/// Read the 4-byte big-endian length prefix from `shards` and validate that
+/// the decoded length fits in the post-prefix payload region.
+fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error> {
+    let total_len: usize = shards.iter().map(|s| s.len()).sum();
+    if total_len < u32::SIZE {
+        return Err(Error::Inconsistent);
     }
 
-    // Concatenate original shards into a contiguous buffer.
-    let mut buf = Vec::with_capacity(k * shard_len);
-    for shard in &shards[..k] {
-        if shard.len() != shard_len {
-            return Err(Error::Inconsistent);
+    // Read the length prefix, which may span multiple shards.
+    let mut prefix = [0u8; u32::SIZE];
+    let mut prefix_len = 0usize;
+    for shard in shards {
+        if prefix_len == u32::SIZE {
+            break;
         }
-        buf.extend_from_slice(shard);
-    }
-    if buf.len() < u32::SIZE {
-        return Err(Error::Inconsistent);
-    }
-
-    // Read the 4-byte big-endian length prefix.
-    let data_len = u32::from_be_bytes(
-        buf[..u32::SIZE]
-            .try_into()
-            .expect("slice length must match u32::SIZE"),
-    ) as usize;
-    let payload_start = u32::SIZE;
-    let payload_end = payload_start
-        .checked_add(data_len)
-        .ok_or(Error::Inconsistent)?;
-    if payload_end > buf.len() {
-        return Err(Error::Inconsistent);
+        let read = (u32::SIZE - prefix_len).min(shard.len());
+        prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
+        prefix_len += read;
     }
 
+    let data_len = u32::from_be_bytes(prefix) as usize;
+    let payload_len = total_len - u32::SIZE;
+    if data_len > payload_len {
+        return Err(Error::Inconsistent);
+    }
+    Ok((data_len, payload_len))
+}
+
+/// Bulk-copy bytes after the 4-byte prefix from `shards` into a contiguous
+/// payload buffer.
+fn copy_payload_after_prefix(shards: &[&[u8]], payload_len: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(payload_len);
+    let mut prefix_bytes_left = u32::SIZE;
+    for shard in shards {
+        if prefix_bytes_left >= shard.len() {
+            prefix_bytes_left -= shard.len();
+            continue;
+        }
+        payload.extend_from_slice(&shard[prefix_bytes_left..]);
+        prefix_bytes_left = 0;
+    }
+    payload
+}
+
+/// Validate canonical encoding by requiring trailing bytes after `data_len`
+/// to be zero.
+fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
     // Canonical encoding requires all trailing bytes to be zero.
-    if !buf[payload_end..].iter().all(|byte| *byte == 0) {
+    if !payload[data_len..].iter().all(|byte| *byte == 0) {
         return Err(Error::Inconsistent);
     }
-
-    Ok(buf[payload_start..payload_end].to_vec())
+    Ok(())
 }
 
 /// Type alias for the internal encoding result.
-type Encoding<D> = (bmt::Tree<D>, Vec<Vec<u8>>);
+type Encoding<D> = (D, Vec<Chunk<D>>);
 
-/// Inner logic for [encode()]
-fn encode_inner<H: Hasher, S: Strategy>(
+/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+/// - `strategy`: The parallelism strategy to use.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -308,23 +339,28 @@ fn encode_inner<H: Hasher, S: Strategy>(
             .map_err(Error::ReedSolomon)?;
     }
 
-    // Compute recovery shards
+    // Compute recovery shards and collect into a contiguous buffer
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let mut shards: Vec<Vec<u8>> = Vec::with_capacity(n);
-    for shard in padded.chunks(shard_len) {
-        shards.push(shard.to_vec());
-    }
+    let mut recovery_buf = Vec::with_capacity(m * shard_len);
     for shard in encoding.recovery_iter() {
-        shards.push(shard.to_vec());
+        recovery_buf.extend_from_slice(shard);
     }
 
     // Drop EncoderResult (auto-resets received shards), then return encoder to cache
     drop(encoding);
     return_encoder(encoder);
 
+    // Create zero-copy Bytes views into the original and recovery buffers
+    let originals: Bytes = padded.into();
+    let recoveries: Bytes = recovery_buf.into();
+
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+    let shard_slices: Vec<Bytes> = (0..k)
+        .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
+        .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
+        .collect();
+    let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
         hasher.update(shard);
         hasher.finalize()
     });
@@ -332,40 +368,13 @@ fn encode_inner<H: Hasher, S: Strategy>(
         builder.add(hash);
     }
     let tree = builder.build();
-
-    Ok((tree, shards))
-}
-
-/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-/// - `concurrency`: The level of concurrency to use.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-#[allow(clippy::type_complexity)]
-fn encode<H: Hasher, S: Strategy>(
-    total: u16,
-    min: u16,
-    data: Vec<u8>,
-    strategy: &S,
-) -> Result<(H::Digest, Vec<Chunk<H::Digest>>), Error> {
-    // Encode data
-    let (tree, shards) = encode_inner::<H, _>(total, min, data, strategy)?;
     let root = tree.root();
-    let n = total as usize;
 
-    // Generate chunks
+    // Generate chunks with zero-copy shard views
     let mut chunks = Vec::with_capacity(n);
-    for (i, shard) in shards.into_iter().enumerate() {
+    for (i, shard) in shard_slices.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard.into(), i as u16, proof));
+        chunks.push(Chunk::new(shard, i as u16, proof));
     }
 
     Ok((root, chunks))
@@ -487,7 +496,7 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    let data = extract_data(shards, k);
+    let data = extract_data(&shards, k);
 
     // Return the encoder and decoder
     drop(encoding);
@@ -941,8 +950,7 @@ mod tests {
         let k = min as usize;
         let m = total as usize - k;
 
-        let mut original_shards = prepare_data(data.to_vec(), k, m);
-        let shard_len = original_shards[0].len();
+        let (mut padded, shard_len) = prepare_data(data, k);
         let payload_end = u32::SIZE + data.len();
         let total_original_len = k * shard_len;
         assert!(payload_end < total_original_len, "test requires padding");
@@ -950,14 +958,14 @@ mod tests {
         // Corrupt one canonical padding byte while keeping payload unchanged.
         let pad_shard = payload_end / shard_len;
         let pad_offset = payload_end % shard_len;
-        original_shards[pad_shard][pad_offset] = 0xAA;
+        padded[pad_shard * shard_len + pad_offset] = 0xAA;
 
         let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
-        for shard in &original_shards {
+        for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
         let recovery = encoder.encode().unwrap();
-        let mut shards = original_shards.clone();
+        let mut shards: Vec<Vec<u8>> = padded.chunks(shard_len).map(|s| s.to_vec()).collect();
         shards.extend(recovery.recovery_iter().map(|s| s.to_vec()));
 
         let mut builder = Builder::<Sha256>::new(total as usize);
