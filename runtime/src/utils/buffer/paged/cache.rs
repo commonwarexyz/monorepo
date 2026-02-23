@@ -306,87 +306,106 @@ impl CacheRef {
         trace!(page_num, blob_id, "page fault");
 
         let key = (blob_id, page_num);
-        let (fetch_state, is_fetch_owner) = {
-            // Create or clone a future that retrieves the desired page from the underlying blob.
-            // This requires a write lock on the page cache since we may need to modify
-            // `page_fetches`.
-            let mut cache = self.cache.write();
-
-            // There's a (small) chance the page was fetched & buffered by another task before we
-            // were able to acquire the write lock, so check the cache before doing anything else.
+        // Fast follower path: if a fetch is already in-flight for this key, join it without
+        // immediately taking the cache write lock. We intentionally skip resolved entries here;
+        // those still require write-lock scavenging to remove stale map state and apply per-key
+        // insertion semantics.
+        let fast_follow = {
+            let cache = self.cache.read();
             if let Some(page) = cache.read_at(blob_id, offset, max_len) {
                 return Ok(page);
             }
+            cache
+                .page_fetches
+                .get(&key)
+                .cloned()
+                .filter(|state| state.future.peek().is_none())
+        };
+        let (fetch_state, is_fetch_owner) = {
+            if let Some(existing) = fast_follow {
+                (existing, false)
+            } else {
+                // Create or clone a future that retrieves the desired page from the underlying blob.
+                // This requires a write lock on the page cache since we may need to modify
+                // `page_fetches`.
+                let mut cache = self.cache.write();
 
-            let create_fetch = || {
-                let logical_page_size = self.logical_page_size;
-                let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-                let buf = self.pool.alloc(physical_page_size as usize);
-                let blob = blob.clone();
-                let future = async move {
-                    let page = read_page_from_blob_into(&blob, page_num, logical_page_size, buf)
-                        .await
-                        .map_err(Arc::new)?;
-                    // We should never be fetching partial pages through the page cache. This
-                    // can happen if a non-last page is corrupted and falls back to a partial CRC.
-                    let len = page.len();
-                    if len != logical_page_size as usize {
-                        error!(
-                            page_num,
-                            expected = logical_page_size,
-                            actual = len,
-                            "attempted to fetch partial page from blob"
-                        );
-                        return Err(Arc::new(Error::InvalidChecksum));
-                    }
-                    Ok(page)
+                // There's a (small) chance the page was fetched & buffered by another task before we
+                // were able to acquire the write lock, so check the cache before doing anything else.
+                if let Some(page) = cache.read_at(blob_id, offset, max_len) {
+                    return Ok(page);
+                }
+
+                let create_fetch = || {
+                    let logical_page_size = self.logical_page_size;
+                    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+                    let buf = self.pool.alloc(physical_page_size as usize);
+                    let blob = blob.clone();
+                    let future = async move {
+                        let page = read_page_from_blob_into(&blob, page_num, logical_page_size, buf)
+                            .await
+                            .map_err(Arc::new)?;
+                        // We should never be fetching partial pages through the page cache. This
+                        // can happen if a non-last page is corrupted and falls back to a partial CRC.
+                        let len = page.len();
+                        if len != logical_page_size as usize {
+                            error!(
+                                page_num,
+                                expected = logical_page_size,
+                                actual = len,
+                                "attempted to fetch partial page from blob"
+                            );
+                            return Err(Arc::new(Error::InvalidChecksum));
+                        }
+                        Ok(page)
+                    };
+
+                    future.boxed().shared()
+                };
+                let create_and_track_fetch = |cache: &mut Cache| {
+                    let future = create_fetch();
+                    let state = Arc::new(PageFetchState {
+                        future,
+                        cleanup_claimed: AtomicBool::new(false),
+                    });
+                    cache.page_fetches.insert(key, state.clone());
+                    (state, true)
                 };
 
-                future.boxed().shared()
-            };
-            let create_and_track_fetch = |cache: &mut Cache| {
-                let future = create_fetch();
-                let state = Arc::new(PageFetchState {
-                    future,
-                    cleanup_claimed: AtomicBool::new(false),
-                });
-                cache.page_fetches.insert(key, state.clone());
-                (state, true)
-            };
-
-            if let Some(existing) = cache.page_fetches.get(&key).cloned() {
-                if let Some(stale_result) = existing.future.peek().cloned() {
-                    // Stale resolved entry from a cancelled first fetcher; remove and apply per-key.
-                    let _ = cache.page_fetches.remove(&key);
-                    match stale_result {
-                        Ok(page_buf) => {
-                            if cache.index.contains_key(&key) {
+                if let Some(existing) = cache.page_fetches.get(&key).cloned() {
+                    if let Some(stale_result) = existing.future.peek().cloned() {
+                        // Stale resolved entry from a cancelled first fetcher; remove and apply per-key.
+                        let _ = cache.page_fetches.remove(&key);
+                        match stale_result {
+                            Ok(page_buf) => {
+                                if cache.index.contains_key(&key) {
+                                    debug!(
+                                        blob_id,
+                                        page_num,
+                                        "dropping stale resolved fetch because key already has cached data"
+                                    );
+                                } else if cache.insert_page(key, page_buf.clone()).is_err() {
+                                    error!(blob_id, page_num, "failed to insert stale fetched page");
+                                }
+                                let bytes = std::cmp::min(max_len, page_buf.len() - offset_in_page);
+                                return Ok(page_buf.slice(offset_in_page..offset_in_page + bytes));
+                            }
+                            Err(err) => {
                                 debug!(
                                     blob_id,
                                     page_num,
-                                    "dropping stale resolved fetch because key already has cached data"
+                                    ?err,
+                                    "dropping stale failed fetch result and refetching"
                                 );
-                            } else if cache.insert_page(key, page_buf.clone()).is_err() {
-                                error!(blob_id, page_num, "failed to insert stale fetched page");
+                                create_and_track_fetch(&mut cache)
                             }
-                            let bytes = std::cmp::min(max_len, page_buf.len() - offset_in_page);
-                            return Ok(page_buf.slice(offset_in_page..offset_in_page + bytes));
                         }
-                        Err(err) => {
-                            debug!(
-                                blob_id,
-                                page_num,
-                                ?err,
-                                "dropping stale failed fetch result and refetching"
-                            );
-                            create_and_track_fetch(&mut cache)
-                        }
+                    } else {
+                        (existing, false)
                     }
                 } else {
-                    (existing, false)
+                    create_and_track_fetch(&mut cache)
                 }
-            } else {
-                create_and_track_fetch(&mut cache)
             }
         };
 
