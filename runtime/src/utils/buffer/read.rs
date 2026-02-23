@@ -149,14 +149,33 @@ impl<B: Blob> Read<B> {
             out.clear();
         }
 
-        // SAFETY: `len` is <= `out.capacity()` by construction above.
-        unsafe { out.set_len(len) };
         // Quick check if we have enough bytes total before attempting reads.
         if (self.buffer_remaining() + self.blob_remaining() as usize) < len {
             return Err(Error::BlobInsufficientLength);
         }
 
+        // For large reads when our internal refill buffer is empty, read directly into caller
+        // storage to avoid refill-buffer copies. Smaller reads still use the refill buffer to
+        // preserve locality for follow-up reads.
+        let direct_read_threshold = self.buffer_size.saturating_mul(2);
+        if self.buffer_remaining() == 0 && len >= direct_read_threshold {
+            let read_start = self.position();
+            let out = self
+                .blob
+                .read_at_buf(read_start, len, out)
+                .await?
+                .coalesce_with_pool(&self.pool);
+            self.blob_position = read_start
+                .checked_add(len as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            self.buffer_position = 0;
+            self.buffer_valid_len = 0;
+            return Ok(out);
+        }
+
         let mut bytes_read = 0;
+        // SAFETY: `len` is <= `out.capacity()` by construction above.
+        unsafe { out.set_len(len) };
         while bytes_read < len {
             // Check if we need to refill.
             if self.buffer_position >= self.buffer_valid_len {

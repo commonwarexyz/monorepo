@@ -483,10 +483,11 @@ impl CacheRef {
         if required_len == physical_pages.len() {
             const MAX_SHARED_ZERO_COPY_PAGES: usize = 2;
             if page_count <= MAX_SHARED_ZERO_COPY_PAGES {
-                let pages = (0..page_count).map(|page_idx| {
+                let mut pages = Vec::with_capacity(page_count);
+                for page_idx in 0..page_count {
                     let page_start = page_idx * physical_page_size;
-                    physical_pages.slice(page_start..page_start + logical_page_size)
-                });
+                    pages.push(physical_pages.slice(page_start..page_start + logical_page_size));
+                }
                 self.cache_pages(blob_id, pages, offset);
                 return;
             }
@@ -521,15 +522,10 @@ impl CacheRef {
         }
     }
 
-    fn cache_pages<I>(&self, blob_id: u64, pages: I, offset: u64)
-    where
-        I: IntoIterator<Item = IoBuf>,
-    {
+    fn cache_pages(&self, blob_id: u64, pages: Vec<IoBuf>, offset: u64) {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
-        // Materialize page ownership before taking the write lock to minimize lock hold time.
-        let pages: Vec<IoBuf> = pages.into_iter().collect();
         let total_pages = pages.len();
         if total_pages == 0 {
             return;
