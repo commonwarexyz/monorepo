@@ -29,15 +29,15 @@
 //!
 //! * [`Info`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
 //! * [`Output`]: The public result of a successful DKG round, containing the public polynomial and player list
-//! * [`Share`]: A player's private share of the distributed key (from `primitives::group`)
+//! * [`Share`]: A player's final private share of the distributed key (from `primitives::group`)
 //! * [`Dealer`]: State machine for a dealer participating in the protocol
-//! * [`Player`]: State machine for a player receiving shares
+//! * [`Player`]: State machine for a player receiving dealings
 //! * [`SignedDealerLog`]: A dealer's signed transcript of their interactions with players
 //!
 //! ## Message Types
 //!
 //! * [`DealerPubMsg`]: Public commitment polynomial sent from dealer to all players
-//! * [`DealerPrivMsg`]: Private share sent from dealer to a specific player
+//! * [`DealerPrivMsg`]: Private dealing sent from dealer to a specific player
 //! * [`PlayerAck`]: Acknowledgement sent from player back to dealer
 //! * [`DealerLog`]: Complete log of a dealer's interactions (commitments and acks/reveals)
 //!
@@ -49,7 +49,7 @@
 //! - Round number (should increment sequentially, including for failed rounds)
 //! - Optional previous [`Output`] (for resharing)
 //! - List of dealers (must be >= quorum of previous round if resharing)
-//! - List of players who will receive shares
+//! - List of players who will receive dealings
 //!
 //! ### Step 2: Dealer Phase
 //!
@@ -66,7 +66,7 @@
 //! Each player creates a [`Player`] instance via [`Player::new`], then for each dealer message:
 //! - Call [`Player::dealer_message`] with the [`DealerPubMsg`] and [`DealerPrivMsg`]
 //! - If valid, this returns a [`PlayerAck`] containing a signature over `(dealer, commitment)`
-//! - The player verifies that the private share matches the public commitment evaluation
+//! - The player verifies that the private dealing matches the public commitment evaluation
 //!
 //! ### Step 4: Dealer Collection
 //!
@@ -84,7 +84,7 @@
 //!
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
-//! - The list of dealers who distributed shares,
+//! - The list of dealers who distributed dealings,
 //! - The list of players who received shares,
 //! - The set of players whose shares may have been revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
@@ -97,6 +97,19 @@
 //! - [`deal`]: given a list of players, generates an [`Output`] like the DKG would,
 //! - [`deal_anonymous`]: a lower-level version that produces a polynomial directly,
 //!   and doesn't require public keys for the players.
+//!
+//! ## State
+//!
+//! The structs in this module are stateful and they assume that they exist from the
+//! start of the DKG to the end of the DKG.
+//!
+//! During restart, state should be restored by replaying all messages that
+//! dealers and players previously processed. For the dealer, it's important to use a
+//! seeded form of randomness, so that way the same messages can be generated on a second run.
+//! For the player, using [`Player::resume`] is more robust than just [`Player::new`], because it
+//! checks the integrity of the replayed messages against the publicly committed transcript (so far).
+//! This can detect some recoverable operator errors, like storage misconfiguration (where a player has publicly
+//! acknowledged a private message but has no record of it in storage).
 //!
 //! # Caveats
 //!
@@ -322,8 +335,12 @@ const SIG_LOG: &[u8] = b"log";
 /// The error type for the DKG protocol.
 ///
 /// The only error which can happen through no fault of your own is
-/// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
-/// for [`Info`] or [`Dealer`] which is invalid in some way.
+/// [`Error::DkgFailed`].
+///
+/// [`Error::MissingPlayerDealing`] happens through mistakes or faults when the state
+/// of a player is restored after a crash.
+///
+/// The other errors are due to issues with configuration.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -338,6 +355,15 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
+    /// The player's state is missing a dealing it should have.
+    ///
+    /// This error is emitted when the player is missing dealings that it should
+    /// otherwise have based on the flow of the protocol. This can only happen if
+    /// the code in this module is used in a stateful way, restoring the
+    /// state of the player from saved information. If this state is corrupted
+    /// on disk, or missing, then this error can happen.
+    #[error("missing player's dealing")]
+    MissingPlayerDealing,
 }
 
 /// The output of a successful DKG.
@@ -987,6 +1013,16 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    fn get_ack(&self, player: &P) -> Option<&PlayerAck<P>> {
+        let DealerResult::Ok(results) = &self.results else {
+            return None;
+        };
+        match results.get_value(player) {
+            Some(AckOrReveal::Ack(ack)) => Some(ack),
+            _ => None,
+        }
+    }
+
     fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
@@ -1482,6 +1518,66 @@ impl<V: Variant, S: Signer> Player<V, S> {
         })
     }
 
+    /// Resume a [`Player`], given some existing public state.
+    ///
+    /// This is equivalent to calling [`Self::new`] and then [`Self::dealer_message`]
+    /// with the appropriate messages, but includes extra safeguards to detect
+    /// missing / corrupted state.
+    ///
+    /// It's imperative that the `logs` passed in have been verified. This is done
+    /// naturally when converting from a [`SignedDealerLog`] to a [`DealerLog`],
+    /// but this function, like [`Player::finalize`], assumes that this check has
+    /// been done.
+    ///
+    /// All messages the player should have received must be passed into this method,
+    /// and if any messages which should be present based on this player's actions
+    /// in the log are missing, this method will return [`Error::MissingPlayerDealing`].
+    ///
+    /// For example, if a particular private message containing a share is not
+    /// present in `msgs`, but we've already acknowledged it, and this has been
+    /// included in a public log, then this method will fail.
+    /// This method cannot catch all cases where state has been corrupted. In
+    /// particular, if a dealer has not posted their log publicly yet, but has
+    /// already received an ack, then this method cannot help in that case,
+    /// but the issue still remains.
+    ///
+    /// The returned map contains the acknowledgements generated while replaying
+    /// `msgs`, keyed by dealer.
+    #[allow(clippy::type_complexity)]
+    pub fn resume<M: Faults>(
+        info: Info<V, S::PublicKey>,
+        me: S,
+        logs: &BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
+        msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+    ) -> Result<(Self, BTreeMap<S::PublicKey, PlayerAck<S::PublicKey>>), Error> {
+        // Record all acks we've emitted (by dealer).
+        let mut this = Self::new(info, me)?;
+        let mut acks = BTreeMap::new();
+        for (dealer, pub_msg, priv_msg) in msgs {
+            if let Some(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
+                acks.insert(dealer, ack);
+            }
+        }
+
+        // Have we emitted any valid acks, publicly recorded, for which we do
+        // not have the private message?
+        if logs.iter().any(|(dealer, log)| {
+            let Some(ack) = log.get_ack(&this.me_pub) else {
+                return false;
+            };
+            // Only trust this ack if the signature is valid for this round.
+            transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
+                .verify(&this.me_pub, &ack.sig)
+                && !acks.contains_key(dealer)
+        }) {
+            // If so, we have a problem, because we're missing a dealing that we're
+            // supposed to have, and that we publicly committed to having.
+            return Err(Error::MissingPlayerDealing);
+        }
+
+        Ok((this, acks))
+    }
+
     /// Process a message from a dealer.
     ///
     /// It's important that nobody can impersonate the dealer, and that the
@@ -1514,18 +1610,34 @@ impl<V: Variant, S: Signer> Player<V, S> {
 
     /// Finalize the player, producing an output, and a share.
     ///
-    /// This should agree with [`observe`], in terms of `Ok` vs `Err` and the
-    /// public output, so long as the logs agree. It's crucial that the players
+    /// This should agree with [`observe`], in terms of `Ok` vs `Err` (with one exception)
+    /// and the public output, so long as the logs agree. It's crucial that the players
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// This will only ever return [`Error::DkgFailed`].
+    /// The exception is that if this function returns [`Error::MissingPlayerDealing`],
+    /// then [`observe`] will return `Ok`, because this error indicates that this
+    /// player's state has been corrupted, but the DKG has otherwise succeeded.
+    /// However, this player's share is not recoverable without external intervention.
+    ///
+    /// Otherwise, the only error this function can return is [`Error::DkgFailed`].
     pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
+        // `select` verifies ack signatures, so any ack present in `selected`
+        // is trustworthy for this round/dealer/pub_msg transcript.
+        // If there's a log that contains an ack of ours, but no corresponding view,
+        // then we're missing a dealing.
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
+        if selected
+            .iter_pairs()
+            .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
+        {
+            return Err(Error::MissingPlayerDealing);
+        }
+
         // We are extracting the private scalars from `Secret` protection
         // because interpolation/summation needs owned scalars for polynomial
         // arithmetic. The extracted scalars are scoped to this function and
@@ -1665,6 +1777,12 @@ mod test_plan {
     }
 
     impl Masks {
+        fn modifies_player_ack(&self) -> bool {
+            self.info_summary.iter().any(|&b| b != 0)
+                || self.dealer.iter().any(|&b| b != 0)
+                || self.pub_msg.iter().any(|&b| b != 0)
+        }
+
         fn transcript_for_round<V: Variant, P: PublicKey>(
             &self,
             info: &Info<V, P>,
@@ -1716,6 +1834,9 @@ mod test_plan {
     pub struct Round {
         dealers: Vec<u32>,
         players: Vec<u32>,
+        crash_resume_players: BTreeSet<(u32, u32)>,
+        resume_missing_dealer_msg_fails: BTreeSet<(u32, u32)>,
+        finalize_missing_dealer_msg_fails: BTreeSet<u32>,
         no_acks: BTreeSet<(u32, u32)>,
         bad_shares: BTreeSet<(u32, u32)>,
         bad_player_sigs: BTreeMap<(u32, u32), Masks>,
@@ -1736,6 +1857,26 @@ mod test_plan {
 
         pub fn no_ack(mut self, dealer: u32, player: u32) -> Self {
             self.no_acks.insert((dealer, player));
+            self
+        }
+
+        pub fn crash_resume_player(mut self, after_dealer: u32, player: u32) -> Self {
+            self.crash_resume_players.insert((after_dealer, player));
+            self
+        }
+
+        pub fn resume_missing_dealer_msg_fails(
+            mut self,
+            after_dealer: u32,
+            missing_dealer: u32,
+        ) -> Self {
+            self.resume_missing_dealer_msg_fails
+                .insert((after_dealer, missing_dealer));
+            self
+        }
+
+        pub fn finalize_missing_dealer_msg_fails(mut self, player: u32) -> Self {
+            self.finalize_missing_dealer_msg_fails.insert(player);
             self
         }
 
@@ -1791,6 +1932,63 @@ mod test_plan {
             for &p in &self.players {
                 if p >= num_participants {
                     return Err(anyhow!("player {p} out of range [1, {num_participants}]"));
+                }
+            }
+            // Crash/resume checkpoints must reference in-round dealers/players.
+            for &(after_dealer, player) in &self.crash_resume_players {
+                if !self.dealers.contains(&after_dealer) {
+                    return Err(anyhow!("crash_resume dealer {after_dealer} not in round"));
+                }
+                if !self.players.contains(&player) {
+                    return Err(anyhow!("crash_resume player {player} not in round"));
+                }
+            }
+            let dealer_positions: BTreeMap<u32, usize> = self
+                .dealers
+                .iter()
+                .enumerate()
+                .map(|(idx, &dealer)| (dealer, idx))
+                .collect();
+            let previous_successful_round = previous_players.is_some();
+            for &(after_dealer, missing_dealer) in &self.resume_missing_dealer_msg_fails {
+                if !self.dealers.contains(&after_dealer) {
+                    return Err(anyhow!("resume_missing dealer {after_dealer} not in round"));
+                }
+                if !self.dealers.contains(&missing_dealer) {
+                    return Err(anyhow!(
+                        "resume_missing missing_dealer {missing_dealer} not in round"
+                    ));
+                }
+                let after_pos = dealer_positions[&after_dealer];
+                let missing_pos = dealer_positions[&missing_dealer];
+                if missing_pos > after_pos {
+                    return Err(anyhow!(
+                        "resume_missing missing_dealer {missing_dealer} appears after {after_dealer}"
+                    ));
+                }
+                if self.bad(previous_successful_round, missing_dealer) {
+                    return Err(anyhow!(
+                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                    ));
+                }
+                let any_valid_ack = self.players.iter().any(|&player| {
+                    let ack_corrupted = self.no_acks.contains(&(missing_dealer, player))
+                        || self.bad_shares.contains(&(missing_dealer, player))
+                        || self
+                            .bad_player_sigs
+                            .get(&(missing_dealer, player))
+                            .is_some_and(Masks::modifies_player_ack);
+                    !ack_corrupted
+                });
+                if !any_valid_ack {
+                    return Err(anyhow!(
+                        "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to ack at least one player"
+                    ));
+                }
+            }
+            for &player in &self.finalize_missing_dealer_msg_fails {
+                if !self.players.contains(&player) {
+                    return Err(anyhow!("finalize_missing player {player} not in round"));
                 }
             }
 
@@ -1881,7 +2079,7 @@ mod test_plan {
         }
 
         /// Validate the entire plan.
-        fn validate(&self) -> anyhow::Result<()> {
+        pub(crate) fn validate(&self) -> anyhow::Result<()> {
             let mut last_successful_players: Option<Vec<u32>> = None;
 
             for round in &self.rounds {
@@ -1973,6 +2171,28 @@ mod test_plan {
                     .collect::<anyhow::Result<Vec<_>>>()?
                     .try_into()
                     .unwrap();
+                let mut acked_dealings: BTreeMap<
+                    ed25519::PublicKey,
+                    Vec<(ed25519::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+                > = player_set
+                    .iter()
+                    .cloned()
+                    .map(|pk| (pk, Vec::new()))
+                    .collect();
+                let mut crash_resume_by_dealer: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+                for &(after_dealer, player) in &round.crash_resume_players {
+                    crash_resume_by_dealer
+                        .entry(after_dealer)
+                        .or_default()
+                        .push(player);
+                }
+                let mut resume_missing_msg_by_dealer: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+                for &(after_dealer, missing_dealer) in &round.resume_missing_dealer_msg_fails {
+                    resume_missing_msg_by_dealer
+                        .entry(after_dealer)
+                        .or_default()
+                        .push(missing_dealer);
+                }
 
                 // Run dealer protocol
                 let mut dealer_logs = BTreeMap::new();
@@ -2060,11 +2280,16 @@ mod test_plan {
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[usize::from(i_player)];
+                        let persisted = priv_msg.clone();
 
                         let ack =
                             player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg);
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);
                         if let Some(ack) = ack {
+                            acked_dealings
+                                .get_mut(&player_pk)
+                                .expect("player should be present")
+                                .push((pk.clone(), pub_msg.clone(), persisted));
                             let masks = round
                                 .bad_player_sigs
                                 .get(&(i_dealer, player_key_idx))
@@ -2129,6 +2354,69 @@ mod test_plan {
                         }
                     }
                     dealer_logs.insert(pk, log);
+
+                    // For selected checkpoints, omit a good dealer's private message and
+                    // ensure resume reports corruption. Do not mutate player state.
+                    for &missing_dealer in resume_missing_msg_by_dealer
+                        .get(&i_dealer)
+                        .into_iter()
+                        .flatten()
+                    {
+                        assert!(
+                            !round.bad(previous_successful_round.is_some(), missing_dealer),
+                            "resume_missing_dealer_msg_fails requires dealer {missing_dealer} to be good"
+                        );
+                        let missing_pk = keys[missing_dealer as usize].public_key();
+                        let missing_log = dealer_logs
+                            .get(&missing_pk)
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
+                        for &i_player in &round.players {
+                            let player_pk = keys[i_player as usize].public_key();
+                            let was_acked = missing_log.get_ack(&player_pk).is_some();
+
+                            let replay = acked_dealings
+                                .get(&player_pk)
+                                .cloned()
+                                .expect("player should be present");
+                            let replay_without = replay
+                                .into_iter()
+                                .filter(|(dealer, _, _)| dealer != &missing_pk);
+                            let player_sk = keys[i_player as usize].clone();
+                            let resumed = Player::resume::<N3f1>(
+                                info.clone(),
+                                player_sk,
+                                &dealer_logs,
+                                replay_without,
+                            );
+                            if was_acked {
+                                assert!(
+                                    matches!(resumed, Err(Error::MissingPlayerDealing)),
+                                    "resume without dealer {missing_dealer} message should report MissingPlayerDealing for player {i_player}"
+                                );
+                            } else {
+                                assert!(
+                                    resumed.is_ok(),
+                                    "resume without dealer {missing_dealer} message should succeed for unacked player {i_player}"
+                                );
+                            }
+                        }
+                    }
+
+                    // Crash/resume selected players after this dealer has finalized.
+                    for &i_player in crash_resume_by_dealer.get(&i_dealer).into_iter().flatten() {
+                        let player_pk = keys[i_player as usize].public_key();
+                        let player_sk = keys[i_player as usize].clone();
+                        let replay = acked_dealings
+                            .get(&player_pk)
+                            .cloned()
+                            .expect("player should be present");
+                        let (resumed, _) =
+                            Player::resume::<N3f1>(info.clone(), player_sk, &dealer_logs, replay)
+                                .expect("player resume perturbation should succeed");
+                        *players
+                            .get_value_mut(&player_pk)
+                            .expect("player should be present") = resumed;
+                    }
                 }
 
                 // Make sure that bad dealers are not selected.
@@ -2204,6 +2492,53 @@ mod test_plan {
                     .map(|&i| keys[i as usize].public_key())
                     .try_collect()
                     .expect("players are unique");
+                for &i_player in &round.finalize_missing_dealer_msg_fails {
+                    let player_pk = keys[i_player as usize].public_key();
+                    let player_sk = keys[i_player as usize].clone();
+                    let mut tested = 0u32;
+                    for &dealer_idx in &selected_dealers {
+                        if round.bad(previous_successful_round.is_some(), dealer_idx) {
+                            continue;
+                        }
+                        let dealer_pk = keys[dealer_idx as usize].public_key();
+                        let dealer_log = dealer_logs
+                            .get(&dealer_pk)
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &dealer_pk));
+                        if dealer_log.get_ack(&player_pk).is_none() {
+                            continue;
+                        }
+                        let replay = acked_dealings
+                            .get(&player_pk)
+                            .cloned()
+                            .expect("player should be present");
+                        let replay_without = replay
+                            .into_iter()
+                            .filter(|(dealer, _, _)| dealer != &dealer_pk);
+                        let resume_logs: BTreeMap<_, _> = dealer_logs
+                            .iter()
+                            .filter(|(dealer, _)| *dealer != &dealer_pk)
+                            .map(|(dealer, log)| (dealer.clone(), log.clone()))
+                            .collect();
+                        let (resumed, _) = Player::resume::<N3f1>(
+                            info.clone(),
+                            player_sk.clone(),
+                            &resume_logs,
+                            replay_without,
+                        )
+                        .expect("resume should succeed with stale logs");
+                        let finalize_res =
+                            resumed.finalize::<N3f1>(dealer_logs.clone(), &Sequential);
+                        assert!(
+                            matches!(finalize_res, Err(Error::MissingPlayerDealing)),
+                            "finalize without dealer {dealer_idx} message should return MissingPlayerDealing for player {i_player}"
+                        );
+                        tested += 1;
+                    }
+                    assert!(
+                        tested > 0,
+                        "finalize_missing_dealer_msg_fails for player {i_player} tested no dealers"
+                    );
+                }
 
                 // Compute expected reveals
                 //
@@ -2383,6 +2718,9 @@ mod test_plan {
                 Ok(pick(u, num, dealers.clone())?.into_iter().collect())
             };
             let round = Round {
+                crash_resume_players: BTreeSet::new(),
+                resume_missing_dealer_msg_fails: BTreeSet::new(),
+                finalize_missing_dealer_msg_fails: BTreeSet::new(),
                 no_acks: pick_pair_set(u)?,
                 bad_shares: pick_pair_set(u)?,
                 bad_player_sigs: {
@@ -2475,6 +2813,68 @@ mod test {
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]))
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]))
             .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn player_crash_resume_after_dealer() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(1, 2))
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn resume_missing_good_dealer_message_fails_after_checkpoint() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .resume_missing_dealer_msg_fails(2, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn resume_missing_good_dealer_message_skips_unacked_players() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(1, 0)
+                    .resume_missing_dealer_msg_fails(2, 1),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn finalize_fails_after_resume_without_good_dealer_message() -> anyhow::Result<()> {
+        Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(0, 1)
+                    .finalize_missing_dealer_msg_fails(0),
+            )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn invalid_checkpoint_configs_fail_validation() {
+        assert!(Plan::new(NZU32!(4))
+            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+            .validate()
+            .is_err());
+        assert!(Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .resume_missing_dealer_msg_fails(1, 2),
+            )
+            .validate()
+            .is_err());
+        assert!(Plan::new(NZU32!(4))
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .bad_reveal(1, 0)
+                    .resume_missing_dealer_msg_fails(2, 1),
+            )
+            .validate()
+            .is_err());
     }
 
     #[test]
@@ -2632,6 +3032,61 @@ mod test {
         std::mem::swap(&mut log0.log, &mut log1.log);
         assert!(log0.check(&info).is_none());
         assert!(log1.check(&info).is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_ignores_invalid_logged_ack_signature() -> Result<(), Error> {
+        let dealer_sk = ed25519::PrivateKey::from_seed(11);
+        let dealer_pk = dealer_sk.public_key();
+        let player_sk = ed25519::PrivateKey::from_seed(22);
+        let player_pk = player_sk.public_key();
+        let dealers: Set<ed25519::PublicKey> = vec![dealer_pk.clone()].try_into().unwrap();
+        let players: Set<ed25519::PublicKey> = vec![player_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Default::default(),
+            dealers.clone(),
+            players.clone(),
+        )?;
+        let wrong_round_info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            1,
+            None,
+            Default::default(),
+            dealers,
+            players,
+        )?;
+        let (_, pub_msg, _) =
+            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), dealer_sk, None)?;
+        let bad_ack = PlayerAck {
+            sig: transcript_for_ack(
+                &transcript_for_round(&wrong_round_info),
+                &dealer_pk,
+                &pub_msg,
+            )
+            .sign(&player_sk),
+        };
+        let results: Map<_, _> = vec![(player_pk, AckOrReveal::Ack(bad_ack))]
+            .into_iter()
+            .try_collect()
+            .unwrap();
+        let mut logs = BTreeMap::new();
+        logs.insert(
+            dealer_pk,
+            DealerLog {
+                pub_msg,
+                results: DealerResult::Ok(results),
+            },
+        );
+
+        let resumed = Player::resume::<N3f1>(info, player_sk, &logs, []);
+        assert!(resumed.is_ok());
+        let (_, acks) = resumed.unwrap();
+        assert!(acks.is_empty());
 
         Ok(())
     }
