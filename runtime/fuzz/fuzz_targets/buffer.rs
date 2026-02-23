@@ -276,13 +276,11 @@ fn fuzz(input: FuzzInput) {
                             let data = &data[..cache.page_size() as usize];
                             let page_size = cache.page_size();
                             let aligned_offset = (offset / page_size) * page_size;
-                            cache
-                                .cache(
-                                    blob_id as u64,
-                                    vec![IoBuf::copy_from_slice(data)],
-                                    aligned_offset,
-                                )
-                                .await;
+                            cache.cache(
+                                blob_id as u64,
+                                vec![IoBuf::copy_from_slice(data)],
+                                aligned_offset,
+                            );
                         }
                     }
                 }

@@ -403,8 +403,9 @@ impl<B: Blob> Append<B> {
         // Snapshot full logical pages to cache from the physical write payload.
         let cached_pages = if pages_to_cache > 0 {
             let mut pages = Vec::with_capacity(pages_to_cache);
-            for physical_page in physical_pages.iter().take(pages_to_cache) {
-                pages.push(physical_page.slice(..logical_page_size));
+            for page in 0..pages_to_cache {
+                let page_start = page * physical_page_size;
+                pages.push(physical_pages.slice(page_start..page_start + logical_page_size));
             }
             Some((buffer.offset, pages))
         } else {
@@ -416,19 +417,19 @@ impl<B: Blob> Append<B> {
         buffer.offset += bytes_to_drain as u64;
         let new_offset = buffer.offset;
 
+        // Best-effort cache population for full pages before we release the tip lock.
+        // This matches main's lock ordering and keeps reads from observing stale persisted bytes
+        // during the handoff from tip to cache.
+        if let Some((cache_offset, pages)) = cached_pages {
+            self.cache_ref.cache(self.id, pages, cache_offset);
+        }
+
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
         // we're writing to it.
         let mut blob_state = self.blob_state.write().await;
 
-        // Release the tip lock before potentially waiting in cache population.
+        // Release the tip lock before writing to the underlying blob.
         drop(buf_guard);
-
-        // Best-effort cache population for full pages while blob_state remains write-locked.
-        // This avoids holding the tip lock across potential waits, while still preventing reads
-        // from observing pre-flush persisted bytes through this wrapper.
-        if let Some((cache_offset, pages)) = cached_pages {
-            self.cache_ref.cache(self.id, pages, cache_offset).await;
-        }
 
         let write_at_offset = blob_state.current_page * physical_page_size as u64;
 
@@ -460,12 +461,7 @@ impl<B: Blob> Append<B> {
                     // Protected CRC is first: [page_size..page_size+6]
                     // Write 1: New data in first page [prefix_len..page_size]
                     if prefix_len < logical_page_size {
-                        let payload = Self::slice_physical_pages(
-                            &physical_pages,
-                            physical_page_size,
-                            prefix_len,
-                            logical_page_size,
-                        );
+                        let payload = physical_pages.slice(prefix_len..logical_page_size);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
@@ -473,12 +469,7 @@ impl<B: Blob> Append<B> {
                     }
                     // Write 2: Second CRC of first page + all remaining pages [page_size+6..end]
                     let second_crc_start = logical_page_size + 6;
-                    let payload = Self::slice_physical_pages(
-                        &physical_pages,
-                        physical_page_size,
-                        second_crc_start,
-                        physical_pages.len() * physical_page_size,
-                    );
+                    let payload = physical_pages.slice(second_crc_start..);
                     blob_state
                         .blob
                         .write_at(write_at_offset + second_crc_start as u64, payload)
@@ -489,25 +480,15 @@ impl<B: Blob> Append<B> {
                     // Write 1: New data + first CRC of first page [prefix_len..page_size+6]
                     let first_crc_end = logical_page_size + 6;
                     if prefix_len < first_crc_end {
-                        let payload = Self::slice_physical_pages(
-                            &physical_pages,
-                            physical_page_size,
-                            prefix_len,
-                            first_crc_end,
-                        );
+                        let payload = physical_pages.slice(prefix_len..first_crc_end);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
                             .await?;
                     }
                     // Write 2: All remaining pages (if any) [physical_page_size..end]
-                    if physical_pages.len() > 1 {
-                        let payload = Self::slice_physical_pages(
-                            &physical_pages,
-                            physical_page_size,
-                            physical_page_size,
-                            physical_pages.len() * physical_page_size,
-                        );
+                    if physical_pages.len() > physical_page_size {
+                        let payload = physical_pages.slice(physical_page_size..);
                         blob_state
                             .blob
                             .write_at(write_at_offset + physical_page_size as u64, payload)
@@ -517,13 +498,10 @@ impl<B: Blob> Append<B> {
             }
         } else {
             // No protected regions, write everything in one operation
-            let payload = Self::slice_physical_pages(
-                &physical_pages,
-                physical_page_size,
-                0,
-                physical_pages.len() * physical_page_size,
-            );
-            blob_state.blob.write_at(write_at_offset, payload).await?;
+            blob_state
+                .blob
+                .write_at(write_at_offset, physical_pages)
+                .await?;
         }
 
         Ok(())
@@ -596,10 +574,7 @@ impl<B: Blob> Append<B> {
         // Entirely persisted: serve through page cache + blob.
         if end_offset <= buffer.offset {
             drop(buffer);
-            let (cached, cached_len) = self
-                .cache_ref
-                .read_cached(self.id, logical_offset, len)
-                .await;
+            let (cached, cached_len) = self.cache_ref.read_cached(self.id, logical_offset, len);
             if cached_len == len {
                 return Ok(cached);
             }
@@ -629,10 +604,9 @@ impl<B: Blob> Append<B> {
         let tip = IoBuf::copy_from_slice(&buffer.data.as_ref()[..tip_len]);
         drop(buffer);
 
-        let (mut cached, cached_len) = self
-            .cache_ref
-            .read_cached(self.id, logical_offset, persisted_len)
-            .await;
+        let (mut cached, cached_len) =
+            self.cache_ref
+                .read_cached(self.id, logical_offset, persisted_len);
         if cached_len == persisted_len {
             cached.append(tip);
             return Ok(cached);
@@ -686,9 +660,10 @@ impl<B: Blob> Append<B> {
         Some((old_len as usize, protected_crc))
     }
 
-    /// Prepare physical pages from buffered logical bytes, where each physical page contains one
-    /// logical page plus CRC record. If the last page is not yet full, it will be included only if
-    /// `include_partial_page` is true.
+    /// Prepare a contiguous physical-byte buffer from buffered logical bytes.
+    ///
+    /// Each physical page contains one logical page plus CRC record. If the last page is not yet
+    /// full, it will be included only if `include_partial_page` is true.
     ///
     /// # Arguments
     ///
@@ -702,17 +677,19 @@ impl<B: Blob> Append<B> {
         buffer: &Buffer,
         include_partial_page: bool,
         old_crc_record: Option<&Checksum>,
-    ) -> (Vec<IoBuf>, Option<Checksum>) {
+    ) -> (IoBuf, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.data.len() / logical_page_size;
         let max_pages_to_write = pages_to_write + if include_partial_page { 1 } else { 0 };
-        let mut physical_pages = Vec::with_capacity(max_pages_to_write);
+        let mut write_buffer = self
+            .cache_ref
+            .pool()
+            .alloc(max_pages_to_write * physical_page_size);
         let buffer_data = buffer.data.as_ref();
 
         // For each logical page, copy over the data and then write a CRC record for it.
         for page in 0..pages_to_write {
-            let mut write_buffer = self.cache_ref.pool().alloc(physical_page_size);
             let start_read_idx = page * logical_page_size;
             let end_read_idx = start_read_idx + logical_page_size;
             let logical_page = &buffer_data[start_read_idx..end_read_idx];
@@ -730,17 +707,16 @@ impl<B: Blob> Append<B> {
                 Checksum::new(logical_page_size_u16, crc)
             };
             write_buffer.put_slice(&crc_record.to_bytes());
-            physical_pages.push(write_buffer.freeze());
         }
 
         if !include_partial_page {
-            return (physical_pages, None);
+            return (write_buffer.freeze(), None);
         }
 
         let partial_page = &buffer_data[pages_to_write * logical_page_size..];
         if partial_page.is_empty() {
             // No partial page data to write.
-            return (physical_pages, None);
+            return (write_buffer.freeze(), None);
         }
 
         // If there are no full pages and the partial page length matches what was already
@@ -749,11 +725,10 @@ impl<B: Blob> Append<B> {
             if let Some(old_crc) = old_crc_record {
                 let (old_len, _) = old_crc.get_crc();
                 if partial_page.len() == old_len as usize {
-                    return (physical_pages, None);
+                    return (write_buffer.freeze(), None);
                 }
             }
         }
-        let mut write_buffer = self.cache_ref.pool().alloc(physical_page_size);
         write_buffer.put_slice(partial_page);
         let partial_len = partial_page.len();
         let crc = Crc32::checksum(partial_page);
@@ -776,40 +751,7 @@ impl<B: Blob> Append<B> {
 
         // Return the CRC record that matches what we wrote to disk, so that future flushes
         // correctly identify which slot is protected.
-        physical_pages.push(write_buffer.freeze());
-        (physical_pages, Some(crc_record))
-    }
-
-    /// Build a zero-copy logical slice view over physical page buffers.
-    fn slice_physical_pages(
-        physical_pages: &[IoBuf],
-        physical_page_size: usize,
-        start: usize,
-        end: usize,
-    ) -> IoBufs {
-        assert!(start <= end);
-        assert!(end <= physical_pages.len() * physical_page_size);
-        if start == end {
-            return IoBufs::default();
-        }
-
-        let mut out = IoBufs::default();
-        let first_page = start / physical_page_size;
-        let last_page = (end - 1) / physical_page_size;
-        for (page_idx, page) in physical_pages
-            .iter()
-            .enumerate()
-            .take(last_page + 1)
-            .skip(first_page)
-        {
-            let page_start = page_idx * physical_page_size;
-            let local_start = start.saturating_sub(page_start);
-            let local_end = (end - page_start).min(physical_page_size);
-            if local_start < local_end {
-                out.append(page.slice(local_start..local_end));
-            }
-        }
-        out
+        (write_buffer.freeze(), Some(crc_record))
     }
 
     /// Build a CRC record that preserves the old CRC in its original slot and places

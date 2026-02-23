@@ -327,7 +327,10 @@ where
                     .await;
                 let block = select! {
                     _ = tx.closed() => {
-                        debug!(reason = "consensus dropped receiver", "skipping verification");
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping verification"
+                        );
                         return;
                     },
                     result = block_request => match result {
