@@ -158,21 +158,30 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 }
 
 /// Extract data from encoded shards.
-fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
+fn extract_data(shards: Vec<&[u8]>, k: usize) -> Result<Vec<u8>, Error> {
     // Concatenate shards
     let mut data = shards.into_iter().take(k).flatten();
 
     // Extract length prefix
-    let data_len = (&mut data)
-        .take(u32::SIZE)
-        .copied()
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("insufficient data");
-    let data_len = u32::from_be_bytes(data_len) as usize;
+    let mut length_prefix = [0u8; u32::SIZE];
+    for byte in &mut length_prefix {
+        *byte = *data.next().ok_or(Error::Inconsistent)?;
+    }
+    let data_len = u32::from_be_bytes(length_prefix) as usize;
 
-    // Extract data
-    data.take(data_len).copied().collect()
+    // Extract payload
+    let mut payload: Vec<_> = data.copied().collect();
+    if payload.len() < data_len {
+        return Err(Error::Inconsistent);
+    }
+
+    // Canonical encoding requires all trailing bytes to be zero.
+    if !payload[data_len..].iter().all(|byte| *byte == 0) {
+        return Err(Error::Inconsistent);
+    }
+
+    payload.truncate(data_len);
+    Ok(payload)
 }
 
 /// Type alias for the internal encoding result.
@@ -372,7 +381,7 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    Ok(extract_data(shards, k))
+    extract_data(shards, k)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
@@ -770,6 +779,55 @@ mod tests {
 
         // Fail to decode
         let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    // Regression: a commitment built from shards with non-zero trailing padding
+    // used to pass decode(), even though canonical re-encoding (zero padding)
+    // produces a different root. decode() must reject such non-canonical shards.
+    #[test]
+    fn test_non_canonical_padding_rejected() {
+        let data = b"X";
+        let total = 6u16;
+        let min = 3u16;
+        let k = min as usize;
+        let m = total as usize - k;
+
+        let mut original_shards = prepare_data(data.to_vec(), k, m);
+        let shard_len = original_shards[0].len();
+        let payload_end = u32::SIZE + data.len();
+        let total_original_len = k * shard_len;
+        assert!(payload_end < total_original_len, "test requires padding");
+
+        // Corrupt one canonical padding byte while keeping payload unchanged.
+        let pad_shard = payload_end / shard_len;
+        let pad_offset = payload_end % shard_len;
+        original_shards[pad_shard][pad_offset] = 0xAA;
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        for shard in &original_shards {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+        let mut shards = original_shards.clone();
+        shards.extend(recovery.recovery_iter().map(|s| s.to_vec()));
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let non_canonical_root = tree.root();
+
+        let mut pieces = Vec::with_capacity(k);
+        for (i, shard) in shards.iter().take(k).enumerate() {
+            let proof = tree.proof(i as u32).unwrap();
+            pieces.push(Chunk::new(shard.clone().into(), i as u16, proof));
+        }
+
+        let result = decode::<Sha256, _>(total, min, &non_canonical_root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
