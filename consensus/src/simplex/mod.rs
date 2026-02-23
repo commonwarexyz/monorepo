@@ -250,6 +250,37 @@
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
 //!
+//! ## Forced Notarization Inclusion
+//!
+//! A notarized payload in view `v` must appear in the canonical chain if no nullification
+//! certificate exists for `v`. This follows directly from the protocol rules:
+//!
+//! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
+//!    and possess nullification certificates for every view between `v_p` and `v+k`.
+//! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
+//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
+//!    or when certification fails.
+//!
+//! Therefore, if view `v` completes without timeout and certification succeeds, no honest
+//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
+//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
+//! that certificate, no future leader can skip view `v`, and the notarized payload must be
+//! included as an ancestor in all subsequent proposals.
+//!
+//! ## Speculative Finality
+//!
+//! The forced inclusion property provides a weaker but faster form of finality: once a
+//! notarization certificate is observed for view `v` (without any timeout having fired),
+//! the notarized payload can be treated as speculatively final. No future sequence of
+//! proposals can exclude it from the canonical chain.
+//!
+//! This "speculative finality" is available after just 2 network hops (proposal + notarization),
+//! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
+//! The only scenario in which a notarized-but-not-yet-finalized payload could be excluded is if
+//! `f+1` or more honest participants had their certification fail or timed out, enabling
+//! a nullification certificate to form. In the common case (no faults, no timeouts), this
+//! cannot happen.
+//!
 //! ## Persistence
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
