@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use commonware_codec::{Codec, Encode as _};
-use commonware_utils::hex;
+use commonware_utils::{hex, Array};
 use std::fmt;
 
 pub(crate) mod fixed;
@@ -15,9 +15,9 @@ pub(crate) mod variable;
 pub(crate) mod varkey;
 pub(crate) use update::Update;
 
-pub(super) const DELETE_CONTEXT: u8 = 0xD1;
-pub(super) const UPDATE_CONTEXT: u8 = 0xD2;
-pub(super) const COMMIT_CONTEXT: u8 = 0xD3;
+const DELETE_CONTEXT: u8 = 0xD1;
+const UPDATE_CONTEXT: u8 = 0xD2;
+const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
 pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
@@ -94,7 +94,7 @@ where
 
 impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
 where
-    K: commonware_utils::Array + fmt::Display,
+    K: Array + fmt::Display,
     V: ValueEncoding,
     V::Value: Codec,
 {

@@ -6,6 +6,7 @@ use crate::{
     kv::{Batchable, Gettable},
     mmr::Location,
     qmdb::{
+        operation::Key,
         store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
@@ -13,7 +14,6 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Digest;
-use crate::qmdb::operation::Key;
 use std::{future::Future, ops::Range};
 
 /// A mutable operation log that can be durably persisted.

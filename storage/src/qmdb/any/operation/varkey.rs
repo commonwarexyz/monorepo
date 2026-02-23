@@ -7,16 +7,14 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{
-            operation::{Operation, Update, DELETE_CONTEXT, UPDATE_CONTEXT, COMMIT_CONTEXT},
+            operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
             value::VarKeyEncoding,
             VariableValue,
         },
         operation::Key,
     },
 };
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
 
 impl<K, V, S> EncodeSize for Operation<K, VarKeyEncoding<V>, S>
@@ -101,7 +99,11 @@ mod tests {
     };
     use commonware_codec::{Codec, RangeCfg, Read};
 
-    type Op = Operation<Vec<u8>, VarKeyEncoding<Vec<u8>>, UnorderedUpdate<Vec<u8>, VarKeyEncoding<Vec<u8>>>>;
+    type Op = Operation<
+        Vec<u8>,
+        VarKeyEncoding<Vec<u8>>,
+        UnorderedUpdate<Vec<u8>, VarKeyEncoding<Vec<u8>>>,
+    >;
 
     fn roundtrip<T>(value: &T, cfg: &<T as Read>::Cfg)
     where

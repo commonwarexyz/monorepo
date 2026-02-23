@@ -1,9 +1,11 @@
-use crate::qmdb::any::{
-    operation::{update::sealed::Sealed, Update as UpdateTrait},
-    value::{FixedEncoding, ValueEncoding, VariableEncoding, VarKeyEncoding},
-    FixedValue, VariableValue,
+use crate::qmdb::{
+    any::{
+        operation::{update::sealed::Sealed, Update as UpdateTrait},
+        value::{FixedEncoding, ValueEncoding, VarKeyEncoding, VariableEncoding},
+        FixedValue, VariableValue,
+    },
+    operation::Key,
 };
-use crate::qmdb::operation::Key;
 use commonware_codec::{
     Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };

@@ -3,11 +3,12 @@
 //!
 //! The specific variants provided within this module include:
 //! - Unordered: The database does not maintain or require any ordering over the key space.
-//!   - Fixed-size values
-//!   - Variable-size values
+//!   - Fixed-size keys with fixed-size values
+//!   - Fixed-size keys with variable-size values
+//!   - Variable-size keys with variable-size values
 //! - Ordered: The database maintains a total order over active keys.
-//!   - Fixed-size values
-//!   - Variable-size values
+//!   - Fixed-size keys with fixed-size values
+//!   - Fixed-size keys with variable-size values
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -21,7 +22,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
-        operation::Committable,
+        operation::{Committable, Key},
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -188,7 +189,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: crate::qmdb::operation::Key,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,
@@ -868,8 +869,7 @@ pub(crate) mod test {
     type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
     // Varkey variant: uses VarKeyEncoding with Digest keys for generic test compatibility.
-    type UnorderedVarKey =
-        unordered::varkey::Db<Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedVarKey = unordered::varkey::Db<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
     type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedFixedP1 =
@@ -979,16 +979,34 @@ pub(crate) mod test {
     // async state machine small enough to avoid stack overflow.
     macro_rules! for_all_variants {
         ($ctx:expr, $sfx:expr, simple: $f:expr) => {{
-            Box::pin(async { with_variants_a!(test_simple!($ctx, $sfx, $f)); }).await;
-            Box::pin(async { with_variants_b!(test_simple!($ctx, $sfx, $f)); }).await;
+            Box::pin(async {
+                with_variants_a!(test_simple!($ctx, $sfx, $f));
+            })
+            .await;
+            Box::pin(async {
+                with_variants_b!(test_simple!($ctx, $sfx, $f));
+            })
+            .await;
         }};
         ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            Box::pin(async { with_variants_a!(test_with_reopen!($ctx, $sfx, $f)); }).await;
-            Box::pin(async { with_variants_b!(test_with_reopen!($ctx, $sfx, $f)); }).await;
+            Box::pin(async {
+                with_variants_a!(test_with_reopen!($ctx, $sfx, $f));
+            })
+            .await;
+            Box::pin(async {
+                with_variants_b!(test_with_reopen!($ctx, $sfx, $f));
+            })
+            .await;
         }};
         ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            Box::pin(async { with_variants_a!(test_with_make_value!($ctx, $sfx, $f)); }).await;
-            Box::pin(async { with_variants_b!(test_with_make_value!($ctx, $sfx, $f)); }).await;
+            Box::pin(async {
+                with_variants_a!(test_with_make_value!($ctx, $sfx, $f));
+            })
+            .await;
+            Box::pin(async {
+                with_variants_b!(test_with_make_value!($ctx, $sfx, $f));
+            })
+            .await;
         }};
     }
 

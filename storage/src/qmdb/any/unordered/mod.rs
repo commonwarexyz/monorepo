@@ -13,7 +13,7 @@ use crate::{
             ValueEncoding,
         },
         build_snapshot_from_log, delete_known_loc,
-        operation::{Committable, Operation as OperationTrait},
+        operation::{Committable, Key, Operation as OperationTrait},
         update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
         NonDurable, Unmerkleized,
     },
@@ -21,7 +21,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use crate::qmdb::operation::Key;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 

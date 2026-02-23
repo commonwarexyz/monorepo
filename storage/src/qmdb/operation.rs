@@ -9,16 +9,7 @@ pub trait Key:
 }
 
 impl<T> Key for T where
-    T: Clone
-        + Send
-        + Sync
-        + 'static
-        + Eq
-        + Ord
-        + Hash
-        + AsRef<[u8]>
-        + Deref<Target = [u8]>
-        + Debug
+    T: Clone + Send + Sync + 'static + Eq + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {
 }
 

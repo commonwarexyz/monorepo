@@ -1,9 +1,8 @@
 //! Support for batching changes to an underlying key-value store.
 
 use super::{Deletable, Gettable, Updatable};
-use crate::qmdb::Error;
+use crate::qmdb::{operation::Key, Error};
 use commonware_codec::CodecShared;
-use crate::qmdb::operation::Key;
 use std::{collections::BTreeMap, future::Future};
 
 /// A batch of changes which may be written to an underlying store with [Batchable::write_batch].

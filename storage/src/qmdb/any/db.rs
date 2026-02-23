@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
-        operation::{Committable, Operation as OperationTrait},
+        operation::{Committable, Key, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
@@ -24,7 +24,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use crate::qmdb::operation::Key;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -39,6 +38,7 @@ pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Jo
 /// - [crate::qmdb::any::ordered::variable::Db]
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
+/// - [crate::qmdb::any::unordered::varkey::Db]
 pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: CodecShared>,
