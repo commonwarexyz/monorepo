@@ -490,6 +490,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
+        pooler: &impl BufferPooler,
         blob: &E::Blob,
         table_size: u32,
         table_resize_frequency: u8,
@@ -498,7 +499,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
+        let mut reader =
+            buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -510,8 +512,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
 
             // Read both entries from the buffer
             let mut buf = [0u8; Entry::FULL_SIZE];
-            let read_buf = reader.read_exact(Entry::FULL_SIZE).await?.coalesce();
-            buf.copy_from_slice(read_buf.as_ref());
+            let mut read_buf = reader.read_exact(Entry::FULL_SIZE).await?;
+            read_buf.copy_to_slice(&mut buf);
             let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
 
             // Check both entries
@@ -699,6 +701,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -723,6 +726,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     table_size,
                     config.table_resize_frequency,

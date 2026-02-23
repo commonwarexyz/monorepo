@@ -164,7 +164,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
                     continue;
                 }
             }
-            let mut replay_blob = ReadBuffer::new(blob.clone(), *size, config.replay_buffer);
+            let mut replay_blob =
+                ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;

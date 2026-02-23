@@ -128,7 +128,12 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    read_buffer = Some(Read::new(blob, effective_size, NZUsize!(buffer_size)));
+                    read_buffer = Some(Read::from_pooler(
+                        &context,
+                        blob,
+                        effective_size,
+                        NZUsize!(buffer_size),
+                    ));
                 }
 
                 FuzzOperation::CreateWrite {
