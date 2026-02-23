@@ -38,7 +38,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
@@ -488,7 +488,7 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
 }
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
@@ -621,7 +621,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
 }
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 

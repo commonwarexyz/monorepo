@@ -1096,6 +1096,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
@@ -1103,7 +1104,6 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "num-rational",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1191,6 +1191,7 @@ dependencies = [
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-coding",
  "commonware-conformance",
  "commonware-consensus",
  "commonware-cryptography",
@@ -1209,6 +1210,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rand_distr",
+ "rayon",
  "rstest",
  "thiserror 2.0.17",
  "tracing",
@@ -1255,6 +1257,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
@@ -1269,7 +1272,6 @@ dependencies = [
  "num-rational",
  "num-traits",
  "p256 0.13.2",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1371,6 +1373,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-invariants"
+version = "2026.2.0"
+dependencies = [
+ "arbitrary",
+ "commonware-macros",
+ "commonware-utils",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "commonware-log"
 version = "2026.2.0"
 dependencies = [
@@ -1425,13 +1439,22 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "commonware-math-fuzz"
+version = "2026.2.0"
+dependencies = [
+ "arbitrary",
+ "commonware-math",
+ "libfuzzer-sys",
 ]
 
 [[package]]

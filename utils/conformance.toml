@@ -22,9 +22,9 @@ hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"
 n_cases = 65536
 hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
 
-["commonware_utils::rng::tests::conformance::BytesRngConformance"]
+["commonware_utils::rng::tests::conformance::FuzzRngConformance"]
 n_cases = 1024
-hash = "cc141bf6e5938f0aa49e025bb1ab236884056f742f7dc4bd141014804ec4e4f4"
+hash = "d0183ff92294532c435ef0bdb5735f25d16ec633adc7324f885d8b8117389134"
 
 ["commonware_utils::sequence::fixed_bytes::tests::conformance::CodecConformance<FixedBytes<16>>"]
 n_cases = 65536

@@ -1,8 +1,6 @@
 use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-#[cfg(test)]
-use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
 
 /// The modulus P := 2^64 - 2^32 + 1.
@@ -41,7 +39,7 @@ impl core::fmt::Debug for F {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let x = u.arbitrary::<u64>()?;
@@ -425,20 +423,57 @@ impl Field for F {
     }
 }
 
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use crate::algebra::{test_suites, Ring};
+    use arbitrary::{Arbitrary, Unstructured};
+
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        Exp(F, u8),
+        Div2(F),
+        StreamRoundtrip(Vec<u64>),
+        FuzzField,
+    }
+
+    impl Plan {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Exp(x, k) => {
+                    let mut naive = F::one();
+                    for _ in 0..k {
+                        naive = naive * x;
+                    }
+                    assert_eq!(naive, x.exp(&[k as u64]));
+                }
+                Self::Div2(x) => {
+                    assert_eq!((x + x).div_2(), x);
+                }
+                Self::StreamRoundtrip(data) => {
+                    let mut roundtrip =
+                        F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter()))
+                            .collect::<Vec<_>>();
+                    roundtrip.truncate(data.len());
+                    assert_eq!(data, roundtrip);
+                }
+                Self::FuzzField => {
+                    test_suites::fuzz_field::<F>(u)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_fuzz() {
+        commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::algebra;
-    use proptest::prelude::*;
-
-    impl Arbitrary for F {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<u64>().prop_map_into().boxed()
-        }
-    }
 
     #[test]
     fn test_generator_calculation() {
@@ -463,39 +498,6 @@ mod test {
     #[test]
     fn test_root_of_unity_exp() {
         assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
-    }
-
-    fn test_stream_roundtrip_inner(data: Vec<u64>) {
-        let mut roundtrip =
-            F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();
-        roundtrip.truncate(data.len());
-        assert_eq!(data, roundtrip);
-    }
-
-    proptest! {
-        #[test]
-        fn test_exp(x: F, k: u8) {
-            let mut naive = F::one();
-            for _ in 0..k {
-                naive = naive * x;
-            }
-            assert_eq!(naive, x.exp(&[k as u64]));
-        }
-
-        #[test]
-        fn test_div2(x: F) {
-            assert_eq!((x + x).div_2(), x)
-        }
-
-        #[test]
-        fn test_stream_roundtrip(xs in proptest::collection::vec(any::<u64>(), 0..128)) {
-            test_stream_roundtrip_inner(xs);
-        }
-    }
-
-    #[test]
-    fn test_field() {
-        algebra::test_suites::test_field(file!(), &F::arbitrary());
     }
 
     #[cfg(feature = "arbitrary")]
