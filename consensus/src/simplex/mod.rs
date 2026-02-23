@@ -267,7 +267,7 @@
 //! that certificate, no future leader can skip view `v`, and the notarized payload must be
 //! included as an ancestor in all subsequent proposals.
 //!
-//! ## Speculative Finality
+//! ## Optimistic Finality
 //!
 //! The forced inclusion property provides a weaker but faster form of finality: once a
 //! notarization certificate is observed for view `v` (without any timeout having fired),
@@ -281,7 +281,7 @@
 //! a nullification certificate to form. In the common case (no faults, no timeouts), this
 //! cannot happen.
 //!
-//! ## Asynchronous Finalization
+//! ## Avoiding Chained Finality
 //!
 //! Finalization does not require consecutive honest views. When a participant certifies
 //! `notarization(c,v)`, it broadcasts `finalize(c,v)` and immediately enters `v+1`,
