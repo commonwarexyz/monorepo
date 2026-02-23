@@ -143,7 +143,7 @@
 //! a nullification certificate to form. In the common case (no faults, no timeouts), this
 //! cannot happen.
 //!
-//! ### Avoiding Chained Finality
+//! ### Unchained Finalization
 //!
 //! Finalization does not require consecutive honest views. When a participant certifies
 //! `notarization(c,v)`, it broadcasts `finalize(c,v)` and immediately enters `v+1`,
