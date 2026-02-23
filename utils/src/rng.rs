@@ -1,6 +1,7 @@
 //! Utilities for random number generation.
 
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use std::mem::size_of;
 
 /// Returns a seeded RNG for deterministic testing.
 ///
@@ -22,10 +23,7 @@ pub fn test_rng_seeded(seed: u64) -> StdRng {
 /// when fuzz input has low structure (for example empty or repeated bytes).
 const FUZZ_RNG_MIX_DOMAIN: u64 = 0x9e3779b97f4a7c15;
 /// Width of each source window in bytes.
-///
-/// This is derived from `u64` so the loaded window maps directly to one output
-/// block before mixing.
-const BLOCK_BYTES: usize = (u64::BITS as usize) / (u8::BITS as usize);
+const BLOCK_BYTES: usize = size_of::<u64>();
 
 /// An RNG that expands a fuzzer byte slice into an infinite deterministic stream.
 ///
@@ -112,7 +110,7 @@ impl FuzzRng {
         let mut bytes = [0u8; BLOCK_BYTES];
         if !self.bytes.is_empty() {
             let len = self.bytes.len() as u64;
-            for (i, byte) in bytes.iter_mut().enumerate().take(BLOCK_BYTES) {
+            for (i, byte) in bytes.iter_mut().enumerate() {
                 *byte = self.bytes[(self.ctr.wrapping_add(i as u64) % len) as usize];
             }
         }
@@ -173,6 +171,9 @@ impl RngCore for FuzzRng {
     }
 }
 
+// SAFETY: FuzzRng is not cryptographically secure. It implements CryptoRng
+// only because the consensus fuzzer requires CryptoRng-bounded RNG. This type
+// must never be used outside of fuzz/test contexts.
 impl CryptoRng for FuzzRng {}
 
 #[cfg(test)]
@@ -365,19 +366,27 @@ mod tests {
         assert_eq!(rng.next_u64(), expected1);
     }
 
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_conformance::Conformance;
+        use rand::Rng;
 
         /// Conformance wrapper for FuzzRng that tests output stability.
         ///
-        /// This ensures that counter-mixed expansion behavior
-        /// remains stable across versions.
+        /// Derives both the input length and content from a seeded RNG so
+        /// conformance covers variable-length inputs including non-aligned
+        /// lengths that exercise wrapping.
         struct FuzzRngConformance;
 
         impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut rng = FuzzRng::new(seed.to_be_bytes().to_vec());
+                let mut seed_rng = test_rng_seeded(seed);
+                let len = seed_rng.gen_range(1..=64);
+                let mut input = vec![0u8; len];
+                seed_rng.fill_bytes(&mut input);
+
+                let mut rng = FuzzRng::new(input);
                 const CONFORMANCE_BLOCKS: usize = 32;
 
                 // Generate enough output to exercise wrapping and mixing.
