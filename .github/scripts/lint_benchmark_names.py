@@ -40,49 +40,56 @@ Rules
 
 How it works
 ------------
-This script runs `cargo bench --workspace -- --list` to extract actual
-registered benchmark names from the compiled binaries, then validates them.
+This script parses benchmark names from benchmark command output and validates
+them. Supported input formats:
+1. Bencher output from `cargo bench ... -- --output-format bencher`:
+   `test module::function/k=v ... bench: ...`
+2. List output from `cargo bench ... -- --list`:
+   `module::function/k=v: benchmark`
 
 Usage
 -----
-  ./lint_benchmark_names.py           # lint from repo root
-  ./lint_benchmark_names.py /path/to/repo
+  ./lint_benchmark_names.py benchmark-output.txt
+  ./lint_benchmark_names.py output1.txt output2.txt
+  cargo bench -- --output-format bencher | ./lint_benchmark_names.py -
 """
 
 import re
-import subprocess
 import sys
-from pathlib import Path
+
+BENCHER_RE = re.compile(r"^test (.+?) \.\.\. bench:")
+LIST_RE = re.compile(r"^(.+): benchmark$")
 
 
-def get_benchmark_names(root: Path) -> list[str]:
-    """
-    Run cargo bench --list to get all benchmark names.
-
-    Returns list of benchmark names.
-    """
-    # Exclude fuzz crates which aren't criterion benchmarks
-    result = subprocess.run(
-        [
-            "cargo", "bench", "--workspace",
-            "--exclude", "commonware-runtime-fuzz",
-            "--exclude", "commonware-consensus-fuzz",
-            "--", "--list"
-        ],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-
-    # Parse benchmark names from stdout
-    benchmarks = []
-    for line in result.stdout.splitlines():
+def parse_benchmark_names(text: str) -> list[str]:
+    """Extract benchmark names from command output."""
+    names = []
+    for line in text.splitlines():
         line = line.strip()
-        if line.endswith(": benchmark"):
-            name = line[:-11]  # Remove ": benchmark" suffix
-            benchmarks.append(name)
+        if not line:
+            continue
+        match = BENCHER_RE.match(line)
+        if match:
+            names.append(match.group(1))
+            continue
+        match = LIST_RE.match(line)
+        if match:
+            names.append(match.group(1))
+    return names
 
-    return benchmarks
+
+def read_inputs(paths: list[str]) -> list[str]:
+    """Read benchmark names from files or stdin ('-')."""
+    all_names = []
+    for path in paths:
+        if path == "-":
+            text = sys.stdin.read()
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        all_names.extend(parse_benchmark_names(text))
+    # Preserve order while de-duplicating.
+    return list(dict.fromkeys(all_names))
 
 
 def validate_benchmark_name(name: str) -> list[str]:
@@ -135,20 +142,18 @@ def validate_benchmark_name(name: str) -> list[str]:
 
 
 def main() -> int:
-    if len(sys.argv) > 1:
-        root = Path(sys.argv[1])
-    else:
-        root = Path.cwd()
-        while root != root.parent:
-            if (root / "Cargo.toml").exists() and (root / ".github").exists():
-                break
-            root = root.parent
+    if len(sys.argv) <= 1:
+        print(
+            "Usage: lint_benchmark_names.py <benchmark-output> [<benchmark-output> ...]\n"
+            "Pass '-' to read from stdin.",
+            file=sys.stderr,
+        )
+        return 1
 
-    print("Compiling benchmarks and extracting names...", file=sys.stderr)
-    benchmarks = get_benchmark_names(root)
+    benchmarks = read_inputs(sys.argv[1:])
 
     if not benchmarks:
-        print("ERROR: No benchmark names found. Is this the right directory?")
+        print("ERROR: No benchmark names found in provided input.", file=sys.stderr)
         return 1
 
     all_violations = []
