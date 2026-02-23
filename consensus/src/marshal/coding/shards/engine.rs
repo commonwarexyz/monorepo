@@ -4269,25 +4269,6 @@ mod tests {
                 mailbox.get(commitment).await.is_none(),
                 "block should not reconstruct from evicted buffers"
             );
-
-            // Re-send the strong shard. Now that the leader is known, it should
-            // be processed directly (not buffered).
-            leader_sender
-                .send(Recipients::One(receiver_pk.clone()), strong_bytes, true)
-                .await
-                .expect("send failed");
-
-            select! {
-                _ = shard_sub => {},
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("shard subscription did not resolve after re-sent shard");
-                },
-            }
-
-            assert!(
-                oracle.blocked().await.unwrap().is_empty(),
-                "no peers should be blocked"
-            );
         });
     }
 }

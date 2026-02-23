@@ -211,7 +211,7 @@ where
                 debug!("peer set subscription closed");
                 break;
             } => {
-                self.evict_disconnected_peers(&tracked_peers);
+                self.evict_untracked_peers(&tracked_peers);
             },
         }
     }
@@ -330,42 +330,21 @@ where
             // Decrement the item count
             // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
-            let count = self
-                .counts
-                .entry(stale)
-                .and_modify(|c| *c = c.checked_sub(1).unwrap())
-                .or_insert_with(|| unreachable!());
-            if *count == 0 {
-                let existing = self.counts.remove(&stale);
-                assert!(existing == Some(0));
-                self.items.remove(&stale);
-            }
+            decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
         true
     }
 
-    fn evict_disconnected_peers(&mut self, tracked_peers: &Set<P>) {
+    fn evict_untracked_peers(&mut self, tracked_peers: &Set<P>) {
         let tracked = tracked_peers.as_ref();
-        let peers_to_remove: Vec<P> = self
+        for (peer, deque) in self
             .deques
-            .keys()
-            .filter(|p| !tracked.contains(p))
-            .cloned()
-            .collect();
-
-        for peer in peers_to_remove {
-            let Some(deque) = self.deques.remove(&peer) else {
-                continue;
-            };
+            .extract_if(.., |peer, _| !tracked.contains(peer))
+        {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
-                let count = self.counts.get_mut(&digest).expect("count must exist");
-                *count = count.checked_sub(1).unwrap();
-                if *count == 0 {
-                    self.counts.remove(&digest);
-                    self.items.remove(&digest);
-                }
+                decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
             }
         }
     }
@@ -413,5 +392,23 @@ where
         } else {
             Status::Dropped
         });
+    }
+}
+
+/// Decrement a digest refcount and evict it from cache when no references remain.
+fn decrement_digest_refcount<D: Ord, M>(
+    counts: &mut BTreeMap<D, usize>,
+    items: &mut BTreeMap<D, M>,
+    digest: &D,
+) {
+    let should_remove = {
+        let count = counts.get_mut(digest).expect("count must exist");
+        *count = count.checked_sub(1).expect("count must be > 0");
+        *count == 0
+    };
+    if should_remove {
+        let existing = counts.remove(digest);
+        assert!(existing == Some(0));
+        items.remove(digest);
     }
 }
