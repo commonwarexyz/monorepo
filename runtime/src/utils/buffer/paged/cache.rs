@@ -512,50 +512,47 @@ impl CacheRef {
             }
         }
 
-        // For larger batches, materialize owned logical pages outside the cache write lock, then
-        // commit them via cache_pages(). This keeps lock hold time close to metadata updates.
-        const MAX_IN_LOCK_COPY_PAGES: usize = 2;
-        if page_count > MAX_IN_LOCK_COPY_PAGES {
-            let physical_bytes = physical_pages.as_ref();
-            let mut pages = Vec::with_capacity(page_count);
-            for page_idx in 0..page_count {
-                let page_start = page_idx * physical_page_size;
-                let page = &physical_bytes[page_start..page_start + logical_page_size];
-                let mut owned = self.pool.alloc(logical_page_size);
-                owned.put_slice(page);
-                pages.push(owned.freeze());
-            }
-            self.cache_pages(blob_id, pages, offset);
-            return;
-        }
-
-        // Small batches: copy directly into cache slots while holding the write lock to avoid
-        // per-page temporary allocations.
+        // Copy directly into cache slots. For larger batches, use bounded chunks to keep lock hold
+        // time controlled without allocating one temporary owned page per input page.
         let physical_bytes = physical_pages.as_ref();
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        let mut cache = self.cache.write();
 
-        for page_idx in 0..page_count {
-            let current_page = page_num;
-            let page_start = page_idx * physical_page_size;
-            let page = &physical_bytes[page_start..page_start + logical_page_size];
-            if cache
-                .insert_page_bytes((blob_id, current_page), page)
-                .is_err()
-            {
-                error!(
-                    blob_id,
-                    page_num = current_page,
-                    dropped_pages = page_count - page_idx,
-                    "failed to cache pages"
-                );
-                break;
-            }
-            if page_idx + 1 < page_count {
-                page_num = page_num
-                    .checked_add(1)
-                    .expect("page number overflow while caching");
+        const MAX_SINGLE_LOCK_COPY_PAGES: usize = 2;
+        const CHUNKED_LOCK_COPY_PAGES: usize = 32;
+        let chunk_size = if page_count <= MAX_SINGLE_LOCK_COPY_PAGES {
+            page_count
+        } else {
+            CHUNKED_LOCK_COPY_PAGES
+        };
+
+        let mut page_idx = 0;
+        while page_idx < page_count {
+            let chunk_end = page_idx.saturating_add(chunk_size).min(page_count);
+            let mut cache = self.cache.write();
+            while page_idx < chunk_end {
+                let current_page = page_num;
+                let page_start = page_idx * physical_page_size;
+                let page = &physical_bytes[page_start..page_start + logical_page_size];
+                if cache
+                    .insert_page_bytes((blob_id, current_page), page)
+                    .is_err()
+                {
+                    error!(
+                        blob_id,
+                        page_num = current_page,
+                        dropped_pages = page_count - page_idx,
+                        "failed to cache pages"
+                    );
+                    return;
+                }
+
+                page_idx += 1;
+                if page_idx < page_count {
+                    page_num = page_num
+                        .checked_add(1)
+                        .expect("page number overflow while caching");
+                }
             }
         }
     }
