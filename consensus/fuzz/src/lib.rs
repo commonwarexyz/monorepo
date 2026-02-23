@@ -543,7 +543,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        invariants::check::<P>(config.n, states).unwrap_or_else(|err| panic!("{err}"));
     });
 }
 
@@ -616,7 +616,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        invariants::check::<P>(config.n, states).unwrap_or_else(|err| panic!("{err}"));
     });
 }
 
@@ -835,7 +835,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        invariants::check::<P>(config.n, states).unwrap_or_else(|err| panic!("{err}"));
     });
 }
 
