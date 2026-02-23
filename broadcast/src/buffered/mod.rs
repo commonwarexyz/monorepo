@@ -143,6 +143,7 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_set_subscription: None,
             };
             let (engine, engine_mailbox) =
                 Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
@@ -680,6 +681,7 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_set_subscription: None,
             };
             let (engine, mailbox) =
                 Engine::<_, PublicKey, TestMessage>::new(engine_context.clone(), config);
@@ -767,6 +769,7 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_set_subscription: None,
             };
             let (engine, engine_mailbox) =
                 Engine::<_, PublicKey, TestMessage>::new(ctx.clone(), config);
@@ -886,5 +889,150 @@ mod tests {
         for seed in 0..25 {
             clean_shutdown(seed);
         }
+    }
+
+    #[test_traced]
+    fn test_peer_set_update_evicts_disconnected_peer_buffers() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+
+            let peer_a = peers[0].clone();
+            let peer_b = peers[1].clone();
+            let peer_c = peers[2].clone();
+
+            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
+
+            // Spawn peer B's engine with the peer set subscription.
+            let network_b = registrations.remove(&peer_b).unwrap();
+            let config_b = Config {
+                public_key: peer_b.clone(),
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_set_subscription: Some(peer_set_rx),
+            };
+            let (engine_b, mailbox_b) =
+                Engine::<_, PublicKey, TestMessage>::new(context.with_label("peer_b"), config_b);
+            engine_b.start(network_b);
+
+            // Spawn remaining peer engines without subscription.
+            let mut mailboxes = BTreeMap::new();
+            mailboxes.insert(peer_b.clone(), mailbox_b);
+            for (peer, network) in registrations {
+                let ctx = context.with_label(&format!("peer_{}", peer));
+                let config = Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: RangeCfg::from(..),
+                    peer_set_subscription: None,
+                };
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage>::new(ctx, config);
+                mailboxes.insert(peer, mailbox);
+                engine.start(network);
+            }
+
+            // Peer A broadcasts a message.
+            let msg = TestMessage::shared(b"eviction-test");
+            let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
+            let result = mailbox_a.broadcast(Recipients::All, msg.clone()).await;
+            assert_eq!(result.await.unwrap().len(), 2);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Peer B should have cached the message (received from A).
+            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await,
+                Some(msg.clone()),
+                "peer B should have the message before eviction"
+            );
+
+            // Send a peer set update excluding peer A.
+            let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
+            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            context.sleep(A_JIFFY).await;
+
+            // Peer A's deque was evicted; the message should be gone.
+            assert!(
+                mailbox_b.get(msg.digest()).await.is_none(),
+                "message should be evicted after peer A left the peer set"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_peer_set_update_preserves_shared_messages() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+
+            let peer_a = peers[0].clone();
+            let peer_b = peers[1].clone();
+            let peer_c = peers[2].clone();
+
+            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
+
+            // Spawn peer B with subscription.
+            let network_b = registrations.remove(&peer_b).unwrap();
+            let config_b = Config {
+                public_key: peer_b.clone(),
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_set_subscription: Some(peer_set_rx),
+            };
+            let (engine_b, mailbox_b) =
+                Engine::<_, PublicKey, TestMessage>::new(context.with_label("peer_b"), config_b);
+            engine_b.start(network_b);
+
+            // Spawn remaining peer engines.
+            let mut mailboxes = BTreeMap::new();
+            mailboxes.insert(peer_b.clone(), mailbox_b);
+            for (peer, network) in registrations {
+                let ctx = context.with_label(&format!("peer_{}", peer));
+                let config = Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: RangeCfg::from(..),
+                    peer_set_subscription: None,
+                };
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage>::new(ctx, config);
+                mailboxes.insert(peer, mailbox);
+                engine.start(network);
+            }
+
+            // Both A and C broadcast the same message.
+            let msg = TestMessage::shared(b"shared-msg");
+            let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
+            let mailbox_c = mailboxes.get(&peer_c).unwrap().clone();
+            mailbox_a.broadcast(Recipients::All, msg.clone()).await;
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            mailbox_c.broadcast(Recipients::All, msg.clone()).await;
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // B has the message in both A's and C's deques (ref count = 2).
+            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
+            assert_eq!(mailbox_b.get(msg.digest()).await, Some(msg.clone()));
+
+            // Evict peer A only; C is still tracked.
+            let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
+            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            context.sleep(A_JIFFY).await;
+
+            // Message should still be available (C's deque still holds it).
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await,
+                Some(msg.clone()),
+                "message should survive when another tracked peer still references it"
+            );
+        });
     }
 }

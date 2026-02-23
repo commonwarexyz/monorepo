@@ -206,6 +206,7 @@ fn fuzz(input: FuzzInput) {
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_set_subscription: None,
             };
 
             // Create engine

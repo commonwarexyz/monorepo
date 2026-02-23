@@ -5,14 +5,18 @@ use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    PeerSetSubscription, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    futures::OptionFuture,
+    ordered::Set,
+};
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
@@ -63,6 +67,9 @@ where
 
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
+
+    /// Optional subscription to peer set changes.
+    peer_set_subscription: Option<PeerSetSubscription<P>>,
 
     ////////////////////////////////////////
     // Cache
@@ -116,6 +123,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            peer_set_subscription: cfg.peer_set_subscription,
             metrics,
         };
 
@@ -145,6 +153,9 @@ where
                 // Cleanup waiters
                 self.cleanup_waiters();
                 let _ = self.metrics.waiters.try_set(self.waiters.len());
+                let peer_set_future = OptionFuture::from(
+                    self.peer_set_subscription.as_mut().map(|rx| rx.recv()),
+                );
             },
             on_stopped => {
                 debug!("shutdown");
@@ -199,6 +210,13 @@ where
                     .get_or_create(&SequencerLabel::from(&peer))
                     .inc();
                 self.handle_network(peer, msg);
+            },
+            result = peer_set_future => {
+                if let Some((_, _, tracked_peers)) = result {
+                    self.evict_disconnected_peers(&tracked_peers);
+                } else {
+                    self.peer_set_subscription = None;
+                }
             },
         }
     }
@@ -330,6 +348,31 @@ where
         }
 
         true
+    }
+
+    fn evict_disconnected_peers(&mut self, tracked_peers: &Set<P>) {
+        let tracked = tracked_peers.as_ref();
+        let peers_to_remove: Vec<P> = self
+            .deques
+            .keys()
+            .filter(|p| !tracked.contains(p))
+            .cloned()
+            .collect();
+
+        for peer in peers_to_remove {
+            let Some(deque) = self.deques.remove(&peer) else {
+                continue;
+            };
+            debug!(?peer, digests = deque.len(), "evicting disconnected peer");
+            for digest in deque {
+                let count = self.counts.get_mut(&digest).expect("count must exist");
+                *count = count.checked_sub(1).unwrap();
+                if *count == 0 {
+                    self.counts.remove(&digest);
+                    self.items.remove(&digest);
+                }
+            }
+        }
     }
 
     ////////////////////////////////////////
