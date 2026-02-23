@@ -2,8 +2,7 @@
 //!
 //! # Overview
 //!
-//! When an object is expensive to construct but cheap to reset (e.g. a
-//! Reed-Solomon encoder whose GF lookup tables survive a `reset()`), keeping
+//! When an object is expensive to construct but cheap to reset, keeping
 //! one instance per thread avoids repeated allocation. The manual
 //! take-then-return pattern is fragile: forgetting the return silently
 //! degrades to constructing a new instance.
@@ -217,5 +216,26 @@ mod tests {
         // Failed reset should not evict the cached value.
         let cached = RESET_ERR_CACHE.with(|cell| *cell.borrow());
         assert_eq!(cached, Some(42));
+    }
+
+    thread_local_cache!(static NESTED_CACHE: Vec<u8>);
+
+    #[test]
+    fn test_nested_guards_last_drop_wins() {
+        NESTED_CACHE.with(|cell| *cell.borrow_mut() = None);
+
+        let mut outer = Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![1]), |_| Ok(())).unwrap();
+        outer.push(10);
+
+        {
+            let mut inner =
+                Cached::take(&NESTED_CACHE, || Ok::<_, ()>(vec![2]), |_| Ok(())).unwrap();
+            inner.push(20);
+        }
+
+        drop(outer);
+
+        let cached = NESTED_CACHE.with(|cell| cell.borrow().clone());
+        assert_eq!(cached, Some(vec![1, 10]));
     }
 }
