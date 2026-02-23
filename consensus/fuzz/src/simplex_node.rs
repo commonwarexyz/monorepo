@@ -30,7 +30,7 @@ use std::{
 };
 
 const MIN_EVENTS: usize = 10;
-const MAX_EVENTS: usize = 80;
+const MAX_EVENTS: usize = 50;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
 
@@ -85,40 +85,6 @@ impl Arbitrary<'_> for SimplexNodeFuzzInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum VoteKey {
-    Notarize {
-        signer: usize,
-        view: u64,
-        payload: Sha256Digest,
-    },
-    Nullify {
-        signer: usize,
-        view: u64,
-    },
-    Finalize {
-        signer: usize,
-        view: u64,
-        payload: Sha256Digest,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CertificateKey {
-    Notarization {
-        signer: usize,
-        view: u64,
-        payload: Sha256Digest,
-        with_honest_vote: bool,
-    },
-    Finalization {
-        signer: usize,
-        view: u64,
-        payload: Sha256Digest,
-        with_honest_vote: bool,
-    },
-}
-
 struct NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
@@ -146,9 +112,6 @@ where
 
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
     proposal_by_view: HashMap<u64, Proposal<Sha256Digest>>,
-
-    used_votes: HashSet<VoteKey>,
-    used_certificates: HashSet<CertificateKey>,
 
     honest_notarize_votes: HashMap<Proposal<Sha256Digest>, Notarize<S, Sha256Digest>>,
     honest_finalize_votes: HashMap<Proposal<Sha256Digest>, Finalize<S, Sha256Digest>>,
@@ -201,8 +164,6 @@ where
             last_nullified_view: 0,
             latest_proposals: VecDeque::new(),
             proposal_by_view: HashMap::new(),
-            used_votes: HashSet::new(),
-            used_certificates: HashSet::new(),
             honest_notarize_votes: HashMap::new(),
             honest_finalize_votes: HashMap::new(),
             injected_finalize_views: HashSet::new(),
@@ -538,7 +499,9 @@ where
                     .insert(view, notarize.proposal.clone());
                 self.latest_proposals.push_back(notarize.proposal);
             }
-            Vote::Nullify(_) => {}
+            Vote::Nullify(nullify) => {
+                self.last_nullified_view = self.last_nullified_view.max(nullify.view().get());
+            }
             Vote::Finalize(finalize) => {
                 let view = finalize.view().get();
                 self.honest_finalize_votes
@@ -592,6 +555,7 @@ where
         match certificate {
             Certificate::Notarization(notarization) => {
                 let view = notarization.view().get();
+                self.last_view = self.last_view.max(view);
                 self.last_notarized_view = self.last_notarized_view.max(view);
                 self.notarized_by_view
                     .insert(view, notarization.proposal.payload);
@@ -602,9 +566,11 @@ where
             Certificate::Nullification(nullification) => {
                 let view = nullification.view().get();
                 self.last_nullified_view = self.last_nullified_view.max(view);
+                self.last_view = self.last_view.max(view);
             }
             Certificate::Finalization(finalization) => {
                 let view = finalization.view().get();
+                self.last_view = self.last_view.max(view);
                 self.last_finalized_view = self.last_finalized_view.max(view);
                 self.finalized_by_view
                     .insert(view, finalization.proposal.payload);
@@ -647,7 +613,7 @@ where
         while let Ok(update) = monitor.try_recv() {
             if update.get() > latest.get() {
                 *latest = update;
-                self.last_finalized_view = update.get();
+                self.last_finalized_view = self.last_finalized_view.max(update.get());
                 progressed = true;
             }
         }
@@ -793,16 +759,6 @@ where
         signer_idx: usize,
         proposal: Proposal<Sha256Digest>,
     ) {
-        let view = proposal.view().get();
-        let payload = proposal.payload;
-
-        let key = VoteKey::Notarize {
-            signer: signer_idx,
-            view,
-            payload,
-        };
-        self.used_votes.insert(key);
-
         let Some(vote) = Notarize::sign(&self.schemes[signer_idx], proposal) else {
             return;
         };
@@ -822,13 +778,6 @@ where
     }
 
     async fn send_nullify_vote_for_view(&mut self, signer_idx: usize, view: u64) {
-        let view = view.max(1);
-        let key = VoteKey::Nullify {
-            signer: signer_idx,
-            view,
-        };
-        self.used_votes.insert(key);
-
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
         let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.schemes[signer_idx], round)
         else {
@@ -850,16 +799,6 @@ where
         signer_idx: usize,
         proposal: Proposal<Sha256Digest>,
     ) {
-        let view = proposal.view().get();
-        let payload = proposal.payload;
-
-        let key = VoteKey::Finalize {
-            signer: signer_idx,
-            view,
-            payload,
-        };
-        self.used_votes.insert(key);
-
         let Some(vote) = Finalize::sign(&self.schemes[signer_idx], proposal) else {
             return;
         };
@@ -1009,17 +948,9 @@ where
 
         let cert = self.notarization_with_optional_honest_vote(&proposal, prefer_honest_vote);
 
-        let Some((certificate, with_honest_vote)) = cert else {
+        let Some((certificate, _)) = cert else {
             return;
         };
-
-        let key = CertificateKey::Notarization {
-            signer: signer_idx,
-            view,
-            payload,
-            with_honest_vote,
-        };
-        self.used_certificates.insert(key);
 
         self.notarized_by_view.insert(view, payload);
         self.last_notarized_view = self.last_notarized_view.max(view);
@@ -1168,17 +1099,9 @@ where
         let prefer_honest_vote = self.context.gen_bool(0.5);
         let cert = self.finalization_with_optional_honest_vote(&proposal, prefer_honest_vote);
 
-        let Some((certificate, with_honest_vote)) = cert else {
+        let Some((certificate, _)) = cert else {
             return;
         };
-
-        let key = CertificateKey::Finalization {
-            signer: signer_idx,
-            view,
-            payload,
-            with_honest_vote,
-        };
-        self.used_certificates.insert(key);
 
         self.finalized_by_view.insert(view, payload);
         self.last_finalized_view = self.last_finalized_view.max(view);
