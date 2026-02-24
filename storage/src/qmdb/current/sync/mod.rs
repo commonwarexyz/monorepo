@@ -169,6 +169,11 @@ where
     .await?;
 
     // Initialize bitmap with pruned chunks.
+    //
+    // Floor division is intentional: chunks entirely below range.start are pruned.
+    // If range.start is not chunk-aligned, the partial leading chunk is reconstructed by
+    // init_from_log, which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the
+    // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| qmdb::Error::DataCorrupted("pruned chunks overflow"))?;

@@ -98,9 +98,11 @@
 //!
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard MMR hashing. At the grafting height, it detects the boundary and
-//! reconstructs the grafted leaf by hashing `chunk || ops_subtree_root`. Above the grafting
-//! height, it resumes standard MMR hashing. If the reconstructed root matches the expected root
-//! and bit _i_ is set in the chunk, the operation is proven active.
+//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks
+//! the grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf
+//! is the ops subtree root itself (identity optimization -- see `grafting::Verifier::node`).
+//! Above the grafting height, it resumes standard MMR hashing. If the reconstructed root
+//! matches the expected root and bit _i_ is set in the chunk, the operation is proven active.
 //!
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.

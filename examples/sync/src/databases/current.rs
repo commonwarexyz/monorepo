@@ -2,7 +2,10 @@
 //!
 //! A `current` database extends an `any` database with an activity bitmap that tracks which
 //! operations are active (i.e. represent the current state of their key) vs inactive
-//! (superseded or deleted). Its canonical root is `hash(grafted_root || ops_root)`.
+//! (superseded or deleted). Its canonical root folds the ops root, a grafted MMR root
+//! (combining bitmap chunks with ops subtree roots), and an optional partial-chunk digest.
+//! See the [`current`](commonware_storage::qmdb::current) module documentation for the
+//! full formula.
 //!
 //! For sync, the engine targets the **ops root** (not the canonical root). The operations and
 //! proof format are identical to `any` -- the bitmap is reconstructed deterministically from
