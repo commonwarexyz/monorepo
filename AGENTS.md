@@ -768,17 +768,34 @@ _Generally, we try to minimize the length of functions and variables._
 
 ### Namespace Conventions
 
-Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
+The codebase uses a two-level namespace scheme for domain separation:
+
+#### Root Namespaces
+
+Root namespaces are complete, self-contained identifiers that follow the pattern:
 ```
 _COMMONWARE_<CRATE>_<OPERATION>
 ```
 
+These are used directly by internal library code (e.g., cryptographic handshakes, DKG) or defined by applications and passed into library components via configuration.
+
 Examples:
 - `_COMMONWARE_CODING_ZODA` - ZODA encoding in the coding crate
-- `_COMMONWARE_STREAM_HANDSHAKE` - Handshake protocol in the stream crate
+- `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` - Handshake protocol in the cryptography crate
 - `_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG` - BLS12-381 DKG in the cryptography crate
 
-This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
+#### Suffixes
+
+Library crates internally append short suffixes to a caller-provided root namespace using `commonware_utils::union()`. Suffixes should be short and descriptive. They do not repeat the `_COMMONWARE_<CRATE>_` prefix since the root already provides global uniqueness.
+
+Examples:
+- `_SEED`, `_NOTARIZE`, `_NULLIFY`, `_FINALIZE` - Simplex consensus message types
+- `_CHUNK`, `_ACK` - Ordered broadcast message types
+- `_TRACKER`, `_STREAM` - P2P subsystem actors
+
+Suffixes can be chained. For example, an application might pass its root namespace to a P2P component, which appends `_TRACKER`, resulting in `<root>_TRACKER`.
+
+Changing any namespace (root or suffix) is a breaking change that affects transcript randomness and derived values.
 
 ### Trait Patterns
 
