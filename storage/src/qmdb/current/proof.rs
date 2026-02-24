@@ -5,7 +5,6 @@
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
-    bitmap::partial_chunk_root,
     journal::contiguous::{Contiguous, Reader as _},
     mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
     qmdb::{current::grafting, Error},
@@ -26,6 +25,10 @@ pub struct RangeProof<D: Digest> {
 
     /// The partial chunk digest from the status bitmap at the time of proof generation, if any.
     pub partial_chunk_digest: Option<D>,
+
+    /// The ops MMR root at the time of proof generation.
+    /// Needed by the verifier to reconstruct the canonical root.
+    pub ops_root: D,
 }
 
 impl<D: Digest> RangeProof<D> {
@@ -35,6 +38,7 @@ impl<D: Digest> RangeProof<D> {
         status: &BitMap<N>,
         storage: &S,
         range: Range<Location>,
+        ops_root: D,
     ) -> Result<Self, Error> {
         let proof = verification::range_proof(storage, range).await?;
 
@@ -51,6 +55,7 @@ impl<D: Digest> RangeProof<D> {
         Ok(Self {
             proof,
             partial_chunk_digest,
+            ops_root,
         })
     }
 
@@ -60,6 +65,7 @@ impl<D: Digest> RangeProof<D> {
     ///
     /// # Errors
     ///
+    /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
@@ -74,17 +80,26 @@ impl<D: Digest> RangeProof<D> {
         log: &C,
         start_loc: Location,
         max_ops: NonZeroU64,
+        ops_root: D,
     ) -> Result<(Self, Vec<C::Item>, Vec<[u8; N]>), Error> {
         // Compute the start and end locations & positions of the range.
         let leaves = Location::new_unchecked(status.len());
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
+
+        // Reject ranges that start in pruned bitmap chunks.
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let start = *start_loc / chunk_bits;
+        if (start as usize) < status.pruned_chunks() {
+            return Err(Error::OperationPruned(start_loc));
+        }
+
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted storage.
-        let proof = Self::new(hasher, status, storage, start_loc..end_loc).await?;
+        let proof = Self::new(hasher, status, storage, start_loc..end_loc, ops_root).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -98,8 +113,6 @@ impl<D: Digest> RangeProof<D> {
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let start = *start_loc / chunk_bits; // chunk that contains the first bit
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
@@ -158,34 +171,33 @@ impl<D: Digest> RangeProof<D> {
             grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
-        if next_bit == 0 {
-            return self
-                .proof
-                .verify_range_inclusion(&mut verifier, &elements, start_loc, root);
-        }
+        let has_partial_chunk = next_bit != 0;
 
-        // The proof must contain the partial chunk digest.
-        let Some(last_chunk_digest) = self.partial_chunk_digest else {
-            debug!("proof has no partial chunk digest");
-            return false;
-        };
-
-        // If the proof is over an operation in the partial chunk, we need to verify the last chunk
-        // digest from the proof matches the digest of chunk, since these bits are not part of the
-        // mmr.
-        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS == *leaves / BitMap::<N>::CHUNK_SIZE_BITS {
-            let Some(last_chunk) = chunks.last() else {
-                debug!("chunks is empty");
+        // For partial chunks, validate the last chunk digest from the proof.
+        if has_partial_chunk {
+            let Some(last_chunk_digest) = self.partial_chunk_digest else {
+                debug!("proof has no partial chunk digest");
                 return false;
             };
-            let expected_last_chunk_digest = verifier.digest(last_chunk);
-            if last_chunk_digest != expected_last_chunk_digest {
-                debug!("last chunk digest does not match expected value");
-                return false;
+
+            // If the proof covers an operation in the partial chunk, verify that the
+            // chunk provided by the caller matches the digest embedded in the proof.
+            if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS
+                == *leaves / BitMap::<N>::CHUNK_SIZE_BITS
+            {
+                let Some(last_chunk) = chunks.last() else {
+                    debug!("chunks is empty");
+                    return false;
+                };
+                let expected_last_chunk_digest = verifier.digest(last_chunk);
+                if last_chunk_digest != expected_last_chunk_digest {
+                    debug!("last chunk digest does not match expected value");
+                    return false;
+                }
             }
         }
 
-        // Reconstruct the MMR root and combine with partial chunk to get the full root.
+        // Reconstruct the grafted MMR root from the proof.
         let mmr_root = match self
             .proof
             .reconstruct_root(&mut verifier, &elements, start_loc)
@@ -197,9 +209,15 @@ impl<D: Digest> RangeProof<D> {
             }
         };
 
-        let reconstructed_root =
-            partial_chunk_root::<H, N>(hasher, &mmr_root, next_bit, &last_chunk_digest);
-
+        // Compute the canonical root and compare.
+        hasher.update(&self.ops_root);
+        hasher.update(&mmr_root);
+        if has_partial_chunk {
+            // partial_chunk_digest is guaranteed Some by the check above.
+            hasher.update(&next_bit.to_be_bytes());
+            hasher.update(self.partial_chunk_digest.as_ref().unwrap());
+        }
+        let reconstructed_root = hasher.finalize();
         reconstructed_root == *root
     }
 }
@@ -221,17 +239,21 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// Return an inclusion proof that incorporates activity status for the operation designated by
     /// `loc`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - Panics if `loc` is out of bounds.
+    /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
         status: &BitMap<N>,
         storage: &S,
         loc: Location,
+        ops_root: D,
     ) -> Result<Self, Error> {
-        // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
-        let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1).await?;
+        // Reject locations in pruned bitmap chunks.
+        if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
+            return Err(Error::OperationPruned(loc));
+        }
+        let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1, ops_root).await?;
         let chunk = *status.get_chunk_containing(*loc);
         Ok(Self {
             loc,
