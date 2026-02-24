@@ -705,10 +705,19 @@ impl<S: Scheme, D: Digest> MNotarization<S, D> {
         I: IntoIterator<Item = &'a Notarize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = notarizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, M5f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+        let mut iter = notarizes.into_iter();
+        let first = iter.next()?;
+        let proposal = first.proposal.clone();
+        let mut attestations = vec![first.attestation.clone()];
+
+        for notarize in iter {
+            if notarize.proposal != proposal {
+                return None;
+            }
+            attestations.push(notarize.attestation.clone());
+        }
+
+        let certificate = scheme.assemble::<_, M5f1>(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -946,10 +955,19 @@ impl<S: Scheme> Nullification<S> {
         I: IntoIterator<Item = &'a Nullify<S>>,
         I::IntoIter: Send,
     {
-        let mut iter = nullifies.into_iter().peekable();
-        let round = iter.peek()?.round;
-        let certificate =
-            scheme.assemble::<_, M5f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+        let mut iter = nullifies.into_iter();
+        let first = iter.next()?;
+        let round = first.round;
+        let mut attestations = vec![first.attestation.clone()];
+
+        for nullify in iter {
+            if nullify.round != round {
+                return None;
+            }
+            attestations.push(nullify.attestation.clone());
+        }
+
+        let certificate = scheme.assemble::<_, M5f1>(attestations, strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1069,10 +1087,19 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         I: IntoIterator<Item = &'a Notarize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = notarizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N5f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+        let mut iter = notarizes.into_iter();
+        let first = iter.next()?;
+        let proposal = first.proposal.clone();
+        let mut attestations = vec![first.attestation.clone()];
+
+        for notarize in iter {
+            if notarize.proposal != proposal {
+                return None;
+            }
+            attestations.push(notarize.attestation.clone());
+        }
+
+        let certificate = scheme.assemble::<_, N5f1>(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -1378,8 +1405,13 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::minimmit::scheme::ed25519::Scheme;
-    use commonware_cryptography::sha256::Digest as Sha256;
+    use crate::{
+        minimmit::scheme::ed25519::{fixture, Scheme},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_attributable_map_basic() {
@@ -1395,6 +1427,68 @@ mod tests {
 
         assert_eq!(tracker.len_notarizes(), 0);
         assert_eq!(tracker.len_nullifies(), 0);
+    }
+
+    fn setup_fixture() -> Vec<Scheme> {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, b"minimmit-types", 6);
+        schemes
+    }
+
+    #[test]
+    fn m_notarization_rejects_mixed_proposals_with_same_payload() {
+        let schemes = setup_fixture();
+        let round = Round::new(Epoch::new(1), View::new(3));
+        let payload = Sha256::from([0xAB; 32]);
+
+        let proposal_a = Proposal::new(round, View::new(2), Sha256::from([1; 32]), payload);
+        let proposal_b = Proposal::new(round, View::new(2), Sha256::from([2; 32]), payload);
+
+        let votes: Vec<_> = vec![
+            Notarize::sign(&schemes[0], proposal_a.clone()).unwrap(),
+            Notarize::sign(&schemes[1], proposal_a).unwrap(),
+            Notarize::sign(&schemes[2], proposal_b).unwrap(),
+        ];
+
+        let m_notarization = MNotarization::from_notarizes(&schemes[0], votes.iter(), &Sequential);
+        assert!(m_notarization.is_none());
+    }
+
+    #[test]
+    fn finalization_rejects_mixed_proposals_with_same_payload() {
+        let schemes = setup_fixture();
+        let round = Round::new(Epoch::new(1), View::new(3));
+        let payload = Sha256::from([0xCD; 32]);
+
+        let proposal_a = Proposal::new(round, View::new(2), Sha256::from([3; 32]), payload);
+        let proposal_b = Proposal::new(round, View::new(2), Sha256::from([4; 32]), payload);
+
+        let votes: Vec<_> = vec![
+            Notarize::sign(&schemes[0], proposal_a.clone()).unwrap(),
+            Notarize::sign(&schemes[1], proposal_a.clone()).unwrap(),
+            Notarize::sign(&schemes[2], proposal_a.clone()).unwrap(),
+            Notarize::sign(&schemes[3], proposal_a).unwrap(),
+            Notarize::sign(&schemes[4], proposal_b).unwrap(),
+        ];
+
+        let finalization = Finalization::from_notarizes(&schemes[0], votes.iter(), &Sequential);
+        assert!(finalization.is_none());
+    }
+
+    #[test]
+    fn nullification_rejects_mixed_rounds() {
+        let schemes = setup_fixture();
+        let round_a = Round::new(Epoch::new(1), View::new(3));
+        let round_b = Round::new(Epoch::new(1), View::new(4));
+
+        let votes: Vec<_> = vec![
+            Nullify::sign::<Sha256>(&schemes[0], round_a).unwrap(),
+            Nullify::sign::<Sha256>(&schemes[1], round_a).unwrap(),
+            Nullify::sign::<Sha256>(&schemes[2], round_b).unwrap(),
+        ];
+
+        let nullification = Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential);
+        assert!(nullification.is_none());
     }
 
     #[cfg(feature = "arbitrary")]

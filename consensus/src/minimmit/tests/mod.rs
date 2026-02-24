@@ -2455,11 +2455,11 @@ mod engine_tests {
             let _latest_complete = required_containers.saturating_sub(activity_timeout);
             for reporter in reporters.iter() {
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty(), "no faults expected in happy path");
                 }
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0, "no invalid signatures expected");
                 }
             }
@@ -2467,7 +2467,7 @@ mod engine_tests {
             // Verify safety: no conflicting finalizations
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     let digest = finalization.proposal.payload;
                     if let Some(existing) = finalized_at_view.get(view) {
@@ -2647,7 +2647,7 @@ mod engine_tests {
             // Verify safety
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     let digest = finalization.proposal.payload;
                     if let Some(existing) = finalized_at_view.get(view) {
@@ -2978,7 +2978,7 @@ mod engine_tests {
             // Verify safety: no conflicting finalizations across honest reporters
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter().skip(honest_start) {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     let digest = finalization.proposal.payload;
                     if let Some(existing) = finalized_at_view.get(view) {
@@ -2994,14 +2994,14 @@ mod engine_tests {
 
             // Verify no invalid signatures were observed by honest nodes
             for reporter in reporters.iter().skip(honest_start) {
-                let invalid = reporter.invalid.lock().unwrap();
+                let invalid = reporter.invalid.lock();
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
             // Ensure faults are attributable to twins
             let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
             for reporter in reporters.iter().skip(honest_start) {
-                let faults = reporter.faults.lock().unwrap();
+                let faults = reporter.faults.lock();
                 for (faulter, _) in faults.iter() {
                     assert!(
                         twin_identities.contains(&faulter),
@@ -3238,7 +3238,7 @@ mod engine_tests {
             // Collect finalized state
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     finalized_at_view.insert(*view, finalization.proposal.payload);
                 }
@@ -3314,8 +3314,8 @@ mod engine_tests {
         L: Elector<S>,
     {
         use commonware_runtime::Clock;
+        use commonware_utils::sync::Mutex;
         use rand::Rng;
-        use std::sync::Mutex;
         use tracing::debug;
 
         let n = 6;
@@ -3455,11 +3455,11 @@ mod engine_tests {
                     _ = context.sleep(wait) => {
                         // Random restart - check faults before restart
                         for reporter in reporters.iter() {
-                            let faults = reporter.faults.lock().unwrap();
+                            let faults = reporter.faults.lock();
                             assert!(faults.is_empty(), "unexpected faults before restart");
                         }
                         {
-                            let mut shutdowns = shutdowns.lock().unwrap();
+                            let mut shutdowns = shutdowns.lock();
                             debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                             *shutdowns += 1;
                         }
@@ -3468,7 +3468,7 @@ mod engine_tests {
                     _ = join_all(finalizers) => {
                         // Completed! Check all reporters for faults
                         for reporter in reporters.iter() {
-                            let faults = reporter.faults.lock().unwrap();
+                            let faults = reporter.faults.lock();
                             assert!(faults.is_empty(), "unexpected faults in final run");
                         }
                         true
@@ -3490,7 +3490,7 @@ mod engine_tests {
                 .start_and_recover(f);
 
             if complete {
-                let shutdowns = shutdowns.lock().unwrap();
+                let shutdowns = shutdowns.lock();
                 info!("unclean_shutdown test passed after {} restarts", *shutdowns);
                 break;
             }

@@ -87,7 +87,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         let mut retained = Vec::new();
         let mut conflicts = Vec::new();
         for notarize in self.notarizes.drain(..) {
-            if notarize.proposal.payload == proposal.payload {
+            if notarize.proposal == proposal {
                 retained.push(notarize);
             } else {
                 conflicts.push(notarize);
@@ -131,7 +131,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // Leader proposal is known - only accept votes for it
-                    if notarize.proposal.payload != leader_proposal.payload {
+                    if notarize.proposal != *leader_proposal {
                         self.conflicting_notarizes.push(notarize);
                         return true;
                     }
@@ -429,6 +429,17 @@ mod tests {
         Notarize::sign(scheme, proposal).unwrap()
     }
 
+    fn create_notarize_with_parent<S: Scheme<Sha256>>(
+        scheme: &S,
+        round: Round,
+        parent_view: View,
+        parent_payload: Sha256,
+        payload: Sha256,
+    ) -> Notarize<S, Sha256> {
+        let proposal = Proposal::new(round, parent_view, parent_payload, payload);
+        Notarize::sign(scheme, proposal).unwrap()
+    }
+
     // Helper to create a Nullify message for any signing scheme
     fn create_nullify<S: Scheme<Sha256>>(scheme: &S, round: Round) -> Nullify<S> {
         Nullify::sign::<Sha256>(scheme, round).unwrap()
@@ -515,6 +526,66 @@ mod tests {
         add_notarize(bls12381_multisig::fixture::<MinPk, _>);
         add_notarize(ed25519::fixture);
         add_notarize(secp256r1::fixture);
+    }
+
+    fn same_payload_different_parent_not_marked_invalid<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let n = 6;
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
+        let m_quorum = M5f1::quorum(n);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
+
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let payload = sample_digest(42);
+        let proposal_a = create_notarize_with_parent(
+            &schemes[0],
+            round,
+            View::new(0),
+            sample_digest(0),
+            payload,
+        );
+        let proposal_b = create_notarize_with_parent(
+            &schemes[1],
+            round,
+            View::new(0),
+            sample_digest(9),
+            payload,
+        );
+        let proposal_c = create_notarize_with_parent(
+            &schemes[2],
+            round,
+            View::new(0),
+            sample_digest(0),
+            payload,
+        );
+
+        verifier.set_leader(proposal_a.signer());
+        verifier.add(Vote::Notarize(proposal_a), false);
+        verifier.add(Vote::Notarize(proposal_b.clone()), false);
+        verifier.add(Vote::Notarize(proposal_c), false);
+        assert!(verifier.ready_notarizes());
+
+        let (_verified, failed) = verifier.verify_notarizes(&mut rng, &Sequential);
+
+        assert!(
+            !failed.contains(&proposal_b.signer()),
+            "a valid vote for a distinct proposal (same payload, different parent) must not be classified as invalid"
+        );
+    }
+
+    #[test]
+    fn test_same_payload_different_parent_not_marked_invalid() {
+        same_payload_different_parent_not_marked_invalid(bls12381_threshold::fixture::<MinSig, _>);
+        same_payload_different_parent_not_marked_invalid(bls12381_threshold::fixture::<MinPk, _>);
+        same_payload_different_parent_not_marked_invalid(bls12381_multisig::fixture::<MinSig, _>);
+        same_payload_different_parent_not_marked_invalid(bls12381_multisig::fixture::<MinPk, _>);
+        same_payload_different_parent_not_marked_invalid(ed25519::fixture);
+        same_payload_different_parent_not_marked_invalid(secp256r1::fixture);
     }
 
     fn conflicting_notarizes_are_verified<S, F>(mut fixture: F)

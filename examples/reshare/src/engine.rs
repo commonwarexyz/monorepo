@@ -8,7 +8,8 @@ use crate::{
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
-use commonware_consensus::{elector::Config as Elector,
+use commonware_consensus::{
+    elector::Config as Elector,
     marshal::{
         self,
         core::Actor as MarshalActor,

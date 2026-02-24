@@ -84,6 +84,44 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Resolved<D: Digest> {
+    #[default]
+    None,
+    MNotarization(Proposal<D>),
+    Nullification(View),
+    Finalization(Proposal<D>),
+}
+
+impl<D: Digest> Resolved<D> {
+    fn from_certificate<S: Scheme<D>>(certificate: &Certificate<S, D>) -> Self {
+        match certificate {
+            Certificate::MNotarization(m_notarization) => {
+                Self::MNotarization(m_notarization.proposal.clone())
+            }
+            Certificate::Nullification(nullification) => Self::Nullification(nullification.view()),
+            Certificate::Finalization(finalization) => {
+                Self::Finalization(finalization.proposal.clone())
+            }
+        }
+    }
+
+    fn matches_certificate<S: Scheme<D>>(&self, certificate: &Certificate<S, D>) -> bool {
+        match (self, certificate) {
+            (Self::MNotarization(resolved), Certificate::MNotarization(certificate)) => {
+                resolved == &certificate.proposal
+            }
+            (Self::Nullification(resolved), Certificate::Nullification(certificate)) => {
+                resolved == &certificate.view()
+            }
+            (Self::Finalization(resolved), Certificate::Finalization(certificate)) => {
+                resolved == &certificate.proposal
+            }
+            _ => false,
+        }
+    }
+}
+
 struct ActionContext<'a, S, D, E, V, C>
 where
     S: Scheme<D>,
@@ -96,6 +134,7 @@ where
     egress: &'a mut Egress<S, D, V, C>,
     batcher: &'a mut batcher::Mailbox<S, D>,
     resolver: &'a mut resolver::Mailbox<S, D>,
+    resolved: Resolved<D>,
     timeout_deadline: &'a mut SystemTime,
     pending_propose: &'a mut Option<Request<Context<D, S::PublicKey>, D>>,
     pending_verify: &'a mut Option<Request<Proposal<D>, bool>>,
@@ -504,6 +543,7 @@ where
                 egress: &mut egress,
                 batcher: &mut batcher,
                 resolver: &mut resolver,
+                resolved: Resolved::None,
                 timeout_deadline: &mut timeout_deadline,
                 pending_propose: &mut pending_propose,
                 pending_verify: &mut pending_verify,
@@ -596,6 +636,7 @@ where
                             egress: &mut egress,
                             batcher: &mut batcher,
                             resolver: &mut resolver,
+                            resolved: Resolved::None,
                             timeout_deadline: &mut timeout_deadline,
                             pending_propose: &mut pending_propose,
                             pending_verify: &mut pending_verify,
@@ -613,6 +654,7 @@ where
                             egress: &mut egress,
                             batcher: &mut batcher,
                             resolver: &mut resolver,
+                            resolved: Resolved::None,
                             timeout_deadline: &mut timeout_deadline,
                             pending_propose: &mut pending_propose,
                             pending_verify: &mut pending_verify,
@@ -626,7 +668,7 @@ where
                     break;
                 };
 
-                let actions = match message {
+                let (actions, resolved) = match message {
                     Message::VerifiedNotarize(notarize) => {
                         // Time certificate construction (only record if certificate is built)
                         let mut timer = self.recover_latency.timer();
@@ -639,7 +681,7 @@ where
                         } else {
                             timer.cancel();
                         }
-                        actions
+                        (actions, Resolved::None)
                     }
                     Message::VerifiedNullify(nullify) => {
                         // Time certificate construction (only record if certificate is built)
@@ -653,18 +695,20 @@ where
                         } else {
                             timer.cancel();
                         }
-                        actions
+                        (actions, Resolved::None)
                     }
-                    Message::VerifiedCertificate(certificate) => {
-                        state.receive_certificate(certificate)
-                    }
+                    Message::Verified(certificate, from_resolver) => (
+                        state.receive_certificate(certificate.clone()),
+                        if from_resolver {
+                            Resolved::from_certificate(&certificate)
+                        } else {
+                            Resolved::None
+                        },
+                    ),
                     Message::Proposal(proposal) => {
                         // Leader's proposal from batcher - request verification
                         let leader = state.leader(proposal.view(), None);
-                        state.receive_proposal(leader, proposal)
-                    }
-                    Message::ResolvedCertificate(certificate) => {
-                        state.receive_certificate(certificate)
+                        (state.receive_proposal(leader, proposal), Resolved::None)
                     }
                 };
 
@@ -674,6 +718,7 @@ where
                         egress: &mut egress,
                         batcher: &mut batcher,
                         resolver: &mut resolver,
+                        resolved: resolved.clone(),
                         timeout_deadline: &mut timeout_deadline,
                         pending_propose: &mut pending_propose,
                         pending_verify: &mut pending_verify,
@@ -716,6 +761,7 @@ where
                             egress: &mut egress,
                             batcher: &mut batcher,
                             resolver: &mut resolver,
+                            resolved: Resolved::None,
                             timeout_deadline: &mut timeout_deadline,
                             pending_propose: &mut pending_propose,
                             pending_verify: &mut pending_verify,
@@ -831,8 +877,12 @@ where
                 };
                 self.append_journal(view, artifact).await;
                 self.sync_journal(view).await;
-                // Notify resolver of new certificate
-                context.resolver.updated(certificate.clone()).await;
+                // Notify resolver of new certificate unless this certificate
+                // came from the resolver in this loop iteration.
+                let from_resolver = context.resolved.matches_certificate(&certificate);
+                if !from_resolver {
+                    context.resolver.updated(certificate.clone()).await;
+                }
                 context.egress.broadcast_certificate(certificate).await;
             }
             Action::Finalized(finalization) => {
@@ -848,10 +898,14 @@ where
                 // Notify resolver so it can serve finalizations for catch-up.
                 // Note: we don't broadcast finalizations (per the paper), but the resolver
                 // needs to know about them to help lagging nodes.
-                context
-                    .resolver
-                    .updated(Certificate::Finalization(finalization))
-                    .await;
+                let from_resolver = matches!(
+                    &context.resolved,
+                    Resolved::Finalization(proposal) if proposal == &finalization.proposal
+                );
+                let certificate = Certificate::Finalization(finalization);
+                if !from_resolver {
+                    context.resolver.updated(certificate).await;
+                }
             }
             Action::Advanced(view) => {
                 trace!(%view, "view advanced (handled in main loop)");
@@ -886,11 +940,12 @@ mod tests {
     use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Recipients};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, IoBufMut, Metrics, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, Clock, IoBufs, Metrics, Runner, Spawner,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{
         channel::{mpsc, oneshot},
+        sync::Mutex,
         test_rng, NZUsize, Participant, NZU16,
     };
     use std::{
@@ -899,7 +954,7 @@ mod tests {
         num::{NonZeroU16, NonZeroUsize},
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         time::{Duration, SystemTime},
     };
@@ -933,11 +988,11 @@ mod tests {
 
     impl<P: PublicKey> TestSender<P> {
         fn len(&self) -> usize {
-            self.messages.lock().unwrap().len()
+            self.messages.lock().len()
         }
 
         fn take(&self) -> Vec<Vec<u8>> {
-            std::mem::take(&mut *self.messages.lock().unwrap())
+            std::mem::take(&mut *self.messages.lock())
         }
     }
 
@@ -952,13 +1007,12 @@ mod tests {
 
         async fn send(
             self,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             _: bool,
         ) -> Result<Vec<P>, Infallible> {
             self.messages
                 .lock()
-                .unwrap()
-                .push(message.into().as_ref().to_vec());
+                .push(message.into().coalesce().as_ref().to_vec());
             Ok(Vec::new())
         }
     }
@@ -1356,7 +1410,7 @@ mod tests {
                 Sha256Digest::from([0u8; 32]),
                 Sha256Digest::from([9u8; 32]),
             );
-            assert!(mailbox.proposal(proposal));
+            mailbox.proposal(proposal).await;
 
             for _ in 0..20 {
                 if verify_calls.load(Ordering::Relaxed) > 0 {
@@ -1386,7 +1440,9 @@ mod tests {
                 &Sequential,
             )
             .expect("nullification");
-            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+            mailbox
+                .verified_certificate(Certificate::Nullification(nullification))
+                .await;
 
             for _ in 0..20 {
                 if certificate_sender.len() > 0 {
@@ -1479,7 +1535,9 @@ mod tests {
                 &Sequential,
             )
             .expect("nullification");
-            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+            mailbox
+                .verified_certificate(Certificate::Nullification(nullification))
+                .await;
 
             context.sleep(Duration::from_millis(10)).await;
             let _ = vote_sender.take();
@@ -1491,7 +1549,7 @@ mod tests {
                 Sha256Digest::from([0u8; 32]),
                 Sha256Digest::from([7u8; 32]),
             );
-            assert!(mailbox.proposal(proposal));
+            mailbox.proposal(proposal).await;
 
             for _ in 0..20 {
                 if verify_calls.load(Ordering::Relaxed) > 0 {
@@ -1612,7 +1670,9 @@ mod tests {
                 &Sequential,
             )
             .expect("nullification");
-            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+            mailbox
+                .verified_certificate(Certificate::Nullification(nullification))
+                .await;
 
             for _ in 0..20 {
                 if certificate_sender.len() > 0 {
@@ -1702,7 +1762,9 @@ mod tests {
                 &Sequential,
             )
             .expect("nullification");
-            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+            mailbox
+                .verified_certificate(Certificate::Nullification(nullification))
+                .await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1713,7 +1775,7 @@ mod tests {
                 parent_payload,
                 Sha256Digest::from([0xB2u8; 32]),
             );
-            assert!(mailbox.proposal(proposal_v2.clone()));
+            mailbox.proposal(proposal_v2.clone()).await;
 
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(verify_calls.load(Ordering::Relaxed), 0);
@@ -1733,7 +1795,9 @@ mod tests {
             let m_notarization =
                 MNotarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
                     .expect("m-notarization");
-            assert!(mailbox.verified_certificate(Certificate::MNotarization(m_notarization)));
+            mailbox
+                .verified_certificate(Certificate::MNotarization(m_notarization))
+                .await;
 
             for _ in 0..30 {
                 if verify_calls.load(Ordering::Relaxed) > 0 {
@@ -1743,6 +1807,97 @@ mod tests {
             }
 
             panic!("expected late ancestry to trigger proposal verification retry");
+        });
+    }
+
+    #[test]
+    fn resolver_origin_certificate_is_not_sent_back_to_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } =
+                ed25519::fixture(&mut rng, b"minimmit-resolver-boomerang", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants,
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let cfg = Config {
+                scheme,
+                elector,
+                blocker: NoopBlocker,
+                automaton: NeverResolvesProposeAutomaton {
+                    genesis: Sha256Digest::from([0u8; 32]),
+                    propose_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                relay: NoopRelay,
+                reporter,
+                strategy: Sequential,
+                partition: "voter_resolver_boomerang".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(1),
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (batcher_sender, batcher_receiver) = mpsc::channel(8);
+            drop(batcher_receiver);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender.clone(),
+            );
+
+            let nullify_votes: Vec<_> = [1usize, 2, 3]
+                .into_iter()
+                .map(|i| {
+                    crate::minimmit::types::Nullify::sign::<Sha256Digest>(
+                        &schemes[i],
+                        Round::new(Epoch::new(1), View::new(1)),
+                    )
+                    .expect("nullify")
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullify_votes.iter(),
+                &Sequential,
+            )
+            .expect("nullification");
+
+            assert!(mailbox.resolved_certificate(Certificate::Nullification(nullification)));
+
+            for _ in 0..20 {
+                if certificate_sender.len() > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                certificate_sender.len() > 0,
+                "resolved certificate should still be processed and broadcast"
+            );
+            assert!(
+                resolver_receiver.try_recv().is_err(),
+                "resolver-origin certificate must not be sent back to resolver"
+            );
         });
     }
 }

@@ -14,12 +14,14 @@ pub enum Message<S: Scheme, D: Digest> {
     VerifiedNotarize(Notarize<S, D>),
     /// A verified nullify vote from the batcher.
     VerifiedNullify(Nullify<S>),
-    /// A verified certificate from the batcher.
-    VerifiedCertificate(Certificate<S, D>),
+    /// A verified certificate from the batcher or resolver.
+    ///
+    /// The boolean indicates whether the certificate came from the resolver.
+    /// When true, the voter should avoid sending the same certificate back to
+    /// the resolver (boomerang suppression).
+    Verified(Certificate<S, D>, bool),
     /// A proposal from the batcher (leader's proposal).
     Proposal(Proposal<D>),
-    /// A certificate resolved from the resolver or recovered from storage.
-    ResolvedCertificate(Certificate<S, D>),
 }
 
 /// Mailbox for sending messages to the voter actor.
@@ -35,64 +37,29 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a verified notarize vote to the voter.
-    ///
-    /// Returns `true` if the message was successfully queued, `false` if the
-    /// mailbox was full (message is dropped with a warning).
-    pub fn verified_notarize(&mut self, notarize: Notarize<S, D>) -> bool {
-        let view = notarize.view();
-        if !self
-            .sender
-            .try_send_lossy(Message::VerifiedNotarize(notarize))
-        {
-            warn!(%view, "voter mailbox full, dropping verified notarize");
-            return false;
-        }
-        true
+    pub async fn verified_notarize(&mut self, notarize: Notarize<S, D>) {
+        self.sender
+            .send_lossy(Message::VerifiedNotarize(notarize))
+            .await;
     }
 
     /// Send a verified nullify vote to the voter.
-    ///
-    /// Returns `true` if the message was successfully queued, `false` if the
-    /// mailbox was full (message is dropped with a warning).
-    pub fn verified_nullify(&mut self, nullify: Nullify<S>) -> bool {
-        let view = nullify.view();
-        if !self
-            .sender
-            .try_send_lossy(Message::VerifiedNullify(nullify))
-        {
-            warn!(%view, "voter mailbox full, dropping verified nullify");
-            return false;
-        }
-        true
+    pub async fn verified_nullify(&mut self, nullify: Nullify<S>) {
+        self.sender
+            .send_lossy(Message::VerifiedNullify(nullify))
+            .await;
     }
 
     /// Send a verified certificate to the voter.
-    ///
-    /// Returns `true` if the message was successfully queued, `false` if the
-    /// mailbox was full (message is dropped with a warning).
-    pub fn verified_certificate(&mut self, certificate: Certificate<S, D>) -> bool {
-        let view = certificate.view();
-        if !self
-            .sender
-            .try_send_lossy(Message::VerifiedCertificate(certificate))
-        {
-            warn!(%view, "voter mailbox full, dropping verified certificate");
-            return false;
-        }
-        true
+    pub async fn verified_certificate(&mut self, certificate: Certificate<S, D>) {
+        self.sender
+            .send_lossy(Message::Verified(certificate, false))
+            .await;
     }
 
     /// Send a proposal to the voter.
-    ///
-    /// Returns `true` if the message was successfully queued, `false` if the
-    /// mailbox was full (message is dropped with a warning).
-    pub fn proposal(&mut self, proposal: Proposal<D>) -> bool {
-        let view = proposal.view();
-        if !self.sender.try_send_lossy(Message::Proposal(proposal)) {
-            warn!(%view, "voter mailbox full, dropping proposal");
-            return false;
-        }
-        true
+    pub async fn proposal(&mut self, proposal: Proposal<D>) {
+        self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
     /// Send a resolved or recovered certificate to the voter.
@@ -103,7 +70,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         let view = certificate.view();
         if !self
             .sender
-            .try_send_lossy(Message::ResolvedCertificate(certificate))
+            .try_send_lossy(Message::Verified(certificate, true))
         {
             warn!(%view, "voter mailbox full, dropping resolved certificate");
             return false;

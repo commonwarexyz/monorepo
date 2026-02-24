@@ -277,6 +277,9 @@ where
             return Vec::new();
         }
         let view = proposal.view();
+        if view != self.view {
+            return Vec::new();
+        }
         // Verify the sender is the leader for this view
         if sender != self.leader(view, None) {
             return Vec::new();
@@ -440,9 +443,7 @@ where
                 actions.push(action);
             }
         }
-        if let Some(certificate) =
-            self.build_notarize_certificate(view, vote.proposal.payload, strategy)
-        {
+        if let Some(certificate) = self.build_notarize_certificate(view, &vote.proposal, strategy) {
             match certificate {
                 Certificate::Finalization(ref finalization) => {
                     // Per the Minimmit paper (Algorithm 1), L-notarisations are NOT broadcast.
@@ -461,7 +462,7 @@ where
                                 .get(&view)
                                 .into_iter()
                                 .flat_map(|t| t.iter_notarizes())
-                                .filter(|n| n.proposal.payload == finalization.proposal.payload),
+                                .filter(|n| n.proposal == finalization.proposal),
                             strategy,
                         ) {
                             actions.extend(self.process_certificate(
@@ -668,9 +669,14 @@ where
             Some(tracker) => tracker,
             None => return false,
         };
+        let voted_proposal = self.voted_proposal(view);
         let mut signers = BTreeSet::new();
         for notarize in tracker.iter_notarizes() {
-            if notarize.proposal.payload != digest {
+            let contradicts = voted_proposal.as_ref().map_or_else(
+                || notarize.proposal.payload != digest,
+                |voted_proposal| notarize.proposal != *voted_proposal,
+            );
+            if contradicts {
                 signers.insert(notarize.attestation.signer);
             }
         }
@@ -690,7 +696,7 @@ where
     fn nullify_by_certificate_contradiction(
         &mut self,
         view: View,
-        certificate_digest: D,
+        certificate_proposal: &Proposal<D>,
     ) -> Option<Action<S, D>> {
         if view != self.view {
             return None;
@@ -701,8 +707,12 @@ where
             return None;
         };
 
-        // If we voted for the same proposal, no contradiction
-        if digest == certificate_digest {
+        // If we voted for the same proposal, no contradiction.
+        let same_proposal = self.voted_proposal(view).map_or_else(
+            || digest == certificate_proposal.payload,
+            |voted_proposal| voted_proposal == *certificate_proposal,
+        );
+        if same_proposal {
             return None;
         }
 
@@ -727,13 +737,13 @@ where
     fn build_notarize_certificate(
         &self,
         view: View,
-        digest: D,
+        proposal: &Proposal<D>,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
         let tracker = self.trackers.get(&view)?;
         let votes: Vec<_> = tracker
             .iter_notarizes()
-            .filter(|v| v.proposal.payload == digest)
+            .filter(|v| v.proposal == *proposal)
             .collect();
 
         if votes.len() >= N5f1::l_quorum(self.participants) as usize {
@@ -898,7 +908,7 @@ where
         // should_nullify_by_contradiction() by handling certificates received directly
         // (e.g., from another partition that already formed the M-notarization).
         if let Some(ref proposal) = proposal {
-            actions.extend(self.nullify_by_certificate_contradiction(view, proposal.payload));
+            actions.extend(self.nullify_by_certificate_contradiction(view, proposal));
         }
 
         let next_view = view.next();
@@ -912,6 +922,14 @@ where
         }
 
         actions
+    }
+
+    fn voted_proposal(&self, view: View) -> Option<Proposal<D>> {
+        let me = self.me?;
+        self.trackers
+            .get(&view)?
+            .notarize(me)
+            .map(|n| n.proposal.clone())
     }
 
     /// Replays a journaled artifact into state during crash recovery.
@@ -1554,6 +1572,60 @@ mod tests {
         );
     }
 
+    /// Regression test: contradiction detection must compare the full proposal,
+    /// not just payload digest.
+    ///
+    /// If two proposals share the same payload but have different parents, they are
+    /// still distinct proposals. Receiving an M-notarization for the distinct proposal
+    /// after voting should trigger condition (b) nullification.
+    #[test]
+    fn nullify_by_certificate_contradiction_same_payload_different_parent() {
+        let (mut state, schemes, _rng) = setup_state();
+        let genesis = Sha256Digest::from([0u8; 32]);
+        let payload = Sha256Digest::from([0xCCu8; 32]);
+
+        // Vote for proposal A.
+        let proposal_a = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            genesis,
+            payload,
+        );
+        state.receive_proposal(Participant::new(2), proposal_a.clone());
+        let actions = state.proposal_verified(proposal_a, true);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::BroadcastNotarize(_))),
+            "Should vote for proposal A"
+        );
+
+        // Receive M-notarization for proposal B with the same payload but different parent payload.
+        let proposal_b = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            Sha256Digest::from([0x11u8; 32]),
+            payload,
+        );
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
+            .collect();
+        let m_notarization =
+            MNotarization::from_notarizes(&schemes[1], notarizes.iter(), &Sequential).unwrap();
+
+        let actions = state.receive_certificate(Certificate::MNotarization(m_notarization));
+
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::BroadcastNullify(_))),
+            "Should nullify when receiving M-notarization for a distinct proposal with same payload"
+        );
+    }
+
     /// Test: M-notarization certificate for same proposal does NOT trigger nullify.
     ///
     /// When we've voted for proposal A and receive an M-notarization for the same
@@ -1800,6 +1872,49 @@ mod tests {
             !voted,
             "Should NOT vote for proposal from past view (view 1 < current view 2)"
         );
+    }
+
+    #[test]
+    fn receive_proposal_rejects_non_current_views() {
+        let (mut state, schemes, _rng) = setup_state();
+        let genesis = Sha256Digest::from([0u8; 32]);
+
+        // Proposal for a future view must be rejected at ingress.
+        let future = Proposal::new(
+            Round::new(Epoch::new(1), View::new(2)),
+            View::zero(),
+            genesis,
+            Sha256Digest::from([0xCAu8; 32]),
+        );
+        let future_actions = state.receive_proposal(Participant::new(3), future);
+        assert!(
+            future_actions.is_empty(),
+            "future proposals must be ignored"
+        );
+
+        // Advance to view 2 via a nullification at view 1.
+        let nullifies: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                Nullify::sign::<Sha256Digest>(scheme, Round::new(Epoch::new(1), View::new(1)))
+                    .unwrap()
+            })
+            .collect();
+        let nullification =
+            Nullification::from_nullifies(&schemes[0], nullifies.iter(), &Sequential).unwrap();
+        state.receive_certificate(Certificate::Nullification(nullification));
+        assert_eq!(state.view(), View::new(2));
+
+        // Proposal for a past view must also be rejected at ingress.
+        let past = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            genesis,
+            Sha256Digest::from([0xCBu8; 32]),
+        );
+        let past_actions = state.receive_proposal(Participant::new(2), past);
+        assert!(past_actions.is_empty(), "past proposals must be ignored");
     }
 
     #[test]

@@ -303,7 +303,7 @@ where
                 // Check if we already have this certificate type for this view
                 let round = work.entry(view).or_insert_with(|| self.new_round());
                 let already_have = match &message {
-                    Certificate::MNotarization(m) => round.has_m_notarization(m.proposal.payload),
+                    Certificate::MNotarization(m) => round.has_m_notarization(&m.proposal),
                     Certificate::Nullification(_) => round.has_nullification(),
                     Certificate::Finalization(_) => round.has_finalization(),
                 };
@@ -331,9 +331,9 @@ where
                     continue;
                 }
 
-                // Mark as received and forward to voter
+                // Mark and forward to voter.
                 round.mark_certificate(&message);
-                voter.verified_certificate(message);
+                voter.verified_certificate(message).await;
 
                 // Certificates are forwarded directly, no need for further processing
                 continue;
@@ -401,7 +401,7 @@ where
                 if let Some(round) = work.get_mut(&current) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            voter.proposal(proposal);
+                            voter.proposal(proposal).await;
                         }
                     }
                 }
@@ -452,10 +452,10 @@ where
                     for vote in voters {
                         match vote {
                             Vote::Notarize(notarize) => {
-                                voter.verified_notarize(notarize);
+                                voter.verified_notarize(notarize).await;
                             }
                             Vote::Nullify(nullify) => {
-                                voter.verified_nullify(nullify);
+                                voter.verified_nullify(nullify).await;
                             }
                         }
                     }
@@ -476,5 +476,174 @@ where
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        minimmit::{scheme::ed25519, types::Nullify},
+        types::{Epoch, Round as Rnd, View},
+    };
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, Scheme as _},
+        ed25519::PublicKey as Ed25519PublicKey,
+        sha256::Digest as Sha256Digest,
+    };
+    use commonware_p2p::Blocker;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::{channel::mpsc, test_rng};
+
+    const NAMESPACE: &[u8] = b"minimmit-batcher-actor";
+
+    #[derive(Clone, Default)]
+    struct NoopBlocker;
+
+    impl Blocker for NoopBlocker {
+        type PublicKey = Ed25519PublicKey;
+
+        async fn block(&mut self, _peer: Self::PublicKey) {}
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopReporter;
+
+    impl Reporter for NoopReporter {
+        type Activity = Activity<ed25519::Scheme, Sha256Digest>;
+
+        async fn report(&mut self, _activity: Self::Activity) {}
+    }
+
+    fn ed25519_fixture() -> Vec<ed25519::Scheme> {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 6);
+        schemes
+    }
+
+    #[test]
+    fn regression_verified_certificate_not_dropped_under_backpressure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let schemes = ed25519_fixture();
+            let view = View::new(1);
+            let mut round = Round::new(
+                schemes[0].participants().clone(),
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter,
+            );
+
+            let nullifies: Vec<_> = schemes
+                .iter()
+                .take(3)
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullifies.iter(),
+                &Sequential,
+            )
+            .unwrap();
+            let certificate = Certificate::Nullification(nullification);
+
+            let (voter_tx, mut voter_rx) = mpsc::channel(1);
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let proposal = crate::minimmit::types::Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                view,
+                Sha256Digest::from([1u8; 32]),
+                Sha256Digest::from([2u8; 32]),
+            );
+            voter.proposal(proposal).await;
+
+            let handle = context.with_label("forward").spawn(|_| async move {
+                round.mark_certificate(&certificate);
+                voter.verified_certificate(certificate).await;
+                round
+            });
+
+            // Let the forward task block on full mailbox capacity.
+            context.sleep(std::time::Duration::from_millis(1)).await;
+
+            // Free capacity and ensure the certificate is eventually delivered.
+            assert!(voter_rx.try_recv().is_ok(), "expected pre-filled proposal");
+            let round = handle.await.expect("forward task should complete");
+            assert!(round.has_nullification(), "certificate should be marked");
+            assert!(
+                voter_rx.try_recv().is_ok(),
+                "verified certificate should eventually be delivered"
+            );
+        });
+    }
+
+    #[test]
+    fn regression_m_notarization_dedup_uses_full_proposal() {
+        let schemes = ed25519_fixture();
+        let view = View::new(3);
+        let payload = Sha256Digest::from([0xAAu8; 32]);
+        let round_id = Rnd::new(Epoch::new(1), view);
+
+        let proposal_a = crate::minimmit::types::Proposal::new(
+            round_id,
+            View::new(2),
+            Sha256Digest::from([1u8; 32]),
+            payload,
+        );
+        let proposal_b = crate::minimmit::types::Proposal::new(
+            round_id,
+            View::new(2),
+            Sha256Digest::from([2u8; 32]),
+            payload,
+        );
+
+        let votes_a: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                crate::minimmit::types::Notarize::sign(scheme, proposal_a.clone()).unwrap()
+            })
+            .collect();
+        let votes_b: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .take(3)
+            .map(|scheme| {
+                crate::minimmit::types::Notarize::sign(scheme, proposal_b.clone()).unwrap()
+            })
+            .collect();
+        let m_notarization_a = crate::minimmit::types::MNotarization::from_notarizes(
+            &schemes[0],
+            votes_a.iter(),
+            &Sequential,
+        )
+        .unwrap();
+        let m_notarization_b = crate::minimmit::types::MNotarization::from_notarizes(
+            &schemes[1],
+            votes_b.iter(),
+            &Sequential,
+        )
+        .unwrap();
+
+        let mut round = Round::new(
+            schemes[0].participants().clone(),
+            schemes[0].clone(),
+            NoopBlocker,
+            NoopReporter,
+        );
+        round.mark_certificate(&Certificate::MNotarization(m_notarization_a));
+        assert!(
+            !round.has_m_notarization(&m_notarization_b.proposal),
+            "same payload but distinct parent proposal must not be treated as duplicate"
+        );
+
+        round.mark_certificate(&Certificate::MNotarization(m_notarization_b.clone()));
+        assert!(
+            round.has_m_notarization(&m_notarization_b.proposal),
+            "marked M-notarization should dedup by full proposal identity"
+        );
     }
 }

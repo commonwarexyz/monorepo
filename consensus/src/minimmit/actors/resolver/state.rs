@@ -163,11 +163,8 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, vec::NonEmptyVec};
-    use std::{
-        collections::BTreeSet,
-        sync::{Arc, Mutex},
-    };
+    use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec};
+    use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"minimmit-resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
@@ -183,7 +180,6 @@ mod tests {
         fn outstanding(&self) -> Vec<u64> {
             self.outstanding
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|key| key.into())
                 .collect()
@@ -195,38 +191,35 @@ mod tests {
         type PublicKey = PublicKey;
 
         async fn fetch(&mut self, key: U64) {
-            self.outstanding.lock().unwrap().insert(key);
+            self.outstanding.lock().insert(key);
         }
 
         async fn fetch_all(&mut self, keys: Vec<U64>) {
             for key in keys {
-                self.outstanding.lock().unwrap().insert(key);
+                self.outstanding.lock().insert(key);
             }
         }
 
         async fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) {
-            self.outstanding.lock().unwrap().insert(key);
+            self.outstanding.lock().insert(key);
         }
 
         async fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) {
             for (key, _targets) in requests {
-                self.outstanding.lock().unwrap().insert(key);
+                self.outstanding.lock().insert(key);
             }
         }
 
         async fn cancel(&mut self, key: U64) {
-            self.outstanding.lock().unwrap().remove(&key);
+            self.outstanding.lock().remove(&key);
         }
 
         async fn clear(&mut self) {
-            self.outstanding.lock().unwrap().clear();
+            self.outstanding.lock().clear();
         }
 
         async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-            self.outstanding
-                .lock()
-                .unwrap()
-                .retain(|key| predicate(key));
+            self.outstanding.lock().retain(|key| predicate(key));
         }
     }
 

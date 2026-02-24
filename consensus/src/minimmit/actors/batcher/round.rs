@@ -53,9 +53,9 @@ where
     proposal_sent: bool,
 
     /// Cached certificate flags to avoid re-forwarding.
-    /// For M-notarizations, we track the specific digest since multiple
-    /// M-notarizations per view are allowed in Minimmit.
-    m_notarization_digests: BTreeSet<D>,
+    /// For M-notarizations, we track the full proposal since multiple
+    /// proposals may share a payload in Minimmit.
+    m_notarization_proposals: BTreeSet<Proposal<D>>,
     has_nullification: bool,
     has_finalization: bool,
 }
@@ -82,15 +82,15 @@ where
 
             proposal_sent: false,
 
-            m_notarization_digests: BTreeSet::new(),
+            m_notarization_proposals: BTreeSet::new(),
             has_nullification: false,
             has_finalization: false,
         }
     }
 
-    /// Returns true if we already have an M-notarization certificate for the given digest.
-    pub fn has_m_notarization(&self, digest: D) -> bool {
-        self.m_notarization_digests.contains(&digest)
+    /// Returns true if we already have an M-notarization certificate for the proposal.
+    pub fn has_m_notarization(&self, proposal: &Proposal<D>) -> bool {
+        self.m_notarization_proposals.contains(proposal)
     }
 
     /// Returns true if we already have a nullification certificate for this view.
@@ -277,10 +277,14 @@ where
     pub fn mark_certificate(&mut self, certificate: &Certificate<S, D>) {
         match certificate {
             Certificate::MNotarization(m) => {
-                self.m_notarization_digests.insert(m.proposal.payload);
+                self.m_notarization_proposals.insert(m.proposal.clone());
             }
-            Certificate::Nullification(_) => self.has_nullification = true,
-            Certificate::Finalization(_) => self.has_finalization = true,
+            Certificate::Nullification(_) => {
+                self.has_nullification = true;
+            }
+            Certificate::Finalization(_) => {
+                self.has_finalization = true;
+            }
         }
     }
 }

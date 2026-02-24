@@ -535,8 +535,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I::IntoIter: Send,
         M: Faults,
     {
-        // Extract signatures from lazy attestations in parallel, returning None if any fail
-        let (vote_partials, failures) =
+        // Extract signatures from lazy attestations in parallel.
+        // Malformed attestations are dropped so a single bad vote cannot block
+        // certificate assembly when enough valid votes remain.
+        let (vote_partials, _) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let partial = attestation
@@ -545,9 +547,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     .map(|&value| PartialSignature::<V> { index, value });
                 (index, partial)
             });
-        if !failures.is_empty() {
-            return None;
-        }
 
         let polynomial = self.polynomial();
         let n = self.participants().len() as u32;
@@ -1053,10 +1052,47 @@ mod tests {
         assert!(schemes[0].assemble::<_, M5f1>(votes, &Sequential).is_some());
     }
 
+    fn malformed_attestation_does_not_block_m_quorum_assembly<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(6, 59);
+        let m_quorum = M5f1::quorum(schemes.len()) as usize;
+        let proposal = sample_proposal(Epoch::new(0), View::new(8), 42);
+
+        // Start with quorum + 1 valid attestations.
+        let mut attestations: Vec<_> = schemes
+            .iter()
+            .take(m_quorum + 1)
+            .map(|scheme| {
+                scheme
+                    .sign(Subject::Notarize {
+                        proposal: &proposal,
+                    })
+                    .unwrap()
+            })
+            .collect();
+
+        // Corrupt one attestation so Lazy::get() fails during assemble().
+        let mut malformed = &b""[..];
+        attestations[0].signature = Lazy::deferred(&mut malformed, ());
+
+        // Desired behavior: ignore malformed attestations if enough valid votes remain.
+        assert!(
+            schemes[0]
+                .assemble::<_, M5f1>(attestations, &Sequential)
+                .is_some(),
+            "single malformed attestation should not prevent M-quorum assembly"
+        );
+    }
+
     #[test]
     fn test_m_notarization_requires_m_quorum() {
         m_notarization_requires_m_quorum::<MinPk>();
         m_notarization_requires_m_quorum::<MinSig>();
+    }
+
+    #[test]
+    fn test_malformed_attestation_does_not_block_m_quorum_assembly() {
+        malformed_attestation_does_not_block_m_quorum_assembly::<MinPk>();
+        malformed_attestation_does_not_block_m_quorum_assembly::<MinSig>();
     }
 
     fn finalization_requires_l_quorum<V: Variant>() {

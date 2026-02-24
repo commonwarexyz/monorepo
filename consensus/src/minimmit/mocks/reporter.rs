@@ -19,13 +19,14 @@ use commonware_parallel::Sequential;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
     ordered::{Quorum, Set},
+    sync::Mutex,
     M5f1, N5f1,
 };
 use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 // Records which validators have participated in a given view/payload pair.
@@ -93,11 +94,11 @@ where
 
     fn certified(&self, round: Round, certificate: &S::Certificate) {
         // Record that this view has a certificate
-        self.certified.lock().unwrap().insert(round.view());
+        self.certified.lock().insert(round.view());
 
         // We use the certificate from view N to determine the leader for view N+1.
         let next_round = Round::new(round.epoch(), round.view().next());
-        let mut leaders = self.leaders.lock().unwrap();
+        let mut leaders = self.leaders.lock();
         leaders.entry(next_round.view()).or_insert_with(|| {
             let leader = self.elector.elect(next_round, Some(certificate));
             self.participants.key(leader).cloned().unwrap()
@@ -123,7 +124,7 @@ where
             Activity::Notarize(notarize) => {
                 if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
@@ -131,7 +132,6 @@ where
                 let public_key = self.participants.key(notarize.signer()).unwrap().clone();
                 self.notarizes
                     .lock()
-                    .unwrap()
                     .entry(notarize.view())
                     .or_default()
                     .entry(notarize.proposal.payload)
@@ -150,7 +150,7 @@ where
                     &Sequential,
                 ) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = m_notarization.encode();
@@ -158,14 +158,13 @@ where
                     .unwrap();
                 self.m_notarizations
                     .lock()
-                    .unwrap()
                     .insert(view, m_notarization.clone());
                 self.certified(m_notarization.round(), &m_notarization.certificate);
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
@@ -173,7 +172,6 @@ where
                 let public_key = self.participants.key(nullify.signer()).unwrap().clone();
                 self.nullifies
                     .lock()
-                    .unwrap()
                     .entry(nullify.view())
                     .or_default()
                     .insert(public_key);
@@ -190,7 +188,7 @@ where
                     &Sequential,
                 ) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = nullification.encode();
@@ -198,7 +196,6 @@ where
                     .unwrap();
                 self.nullifications
                     .lock()
-                    .unwrap()
                     .insert(view, nullification.clone());
                 self.certified(nullification.round, &nullification.certificate);
             }
@@ -214,21 +211,18 @@ where
                     &Sequential,
                 ) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = finalization.encode();
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
-                self.finalizations
-                    .lock()
-                    .unwrap()
-                    .insert(view, finalization.clone());
+                self.finalizations.lock().insert(view, finalization.clone());
                 self.certified(finalization.round(), &finalization.certificate);
 
                 // Send message to subscribers
-                *self.latest.lock().unwrap() = finalization.view();
-                let mut subscribers = self.subscribers.lock().unwrap();
+                *self.latest.lock() = finalization.view();
+                let mut subscribers = self.subscribers.lock();
                 for subscriber in subscribers.iter_mut() {
                     subscriber.try_send_lossy(finalization.view());
                 }
@@ -237,7 +231,7 @@ where
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
+                    *self.invalid.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
@@ -245,7 +239,6 @@ where
                 let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
-                    .unwrap()
                     .entry(public_key)
                     .or_default()
                     .entry(view)
@@ -267,8 +260,8 @@ where
 
     async fn subscribe(&mut self) -> (Self::Index, mpsc::Receiver<Self::Index>) {
         let (tx, rx) = mpsc::channel(128);
-        self.subscribers.lock().unwrap().push(tx);
-        let latest = *self.latest.lock().unwrap();
+        self.subscribers.lock().push(tx);
+        let latest = *self.latest.lock();
         (latest, rx)
     }
 }

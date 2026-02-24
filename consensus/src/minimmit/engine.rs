@@ -12,7 +12,9 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
@@ -43,7 +45,7 @@ where
 
 impl<E, S, L, B, D, A, R, F, T> Engine<E, S, L, B, D, A, R, F, T>
 where
-    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
