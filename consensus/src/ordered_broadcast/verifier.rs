@@ -28,6 +28,11 @@ struct Batch<P: PublicKey, S: Scheme, D: Digest> {
 
     /// Count of acks that have already been verified for this subject.
     verified: usize,
+
+    /// Signers already seen for this subject (pending or verified).
+    /// Prevents duplicate acks from the same participant from
+    /// accumulating unboundedly.
+    seen: HashSet<Participant>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Default for Batch<P, S, D> {
@@ -35,6 +40,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Default for Batch<P, S, D> {
         Self {
             pending: Vec::new(),
             verified: 0,
+            seen: HashSet::new(),
         }
     }
 }
@@ -90,16 +96,17 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
 
     /// Adds an ack to the pending batch for its subject.
     ///
-    /// The ack must have already passed cheap validation (epoch bounds,
+    /// The ack must have already passed validation (epoch bounds,
     /// sender/signer match, height range). Only signature verification is
     /// deferred.
     ///
     /// If `verified` is true, the ack counts toward the verified total
     /// without being buffered for batch verification.
     ///
-    /// Acks for subjects that have already reached quorum are dropped
-    /// since they cannot contribute to certificate formation.
+    /// Duplicate acks from the same signer and acks for subjects that
+    /// have already reached quorum are dropped.
     pub fn add(&mut self, ack: Ack<P, S, D>, verified: bool) {
+        let signer = ack.attestation.signer;
         let key = BatchKey {
             chunk: ack.chunk.clone(),
             epoch: ack.epoch,
@@ -108,6 +115,11 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
 
         // Drop acks for subjects that have already reached quorum.
         if batch.verified >= self.quorum {
+            return;
+        }
+
+        // Drop duplicate acks from the same signer.
+        if !batch.seen.insert(signer) {
             return;
         }
 
