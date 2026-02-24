@@ -227,6 +227,7 @@ where
     ///
     /// # Errors
     ///
+    /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
     /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [mmr::MAX_LOCATION].
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(

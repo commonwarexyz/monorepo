@@ -65,6 +65,7 @@ impl<D: Digest> RangeProof<D> {
     ///
     /// # Errors
     ///
+    /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
@@ -86,6 +87,14 @@ impl<D: Digest> RangeProof<D> {
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
+
+        // Reject ranges that start in pruned bitmap chunks.
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let start = *start_loc / chunk_bits;
+        if (start as usize) < status.pruned_chunks() {
+            return Err(Error::OperationPruned(start_loc));
+        }
+
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
@@ -104,8 +113,6 @@ impl<D: Digest> RangeProof<D> {
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let start = *start_loc / chunk_bits; // chunk that contains the first bit
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
@@ -232,9 +239,9 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// Return an inclusion proof that incorporates activity status for the operation designated by
     /// `loc`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - Panics if `loc` is out of bounds.
+    /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
         status: &BitMap<N>,
@@ -242,7 +249,10 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
         loc: Location,
         ops_root: D,
     ) -> Result<Self, Error> {
-        // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
+        // Reject locations in pruned bitmap chunks.
+        if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
+            return Err(Error::OperationPruned(loc));
+        }
         let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1, ops_root).await?;
         let chunk = *status.get_chunk_containing(*loc);
         Ok(Self {
