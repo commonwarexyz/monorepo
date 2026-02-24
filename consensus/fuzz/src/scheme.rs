@@ -2,9 +2,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_consensus::simplex::types::Subject;
+use commonware_consensus::simplex::{scheme::Namespace, types::Subject};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Signers},
+    certificate::{self, Attestation, Subject as CertificateSubject, Signers},
     Digest,
 };
 use commonware_parallel::Strategy;
@@ -13,11 +13,16 @@ use commonware_utils::{
     sequence::U32,
     Array, Faults, Participant, Span, TryCollect,
 };
+use crate::utils::fnv1a_hash;
 use core::{
     fmt::{Display, Formatter},
     ops::Deref,
 };
 use rand::{CryptoRng, RngCore};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct Identity(U32);
@@ -153,22 +158,38 @@ impl Display for PublicKey {
     }
 }
 
-/// Identity-like signature used in the fuzz tests only.
+/// Shared record of all signing operations.
 ///
-/// A signature is valid when:
-/// - the attestation signer index is in the participant set, and
-/// - the signature carries the same signer index, and
-/// - the signature's valid flag is true.
+/// Stores `(signer_index, message_hash)` pairs. Verification checks whether
+/// the signer actually signed the given message, detecting wire manipulation.
+#[derive(Clone, Debug, Default)]
+pub struct SigningRecord {
+    signed: Arc<Mutex<HashSet<(u32, u64)>>>,
+}
+
+impl SigningRecord {
+    fn record(&self, signer: u32, message_hash: u64) {
+        self.signed.lock().unwrap().insert((signer, message_hash));
+    }
+
+    fn contains(&self, signer: u32, message_hash: u64) -> bool {
+        self.signed.lock().unwrap().contains(&(signer, message_hash))
+    }
+}
+
+/// Virtual signature carrying only the signer index.
+///
+/// Verification does not trust any data in the signature itself. Instead,
+/// it recomputes the message hash from the subject and checks the shared
+/// [`SigningRecord`] to confirm the signer actually signed that message.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature {
     pub signer: u32,
-    pub valid: bool,
 }
 
 impl Write for Signature {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
-        self.valid.write(writer);
     }
 }
 
@@ -178,13 +199,12 @@ impl Read for Signature {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         Ok(Self {
             signer: u32::read(reader)?,
-            valid: bool::read(reader)?,
         })
     }
 }
 
 impl FixedSize for Signature {
-    const SIZE: usize = u32::SIZE + bool::SIZE;
+    const SIZE: usize = u32::SIZE;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -237,31 +257,34 @@ impl Read for Certificate {
 pub struct Scheme {
     participants: Set<PublicKey>,
     signer: Option<Participant>,
+    namespace: Namespace,
+    record: SigningRecord,
 }
 
 impl Scheme {
-    pub fn signer(participants: Set<PublicKey>, signer: Participant) -> Self {
-        Self {
-            participants,
-            signer: Some(signer),
-        }
-    }
-
-    pub fn verifier(participants: Set<PublicKey>) -> Self {
-        Self {
-            participants,
-            signer: None,
-        }
+    /// Hashes the subject (namespace || message) into a u64.
+    fn message_hash<D: Digest>(&self, subject: &Subject<'_, D>) -> u64 {
+        let ns = subject.namespace(&self.namespace);
+        let msg = subject.message();
+        let mut buf = Vec::with_capacity(ns.len() + msg.len());
+        buf.extend_from_slice(ns);
+        buf.extend_from_slice(&msg);
+        fnv1a_hash(&buf)
     }
 }
 
 /// Builds identities and mock scheme instances for fuzz tests.
-pub fn fixture<R>(_: &mut R, _: &[u8], n: u32) -> (Vec<PublicKey>, Vec<Scheme>)
+///
+/// All returned schemes share a single [`SigningRecord`], so a signature
+/// produced by any scheme can be verified by any other.
+pub fn fixture<R>(_: &mut R, namespace: &[u8], n: u32) -> (Vec<PublicKey>, Vec<Scheme>)
 where
     R: RngCore + CryptoRng,
 {
     assert!(n > 0);
 
+    let record = SigningRecord::default();
+    let ns = Namespace::new(namespace);
     let participants: Vec<_> = (0..n).map(PublicKey::from_index).collect();
     let participant_set = participants
         .iter()
@@ -269,7 +292,12 @@ where
         .try_collect::<Set<PublicKey>>()
         .expect("index-based public keys are unique");
     let schemes = (0..n)
-        .map(|index| Scheme::signer(participant_set.clone(), Participant::new(index)))
+        .map(|index| Scheme {
+            participants: participant_set.clone(),
+            signer: Some(Participant::new(index)),
+            namespace: ns.clone(),
+            record: record.clone(),
+        })
         .collect();
 
     (participants, schemes)
@@ -289,13 +317,14 @@ impl certificate::Scheme for Scheme {
         &self.participants
     }
 
-    fn sign<D: Digest>(&self, _subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
+    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
         let signer = self.signer?;
+        let hash = self.message_hash(&subject);
+        self.record.record(signer.get(), hash);
         Some(Attestation {
             signer,
             signature: Signature {
                 signer: signer.get(),
-                valid: true,
             }
             .into(),
         })
@@ -304,7 +333,7 @@ impl certificate::Scheme for Scheme {
     fn verify_attestation<R, D>(
         &self,
         _rng: &mut R,
-        _subject: Self::Subject<'_, D>,
+        subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
         _strategy: &impl Strategy,
     ) -> bool
@@ -320,7 +349,12 @@ impl certificate::Scheme for Scheme {
             return false;
         };
 
-        signature.signer == attestation.signer.get() && signature.valid
+        if signature.signer != attestation.signer.get() {
+            return false;
+        }
+
+        let hash = self.message_hash(&subject);
+        self.record.contains(signature.signer, hash)
     }
 
     fn assemble<I, M>(
@@ -339,7 +373,7 @@ impl certificate::Scheme for Scheme {
                 return None;
             }
             let signature = signature.get().cloned()?;
-            if signature.signer != signer.get() || !signature.valid {
+            if signature.signer != signer.get() {
                 return None;
             }
             entries.push((signer, signature));
@@ -362,7 +396,7 @@ impl certificate::Scheme for Scheme {
     fn verify_certificate<R, D, M>(
         &self,
         _rng: &mut R,
-        _subject: Self::Subject<'_, D>,
+        subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
         _strategy: &impl Strategy,
     ) -> bool
@@ -381,6 +415,7 @@ impl certificate::Scheme for Scheme {
             return false;
         }
 
+        let hash = self.message_hash(&subject);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             if self.participants.key(signer).is_none() {
                 return false;
@@ -388,7 +423,10 @@ impl certificate::Scheme for Scheme {
             let Some(signature) = signature.get() else {
                 return false;
             };
-            if signature.signer != signer.get() || !signature.valid {
+            if signature.signer != signer.get() {
+                return false;
+            }
+            if !self.record.contains(signature.signer, hash) {
                 return false;
             }
         }
