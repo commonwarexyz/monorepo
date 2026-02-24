@@ -414,10 +414,9 @@ impl<
         if self.state.current_view() != view {
             return None;
         }
-        let (retry, nullify, _) = self.state.handle_timeout();
-        if retry {
+        let (false, nullify, _) = self.state.handle_timeout() else {
             return None;
-        }
+        };
         nullify
     }
 
