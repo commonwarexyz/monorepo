@@ -90,10 +90,11 @@
 //! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
-//! A nullification certificate for a view does not retroactively erase an already observed
-//! notarization for that view. In-flight certification may still complete and can be used for
-//! synchronization/floor selection. Finalization is the definitive proof that makes lower-view
-//! certification work irrelevant.
+//! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
+//! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
+//! attempting to complete certification. This increases the likelihood that we can vote on the next honest proposer's block (which
+//! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
+//! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
