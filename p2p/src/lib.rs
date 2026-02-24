@@ -317,6 +317,14 @@ stability_scope!(BETA {
 macro_rules! block {
     ($blocker:expr, $peer:expr, $($arg:tt)+) => {
         tracing::warn!(peer = ?$peer, $($arg)+);
+        #[allow(clippy::disallowed_methods)]
         $blocker.block($peer).await;
     };
+}
+
+/// Block a peer without logging.
+#[allow(clippy::disallowed_methods, reason = "test helper that bypasses the block! macro")]
+#[cfg(test)]
+pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
+    blocker.block(peer).await;
 }

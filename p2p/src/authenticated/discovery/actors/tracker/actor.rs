@@ -574,7 +574,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            oracle.block(pk1.clone()).await;
+            crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
@@ -608,9 +608,9 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            oracle.block(pk1.clone()).await;
+            crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
-            oracle.block(pk1.clone()).await;
+            crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
@@ -631,7 +631,7 @@ mod tests {
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
 
-            oracle.block(pk_non_existent).await;
+            crate::block_peer(&mut oracle, pk_non_existent).await;
             context.sleep(Duration::from_millis(10)).await;
         });
     }

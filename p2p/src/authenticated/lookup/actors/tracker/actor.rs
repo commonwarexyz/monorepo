@@ -374,7 +374,7 @@ mod tests {
             let dialable_peers = mailbox.dialable().await;
             assert!(dialable_peers.iter().any(|peer| peer == &pk));
 
-            oracle.block(pk.clone()).await;
+            crate::block_peer(&mut oracle, pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -400,13 +400,13 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            oracle.block(pk1.clone()).await;
+            crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable_peers = mailbox.dialable().await;
             assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
 
-            oracle.block(pk1.clone()).await;
+            crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -423,7 +423,7 @@ mod tests {
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
 
-            oracle.block(pk_non_existent).await;
+            crate::block_peer(&mut oracle, pk_non_existent).await;
             context.sleep(Duration::from_millis(10)).await;
         });
     }
@@ -525,7 +525,7 @@ mod tests {
             );
 
             // Block peer_pk2 and verify it's not acceptable
-            oracle.block(peer_pk2.clone()).await;
+            crate::block_peer(&mut oracle, peer_pk2.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
@@ -661,7 +661,7 @@ mod tests {
             mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
-            oracle.block(peer_pk.clone()).await;
+            crate::block_peer(&mut oracle, peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
                 matches!(peer_rx.recv().await, Some(peer::Message::Kill)),
@@ -669,7 +669,7 @@ mod tests {
             );
 
             // 4) Block again → mailbox was removed, so no new Kill
-            oracle.block(peer_pk.clone()).await;
+            crate::block_peer(&mut oracle, peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
                 peer_rx.recv().await.is_none(),
@@ -851,7 +851,7 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_1.ip()));
 
-            oracle.block(pk_1.clone()).await;
+            crate::block_peer(&mut oracle, pk_1.clone()).await;
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
 
