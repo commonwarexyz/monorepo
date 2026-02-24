@@ -21,7 +21,7 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Metrics};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use commonware_utils::channel::mpsc::Receiver;
 use futures::FutureExt;
 use rand::Rng;
@@ -31,6 +31,13 @@ const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 50;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
+
+/// Number of Byzantine nodes in the N4F3C1 configuration.
+pub(crate) const BYZANTINE_COUNT: usize = 3;
+/// Index of the single honest node in the N4F3C1 configuration.
+pub(crate) const HONEST_ID: usize = BYZANTINE_COUNT;
+/// All Byzantine signer indices, used to build quorum certificates.
+const BYZANTINE_IDS: [usize; BYZANTINE_COUNT] = [0, 1, 2];
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 pub enum Event {
@@ -295,7 +302,7 @@ where
             }
         }
 
-        let cert = self.build_notarization_from_byz(proposal, &[0, 1, 2])?;
+        let cert = self.build_notarization_from_byz(proposal, &BYZANTINE_IDS)?;
         Some((cert, false))
     }
 
@@ -314,7 +321,7 @@ where
             }
         }
 
-        let cert = self.build_finalization_from_byz(proposal, &[0, 1, 2])?;
+        let cert = self.build_finalization_from_byz(proposal, &BYZANTINE_IDS)?;
         Some((cert, false))
     }
 
@@ -406,14 +413,14 @@ where
         match self.context.gen_range(0..=3u8) {
             0 => {
                 let cert = if self.context.gen_bool(0.8) {
-                    self.build_notarization_from_byz(&base, &[0, 1, 2])?
+                    self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?
                 } else {
                     let wrong = Proposal::new(
                         Round::new(wrong_epoch, base.view()),
                         base.parent,
                         base.payload,
                     );
-                    self.build_notarization_from_byz(&wrong, &[0, 1, 2])?
+                    self.build_notarization_from_byz(&wrong, &BYZANTINE_IDS)?
                 };
                 Some(Certificate::Notarization(cert))
             }
@@ -423,14 +430,14 @@ where
                     view.saturating_sub(1),
                 );
                 let cert = if self.context.gen_bool(0.8) {
-                    self.build_finalization_from_byz(&proposal, &[0, 1, 2])?
+                    self.build_finalization_from_byz(&proposal, &BYZANTINE_IDS)?
                 } else {
                     let wrong = Proposal::new(
                         Round::new(wrong_epoch, proposal.view()),
                         proposal.parent,
                         proposal.payload,
                     );
-                    self.build_finalization_from_byz(&wrong, &[0, 1, 2])?
+                    self.build_finalization_from_byz(&wrong, &BYZANTINE_IDS)?
                 };
                 Some(Certificate::Finalization(cert))
             }
@@ -447,22 +454,22 @@ where
                 } else {
                     Round::new(wrong_epoch, View::new(view.max(1)))
                 };
-                let cert = self.build_nullification_from_byz(round, &[0, 1, 2])?;
+                let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
                 Some(Certificate::Nullification(cert))
             }
             // Default: valid responses.
             _ => match self.context.gen_range(0..3usize) {
                 0 => {
-                    let cert = self.build_notarization_from_byz(&base, &[0, 1, 2])?;
+                    let cert = self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?;
                     Some(Certificate::Notarization(cert))
                 }
                 1 => {
-                    let cert = self.build_finalization_from_byz(&base, &[0, 1, 2])?;
+                    let cert = self.build_finalization_from_byz(&base, &BYZANTINE_IDS)?;
                     Some(Certificate::Finalization(cert))
                 }
                 _ => {
                     let round = Round::new(Epoch::new(crate::EPOCH), View::new(base.view().get()));
-                    let cert = self.build_nullification_from_byz(round, &[0, 1, 2])?;
+                    let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
                     Some(Certificate::Nullification(cert))
                 }
             },
@@ -844,7 +851,7 @@ where
         let view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
         let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
         let round = Round::new(wrong_epoch, View::new(view));
-        let Some(cert) = self.build_nullification_from_byz(round, &[0, 1, 2]) else {
+        let Some(cert) = self.build_nullification_from_byz(round, &BYZANTINE_IDS) else {
             return;
         };
 
@@ -980,7 +987,7 @@ where
 
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
         let cert = self
-            .build_nullification_from_byz(round, &[0, 1, 2])
+            .build_nullification_from_byz(round, &BYZANTINE_IDS)
             .expect("byzantine nullification should build");
 
         self.last_nullified_view = self.last_nullified_view.max(view);
@@ -1100,7 +1107,7 @@ where
         view: u64,
     ) -> Option<Finalization<S, Sha256Digest>> {
         let base = self.get_or_build_proposal_for_view(view);
-        let valid = self.build_finalization_from_byz(&base, &[0, 1, 2])?;
+        let valid = self.build_finalization_from_byz(&base, &BYZANTINE_IDS)?;
 
         let mut conflicting = self.strategy.mutate_proposal(
             &mut self.context,
@@ -1160,7 +1167,7 @@ where
     }
 }
 
-pub(crate) async fn run_primary<P: simplex_protocol::Simplex>(
+pub(crate) async fn run<P: simplex_protocol::Simplex>(
     context: &mut deterministic::Context,
     input: &NodeFuzzInput,
 ) -> (Vec<PublicKeyOf<P>>, Vec<P::Scheme>)
@@ -1183,11 +1190,12 @@ where
     let (oracle, participants, schemes, mut registrations) =
         crate::setup_network::<P>(context, &base).await;
 
-    let (fuzzer_schemes, honest_schemes) = schemes.split_at(3);
+    let (fuzzer_schemes, honest_schemes) = schemes.split_at(BYZANTINE_COUNT);
     let honest_scheme = honest_schemes[0].clone();
 
     let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
-    let byzantine_participants: Vec<_> = participants.iter().take(3).cloned().collect();
+    let byzantine_participants: Vec<_> =
+        participants.iter().take(BYZANTINE_COUNT).cloned().collect();
 
     let mut vote_senders = Vec::new();
     let mut certificate_senders = Vec::new();
@@ -1196,7 +1204,7 @@ where
     let mut certificate_receivers = Vec::new();
     let mut resolver_receivers = Vec::new();
 
-    for byz in participants.iter().take(3usize) {
+    for byz in participants.iter().take(BYZANTINE_COUNT) {
         let (
             (vote_sender, vote_receiver),
             (cert_sender, cert_receiver),
@@ -1213,7 +1221,7 @@ where
         resolver_receivers.push(resolver_receiver);
     }
 
-    let honest = participants[3].clone();
+    let honest = participants[HONEST_ID].clone();
     let honest_channels = registrations
         .remove(&honest)
         .expect("honest participant must exist");
@@ -1254,6 +1262,47 @@ where
     }
 
     (participants, schemes)
+}
+
+pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
+    checkpoint: deterministic::Checkpoint,
+    participants: Vec<PublicKeyOf<P>>,
+    schemes: Vec<P::Scheme>,
+) where
+    PublicKeyOf<P>: Send,
+{
+    deterministic::Runner::from(checkpoint).start(|context: deterministic::Context| async move {
+        let (network, mut oracle) = simulated::Network::new(
+            context.with_label("network_recovery"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: false,
+                tracked_peer_sets: None,
+            },
+        );
+        network.start();
+
+        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+        let honest = participants[HONEST_ID].clone();
+        let mut registrations =
+            crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
+        let honest_channels = registrations
+            .remove(&honest)
+            .expect("honest participant must exist in recovery");
+        let mut reporter = crate::spawn_honest_validator::<P>(
+            context.with_label("honest_validator_recovery"),
+            &oracle,
+            &participants,
+            schemes[HONEST_ID].clone(),
+            honest,
+            relay,
+            honest_channels,
+        )
+        .with_strict(false);
+
+        let _ = reporter.subscribe().await;
+        context.sleep(std::time::Duration::from_millis(50)).await;
+    });
 }
 
 #[cfg(test)]

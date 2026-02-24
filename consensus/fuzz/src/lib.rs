@@ -32,7 +32,6 @@ use commonware_cryptography::{
     certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
 };
 use commonware_p2p::{
-    simulated,
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
 };
@@ -852,45 +851,12 @@ where
     if M::MODE == Mode::WithRecovery {
         let ((participants, schemes), checkpoint) =
             executor.start_and_recover(|mut context| async move {
-                crate::simplex_node::run_primary::<P>(&mut context, &input).await
+                simplex_node::run::<P>(&mut context, &input).await
             });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (network, mut oracle) = simulated::Network::new(
-                context.with_label("network_recovery"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
-            let relay =
-                std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
-            let honest = participants[3].clone();
-            let mut registrations =
-                crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
-            let honest_channels = registrations
-                .remove(&honest)
-                .expect("honest participant must exist in recovery");
-            let mut reporter = crate::spawn_honest_validator::<P>(
-                context.with_label("honest_validator_recovery"),
-                &oracle,
-                &participants,
-                schemes[3].clone(),
-                honest,
-                relay,
-                honest_channels,
-            )
-            .with_strict(false);
-
-            let _ = reporter.subscribe().await;
-            context.sleep(Duration::from_millis(50)).await;
-        });
+        simplex_node::run_recovery::<P>(checkpoint, participants, schemes);
     } else if M::MODE == Mode::Standard {
         executor.start(|mut context| async move {
-            let _ = simplex_node::run_primary::<P>(&mut context, &input).await;
+            let _ = simplex_node::run::<P>(&mut context, &input).await;
         });
     } else {
         panic!("unsupported mode for node fuzzing");
