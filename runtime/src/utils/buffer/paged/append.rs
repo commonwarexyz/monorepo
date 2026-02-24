@@ -573,7 +573,7 @@ impl<B: Blob> Append<B> {
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Acquire a read lock on the write buffer.
+        // Acquire a read lock on the buffer.
         let buffer = self.buffer.read().await;
 
         // If the data required is beyond the size of the blob, return an error.
@@ -588,68 +588,49 @@ impl<B: Blob> Append<B> {
             return Ok(buffer.slice(start..end).into());
         }
 
-        // Entirely persisted: serve through page cache + blob.
-        if end_offset <= buffer.offset {
-            drop(buffer);
-            let (cached, cached_len) = self.cache_ref.read_cached(self.id, logical_offset, len);
-            if cached_len == len {
-                return Ok(cached);
-            }
+        // Split the request into:
+        // - persisted prefix: bytes before `buffer.offset` (served via cache/blob)
+        // - tip suffix: bytes at/after `buffer.offset` (served from tip)
+        // If the request is entirely persisted, `persisted_len == len` and `tip` is `None`.
+        let persisted_len = ((buffer.offset - logical_offset) as usize).min(len);
+        let tip = if persisted_len < len {
+            Some(buffer.slice(..(len - persisted_len)))
+        } else {
+            None
+        };
+
+        // Release buffer lock before potential I/O.
+        drop(buffer);
+
+        // Fast path: try to read *only* from page cache without acquiring blob lock. This allows
+        // concurrent reads even while a flush is in progress.
+        let (cached, cached_len) =
+            self.cache_ref
+                .read_cached(self.id, logical_offset, persisted_len);
+
+        // Full cache hit for the persisted prefix: no blob read required.
+        let mut out = if cached_len == persisted_len {
+            cached
+        } else {
+            // Slow path: cache miss (partial or full), acquire blob read lock to ensure any
+            // in-flight write completes before we read from the blob.
             let blob_guard = self.blob_state.read().await;
-            if cached_len == 0 {
-                return self
-                    .cache_ref
-                    .read(&blob_guard.blob, self.id, logical_offset, len)
-                    .await;
-            }
-            return self
-                .cache_ref
-                .read_with_prefix(
+            self.cache_ref
+                .read(
                     &blob_guard.blob,
                     self.id,
                     logical_offset,
-                    len,
+                    persisted_len,
                     cached,
                     cached_len,
                 )
-                .await;
-        }
+                .await?
+        };
 
-        // Overlaps persisted range and buffered tip.
-        let persisted_len = (buffer.offset - logical_offset) as usize;
-        let tip_len = len - persisted_len;
-        let tip = buffer.slice(..tip_len);
-        drop(buffer);
-
-        let (mut cached, cached_len) =
-            self.cache_ref
-                .read_cached(self.id, logical_offset, persisted_len);
-        if cached_len == persisted_len {
-            cached.append(tip);
-            return Ok(cached);
-        }
-
-        let blob_guard = self.blob_state.read().await;
-        if cached_len == 0 {
-            let mut out = self
-                .cache_ref
-                .read(&blob_guard.blob, self.id, logical_offset, persisted_len)
-                .await?;
+        if let Some(tip) = tip {
             out.append(tip);
-            return Ok(out);
         }
-        let mut out = self
-            .cache_ref
-            .read_with_prefix(
-                &blob_guard.blob,
-                self.id,
-                logical_offset,
-                persisted_len,
-                cached,
-                cached_len,
-            )
-            .await?;
-        out.append(tip);
+
         Ok(out)
     }
 
