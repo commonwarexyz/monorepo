@@ -71,8 +71,8 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-parallel = [ "blake3/rayon", "commonware-parallel/std", "std" ]
-asm = [ "sha2/asm" ]
+blake3-parallel = [ "blake3/rayon", "std" ]
+sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
