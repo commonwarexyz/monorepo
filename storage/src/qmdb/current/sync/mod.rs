@@ -61,14 +61,14 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
-        operation::Committable,
+        operation::{Committable, Key},
         sync::{Database, DatabaseConfig as Config},
         Durable,
     },
     translator::Translator,
     Persistable,
 };
-use commonware_codec::{Codec, CodecShared};
+use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
@@ -140,7 +140,7 @@ async fn build_db<E, K, V, U, I, H, J, const N: usize>(
 ) -> Result<db::Db<E, J, I, H, U, N, Merkleized<DigestOf<H>>, Durable>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
@@ -326,16 +326,17 @@ impl<E, K, V, H, T, const N: usize> Database
     for CurrentUnorderedVariableDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
+    UnorderedVariableOp<K, V>: CodecShared,
 {
     type Context = E;
     type Op = UnorderedVariableOp<K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, V::Cfg>;
+    type Config = VariableConfig<T, <UnorderedVariableOp<K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(
@@ -433,7 +434,7 @@ where
     type Op = OrderedVariableOp<K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, V::Cfg>;
+    type Config = VariableConfig<T, <OrderedVariableOp<K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(

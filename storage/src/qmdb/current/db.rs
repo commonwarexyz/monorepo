@@ -26,6 +26,7 @@ use crate::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
+        operation::Key,
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, MerkleizationState, NonDurable,
     },
@@ -255,7 +256,7 @@ where
 impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>>,
