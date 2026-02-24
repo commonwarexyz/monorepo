@@ -19,7 +19,7 @@
 //!
 //! - Initialization: [Cache::new] eagerly allocates `capacity` physical-page slot buffers via
 //!   [BufferPool::alloc_zeroed].
-//! - Cache insert/update path: [Cache::insert_page_bytes] reuses a slot allocation when uniquely
+//! - Cache insert/update path: [Cache::insert_page] reuses a slot allocation when uniquely
 //!   owned. If the slot is still aliased by readers, it allocates a replacement from the pool.
 //! - Miss/fetch path: [CacheRef::read_after_page_fault] reserves an evictable cache slot and reuses
 //!   that slot's backing allocation for blob I/O. If the slot buffer is still aliased by readers,
@@ -83,7 +83,9 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>
 
 /// Shared state for one in-flight page fetch.
 struct PageFetchState {
+    /// Shared future for fetching one page from storage.
     future: PageFetchFut,
+    /// Single-winner bit: exactly one waiter may finalize slot cleanup.
     cleanup_claimed: AtomicBool,
 }
 
@@ -95,6 +97,7 @@ impl PageFetchState {
         }
     }
 
+    /// Returns true for exactly one caller, which becomes responsible for cleanup/finalization.
     #[inline]
     fn try_claim_cleanup(&self) -> bool {
         !self.cleanup_claimed.swap(true, Ordering::AcqRel)
@@ -253,7 +256,8 @@ impl CacheRef {
     /// Attempt to read bytes from cache only, stopping at the first miss.
     ///
     /// Returns `(buffers, bytes_read)` where `buffers` is the contiguous cached prefix starting at
-    /// `logical_offset`. This method never performs blob I/O.
+    /// `logical_offset`. This method never performs blob I/O and can return fewer than `len` bytes
+    /// on the first miss.
     pub(super) fn read_cached(
         &self,
         blob_id: u64,
@@ -296,6 +300,10 @@ impl CacheRef {
     ///
     /// Existing bytes in `result` are preserved. This method only appends new bytes and does not
     /// reinterpret `logical_offset` relative to `result`.
+    ///
+    /// Callers should pass the absolute start of the missing suffix range in `logical_offset`.
+    /// For example, if `cached_len` bytes were already appended from `start_offset`, pass
+    /// `logical_offset = start_offset + cached_len`.
     ///
     /// Typical usage:
     /// - `read_cached(...)` fills an initial prefix
@@ -344,6 +352,11 @@ impl CacheRef {
     ///
     /// If no slot can be reserved because all slots are currently in `Fetching` state, performs an
     /// untracked fetch and returns bytes directly without caching.
+    ///
+    /// Locking semantics:
+    /// - cache read/write locks are only used for short state transitions and cache probes
+    /// - no storage I/O is awaited while holding a cache lock
+    /// - exactly one waiter finalizes per-fetch slot state via [PageFetchState::try_claim_cleanup]
     pub(super) async fn read_after_page_fault<B: Blob>(
         &self,
         blob: &B,
@@ -358,6 +371,9 @@ impl CacheRef {
         trace!(page_num, blob_id, "page fault");
 
         let key = (blob_id, page_num);
+        // Exactly one of these is populated before we leave the loop:
+        // - `tracked`: fetch is represented in cache state and needs post-await finalization.
+        // - `uncached`: fallback fetch when no slot is currently reservable.
         let mut tracked: Option<(Arc<PageFetchState>, usize)> = None;
         let mut uncached: Option<PageFetchFut> = None;
         loop {
@@ -414,6 +430,8 @@ impl CacheRef {
                 page_num,
                 fetch_buf,
             )));
+            // Publish `(key -> slot)` + Reserved state atomically under this lock so followers can
+            // join this fetch instead of launching duplicates.
             cache.index.insert(key, slot);
             cache.set_fetching(slot, key, state.clone());
             tracked = Some((state, slot));
@@ -463,6 +481,8 @@ impl CacheRef {
     ///
     /// The returned buffer is the fetched physical page bytes. Callers consume only the logical
     /// prefix via [Self::logical_page_size].
+    ///
+    /// This function does not touch cache state, it only performs the storage read + CRC checks.
     fn make_fetch_future<B: Blob>(
         &self,
         blob: B,
@@ -511,6 +531,9 @@ impl CacheRef {
     /// dropped after logging an error.
     /// This does not affect correctness; it only reduces cache hit rate.
     ///
+    /// Locking semantics: this method acquires the cache write lock once and inserts as many pages
+    /// as it can from the provided prefix.
+    ///
     /// # Panics
     ///
     /// Panics if `offset` is not page aligned or if `logical_pages` does not contain enough bytes
@@ -534,6 +557,7 @@ impl CacheRef {
             let current_page = page_num;
             let page_start = page_idx * logical_page_size;
             let page = &logical_bytes[page_start..page_start + logical_page_size];
+            // Best-effort semantics: if no slot is reservable right now, stop caching.
             if cache.insert_page((blob_id, current_page), page).is_err() {
                 error!(
                     blob_id,
@@ -558,7 +582,7 @@ impl Cache {
     /// Return an empty page cache with capacity `capacity` logical pages of size
     /// `logical_page_size` and backing buffers sized for `physical_page_size`.
     ///
-    /// Slot storage is eagerly allocated.
+    /// Slot storage is eagerly allocated and zero-initialized.
     pub fn new(
         pool: BufferPool,
         physical_page_size: usize,
@@ -607,6 +631,9 @@ impl Cache {
     ///
     /// Returns `None` if the first page in the requested range isn't buffered.
     /// Returned bytes never cross a page boundary.
+    ///
+    /// This method only serves [SlotState::Filled] entries. Reserved in-flight entries are
+    /// treated as misses.
     fn read_at(&self, blob_id: u64, logical_offset: u64, max_len: usize) -> Option<IoBuf> {
         let (page_num, offset_in_page) =
             Self::offset_to_page(self.logical_page_size as u64, logical_offset);
@@ -634,6 +661,8 @@ impl Cache {
     ///
     /// If the destination slot is uniquely owned, its existing allocation is reused.
     /// If the slot is shared by readers, a replacement allocation is taken from `pool`.
+    ///
+    /// Returns `Err(())` only when no slot is currently reservable.
     fn insert_page(&mut self, key: (u64, u64), page: &[u8]) -> Result<(), ()> {
         // Duplicate key update: reuse the same slot and refresh the reference bit.
         let slot = if let Some(&slot) = self.index.get(&key) {
@@ -669,6 +698,8 @@ impl Cache {
     }
 
     /// Return the in-flight fetch state for `key`, if any.
+    ///
+    /// Only returns entries that are currently in [SlotState::Reserved] for the exact same key.
     fn fetch_for_key(&self, key: (u64, u64)) -> Option<(usize, Arc<PageFetchState>)> {
         let slot = *self.index.get(&key)?;
         match &self.slots[slot].state {
@@ -697,12 +728,15 @@ impl Cache {
             self.clock = (self.clock + 1) % self.capacity;
             let slot_ref = &self.slots[slot];
             match &slot_ref.state {
+                // Empty slot: immediately usable.
                 SlotState::Vacant => {
                     chosen = Some(slot);
                     break;
                 }
+                // In-flight fetches cannot be stolen.
                 SlotState::Reserved { .. } => continue,
                 SlotState::Filled { referenced, .. } => {
+                    // Clock second-chance: clear the ref bit on first pass; pick it if already cold.
                     if referenced.swap(false, Ordering::Relaxed) {
                         continue;
                     }
@@ -718,6 +752,7 @@ impl Cache {
                 self.clock = (self.clock + 1) % self.capacity;
                 let slot_ref = &self.slots[slot];
                 match &slot_ref.state {
+                    // Force progress on pass 2 by accepting any non-fetching slot.
                     SlotState::Vacant | SlotState::Filled { .. } => {
                         chosen = Some(slot);
                         break;
@@ -733,11 +768,15 @@ impl Cache {
     }
 
     /// Convert a slot to fetching state.
+    ///
+    /// Caller must already have inserted `key -> slot` into `index` under the same lock.
     fn set_fetching(&mut self, slot: usize, key: (u64, u64), state: Arc<PageFetchState>) {
         self.slots[slot].state = SlotState::Reserved { key, fetch: state };
     }
 
     /// Finalize fetch completion for `key` if `slot` still tracks `state`.
+    ///
+    /// This defends against races where slot/key ownership changed while the fetch was in-flight.
     fn finish_fetch_if_current(
         &mut self,
         slot: usize,
@@ -755,6 +794,7 @@ impl Cache {
             } => *state_key == key && Arc::ptr_eq(fetch, state),
             SlotState::Vacant | SlotState::Filled { .. } => false,
         };
+        // Slot ownership changed while this fetch was in-flight, treat this result as stale.
         if !is_current {
             return;
         }
@@ -771,7 +811,7 @@ impl Cache {
                     self.evict_slot(slot);
                     return;
                 }
-                // `page` may include a physical suffix; reads are still bounded to logical size.
+                // `page` may include a physical suffix, reads remain bounded to logical size.
                 let slot_ref = &mut self.slots[slot];
                 slot_ref.buf = page;
                 slot_ref.state = SlotState::Filled {
@@ -797,6 +837,7 @@ impl Cache {
             }
             Err(_) => self.pool.alloc(self.physical_page_size),
         };
+        // A logical-sized recycled buffer is not large enough for physical-page fetches.
         if dst.capacity() < self.physical_page_size {
             dst = self.pool.alloc(self.physical_page_size);
         }
@@ -806,6 +847,7 @@ impl Cache {
     /// Evict any key currently assigned to `slot`, leaving the slot vacant.
     fn evict_slot(&mut self, slot: usize) {
         let slot_ref = &mut self.slots[slot];
+        // Remove reverse index entry first, then clear slot state.
         let key = match &slot_ref.state {
             SlotState::Vacant => None,
             SlotState::Filled { key, .. } | SlotState::Reserved { key, .. } => Some(*key),
