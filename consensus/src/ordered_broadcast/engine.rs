@@ -366,6 +366,13 @@ impl<
                     let n = scheme.participants().len() as u32;
                     self.verifier.set_quorum(N3f1::quorum(n));
                 }
+
+                // Prune verifier batches outside the new epoch bounds
+                let (eb_lo, eb_hi) = self.epoch_bounds;
+                self.verifier.prune_epochs(
+                    epoch.saturating_sub(eb_lo),
+                    epoch.saturating_add(eb_hi),
+                );
                 continue;
             },
 
@@ -696,6 +703,10 @@ impl<
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
                 .try_set(node.chunk.height.get());
+
+            // Prune verifier batches below the new tip height
+            self.verifier
+                .prune_heights(&node.chunk.sequencer, node.chunk.height);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if

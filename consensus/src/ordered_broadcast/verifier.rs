@@ -2,7 +2,7 @@ use super::{
     scheme,
     types::{Ack, AckSubject, Chunk},
 };
-use crate::types::{Epoch, Participant};
+use crate::types::{Epoch, Height, Participant};
 use commonware_cryptography::{
     certificate::{Scheme, Verification},
     Digest, PublicKey,
@@ -203,6 +203,24 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
     /// This is used when the validator set changes across epochs.
     pub const fn set_quorum(&mut self, quorum: u32) {
         self.quorum = quorum as usize;
+    }
+
+    /// Removes all batches whose epoch falls outside `[min_epoch, max_epoch]`.
+    ///
+    /// Called when the epoch changes to evict batches that are no longer
+    /// within the accepted epoch bounds.
+    pub fn prune_epochs(&mut self, min_epoch: Epoch, max_epoch: Epoch) {
+        self.batches
+            .retain(|key, _| key.epoch >= min_epoch && key.epoch <= max_epoch);
+    }
+
+    /// Removes all batches for `sequencer` with height below `min_height`.
+    ///
+    /// Called when the tip advances for a sequencer, since acks for heights
+    /// below the tip can no longer contribute to certificate formation.
+    pub fn prune_heights(&mut self, sequencer: &P, min_height: Height) {
+        self.batches
+            .retain(|key, _| key.chunk.sequencer != *sequencer || key.chunk.height >= min_height);
     }
 }
 
@@ -493,5 +511,122 @@ mod tests {
         quorum_guard_drops_late_acks(bls12381_multisig::fixture::<MinSig, _>);
         quorum_guard_drops_late_acks(bls12381_threshold::fixture::<MinPk, _>);
         quorum_guard_drops_late_acks(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that prune_epochs removes batches outside the given epoch range.
+    fn prune_epochs<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Add acks across epochs 5, 10, and 15.
+        for epoch_val in [5, 10, 15] {
+            let epoch = Epoch::new(epoch_val);
+            let ack = create_ack(&fixture.schemes[0], chunk.clone(), epoch);
+            verifier.add(ack, false);
+        }
+        assert_eq!(verifier.batches.len(), 3);
+
+        // Prune to keep only epochs [8, 12].
+        verifier.prune_epochs(Epoch::new(8), Epoch::new(12));
+        assert_eq!(verifier.batches.len(), 1);
+
+        // Only epoch 10 should remain.
+        let key = BatchKey {
+            chunk,
+            epoch: Epoch::new(10),
+        };
+        assert!(verifier.batches.contains_key(&key));
+    }
+
+    #[test]
+    fn test_prune_epochs() {
+        prune_epochs(ed25519::fixture);
+        prune_epochs(secp256r1::fixture);
+        prune_epochs(bls12381_multisig::fixture::<MinPk, _>);
+        prune_epochs(bls12381_multisig::fixture::<MinSig, _>);
+        prune_epochs(bls12381_threshold::fixture::<MinPk, _>);
+        prune_epochs(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that prune_heights removes batches for a sequencer below a given height.
+    fn prune_heights<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+
+        // Add acks at heights 1, 5, and 10 for sequencer 0.
+        for h in [1, 5, 10] {
+            let chunk = Chunk::new(
+                fixture.participants[0].clone(),
+                crate::types::Height::new(h),
+                Sha256::hash(b"payload"),
+            );
+            let ack = create_ack(&fixture.schemes[0], chunk, epoch);
+            verifier.add(ack, false);
+        }
+
+        // Add an ack at height 1 for sequencer 1 (should not be pruned).
+        let other_chunk = Chunk::new(
+            fixture.participants[1].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+        let ack = create_ack(&fixture.schemes[0], other_chunk.clone(), epoch);
+        verifier.add(ack, false);
+
+        assert_eq!(verifier.batches.len(), 4);
+
+        // Prune sequencer 0 below height 5 (removes height 1, keeps 5 and 10).
+        verifier.prune_heights(&fixture.participants[0], crate::types::Height::new(5));
+        assert_eq!(verifier.batches.len(), 3);
+
+        // Height 1 for sequencer 0 should be gone.
+        let pruned_key = BatchKey {
+            chunk: Chunk::new(
+                fixture.participants[0].clone(),
+                crate::types::Height::new(1),
+                Sha256::hash(b"payload"),
+            ),
+            epoch,
+        };
+        assert!(!verifier.batches.contains_key(&pruned_key));
+
+        // Height 1 for sequencer 1 should still exist.
+        let kept_key = BatchKey {
+            chunk: other_chunk,
+            epoch,
+        };
+        assert!(verifier.batches.contains_key(&kept_key));
+    }
+
+    #[test]
+    fn test_prune_heights() {
+        prune_heights(ed25519::fixture);
+        prune_heights(secp256r1::fixture);
+        prune_heights(bls12381_multisig::fixture::<MinPk, _>);
+        prune_heights(bls12381_multisig::fixture::<MinSig, _>);
+        prune_heights(bls12381_threshold::fixture::<MinPk, _>);
+        prune_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
 }
