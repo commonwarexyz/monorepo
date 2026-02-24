@@ -478,10 +478,7 @@ mod tests {
 
             // Create Replay with buffer size that results in prefetch_count=1.
             // Buffer size of one physical page gives prefetch_pages=1.
-            let mut replay = append
-                .replay(std::num::NonZeroUsize::new(PAGE_SIZE.get() as usize).unwrap())
-                .await
-                .unwrap();
+            let mut replay = append.replay(PAGE_SIZE.into()).await.unwrap();
 
             // Ensure all data - this requires 4 separate fill() calls (one per page).
             // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
