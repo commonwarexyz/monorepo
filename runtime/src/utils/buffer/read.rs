@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
-///     let header = reader.read_exact(16).await.expect("unable to read data");
+///     let header = reader.read(16).await.expect("unable to read data");
 ///     println!("Read header: {:?}", header.coalesce().as_ref());
 ///
 ///     // Position is still at 16 (after header)

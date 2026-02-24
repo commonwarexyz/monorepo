@@ -39,7 +39,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
-///     let buf = reader.read_exact(size as usize).await.expect("read failed");
+///     let buf = reader.read(size as usize).await.expect("read failed");
 ///     assert_eq!(buf.coalesce().as_ref(), b"hello world!");
 /// });
 /// ```
