@@ -2937,7 +2937,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"nullify_exit_late_notarization".to_vec();
+        let namespace = b"nullification_exit_emits_nullify_vote".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network.
@@ -2957,7 +2957,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _, _) = setup_voter(
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
