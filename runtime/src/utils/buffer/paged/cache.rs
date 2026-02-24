@@ -531,13 +531,7 @@ impl CacheRef {
     ///
     /// Panics if `offset` is not page aligned or if `logical_pages` does not contain enough bytes
     /// for `page_count` full logical pages.
-    pub(crate) fn cache(
-        &self,
-        blob_id: u64,
-        logical_pages: &IoBuf,
-        offset: u64,
-        page_count: usize,
-    ) {
+    pub fn cache(&self, blob_id: u64, logical_pages: &IoBuf, offset: u64, page_count: usize) {
         if page_count == 0 {
             return;
         }

@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, IoBuf, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -270,15 +270,16 @@ fn fuzz(input: FuzzInput) {
                     data,
                     offset,
                 } => {
-                    // Keep this operation lightweight for fuzzing without relying on internal
-                    // cache injection helpers.
-                    let _ = blob_id;
-                    if let (Some(cache), Some(append)) = (&cache_ref, &append_buffer) {
-                        let offset = offset as u64;
-                        let page_size = cache.logical_page_size();
-                        let aligned_offset = (offset / page_size) * page_size;
-                        let len = data.len().min(page_size as usize);
-                        let _ = append.read_at(aligned_offset, len).await;
+                    if let Some(cache) = &cache_ref {
+                        let page_size = cache.logical_page_size() as usize;
+                        let page_count = data.len() / page_size;
+                        if page_count > 0 {
+                            let bytes_to_cache = page_count * page_size;
+                            let logical_pages = IoBuf::from(data[..bytes_to_cache].to_vec());
+                            let offset = offset as u64;
+                            let aligned_offset = (offset / page_size as u64) * page_size as u64;
+                            cache.cache(blob_id as u64, &logical_pages, aligned_offset, page_count);
+                        }
                     }
                 }
 
