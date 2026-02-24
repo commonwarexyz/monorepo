@@ -928,6 +928,144 @@ mod tests {
         matches!(cache.slots[slot].state, SlotState::Reserved { .. })
     }
 
+    /// Test blob that optionally blocks one read, then returns a valid physical page payload.
+    ///
+    /// Used by cancellation/takeover tests that need deterministic fetch ordering and successful
+    /// page completion.
+    #[derive(Clone)]
+    struct BlockingBlob {
+        logical_page_size: usize,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        fill: u8,
+    }
+
+    impl BlockingBlob {
+        /// Build a blob that blocks one read until released via the returned sender.
+        fn new(
+            logical_page_size: usize,
+            fill: u8,
+        ) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    logical_page_size,
+                    started: Arc::new(Mutex::new(Some(started_tx))),
+                    release: Arc::new(Mutex::new(Some(release_rx))),
+                    fill,
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    impl crate::Blob for BlockingBlob {
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            len: usize,
+            buf: impl Into<crate::IoBufsMut> + Send,
+        ) -> Result<crate::IoBufsMut, crate::Error> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+
+            let mut page = vec![self.fill; self.logical_page_size];
+            let crc = Crc32::checksum(&page);
+            page.extend_from_slice(&Checksum::new(self.logical_page_size as u16, crc).to_bytes());
+            assert_eq!(len, page.len());
+
+            let mut out = buf.into();
+            // SAFETY: we fully initialize `len` bytes immediately below with `copy_from_slice`.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&page);
+            Ok(out)
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
+            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
+                .await
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _buf: impl Into<crate::IoBufs> + Send,
+        ) -> Result<(), crate::Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
+    /// Test blob that signals read start and then never resolves.
+    ///
+    /// Used to model a cancelled first fetcher leaving an unresolved in-flight fetch state.
+    #[derive(Clone)]
+    struct PendingBlob {
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl PendingBlob {
+        fn new() -> (Self, oneshot::Receiver<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            (
+                Self {
+                    started: Arc::new(Mutex::new(Some(started_tx))),
+                },
+                started_rx,
+            )
+        }
+    }
+
+    impl crate::Blob for PendingBlob {
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _buf: impl Into<crate::IoBufsMut> + Send,
+        ) -> Result<crate::IoBufsMut, crate::Error> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            pending::<()>().await;
+            unreachable!("pending future never resolves")
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
+            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
+                .await
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _buf: impl Into<crate::IoBufs> + Send,
+        ) -> Result<(), crate::Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
     #[test_traced]
     fn test_cache_basic() {
         let mut registry = Registry::default();
@@ -1421,136 +1559,6 @@ mod tests {
             assert_eq!(cache.slots.len(), 1);
             assert!(!is_fetching(&cache, (0, 0)));
         });
-    }
-
-    #[derive(Clone)]
-    struct BlockingBlob {
-        logical_page_size: usize,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-        fill: u8,
-    }
-
-    impl BlockingBlob {
-        fn new(
-            logical_page_size: usize,
-            fill: u8,
-        ) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    logical_page_size,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                    fill,
-                },
-                started_rx,
-                release_tx,
-            )
-        }
-    }
-
-    impl crate::Blob for BlockingBlob {
-        async fn read_at_buf(
-            &self,
-            _offset: u64,
-            len: usize,
-            buf: impl Into<crate::IoBufsMut> + Send,
-        ) -> Result<crate::IoBufsMut, crate::Error> {
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-            let release = self.release.lock().take();
-            if let Some(release) = release {
-                let _ = release.await;
-            }
-
-            let mut page = vec![self.fill; self.logical_page_size];
-            let crc = Crc32::checksum(&page);
-            page.extend_from_slice(&Checksum::new(self.logical_page_size as u16, crc).to_bytes());
-            assert_eq!(len, page.len());
-
-            let mut out = buf.into();
-            // SAFETY: we fully initialize `len` bytes immediately below with `copy_from_slice`.
-            unsafe { out.set_len(len) };
-            out.copy_from_slice(&page);
-            Ok(out)
-        }
-
-        async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
-            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
-                .await
-        }
-
-        async fn write_at(
-            &self,
-            _offset: u64,
-            _buf: impl Into<crate::IoBufs> + Send,
-        ) -> Result<(), crate::Error> {
-            Ok(())
-        }
-
-        async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), crate::Error> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct PendingBlob {
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    }
-
-    impl PendingBlob {
-        fn new() -> (Self, oneshot::Receiver<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            (
-                Self {
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                },
-                started_rx,
-            )
-        }
-    }
-
-    impl crate::Blob for PendingBlob {
-        async fn read_at_buf(
-            &self,
-            _offset: u64,
-            _len: usize,
-            _buf: impl Into<crate::IoBufsMut> + Send,
-        ) -> Result<crate::IoBufsMut, crate::Error> {
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-            pending::<()>().await;
-            unreachable!("pending future never resolves")
-        }
-
-        async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
-            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
-                .await
-        }
-
-        async fn write_at(
-            &self,
-            _offset: u64,
-            _buf: impl Into<crate::IoBufs> + Send,
-        ) -> Result<(), crate::Error> {
-            Ok(())
-        }
-
-        async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), crate::Error> {
-            Ok(())
-        }
     }
 
     #[test_traced]
