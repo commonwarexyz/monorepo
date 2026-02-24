@@ -3,8 +3,6 @@
 //! The base [`Mmr`] is always merkleized (has a computed root). Mutations go
 //! through a [`super::diff::DirtyDiff`] which borrows the base, accumulates
 //! changes, and produces a [`super::diff::Changeset`] that is applied back.
-//!
-//! An internal [`DirtyMmr`] is kept `pub(crate)` for the diff layer's use.
 
 use crate::mmr::{
     hasher::Hasher,
@@ -1510,7 +1508,7 @@ mod tests {
         let restore_updates: Vec<(Location, sha256::Digest)> = leaf_locs
             .iter()
             .map(|&loc| {
-                let leaf_num = *loc as u64;
+                let leaf_num = *loc;
                 hasher.inner().update(&leaf_num.to_be_bytes());
                 let element = hasher.inner().finalize();
                 let pos = Position::try_from(loc).unwrap();

@@ -342,11 +342,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             _durable: core::marker::PhantomData,
         }
     }
-
-    /// Identity conversion (merkleization state was removed).
-    pub fn into_merkleized(self) -> Self {
-        self
-    }
 }
 
 // Functionality specific to the NonDurable (mutable) state.
@@ -397,11 +392,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         };
 
         Ok((db, range))
-    }
-
-    /// Identity conversion (merkleization state was removed).
-    pub fn into_merkleized(self) -> Self {
-        self
     }
 }
 
@@ -535,8 +525,7 @@ pub(super) mod test {
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let db = db.into_mutable();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // commit op added
             let root = db.root();
             drop(db);
@@ -571,8 +560,7 @@ pub(super) mod test {
             assert_eq!(db.bounds().await.end, 2);
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
-            let (durable_db, _) = db.commit(metadata.clone()).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.bounds().await.end, 3);
@@ -588,8 +576,7 @@ pub(super) mod test {
             assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Commit the second key.
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 5);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -634,8 +621,7 @@ pub(super) mod test {
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -685,8 +671,7 @@ pub(super) mod test {
             }
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             let halfway_root = db.root();
 
@@ -730,8 +715,7 @@ pub(super) mod test {
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
@@ -783,8 +767,7 @@ pub(super) mod test {
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Prune the db to the first half of the operations.
@@ -887,8 +870,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let mut db = db.into_mutable();
             db.set(k3, v3.clone()).await.unwrap();
 
@@ -896,8 +878,7 @@ pub(super) mod test {
             assert_eq!(*db.last_commit_loc, 3);
 
             // Test valid prune (at last commit) - need Merkleized state for prune
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit

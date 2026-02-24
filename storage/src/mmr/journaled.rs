@@ -1717,7 +1717,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let elements: Vec<_> = (0..50).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..50).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             mmr.sync().await.unwrap();
             let original_size = mmr.size();
@@ -1781,7 +1781,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let elements: Vec<_> = (0..30).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..30).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             mmr.sync().await.unwrap();
             mmr.prune_to_pos(Position::new(10)).await.unwrap();
@@ -1852,7 +1852,7 @@ mod tests {
             .unwrap();
 
             // Add 50 elements
-            let elements: Vec<_> = (0..50).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..50).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             mmr.sync().await.unwrap();
 
@@ -1915,7 +1915,7 @@ mod tests {
             .unwrap();
 
             // Add 50 elements
-            let elements: Vec<_> = (0..50).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..50).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             mmr.sync().await.unwrap();
 
@@ -1970,7 +1970,7 @@ mod tests {
             let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
-            let elements: Vec<_> = (0..100).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..100).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             mmr.sync().await.unwrap();
 
@@ -2015,7 +2015,7 @@ mod tests {
             .await
             .unwrap();
 
-            let elements: Vec<_> = (0..20).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..20).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
 
             let historical_leaves = Location::new_unchecked(10);
@@ -2053,7 +2053,7 @@ mod tests {
             .await
             .unwrap();
 
-            let elements: Vec<_> = (0..30).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..30).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
 
             let prune_loc = Location::new_unchecked(10);
@@ -2105,7 +2105,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let elements: Vec<_> = (0..20).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..20).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             let end = mmr.leaves();
             let size = mmr.size();
@@ -2128,7 +2128,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let elements: Vec<_> = (0..11).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..11).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             let end = mmr.leaves();
             let keep_loc = end - 1;
@@ -2162,7 +2162,7 @@ mod tests {
             .await
             .unwrap();
 
-            let elements: Vec<_> = (0..8).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..8).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
             let requested = mmr.leaves() + 1;
 
@@ -2191,7 +2191,7 @@ mod tests {
             .await
             .unwrap();
 
-            let elements: Vec<_> = (0..16).map(|i| test_digest(i)).collect();
+            let elements: Vec<_> = (0..16).map(test_digest).collect();
             add_elements(&mut mmr, &mut hasher, &elements);
 
             let end = mmr.leaves();

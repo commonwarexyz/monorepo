@@ -16,7 +16,7 @@
 //! # Database States
 //!
 //! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
+//! - Merkleization: Merkleized (has computed root) or Unmerkleized (root not yet computed)
 //! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
 //!
 //! We call the combined (Merkleized,Durable) state the _Clean_ state.

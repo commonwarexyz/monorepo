@@ -581,7 +581,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Mutable = Db<E, C, I, H, Update<K, V>, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Durable>;
+    type Merkleized = Self;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -604,7 +604,7 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, NonDurable>;
+    type Mutable = Self;
 
     fn into_mutable(self) -> Self::Mutable {
         self
@@ -626,7 +626,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Durable = Db<E, C, I, H, Update<K, V>, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, NonDurable>;
+    type Merkleized = Self;
 
     async fn commit(
         self,

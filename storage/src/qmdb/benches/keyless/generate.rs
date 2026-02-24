@@ -77,8 +77,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
             db = durable.into_mutable();
         }
     }
-    let (durable, _) = db.commit(None).await.unwrap();
-    let mut clean = durable.into_merkleized();
+    let (mut clean, _) = db.commit(None).await.unwrap();
     clean.sync().await.unwrap();
 
     clean

@@ -247,11 +247,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
             _durability: PhantomData,
         }
     }
-
-    /// Identity transition (merkleization state tracking was removed).
-    pub fn into_merkleized(self) -> Self {
-        self
-    }
 }
 
 // Implementation for the Mutable state.
@@ -287,19 +282,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
 
         Ok((durable, start_loc..op_count))
     }
-
-    /// Identity transition (merkleization state tracking was removed).
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Durable> {
-        Keyless {
-            journal: self.journal,
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        }
-    }
 }
-
-// The `into_mutable` and `into_merkleized` methods are now on the Durable impl block directly,
-// since the merkleization state parameter was removed.
 
 // Implementation of MerkleizedStore for all states.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
@@ -416,8 +399,7 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![3u8; 10];
             let db = db.into_mutable();
-            let (durable, _) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -455,8 +437,7 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             // Make sure closing/reopening gets us back to the same state.
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
@@ -518,8 +499,7 @@ mod test {
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             // Append more values.
@@ -535,8 +515,7 @@ mod test {
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
@@ -561,8 +540,7 @@ mod test {
             const ELEMENTS: usize = 200;
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
 
@@ -694,8 +672,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
@@ -803,8 +780,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
@@ -923,8 +899,7 @@ mod test {
                 let v = vec![i as u8; 10];
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let committed_root = db.root();
             let committed_size = db.bounds().await.end;
 
@@ -966,8 +941,7 @@ mod test {
             assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
 
             // Test with multiple trailing appends to ensure robustness
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let new_committed_root = db.root();
             let new_committed_size = db.bounds().await.end;
 
@@ -1034,9 +1008,7 @@ mod test {
             assert!(
                 matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(4) && size == Location::new_unchecked(4))
             );
-
-            let db = durable.into_merkleized();
-            db.destroy().await.unwrap();
+            durable.destroy().await.unwrap();
         });
     }
 
@@ -1069,8 +1041,7 @@ mod test {
             assert_eq!(last_commit, Location::new_unchecked(3));
 
             // Test valid prune (at last commit) - need Clean state for prune
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit
