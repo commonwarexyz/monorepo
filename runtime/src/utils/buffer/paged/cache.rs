@@ -12,6 +12,24 @@
 //! Cache capacity bounds resident cache slots, not total process memory retained by read results.
 //! Returned [IoBuf] slices are reference-counted and can outlive eviction, so memory for evicted
 //! pages can remain live until all readers drop their references.
+//!
+//! # Allocation Semantics
+//!
+//! - Initialization: [Cache::new] eagerly allocates `capacity` logical-page slots via
+//!   [BufferPool::alloc_zeroed].
+//! - Cache insert/update path: [Cache::insert_page_bytes] reuses a slot allocation when uniquely
+//!   owned. If the slot is still aliased by readers, it allocates a replacement from the pool.
+//! - Miss/fetch path: [CacheRef::read_after_page_fault] allocates a temporary physical-page buffer
+//!   for blob I/O, validates/strips CRC, and caches logical bytes. The temporary buffer is dropped
+//!   after the fetch path completes.
+//! - Caller ownership: [CacheRef::cache] copies logical bytes into cache slots and does not retain
+//!   caller-provided buffers.
+//!
+//! # Concurrency Semantics
+//!
+//! Reads first probe the cache under a read lock. On miss, page fetches are deduplicated per
+//! `(blob_id, page_num)` through `page_fetches`, so concurrent readers typically await one shared
+//! in-flight fetch. Cleanup uses a per-fetch claim bit to ensure only one task removes map state.
 
 use super::{read_page_from_blob_into, CHECKSUM_SIZE};
 use crate::{Blob, BufMut, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
@@ -42,6 +60,13 @@ struct PageFetchState {
 }
 
 impl PageFetchState {
+    fn new(future: PageFetchFut) -> Self {
+        Self {
+            future,
+            cleanup_claimed: AtomicBool::new(false),
+        }
+    }
+
     #[inline]
     fn try_claim_cleanup(&self) -> bool {
         !self.cleanup_claimed.swap(true, Ordering::AcqRel)
@@ -80,7 +105,7 @@ struct Cache {
     slots: Vec<IoBuf>,
 
     /// Logical size of each cached page in bytes.
-    page_size: usize,
+    logical_page_size: usize,
 
     /// The Clock replacement policy's clock hand index into `entries`.
     clock: usize,
@@ -215,7 +240,8 @@ impl CacheRef {
 
     /// Attempt to read bytes from cache only, stopping at the first miss.
     ///
-    /// Returns the buffers read from cache and the number of bytes read.
+    /// Returns `(buffers, bytes_read)` where `buffers` is the contiguous cached prefix starting at
+    /// `logical_offset`. This method never performs blob I/O.
     pub(super) fn read_cached(
         &self,
         blob_id: u64,
@@ -241,8 +267,12 @@ impl CacheRef {
 
     /// Read `len` bytes, starting from `logical_offset`.
     ///
-    /// `result` may contain an existing prefix of length `prefix_len`. Any missing suffix bytes are
-    /// fetched from cache/blob and appended.
+    /// `result` may contain an existing prefix of length `prefix_len` that corresponds to this same
+    /// logical range. Any missing suffix bytes are fetched from cache/blob and appended.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `prefix_len > len`.
     pub(super) async fn read<B: Blob>(
         &self,
         blob: &B,
@@ -286,8 +316,11 @@ impl CacheRef {
         Ok(result)
     }
 
-    /// Fetch the requested page after encountering a page fault, which may involve retrieving it
-    /// from `blob` & caching the result in the page cache.
+    /// Resolve one page miss for `(blob_id, page_num)`.
+    ///
+    /// If another task is already fetching this key, joins that in-flight shared future.
+    /// Otherwise creates/tracks a new fetch, validates the physical page, and inserts logical page
+    /// bytes into the cache (best effort).
     pub(super) async fn read_after_page_fault<B: Blob>(
         &self,
         blob: &B,
@@ -302,10 +335,9 @@ impl CacheRef {
         trace!(page_num, blob_id, "page fault");
 
         let key = (blob_id, page_num);
-        // Fast follower path: if a fetch is already in-flight for this key, join it without
-        // immediately taking the cache write lock. We intentionally skip resolved entries here;
-        // those still require write-lock scavenging to remove stale map state and apply per-key
-        // insertion semantics.
+        // Fast follower path: if a fetch is already in-flight for this key, join it without taking
+        // the cache write lock. Resolved entries are intentionally skipped here; stale resolved
+        // state still requires write-lock scavenging.
         let fast_follow = {
             let cache = self.cache.read();
             if let Some(page) = cache.read_at(blob_id, offset, max_len) {
@@ -321,9 +353,7 @@ impl CacheRef {
             if let Some(existing) = fast_follow {
                 (existing, false)
             } else {
-                // Create or clone a future that retrieves the desired page from the underlying blob.
-                // This requires a write lock on the page cache since we may need to modify
-                // `page_fetches`.
+                // Create or reuse tracked fetch state for this key under write lock.
                 let mut cache = self.cache.write();
 
                 // There's a (small) chance the page was fetched & buffered by another task before we
@@ -360,18 +390,15 @@ impl CacheRef {
                     future.boxed().shared()
                 };
                 let create_and_track_fetch = |cache: &mut Cache| {
-                    let future = create_fetch();
-                    let state = Arc::new(PageFetchState {
-                        future,
-                        cleanup_claimed: AtomicBool::new(false),
-                    });
+                    let state = Arc::new(PageFetchState::new(create_fetch()));
                     cache.page_fetches.insert(key, state.clone());
                     (state, true)
                 };
 
                 if let Some(existing) = cache.page_fetches.get(&key).cloned() {
                     if let Some(stale_result) = existing.future.peek().cloned() {
-                        // Stale resolved entry from a cancelled first fetcher; remove and apply per-key.
+                        // Stale resolved entry from a cancelled first fetcher. Remove it, then
+                        // either reuse resolved data (success) or create a new fetch (error).
                         let _ = cache.page_fetches.remove(&key);
                         match stale_result {
                             Ok(page_buf) => {
@@ -415,7 +442,7 @@ impl CacheRef {
         let should_cleanup = if is_fetch_owner {
             fetch_state.try_claim_cleanup()
         } else {
-            // Fast path: if another task already cleaned this fetch entry, avoid write-locking.
+            // If another task already cleaned this fetch entry, avoid a write lock.
             let still_tracked = {
                 let cache = self.cache.read();
                 cache
@@ -453,7 +480,8 @@ impl CacheRef {
             }
         };
 
-        // Return directly from the fetched page to preserve correctness regardless of insertion.
+        // Return directly from fetched bytes. Cache insertion failures affect hit rate, not
+        // correctness for this read.
         let bytes = std::cmp::min(max_len, page_for_return.len() - offset_in_page);
         Ok(page_for_return.slice(offset_in_page..offset_in_page + bytes))
     }
@@ -463,9 +491,9 @@ impl CacheRef {
     /// `logical_pages` is interpreted as a contiguous sequence of exactly `page_count` logical
     /// pages starting at `offset`. `offset` must be logical-page aligned.
     ///
-    /// This method is best effort: if insertion fails (for example, no evictable slot is found),
-    /// remaining pages are dropped after logging an error. This does not affect correctness; it
-    /// only reduces cache hit rate.
+    /// This method copies bytes into cache slots and is best effort: if insertion fails (for
+    /// example, no evictable slot is found), remaining pages are dropped after logging an error.
+    /// This does not affect correctness; it only reduces cache hit rate.
     ///
     /// # Panics
     ///
@@ -533,21 +561,23 @@ impl CacheRef {
 }
 
 impl Cache {
-    /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity
-    /// of `capacity` pages, each of size `page_size` bytes.
-    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let page_size = page_size.get() as usize;
+    /// Return an empty page cache with capacity `capacity` logical pages of size
+    /// `logical_page_size`.
+    ///
+    /// Slot storage is eagerly allocated.
+    pub fn new(pool: BufferPool, logical_page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+        let logical_page_size = logical_page_size.get() as usize;
         let capacity = capacity.get();
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
-            let slot = pool.alloc_zeroed(page_size).freeze();
+            let slot = pool.alloc_zeroed(logical_page_size).freeze();
             slots.push(slot);
         }
         Self {
             index: HashMap::new(),
             entries: Vec::with_capacity(capacity),
             slots,
-            page_size,
+            logical_page_size,
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
@@ -563,8 +593,8 @@ impl Cache {
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
-    const fn offset_to_page(page_size: u64, offset: u64) -> (u64, u64) {
-        (offset / page_size, offset % page_size)
+    const fn offset_to_page(logical_page_size: u64, offset: u64) -> (u64, u64) {
+        (offset / logical_page_size, offset % logical_page_size)
     }
 
     /// Attempt to fetch blob data starting at `logical_offset` from the page cache.
@@ -573,23 +603,23 @@ impl Cache {
     /// Returned bytes never cross a page boundary.
     fn read_at(&self, blob_id: u64, logical_offset: u64, max_len: usize) -> Option<IoBuf> {
         let (page_num, offset_in_page) =
-            Self::offset_to_page(self.page_size as u64, logical_offset);
+            Self::offset_to_page(self.logical_page_size as u64, logical_offset);
         let slot = *self.index.get(&(blob_id, page_num))?;
         let entry = &self.entries[slot];
         assert_eq!(entry.key, (blob_id, page_num));
         entry.referenced.store(true, Ordering::Relaxed);
 
         let page = self.page(slot);
-        let bytes = std::cmp::min(max_len, self.page_size - offset_in_page as usize);
+        let bytes = std::cmp::min(max_len, self.logical_page_size - offset_in_page as usize);
         Some(page.slice(offset_in_page as usize..offset_in_page as usize + bytes))
     }
 
-    /// Put a page into the cache.
+    /// Put a page into the cache by transferring ownership of `page`.
     fn insert_page(&mut self, key: (u64, u64), page: IoBuf) -> Result<(), IoBuf> {
         let Some(slot) = self.prepare_slot(key) else {
             return Err(page);
         };
-        assert_eq!(page.len(), self.page_size);
+        assert_eq!(page.len(), self.logical_page_size);
         self.slots[slot] = page;
         Ok(())
     }
@@ -602,7 +632,7 @@ impl Cache {
         let Some(slot) = self.prepare_slot(key) else {
             return Err(());
         };
-        assert_eq!(page.len(), self.page_size);
+        assert_eq!(page.len(), self.logical_page_size);
 
         let current = std::mem::take(&mut self.slots[slot]);
         let mut dst = match current.try_into_mut() {
@@ -610,14 +640,16 @@ impl Cache {
                 writable.clear();
                 writable
             }
-            Err(_) => self.pool.alloc(self.page_size),
+            Err(_) => self.pool.alloc(self.logical_page_size),
         };
         dst.put_slice(page);
         self.slots[slot] = dst.freeze();
         Ok(())
     }
 
-    /// Reserve/initialize a slot for `key`.
+    /// Reserve or initialize a slot for `key`.
+    ///
+    /// Returns `None` only when the cache is full and no slot is evictable in this pass.
     fn prepare_slot(&mut self, key: (u64, u64)) -> Option<usize> {
         let (blob_id, page_num) = key;
         // Check for existing entry (update case)
@@ -658,6 +690,9 @@ impl Cache {
     }
 
     /// Find the next clock slot that can be evicted.
+    ///
+    /// Performs at most two full clock sweeps. Returns `None` if every entry remains recently
+    /// referenced across those sweeps.
     fn next_evictable_slot(&mut self) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
@@ -1008,13 +1043,9 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache.page_fetches.insert(
-                    (0, 0),
-                    Arc::new(PageFetchState {
-                        future: stale,
-                        cleanup_claimed: AtomicBool::new(false),
-                    }),
-                );
+                cache
+                    .page_fetches
+                    .insert((0, 0), Arc::new(PageFetchState::new(stale)));
             }
 
             let read = cache_ref
@@ -1052,13 +1083,9 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache.page_fetches.insert(
-                    (0, 0),
-                    Arc::new(PageFetchState {
-                        future: stale,
-                        cleanup_claimed: AtomicBool::new(false),
-                    }),
-                );
+                cache
+                    .page_fetches
+                    .insert((0, 0), Arc::new(PageFetchState::new(stale)));
             }
 
             let read = cache_ref
@@ -1099,13 +1126,9 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache.page_fetches.insert(
-                    (7, 7),
-                    Arc::new(PageFetchState {
-                        future: stale,
-                        cleanup_claimed: AtomicBool::new(false),
-                    }),
-                );
+                cache
+                    .page_fetches
+                    .insert((7, 7), Arc::new(PageFetchState::new(stale)));
             }
 
             let read = cache_ref
@@ -1139,13 +1162,9 @@ mod tests {
             let _ = stale.clone().await;
             {
                 let mut cache = cache_ref.cache.write();
-                cache.page_fetches.insert(
-                    (0, 0),
-                    Arc::new(PageFetchState {
-                        future: stale,
-                        cleanup_claimed: AtomicBool::new(false),
-                    }),
-                );
+                cache
+                    .page_fetches
+                    .insert((0, 0), Arc::new(PageFetchState::new(stale)));
             }
 
             // Insert on another key. This should not affect stale fetch-map entries for key (0, 0).
@@ -1496,13 +1515,9 @@ mod tests {
             .shared();
             {
                 let mut cache = cache_ref.cache.write();
-                cache.page_fetches.insert(
-                    (42, 7),
-                    Arc::new(PageFetchState {
-                        future: stranded,
-                        cleanup_claimed: AtomicBool::new(false),
-                    }),
-                );
+                cache
+                    .page_fetches
+                    .insert((42, 7), Arc::new(PageFetchState::new(stranded)));
             }
 
             cache_pages(

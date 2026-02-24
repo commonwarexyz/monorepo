@@ -26,7 +26,7 @@ pub(super) struct PageReader<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// Physical page size (logical_page_size + CHECKSUM_SIZE).
-    page_size: usize,
+    physical_page_size: usize,
     /// Logical page size (data bytes per page, not including CRC).
     logical_page_size: usize,
     /// The physical size of the blob.
@@ -60,7 +60,7 @@ impl<B: Blob> PageReader<B> {
 
         Self {
             blob,
-            page_size,
+            physical_page_size: page_size,
             logical_page_size,
             physical_blob_size,
             logical_blob_size,
@@ -76,7 +76,7 @@ impl<B: Blob> PageReader<B> {
 
     /// Returns the physical page size.
     pub(super) const fn physical_page_size(&self) -> usize {
-        self.page_size
+        self.physical_page_size
     }
 
     /// Returns the logical page size.
@@ -90,7 +90,7 @@ impl<B: Blob> PageReader<B> {
     /// `None` if no more data available.
     pub(super) async fn fill(&mut self) -> Result<Option<(BufferState, usize)>, Error> {
         // Calculate physical read offset
-        let start_offset = match self.blob_page.checked_mul(self.page_size as u64) {
+        let start_offset = match self.blob_page.checked_mul(self.physical_page_size as u64) {
             Some(o) => o,
             None => return Err(Error::OffsetOverflow),
         };
@@ -100,12 +100,12 @@ impl<B: Blob> PageReader<B> {
 
         // Calculate how many pages to read
         let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.page_size;
+        let max_pages = remaining_physical / self.physical_page_size;
         let pages_to_read = max_pages.min(self.prefetch_count);
         if pages_to_read == 0 {
             return Ok(None);
         }
-        let bytes_to_read = pages_to_read * self.page_size;
+        let bytes_to_read = pages_to_read * self.physical_page_size;
 
         // Read physical data
         let physical_buf = self
@@ -120,8 +120,9 @@ impl<B: Blob> PageReader<B> {
         let mut last_len = 0usize;
         let is_final_batch = pages_to_read == max_pages;
         for page_idx in 0..pages_to_read {
-            let page_start = page_idx * self.page_size;
-            let page_slice = &physical_buf.as_ref()[page_start..page_start + self.page_size];
+            let page_start = page_idx * self.physical_page_size;
+            let page_slice =
+                &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
             let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
@@ -163,7 +164,7 @@ impl<B: Blob> PageReader<B> {
 /// `advance()`.
 struct ReplayBuf {
     /// Physical page size (logical_page_size + CHECKSUM_SIZE).
-    page_size: usize,
+    physical_page_size: usize,
     /// Logical page size (data bytes per page, not including CRC).
     logical_page_size: usize,
     /// Accumulated buffers from fills.
@@ -178,9 +179,9 @@ struct ReplayBuf {
 
 impl ReplayBuf {
     /// Creates a new ReplayBuf.
-    const fn new(page_size: usize, logical_page_size: usize) -> Self {
+    const fn new(physical_page_size: usize, logical_page_size: usize) -> Self {
         Self {
-            page_size,
+            physical_page_size,
             logical_page_size,
             buffers: VecDeque::new(),
             current_page: 0,
@@ -234,8 +235,8 @@ impl Buf for ReplayBuf {
             return &[];
         }
         let page_len = Self::page_len(buf, self.current_page, self.logical_page_size);
-        let physical_start = self.current_page * self.page_size + self.offset_in_page;
-        let physical_end = self.current_page * self.page_size + page_len;
+        let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
+        let physical_end = self.current_page * self.physical_page_size + page_len;
         &buf.buffer.as_ref()[physical_start..physical_end]
     }
 

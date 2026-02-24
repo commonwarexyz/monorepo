@@ -287,9 +287,9 @@ impl<B: Blob> Append<B> {
     async fn read_last_valid_page(
         blob: &B,
         blob_size: u64,
-        page_size: u64,
+        logical_page_size: u64,
     ) -> Result<(Option<(IoBuf, Checksum)>, u64, bool), Error> {
-        let physical_page_size = page_size + CHECKSUM_SIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
         let mut last_page_end = blob_size - partial_bytes;
 
@@ -311,7 +311,7 @@ impl<B: Blob> Append<B> {
                     // Found a valid page.
                     let (len, _) = crc_record.get_crc();
                     let len = len as u64;
-                    if len != page_size {
+                    if len != logical_page_size {
                         // The page is partial (logical data doesn't fill the page).
                         let logical_bytes = buf.slice(..len as usize);
                         return Ok((
