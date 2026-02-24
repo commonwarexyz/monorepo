@@ -7,7 +7,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 /// # Allocation Semantics
 ///
-/// - [Self::new] allocates tip backing eagerly at `capacity` via [Buffer::new].
+/// - [Self::new] allocates tip backing eagerly at `capacity`.
 /// - Most writes reuse that backing, copy-on-write allocation only occurs when buffered data is
 ///   shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
