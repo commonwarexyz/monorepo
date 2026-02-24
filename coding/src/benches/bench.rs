@@ -50,16 +50,16 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
 #[derive(Clone, Copy)]
 pub(crate) enum ShardSelection {
     Best,
-    NearBest,
+    Exception,
     Worst,
     Interleaved,
 }
 
 impl ShardSelection {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Best => "best",
-            Self::NearBest => "near_best",
+            Self::Exception => "exception",
             Self::Worst => "worst",
             Self::Interleaved => "interleaved",
         }
@@ -69,7 +69,7 @@ impl ShardSelection {
         let n = min as usize;
         match self {
             Self::Best => (0..min).collect(),
-            Self::NearBest => (1..=min).collect(),
+            Self::Exception => (1..=min).collect(),
             Self::Worst => (min..min + min).collect(),
             Self::Interleaved => {
                 let half = n / 2;
@@ -82,7 +82,7 @@ impl ShardSelection {
                     indices.push(recov);
                     recov += 1;
                 }
-                if n % 2 != 0 {
+                if !n.is_multiple_of(2) {
                     indices.push(orig);
                 }
                 indices
@@ -93,7 +93,7 @@ impl ShardSelection {
 
 const SELECTIONS: [ShardSelection; 4] = [
     ShardSelection::Best,
-    ShardSelection::NearBest,
+    ShardSelection::Exception,
     ShardSelection::Worst,
     ShardSelection::Interleaved,
 ];
