@@ -36,7 +36,6 @@
 
 use super::{Checksum, CHECKSUM_SIZE};
 use crate::{Blob, BufMut, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
-use bytes::Buf;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -188,14 +187,11 @@ impl CacheRef {
             physical_page_size > CHECKSUM_SIZE,
             "physical page size must be larger than checksum record"
         );
-        let logical_page_size_u64 = physical_page_size - CHECKSUM_SIZE;
-        let logical_page_size_u16 =
-            u16::try_from(logical_page_size_u64).expect("logical page size must fit in u16");
         let logical_page_size =
-            NonZeroU16::new(logical_page_size_u16).expect("logical page size must be non-zero");
+            NonZeroU16::new((physical_page_size - CHECKSUM_SIZE) as u16).unwrap();
 
         Self {
-            logical_page_size: logical_page_size_u64,
+            logical_page_size: logical_page_size.get() as u64,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(
                 pool.clone(),
@@ -296,31 +292,26 @@ impl CacheRef {
         Ok(result)
     }
 
-    /// Continue reading `[logical_offset, logical_offset + len)` into `result`.
+    /// Append `len` bytes into `result` starting at absolute `logical_offset`.
     ///
-    /// Existing bytes in `result` are treated as a prefix for this same range. The method appends
-    /// only the missing suffix bytes.
+    /// Existing bytes in `result` are preserved. This method only appends new bytes and does not
+    /// reinterpret `logical_offset` relative to `result`.
     ///
     /// Typical usage:
     /// - `read_cached(...)` fills an initial prefix
     /// - `read_append(...)` fetches and appends the remainder
-    ///
-    /// # Panics
-    ///
-    /// Panics if `result` already contains more than `len` bytes.
     pub(super) async fn read_append<B: Blob>(
         &self,
         blob: &B,
         blob_id: u64,
-        logical_offset: u64,
+        mut logical_offset: u64,
         len: usize,
         result: &mut IoBufs,
     ) -> Result<(), Error> {
-        let prefix_len = result.remaining();
-        let mut remaining = len
-            .checked_sub(prefix_len)
-            .expect("prefix length must not exceed requested length");
-        let mut logical_offset = logical_offset + prefix_len as u64;
+        let mut remaining = len;
+
+        // Read up to a page worth of data at a time from either the page cache or the `blob`,
+        // until the requested data is fully read.
         while remaining > 0 {
             // Probe cache first under read lock.
             if let Some(page) = {
@@ -333,7 +324,7 @@ impl CacheRef {
                 continue;
             }
 
-            // Cache miss: resolve one page fault (deduped by key across concurrent readers).
+            // Handle page fault.
             let page = self
                 .read_after_page_fault(blob, blob_id, logical_offset, remaining)
                 .await?;
@@ -366,17 +357,12 @@ impl CacheRef {
         let offset_in_page = offset_in_page as usize;
         trace!(page_num, blob_id, "page fault");
 
-        enum FaultAction {
-            Tracked {
-                fetch_state: Arc<PageFetchState>,
-                fetch_slot: usize,
-            },
-            Uncached(PageFetchFut),
-        }
-
         let key = (blob_id, page_num);
-        let action = loop {
-            // Fast path: page may have been installed while we were waiting for locks.
+        let mut tracked: Option<(Arc<PageFetchState>, usize)> = None;
+        let mut uncached: Option<PageFetchFut> = None;
+        loop {
+            // There's a (small) chance the page was fetched and installed before we acquired
+            // locks, so probe under a read lock before doing anything else.
             if let Some(page) = {
                 let cache = self.cache.read();
                 cache.read_at(blob_id, offset, max_len)
@@ -384,7 +370,10 @@ impl CacheRef {
                 return Ok(page);
             }
 
+            // Create or join a future that retrieves this page from the underlying blob. This
+            // requires a write lock since we may need to update per-slot fetch state.
             let mut cache = self.cache.write();
+            // Re-check after acquiring write lock in case another task raced and installed it.
             if let Some(page) = cache.read_at(blob_id, offset, max_len) {
                 return Ok(page);
             }
@@ -397,20 +386,24 @@ impl CacheRef {
                     }
                     continue;
                 }
-                break FaultAction::Tracked {
-                    fetch_state: state,
-                    fetch_slot: slot,
-                };
+                // Another task is already fetching this page, so join its existing shared future.
+                tracked = Some((state, slot));
+                break;
             }
 
             let Some(slot) = cache.reserve_slot() else {
-                break FaultAction::Uncached(self.make_fetch_future(
+                // All slots are currently reserved for in-flight fetches. Fall back to an
+                // uncached fetch so we can still serve this read.
+                uncached = Some(self.make_fetch_future(
                     blob.clone(),
                     page_num,
                     self.pool.alloc(self.physical_page_size() as usize),
                 ));
+                break;
             };
 
+            // Nobody is currently fetching this page. Create a new shared future and reserve this
+            // slot for it.
             let fetch_buf = cache.take_slot_buffer(slot);
             let state = Arc::new(PageFetchState::new(self.make_fetch_future(
                 blob.clone(),
@@ -419,35 +412,29 @@ impl CacheRef {
             )));
             cache.index.insert(key, slot);
             cache.set_fetching(slot, key, state.clone());
-            break FaultAction::Tracked {
-                fetch_state: state,
-                fetch_slot: slot,
+            tracked = Some((state, slot));
+            break;
+        }
+
+        if let Some(future) = uncached {
+            // Uncached fallback path: await and return directly without touching cache state.
+            let uncached = future.await;
+            return match uncached {
+                Ok(page) => {
+                    let bytes = std::cmp::min(max_len, self.logical_page_size as usize - offset_in_page);
+                    Ok(page.slice(offset_in_page..offset_in_page + bytes))
+                }
+                Err(err) => {
+                    error!(page_num, ?err, "Page fetch failed");
+                    Err(Error::ReadFailed)
+                }
             };
-        };
+        }
 
-        let (fetch_state, fetch_slot) = match action {
-            FaultAction::Tracked {
-                fetch_state,
-                fetch_slot,
-            } => (fetch_state, fetch_slot),
-            FaultAction::Uncached(future) => {
-                let uncached = future.await;
-                return match uncached {
-                    Ok(page) => {
-                        let bytes = std::cmp::min(
-                            max_len,
-                            self.logical_page_size as usize - offset_in_page,
-                        );
-                        Ok(page.slice(offset_in_page..offset_in_page + bytes))
-                    }
-                    Err(err) => {
-                        error!(page_num, ?err, "Page fetch failed");
-                        Err(Error::ReadFailed)
-                    }
-                };
-            }
-        };
+        let (fetch_state, fetch_slot) = tracked.expect("page fault must resolve to tracked or uncached fetch");
 
+        // Await the shared fetch result. Exactly one waiter claims cleanup and finalizes slot
+        // state, mirroring first-fetcher cleanup semantics from main.
         let fetch_result = fetch_state.future.clone().await;
         if fetch_state.try_claim_cleanup() {
             let mut cache = self.cache.write();
@@ -489,6 +476,8 @@ impl CacheRef {
             let Some(record) = Checksum::validate_page(page.as_ref()) else {
                 return Err(Arc::new(Error::InvalidChecksum));
             };
+            // We should never fetch partial pages through the page cache. This can happen if a
+            // non-last page is corrupted and falls back to a partial CRC.
             let (len, _) = record.get_crc();
             if len as u64 != logical_page_size {
                 error!(

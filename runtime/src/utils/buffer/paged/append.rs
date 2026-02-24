@@ -624,8 +624,8 @@ impl<B: Blob> Append<B> {
                     .read_append(
                         &blob_guard.blob,
                         self.id,
-                        logical_offset,
-                        persisted_len,
+                        logical_offset + cached_len as u64,
+                        persisted_len - cached_len,
                         &mut cached,
                     )
                     .await?;
