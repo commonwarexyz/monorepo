@@ -1,6 +1,9 @@
 use crate::{
     mmr::Location,
-    qmdb::{any::value::ValueEncoding, operation::Committable},
+    qmdb::{
+        any::value::ValueEncoding,
+        operation::{Committable, Key},
+    },
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_utils::{hex, Array};
@@ -19,14 +22,14 @@ pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
 pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
+pub enum Operation<K: Key, V: ValueEncoding, S: Update<K, V>> {
     Delete(K),
     Update(S),
     CommitFloor(Option<V::Value>, Location),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
+impl<K: Key, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
@@ -45,7 +48,7 @@ where
 
 impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
 where
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     V::Value: Codec,
     S: Update<K, V>,
@@ -78,7 +81,7 @@ where
 
 impl<K, V, S> Committable for Operation<K, V, S>
 where
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     V::Value: Codec,
     S: Update<K, V>,
@@ -97,6 +100,31 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Update(payload) => payload.fmt(f),
+            Self::CommitFloor(value, loc) => {
+                if let Some(value) = value {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
+        }
+    }
+}
+
+impl<K, V> fmt::Display for Operation<K, V, update::Unordered<K, V>>
+where
+    K: Key,
+    V: ValueEncoding,
+    V::Value: Codec,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
             Self::Update(payload) => payload.fmt(f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
@@ -172,7 +200,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
         type Op = Ordered<K, VariableEncoding<V>>;
-        let cfg = (RangeCfg::from(..), ());
+        let cfg = ((), (RangeCfg::from(..), ()));
 
         let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
         let update = Op::Update(update::Ordered {
@@ -195,7 +223,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = Vec<u8>;
         type Op = Unordered<K, VariableEncoding<V>>;
-        let cfg = (RangeCfg::from(..), ());
+        let cfg = ((), (RangeCfg::from(..), ()));
 
         let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
         let update = Op::Update(update::Unordered(

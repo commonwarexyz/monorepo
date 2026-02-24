@@ -140,14 +140,14 @@ fn current_cfg(context: &(impl BufferPooler + ThreadPooler)) -> CConfig<EightCap
 
 fn variable_any_cfg(
     context: &(impl BufferPooler + ThreadPooler),
-) -> VariableAnyConfig<EightCap, ()> {
-    VariableAnyConfig::<EightCap, ()> {
+) -> VariableAnyConfig<EightCap, ((), ())> {
+    VariableAnyConfig::<EightCap, ((), ())> {
         mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
-        log_codec_config: (),
+        log_codec_config: ((), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
@@ -160,14 +160,14 @@ fn variable_any_cfg(
 /// Configuration for variable current QMDB.
 fn variable_current_cfg(
     context: &(impl BufferPooler + ThreadPooler),
-) -> VariableCurrentConfig<EightCap, ()> {
-    VariableCurrentConfig::<EightCap, ()> {
+) -> VariableCurrentConfig<EightCap, ((), ())> {
+    VariableCurrentConfig::<EightCap, ((), ())> {
         mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
-        log_codec_config: (),
+        log_codec_config: ((), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,

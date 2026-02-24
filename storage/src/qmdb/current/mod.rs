@@ -564,7 +564,7 @@ pub mod tests {
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ()> {
+    ) -> VariableConfig<T, ((), ())> {
         VariableConfig {
             mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
             mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -574,7 +574,7 @@ pub mod tests {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: (),
+            log_codec_config: ((), ()),
             grafted_mmr_metadata_partition: format!(
                 "{partition_prefix}-grafted-mmr-metadata-partition"
             ),
