@@ -9,7 +9,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Key for grouping acks that share the same signing subject.
 ///
@@ -36,6 +36,26 @@ impl<P: PublicKey, S: Scheme, D: Digest> Default for Batch<P, S, D> {
             pending: Vec::new(),
             verified: 0,
         }
+    }
+}
+
+impl<P: PublicKey, S: Scheme, D: Digest> Batch<P, S, D> {
+    /// Returns true if this batch has pending acks ready for verification.
+    ///
+    /// A batch is ready when it has pending acks AND either:
+    /// - The scheme is non-batchable (verify eagerly), OR
+    /// - The sum of verified + pending could reach the quorum.
+    fn is_ready(&self, quorum: usize) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        if self.verified >= quorum {
+            return false;
+        }
+        if !S::is_batchable() {
+            return true;
+        }
+        self.verified + self.pending.len() >= quorum
     }
 }
 
@@ -99,27 +119,10 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
     }
 
     /// Returns true if any batch is ready for verification.
-    ///
-    /// A batch is ready when:
-    /// - It has pending acks, AND
-    /// - Either the scheme is non-batchable (verify eagerly), OR
-    ///   the sum of verified + pending could reach the quorum.
     pub fn ready(&self) -> bool {
-        self.batches.values().any(|batch| {
-            if batch.pending.is_empty() {
-                return false;
-            }
-            // Already have enough verified for this subject.
-            if batch.verified >= self.quorum {
-                return false;
-            }
-            // For non-batchable schemes, verify immediately.
-            if !S::is_batchable() {
-                return true;
-            }
-            // For batchable schemes, wait until we have enough.
-            batch.verified + batch.pending.len() >= self.quorum
-        })
+        self.batches
+            .values()
+            .any(|batch| batch.is_ready(self.quorum))
     }
 
     /// Batch-verifies all ready batches and returns verified acks and invalid signers.
@@ -143,18 +146,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         let ready_keys: Vec<_> = self
             .batches
             .iter()
-            .filter(|(_, batch)| {
-                if batch.pending.is_empty() {
-                    return false;
-                }
-                if batch.verified >= self.quorum {
-                    return false;
-                }
-                if !S::is_batchable() {
-                    return true;
-                }
-                batch.verified + batch.pending.len() >= self.quorum
-            })
+            .filter(|(_, batch)| batch.is_ready(self.quorum))
             .map(|(key, _)| key.clone())
             .collect();
 
@@ -184,7 +176,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
 
             // Map verified attestations back to their acks.
             // Build a set of verified signer indices for quick lookup.
-            let verified_signers: std::collections::HashSet<Participant> =
+            let verified_signers: HashSet<Participant> =
                 verified.iter().map(|a| a.signer).collect();
 
             for ack in acks {

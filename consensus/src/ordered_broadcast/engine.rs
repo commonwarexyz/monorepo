@@ -467,11 +467,13 @@ impl<
                     Ok(ack) => ack,
                     Err(err) => {
                         debug!(?err, ?sender, "ack decode failed");
+                        self.metrics.acks.inc(Status::Invalid);
                         continue;
                     }
                 };
                 if let Err(err) = self.validate_ack_cheap(&ack, &sender) {
                     debug!(?err, ?sender, "ack validate failed");
+                    self.metrics.acks.inc(Status::Dropped);
                     continue;
                 };
                 self.verifier.add(ack, false);
