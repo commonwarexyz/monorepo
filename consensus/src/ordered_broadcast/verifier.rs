@@ -84,10 +84,8 @@ pub struct Verifier<P: PublicKey, S: Scheme, D: Digest> {
     batches: HashMap<BatchKey<P, D>, Batch<P, S, D>>,
     quorum: usize,
 
-    /// Whether any batch is ready for verification. Set when a pending
-    /// ack makes its batch reach the readiness threshold, cleared after
-    /// `verify()`.
-    ready: bool,
+    /// Keys of batches that are ready for verification.
+    ready: HashSet<BatchKey<P, D>>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
@@ -96,7 +94,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         Self {
             batches: HashMap::new(),
             quorum: quorum as usize,
-            ready: false,
+            ready: HashSet::new(),
         }
     }
 
@@ -117,7 +115,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
             chunk: ack.chunk.clone(),
             epoch: ack.epoch,
         };
-        let batch = self.batches.entry(key).or_default();
+        let batch = self.batches.entry(key.clone()).or_default();
 
         // Drop acks for subjects that have already reached quorum.
         if batch.verified >= self.quorum {
@@ -133,15 +131,15 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
             batch.verified += 1;
         } else {
             batch.pending.push(ack);
-            if batch.is_ready(self.quorum) {
-                self.ready = true;
-            }
+        }
+        if batch.is_ready(self.quorum) {
+            self.ready.insert(key);
         }
     }
 
     /// Returns true if any batch is ready for verification.
-    pub const fn ready(&self) -> bool {
-        self.ready
+    pub fn ready(&self) -> bool {
+        !self.ready.is_empty()
     }
 
     /// Batch-verifies all ready batches and returns verified acks and invalid signers.
@@ -161,13 +159,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         let mut all_acks = Vec::new();
         let mut all_invalid = Vec::new();
 
-        // Collect keys for ready batches.
-        let ready_keys: Vec<_> = self
-            .batches
-            .iter()
-            .filter(|(_, batch)| batch.is_ready(self.quorum))
-            .map(|(key, _)| key.clone())
-            .collect();
+        let ready_keys = std::mem::take(&mut self.ready);
 
         for key in ready_keys {
             let batch = self.batches.get_mut(&key).unwrap();
@@ -211,8 +203,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         self.batches
             .retain(|_, batch| !batch.pending.is_empty() || batch.verified < self.quorum);
 
-        self.ready = false;
-
         Verified {
             acks: all_acks,
             invalid: all_invalid,
@@ -233,6 +223,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
     pub fn prune_epochs(&mut self, min_epoch: Epoch, max_epoch: Epoch) {
         self.batches
             .retain(|key, _| key.epoch >= min_epoch && key.epoch <= max_epoch);
+        self.ready
+            .retain(|key| key.epoch >= min_epoch && key.epoch <= max_epoch);
     }
 
     /// Removes all batches for `sequencer` with height below `min_height`.
@@ -242,6 +234,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
     pub fn prune_heights(&mut self, sequencer: &P, min_height: Height) {
         self.batches
             .retain(|key, _| key.chunk.sequencer != *sequencer || key.chunk.height >= min_height);
+        self.ready
+            .retain(|key| key.chunk.sequencer != *sequencer || key.chunk.height >= min_height);
     }
 }
 
@@ -705,5 +699,81 @@ mod tests {
         invalid_signatures(bls12381_multisig::fixture::<MinSig, _>);
         invalid_signatures(bls12381_threshold::fixture::<MinPk, _>);
         invalid_signatures(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    /// Test that the ready flag is set correctly across add/verify cycles,
+    /// including when pre-verified acks tip a batch to readiness.
+    fn ready_flag_transitions<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Initially not ready.
+        assert!(!verifier.ready());
+
+        // For non-batchable schemes, verify that a single pending ack
+        // is immediately ready, then use a fresh subject for the rest.
+        if !S::is_batchable() {
+            let ack = create_ack(&fixture.schemes[0], chunk, epoch);
+            verifier.add(ack, false);
+            assert!(verifier.ready());
+            let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+            assert_eq!(result.acks.len(), 1);
+            assert!(!verifier.ready());
+        }
+
+        // Use a fresh subject so no signers are already in `seen`.
+        let chunk2 = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(2),
+            Sha256::hash(b"payload2"),
+        );
+
+        // Add one pending ack. For batchable schemes, not ready yet.
+        let ack = create_ack(&fixture.schemes[0], chunk2.clone(), epoch);
+        verifier.add(ack, false);
+        if S::is_batchable() {
+            assert!(!verifier.ready());
+        }
+
+        // Pre-verified acks tip the batch to readiness.
+        for i in 1..quorum as usize {
+            let ack = create_ack(&fixture.schemes[i], chunk2.clone(), epoch);
+            verifier.add(ack, true);
+        }
+        assert!(verifier.ready());
+
+        // After verify, ready is cleared.
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+        assert!(!result.acks.is_empty());
+        assert!(!verifier.ready());
+
+        // Verify on empty is harmless (should not panic or set ready).
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+        assert!(result.acks.is_empty());
+        assert!(!verifier.ready());
+    }
+
+    #[test]
+    fn test_ready_flag_transitions() {
+        ready_flag_transitions(ed25519::fixture);
+        ready_flag_transitions(secp256r1::fixture);
+        ready_flag_transitions(bls12381_multisig::fixture::<MinPk, _>);
+        ready_flag_transitions(bls12381_multisig::fixture::<MinSig, _>);
+        ready_flag_transitions(bls12381_threshold::fixture::<MinPk, _>);
+        ready_flag_transitions(bls12381_threshold::fixture::<MinSig, _>);
     }
 }
