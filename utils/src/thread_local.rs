@@ -36,15 +36,20 @@
 
 use std::{
     cell::RefCell,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     thread::LocalKey,
 };
 
 /// RAII guard that borrows a value from a thread-local cache and returns it
 /// on drop.
+///
+/// Guards are thread-affine and must be dropped on the same thread where
+/// they were created.
 pub struct Cached<T: 'static> {
     value: Option<T>,
     cache: &'static LocalKey<RefCell<(bool, Option<T>)>>,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl<T: 'static> Cached<T> {
@@ -99,6 +104,7 @@ impl<T: 'static> Cached<T> {
         Ok(Self {
             value: Some(value),
             cache,
+            _not_send: PhantomData,
         })
     }
 }
