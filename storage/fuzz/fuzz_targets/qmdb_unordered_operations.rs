@@ -120,6 +120,8 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Root => {
                     // root requires commit + merkleization
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_known_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
                     let clean_db = durable_db.into_merkleized();
                     clean_db.root();
                     db = clean_db.into_mutable();
@@ -133,6 +135,8 @@ fn fuzz(data: FuzzInput) {
                     }
 
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_known_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
                     let clean_db = durable_db.into_merkleized();
 
                     let current_root = clean_db.root();

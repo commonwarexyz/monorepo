@@ -166,7 +166,7 @@ where
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>>,

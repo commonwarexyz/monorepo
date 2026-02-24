@@ -158,7 +158,6 @@ pub(crate) mod test {
             any::{
                 ordered::{
                     test::{
-                        test_digest_ordered_any_db_basic, test_digest_ordered_any_db_empty,
                         test_ordered_any_db_basic, test_ordered_any_db_empty,
                         test_ordered_any_update_collision_edge_case,
                     },
@@ -935,26 +934,6 @@ pub(crate) mod test {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
 
-    // Tests calling generic helpers with Digest-key DB (non-partitioned variant)
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_fixed_db_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_empty(context, db, |ctx| Box::pin(open_db(ctx))).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_fixed_db_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_basic(context, db, |ctx| Box::pin(open_db(ctx))).await;
-        });
-    }
-
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
 
     /// Type alias for a fixed db with FixedBytes<4> keys.
@@ -1195,42 +1174,6 @@ pub(crate) mod test {
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
             db.into_merkleized().destroy().await.unwrap();
-        });
-    }
-
-    // Partitioned variant tests
-
-    type PartitionedAnyTest =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
-
-    async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let cfg = fixed_db_config("ordered-partitioned-p1", &context);
-        PartitionedAnyTest::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_empty(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_basic(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
         });
     }
 

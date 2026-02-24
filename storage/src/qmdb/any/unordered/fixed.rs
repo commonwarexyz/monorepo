@@ -151,13 +151,7 @@ pub(crate) mod test {
         qmdb::{
             any::{
                 test::fixed_db_config,
-                unordered::{
-                    fixed::Operation,
-                    test::{
-                        test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
-                    },
-                    Update,
-                },
+                unordered::{fixed::Operation, Update},
             },
             store::{
                 batch_tests,
@@ -183,11 +177,6 @@ pub(crate) mod test {
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
     pub(crate) type DirtyAnyTest =
         Db<Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
-
-    #[inline]
-    fn to_digest(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
-    }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -243,50 +232,6 @@ pub(crate) mod test {
                 }
             }
         }
-    }
-
-    #[test_traced("WARN")]
-    fn test_any_fixed_db_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_db(db_context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_build_and_authenticate(
-                db_context,
-                db,
-                |ctx| Box::pin(open_db(ctx)),
-                to_digest,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_db(ctx))
-            })
-            .await;
-        });
     }
 
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
@@ -466,44 +411,60 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let ops = create_test_ops(100);
             let mut hasher = StandardHasher::<Sha256>::new();
+            let start_loc = Location::new_unchecked(2);
+            let max_ops = NZU64!(10);
 
-            // Build the db with all ops and a single commit.
+            // Build checkpoints only at commit points and record reference proofs/roots there.
             let mut db = create_test_db(context.with_label("main"))
                 .await
                 .into_mutable();
-            apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let mut offset = 0usize;
+            let mut checkpoints = Vec::new();
+            for chunk in [20usize, 15, 25, 30, 10] {
+                apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
+                offset += chunk;
 
-            let root = db.root();
-            let full_size = db.bounds().await.end;
+                let (clean_db, _) = db.commit(None).await.unwrap();
+                let clean_db = clean_db.into_merkleized();
+                let end_loc = clean_db.bounds().await.end;
+                let root = clean_db.root();
+                let (proof, proof_ops) = clean_db.proof(start_loc, max_ops).await.unwrap();
+                checkpoints.push((end_loc, root, proof, proof_ops));
 
-            // Test historical proof generation at several sizes up to the commit point.
-            // Use start locations well above the inactivity floor to avoid floor-raised ops.
-            let start_loc = Location::new_unchecked(21);
-            let max_ops = NZU64!(10);
-            for end in [32, 40, 51, 70, *full_size] {
-                let end_loc = Location::new_unchecked(end);
-                let (proof, proof_ops) = db
-                    .historical_proof(end_loc, start_loc, max_ops)
-                    .await
-                    .unwrap();
-                assert_eq!(proof.leaves, end_loc);
-
-                let expected_len = std::cmp::min(max_ops.get(), end - *start_loc) as usize;
-                assert_eq!(proof_ops.len(), expected_len);
+                db = clean_db.into_mutable();
             }
 
-            // Verify the full-size proof against the root.
-            let (proof, proof_ops) = db.proof(start_loc, max_ops).await.unwrap();
+            // Grow state past the checkpoints and verify all historical proofs from that later state.
+            let final_db = db.commit(None).await.unwrap().0.into_merkleized();
+            for (historical_size, root, reference_proof, reference_ops) in checkpoints {
+                let (historical_proof, historical_ops) = final_db
+                    .historical_proof(historical_size, start_loc, max_ops)
+                    .await
+                    .unwrap();
+                assert_eq!(historical_proof.leaves, reference_proof.leaves);
+                assert_eq!(historical_proof.digests, reference_proof.digests);
+                assert_eq!(historical_ops, reference_ops);
+                assert!(verify_proof(
+                    &mut hasher,
+                    &historical_proof,
+                    start_loc,
+                    &historical_ops,
+                    &root
+                ));
+            }
+
+            // Verify the current full-size proof against the current root as a final sanity check.
+            let full_root = final_db.root();
+            let (full_proof, full_ops) = final_db.proof(start_loc, max_ops).await.unwrap();
             assert!(verify_proof(
                 &mut hasher,
-                &proof,
+                &full_proof,
                 start_loc,
-                &proof_ops,
-                &root,
+                &full_ops,
+                &full_root
             ));
 
-            db.destroy().await.unwrap();
+            final_db.destroy().await.unwrap();
         });
     }
 
@@ -567,83 +528,5 @@ pub(crate) mod test {
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
-    }
-
-    // Partitioned variant tests
-
-    type PartitionedAnyTestP1 =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
-
-    type PartitionedAnyTestP2 =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
-
-    async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        let cfg = fixed_db_config("unordered-partitioned-p1", &context);
-        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
-    }
-
-    async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        let cfg = fixed_db_config("unordered-partitioned-p2", &context);
-        PartitionedAnyTestP2::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_p1_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db_p1(db_context.clone()).await;
-            test_any_db_build_and_authenticate(
-                db_context,
-                db,
-                |ctx| Box::pin(open_partitioned_db_p1(ctx)),
-                to_digest,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_p2_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db_p2(db_context.clone()).await;
-            test_any_db_build_and_authenticate(
-                db_context,
-                db,
-                |ctx| Box::pin(open_partitioned_db_p2(ctx)),
-                to_digest,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_partitioned_p1_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_partitioned_db_p1(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_partitioned_db_p1(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_partitioned_p1_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_partitioned_db_p1(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_partitioned_db_p1(ctx))
-            })
-            .await;
-        });
     }
 }

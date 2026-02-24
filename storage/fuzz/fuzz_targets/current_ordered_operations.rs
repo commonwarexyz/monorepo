@@ -200,7 +200,10 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::Root => {
-                    let clean_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let _root = clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -209,10 +212,14 @@ fn fuzz(data: FuzzInput) {
                     let current_op_count = db.bounds().await.end;
 
                     if current_op_count > 0 {
-                        let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                        last_committed_op_count = durable_db.bounds().await.end;
+                        uncommitted_ops = 0;
+                        let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                         let current_root = merkleized_db.root();
 
                         // Adjust start_loc and max_ops to be within the valid range
+                        let current_op_count = merkleized_db.bounds().await.end;
                         let start_loc = Location::new(start_loc % *current_op_count).unwrap();
 
                         let oldest_loc = merkleized_db.inactivity_floor_loc();
@@ -243,8 +250,12 @@ fn fuzz(data: FuzzInput) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
 
+                    let current_op_count = merkleized_db.bounds().await.end;
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
                     let root = merkleized_db.root();
 
@@ -284,7 +295,10 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let current_root = merkleized_db.root();
 
                     match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
@@ -312,7 +326,10 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let current_root = merkleized_db.root();
 
                     match merkleized_db.exclusion_proof(&mut hasher, &k).await {
