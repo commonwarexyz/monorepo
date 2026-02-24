@@ -342,9 +342,10 @@ impl CacheRef {
                     let buf = self.pool.alloc(physical_page_size as usize);
                     let blob = blob.clone();
                     let future = async move {
-                        let page = read_page_from_blob_into(&blob, page_num, logical_page_size, buf)
-                            .await
-                            .map_err(Arc::new)?;
+                        let page =
+                            read_page_from_blob_into(&blob, page_num, logical_page_size, buf)
+                                .await
+                                .map_err(Arc::new)?;
                         // We should never be fetching partial pages through the page cache. This
                         // can happen if a non-last page is corrupted and falls back to a partial CRC.
                         let len = page.len();
@@ -385,7 +386,10 @@ impl CacheRef {
                                         "dropping stale resolved fetch because key already has cached data"
                                     );
                                 } else if cache.insert_page(key, page_buf.clone()).is_err() {
-                                    error!(blob_id, page_num, "failed to insert stale fetched page");
+                                    error!(
+                                        blob_id,
+                                        page_num, "failed to insert stale fetched page"
+                                    );
                                 }
                                 let bytes = std::cmp::min(max_len, page_buf.len() - offset_in_page);
                                 return Ok(page_buf.slice(offset_in_page..offset_in_page + bytes));
@@ -475,14 +479,11 @@ impl CacheRef {
         self.cache_pages(blob_id, pages, offset);
     }
 
-    /// Cache full logical pages from a contiguous physical write payload.
-    ///
-    /// `page_count` counts logical pages at the front of `physical_pages` where each physical page
-    /// has size [`Self::physical_page_size`]. CRC trailers are skipped.
-    pub(super) fn cache_from_physical_prefix(
+    /// Cache full logical pages from a contiguous logical-byte prefix.
+    pub(super) fn cache_from_logical_prefix(
         &self,
         blob_id: u64,
-        physical_pages: &IoBuf,
+        logical_pages: &IoBuf,
         offset: u64,
         page_count: usize,
     ) {
@@ -490,31 +491,27 @@ impl CacheRef {
             return;
         }
         let logical_page_size = self.logical_page_size as usize;
-        let physical_page_size = self.physical_page_size as usize;
         let required_len = page_count
-            .checked_mul(physical_page_size)
-            .expect("physical page length overflow while caching");
-        assert!(required_len <= physical_pages.len());
+            .checked_mul(logical_page_size)
+            .expect("logical page length overflow while caching");
+        assert!(required_len <= logical_pages.len());
 
-        // Zero-copy fast path when the input covers only the cached physical prefix itself.
-        // For very small page counts this is worth it and bounded, while larger counts use owned
-        // per-page materialization below to avoid retention amplification.
-        if required_len == physical_pages.len() {
+        // Zero-copy fast path only for very small batches, to keep retention bounded.
+        if required_len == logical_pages.len() {
             const MAX_SHARED_ZERO_COPY_PAGES: usize = 2;
             if page_count <= MAX_SHARED_ZERO_COPY_PAGES {
                 let mut pages = Vec::with_capacity(page_count);
                 for page_idx in 0..page_count {
-                    let page_start = page_idx * physical_page_size;
-                    pages.push(physical_pages.slice(page_start..page_start + logical_page_size));
+                    let page_start = page_idx * logical_page_size;
+                    pages.push(logical_pages.slice(page_start..page_start + logical_page_size));
                 }
                 self.cache_pages(blob_id, pages, offset);
                 return;
             }
         }
 
-        // Copy directly into cache slots. For larger batches, use bounded chunks to keep lock hold
-        // time controlled without allocating one temporary owned page per input page.
-        let physical_bytes = physical_pages.as_ref();
+        // Copy directly into cache slots for larger batches.
+        let logical_bytes = logical_pages.as_ref();
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
@@ -532,8 +529,8 @@ impl CacheRef {
             let mut cache = self.cache.write();
             while page_idx < chunk_end {
                 let current_page = page_num;
-                let page_start = page_idx * physical_page_size;
-                let page = &physical_bytes[page_start..page_start + logical_page_size];
+                let page_start = page_idx * logical_page_size;
+                let page = &logical_bytes[page_start..page_start + logical_page_size];
                 if cache
                     .insert_page_bytes((blob_id, current_page), page)
                     .is_err()
