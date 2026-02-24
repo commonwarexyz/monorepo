@@ -66,27 +66,18 @@ impl ShardSelection {
     }
 
     fn indices(self, min: u16) -> Vec<u16> {
-        let n = min as usize;
         match self {
             Self::Best => (0..min).collect(),
             Self::Exception => (1..=min).collect(),
             Self::Worst => (min..min + min).collect(),
-            Self::Interleaved => {
-                let half = n / 2;
-                let mut indices = Vec::with_capacity(n);
-                let mut orig = 0u16;
-                let mut recov = min;
-                for _ in 0..half {
-                    indices.push(orig);
-                    orig += 1;
-                    indices.push(recov);
-                    recov += 1;
-                }
-                if !n.is_multiple_of(2) {
-                    indices.push(orig);
-                }
-                indices
-            }
+            Self::Interleaved => (0..min)
+                .map(|i| {
+                    let k = i / 2;
+                    // Alternate between original shard indices [0, min) and
+                    // recovery shard indices [min, 2 * min).
+                    if i % 2 == 0 { k } else { min + k }
+                })
+                .collect(),
         }
     }
 }
