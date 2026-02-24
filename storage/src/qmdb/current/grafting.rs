@@ -42,7 +42,7 @@
 //! grafted leaves change.
 
 use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::CleanMmr,
+    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::Mmr,
     storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -310,25 +310,21 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
     }
 }
 
-/// A virtual [StorageTrait] that presents a grafted [CleanMmr] and ops MMR as a single combined
+/// A virtual [StorageTrait] that presents a grafted [Mmr] and ops MMR as a single combined
 /// MMR.
 ///
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
 pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
-    grafted_mmr: &'a CleanMmr<D>,
+    grafted_mmr: &'a Mmr<D>,
     grafting_height: u32,
     ops_mmr: &'a S,
 }
 
 impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(
-        grafted_mmr: &'a CleanMmr<D>,
-        grafting_height: u32,
-        ops_mmr: &'a S,
-    ) -> Self {
+    pub(super) const fn new(grafted_mmr: &'a Mmr<D>, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
             grafted_mmr,
             grafting_height,
@@ -357,23 +353,23 @@ mod tests {
     use crate::mmr::{
         conformance::build_test_mmr,
         iterator::PeakIterator,
-        mem::{CleanMmr, DirtyMmr},
+        mem::{DirtyMmr, Mmr},
         verification, Position, StandardHasher,
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    /// Precompute grafted leaf digests and return a [CleanMmr] in grafted-space.
+    /// Precompute grafted leaf digests and return a [Mmr] in grafted-space.
     ///
     /// Each grafted leaf is `hash(chunk || ops_subtree_root)` where `ops_subtree_root` is the ops
     /// MMR node at the mapped position.
     fn build_test_grafted_mmr(
         standard: &mut StandardHasher<Sha256>,
-        ops_mmr: &CleanMmr<sha256::Digest>,
+        ops_mmr: &Mmr<sha256::Digest>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> CleanMmr<sha256::Digest> {
+    ) -> Mmr<sha256::Digest> {
         let mut dirty = DirtyMmr::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
@@ -480,7 +476,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = CleanMmr::new(&mut standard);
+            let mmr = Mmr::new(&mut standard);
             let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).

@@ -103,7 +103,7 @@ pub struct Db<
     /// the ops MMR node at the grafting height.
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -796,14 +796,14 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     )
 }
 
-/// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
+/// Build a grafted [mmr::mem::Mmr] from scratch using bitmap chunks and the ops MMR.
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::CleanMmr<H::Digest>, Error> {
+) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -817,13 +817,13 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     )
     .await?;
 
-    // Build a base CleanMmr: either from pruned components or empty.
+    // Build a base Mmr: either from pruned components or empty.
     let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
     let base = if pruned_chunks > 0 {
         let grafted_pruned_to_pos =
             Position::try_from(Location::new_unchecked(pruned_chunks as u64))
                 .expect("pruned_chunks overflow");
-        mmr::mem::CleanMmr::init(
+        mmr::mem::Mmr::init(
             mmr::mem::Config {
                 nodes: Vec::new(),
                 pruned_to_pos: grafted_pruned_to_pos,
@@ -832,7 +832,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
             &mut grafted_hasher,
         )?
     } else {
-        mmr::mem::CleanMmr::new(&mut grafted_hasher)
+        mmr::mem::Mmr::new(&mut grafted_hasher)
     };
 
     // Add each grafted leaf digest via the diff API.

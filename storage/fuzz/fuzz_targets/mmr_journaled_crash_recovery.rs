@@ -9,7 +9,7 @@ use commonware_runtime::{
 };
 use commonware_storage::mmr::{
     diff::DirtyDiff,
-    journaled::{CleanMmr, Config},
+    journaled::{Config, Mmr},
     Location, Position, StandardHasher,
 };
 use commonware_utils::NZU64;
@@ -22,7 +22,7 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type MerkleizedMmr = CleanMmr<deterministic::Context, Digest>;
+type MerkleizedMmr = Mmr<deterministic::Context, Digest>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)

@@ -5,7 +5,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{diff::DirtyDiff, mem::CleanMmr, Location, StandardHasher as Standard},
+    mmr::{diff::DirtyDiff, mem::Mmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
@@ -124,7 +124,7 @@ fn fuzz(input: FuzzInput) {
     match input.proof {
         ProofType::Mmr => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&mut hasher);
             let changeset = {
                 let mut diff = DirtyDiff::new(&mmr);
                 for digest in &digests {
@@ -156,7 +156,7 @@ fn fuzz(input: FuzzInput) {
         }
         ProofType::MmrMulti => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&mut hasher);
             let changeset = {
                 let mut diff = DirtyDiff::new(&mmr);
                 for digest in &digests {

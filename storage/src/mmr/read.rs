@@ -1,7 +1,7 @@
 //! Read-only trait for merkleized MMRs.
 //!
 //! [`MmrRead`] provides a synchronous, `no_std`-compatible interface for
-//! reading from any merkleized MMR. It is implemented by [`super::mem::CleanMmr`]
+//! reading from any merkleized MMR. It is implemented by [`super::mem::Mmr`]
 //! (base) and [`super::diff::CleanDiff`] (diff layer).
 //!
 //! [`ChainInfo`] is a `pub(crate)` trait used internally by changeset
@@ -82,7 +82,7 @@ pub trait MmrRead<D: Digest>: Send + Sync {
 /// MMR, not just the immediate parent. These methods let `CleanDiff` recurse
 /// through the parent chain to collect the necessary information.
 ///
-/// `CleanMmr` implements the trivial base-case (size = self, no overwrites).
+/// `Mmr` implements the trivial base-case (size = self, no overwrites).
 /// `CleanDiff` overrides to recurse through parents.
 pub trait ChainInfo<D: Digest> {
     /// Size of the ultimate base MMR in this diff chain.

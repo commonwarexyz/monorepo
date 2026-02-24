@@ -340,7 +340,7 @@ impl commonware_codec::Read for Position {
 mod tests {
     use super::{Location, Position};
     use crate::mmr::{
-        diff::DirtyDiff, mem::CleanMmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION,
+        diff::DirtyDiff, mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION,
     };
     use commonware_cryptography::Sha256;
 
@@ -513,7 +513,7 @@ mod tests {
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {

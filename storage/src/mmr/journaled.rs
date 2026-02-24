@@ -18,7 +18,7 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{CleanMmr as CleanMemMmr, Config as MemConfig},
+        mem::{Config as MemConfig, Mmr as MemMmr},
         position::Position,
         storage::Storage,
         verification,
@@ -41,14 +41,12 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
-pub type CleanMmr<E, D> = Mmr<E, D>;
-
 /// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
 struct Inner<D: Digest> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: CleanMemMmr<D>,
+    mem_mmr: MemMmr<D>,
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
@@ -188,7 +186,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut CleanMemMmr<D>,
+        mem_mmr: &mut MemMmr<D>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, D>,
         prune_pos: Position,
@@ -226,7 +224,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                 .await?;
 
         if journal_size == 0 {
-            let mem_mmr = CleanMemMmr::init(
+            let mem_mmr = MemMmr::init(
                 MemConfig {
                     nodes: vec![],
                     pruned_to_pos: Position::new(0),
@@ -308,7 +306,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
-        let mut mem_mmr = CleanMemMmr::init(
+        let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
                 pruned_to_pos: journal_size,
@@ -435,7 +433,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
-        let mut mem_mmr = CleanMemMmr::init(
+        let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
                 pruned_to_pos: journal_size,
@@ -717,7 +715,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Use this to create diffs: `DirtyDiff::new(&*mmr.inner_mmr())`
     ///
     /// The guard must be dropped before calling `apply()`.
-    pub fn inner_mmr(&self) -> MappedRwLockReadGuard<'_, CleanMemMmr<D>> {
+    pub fn inner_mmr(&self) -> MappedRwLockReadGuard<'_, MemMmr<D>> {
         RwLockReadGuard::map(self.inner.read(), |inner| &inner.mem_mmr)
     }
 
@@ -762,7 +760,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         }
 
         // Rebuild the in-memory MMR from pinned nodes.
-        let mut mem_mmr = CleanMemMmr::init(
+        let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
                 pruned_to_pos: new_size,
@@ -914,7 +912,7 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
             let mut hasher: Standard<Sha256> = Standard::new();
-            let test_mmr = mem::CleanMmr::new(&mut hasher);
+            let test_mmr = mem::Mmr::new(&mut hasher);
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
@@ -1037,7 +1035,7 @@ mod tests {
             for i in (0..NUM_ELEMENTS).rev() {
                 mmr.pop(1, &mut hasher).await.unwrap();
                 let root = mmr.root();
-                let mut reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let mut reference_mmr = mem::Mmr::new(&mut hasher);
                 let changeset = {
                     let mut diff = diff::DirtyDiff::new(&reference_mmr);
                     for j in 0..i {
@@ -1072,7 +1070,7 @@ mod tests {
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 mmr.pop(2, &mut hasher).await.unwrap();
                 let root = mmr.root();
-                let reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let reference_mmr = mem::Mmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
@@ -2234,10 +2232,10 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = CleanMmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
             // Build the same elements via the old dirty path for reference.
-            let base = mem::CleanMmr::new(&mut hasher);
+            let base = mem::Mmr::new(&mut hasher);
             let reference = build_test_mmr(&mut hasher, base, 50);
 
             // Build via the diff path on the journaled MMR.
@@ -2269,7 +2267,7 @@ mod tests {
 
             // Build via diff and sync to disk.
             let expected_root = {
-                let mut mmr = CleanMmr::init(context.with_label("first"), &mut hasher, cfg.clone())
+                let mut mmr = Mmr::init(context.with_label("first"), &mut hasher, cfg.clone())
                     .await
                     .unwrap();
                 let changeset = {
@@ -2289,7 +2287,7 @@ mod tests {
             };
 
             // Re-init from the same storage and verify root matches.
-            let mmr = CleanMmr::init(context.with_label("second"), &mut hasher, cfg)
+            let mmr = Mmr::init(context.with_label("second"), &mut hasher, cfg)
                 .await
                 .unwrap();
             assert_eq!(mmr.root(), expected_root);
@@ -2305,7 +2303,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = CleanMmr::init(context.with_label("first"), &mut hasher, cfg.clone())
+            let mut mmr = Mmr::init(context.with_label("first"), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
 
@@ -2337,13 +2335,13 @@ mod tests {
             mmr.sync().await.unwrap();
 
             // Verify root matches reference with 40 elements.
-            let base = mem::CleanMmr::new(&mut hasher);
+            let base = mem::Mmr::new(&mut hasher);
             let reference = build_test_mmr(&mut hasher, base, 40);
             assert_eq!(mmr.root(), *reference.root());
 
             // Re-init and verify persistence.
             drop(mmr);
-            let mmr = CleanMmr::init(context.with_label("second"), &mut hasher, cfg)
+            let mmr = Mmr::init(context.with_label("second"), &mut hasher, cfg)
                 .await
                 .unwrap();
             assert_eq!(mmr.root(), *reference.root());
@@ -2359,7 +2357,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = CleanMmr::init(context.with_label("first"), &mut hasher, cfg.clone())
+            let mut mmr = Mmr::init(context.with_label("first"), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
 
@@ -2404,13 +2402,13 @@ mod tests {
             // Sync: journal has 50, mem has 50, should be a no-op.
             mmr.sync().await.unwrap();
 
-            let base = mem::CleanMmr::new(&mut hasher);
+            let base = mem::Mmr::new(&mut hasher);
             let reference = build_test_mmr(&mut hasher, base, 50);
             assert_eq!(mmr.root(), *reference.root());
 
             // Re-init and verify persistence.
             drop(mmr);
-            let mmr = CleanMmr::init(context.with_label("second"), &mut hasher, cfg)
+            let mmr = Mmr::init(context.with_label("second"), &mut hasher, cfg)
                 .await
                 .unwrap();
             assert_eq!(mmr.root(), *reference.root());
@@ -2426,7 +2424,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = CleanMmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
             // Add 20 elements.
             let changeset = {
@@ -2453,7 +2451,7 @@ mod tests {
             mmr.apply(changeset);
 
             // Build the same thing via mem MMR for reference.
-            let mut ref_mmr = mem::CleanMmr::new(&mut hasher);
+            let mut ref_mmr = mem::Mmr::new(&mut hasher);
             {
                 let changeset = {
                     let mut diff = diff::DirtyDiff::new(&ref_mmr);
@@ -2489,7 +2487,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = CleanMmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
             // Add 30 elements via diff.
             let changeset = {

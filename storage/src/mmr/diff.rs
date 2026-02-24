@@ -58,7 +58,7 @@ pub type CleanDiff<'a, D, P> = Diff<'a, D, P, Clean<D>>;
 
 /// Owned delta extracted from a diff chain, relative to the ultimate base.
 ///
-/// Apply via [`super::mem::CleanMmr::apply`].
+/// Apply via [`super::mem::Mmr::apply`].
 pub struct Changeset<D: Digest> {
     /// Base nodes to keep: [0, parent_end). If < base.size(), truncate tail.
     pub(crate) parent_end: Position,
@@ -261,8 +261,7 @@ impl<'a, D: Digest, P: MmrRead<D>> DirtyDiff<'a, D, P> {
             self.appended.clear();
             self.parent_visible = new_size;
             // Remove overwrites at positions >= new parent_visible.
-            let tail = self.overwrites.split_off(&new_size);
-            drop(tail);
+            self.overwrites.split_off(&new_size);
         }
 
         // Remove dirty nodes that are now out of bounds.
@@ -319,6 +318,8 @@ impl<'a, D: Digest, P: MmrRead<D>> DirtyDiff<'a, D, P> {
         }
     }
 
+    // NOTE: The serial/parallel merkleize logic is intentionally duplicated in
+    // `mem::DirtyMmr` which uses direct indexing instead of resolve_node/store_node.
     fn merkleize_serial(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -525,15 +526,15 @@ mod tests {
     use crate::mmr::{
         conformance::build_test_mmr,
         hasher::{Hasher as _, Standard},
-        mem::CleanMmr,
+        mem::Mmr,
         read::MmrRead,
     };
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
     /// Build a reference MMR with `n` elements via DirtyMmr for comparison.
-    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> CleanMmr<sha256::Digest> {
-        let mmr = CleanMmr::new(hasher);
+    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<sha256::Digest> {
+        let mmr = Mmr::new(hasher);
         build_test_mmr(hasher, mmr, n)
     }
 
@@ -551,7 +552,7 @@ mod tests {
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Diff: start from empty base, add all via diff
-                let base = CleanMmr::new(&mut hasher);
+                let base = Mmr::new(&mut hasher);
                 let mut diff = DirtyDiff::new(&base);
                 for i in 0..n {
                     hasher.inner().update(&i.to_be_bytes());

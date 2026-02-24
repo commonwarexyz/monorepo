@@ -123,7 +123,7 @@ mod tests {
     use crate::mmr::{
         iterator::nodes_to_pin,
         location::LocationRangeExt as _,
-        mem::{CleanMmr, DirtyMmr},
+        mem::{DirtyMmr, Mmr},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -582,7 +582,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let empty_mmr = CleanMmr::new(&mut hasher);
+            let empty_mmr = Mmr::new(&mut hasher);
             let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.

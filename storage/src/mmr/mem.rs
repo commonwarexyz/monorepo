@@ -34,11 +34,6 @@ cfg_if::cfg_if! {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
-/// An MMR whose root digest has been computed.
-///
-/// This is a convenience alias; [`Mmr`] is always merkleized.
-pub type CleanMmr<D> = Mmr<D>;
-
 // --- State types used by the diff layer ---
 
 /// Sealed trait for diff state types.
@@ -347,7 +342,7 @@ impl<D: Digest> Mmr<D> {
     /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
     /// be pruned, but whose digests remain required for proof generation.
     #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
+    pub(crate) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.pinned_nodes.clone()
     }
 
@@ -516,21 +511,6 @@ impl<D: Digest> DirtyMmr<D> {
         Location::try_from(self.size()).expect("invalid mmr size")
     }
 
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    #[allow(dead_code)]
-    pub(crate) fn last_leaf_pos(&self) -> Option<Position> {
-        if self.size() == 0 {
-            return None;
-        }
-        Some(PeakIterator::last_leaf_pos(self.size()))
-    }
-
-    /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
-    /// retained nodes respectively.
-    pub(crate) fn bounds(&self) -> Range<Position> {
-        self.pruned_to_pos..self.size()
-    }
-
     /// Return a new iterator over the peaks of the MMR.
     pub(crate) fn peak_iterator(&self) -> PeakIterator {
         PeakIterator::new(self.size())
@@ -554,12 +534,6 @@ impl<D: Digest> DirtyMmr<D> {
             "pos precedes oldest retained position"
         );
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
-    }
-
-    /// Return the position of the element given its index in the current nodes vector.
-    #[allow(dead_code)]
-    fn index_to_pos(&self, index: usize) -> Position {
-        self.pruned_to_pos + (index as u64)
     }
 
     // --- Mutation methods ---
@@ -712,6 +686,9 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     // --- Merkleization ---
+    // NOTE: The serial/parallel merkleize logic is intentionally duplicated in
+    // `diff::Diff` which uses resolve_node/store_node indirection instead of
+    // direct indexing.
 
     /// Compute updated digests for dirty nodes and compute the root, converting this MMR into an
     /// [Mmr].
@@ -892,7 +869,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -933,7 +910,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
             // Build the MMR one element at a time, checking peaks at each step.
-            let mut base = CleanMmr::new(&mut hasher);
+            let mut base = Mmr::new(&mut hasher);
             let mut leaves: Vec<Position> = Vec::new();
             for _ in 0..11 {
                 let changeset = {
@@ -1081,7 +1058,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
@@ -1103,7 +1080,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
-            let mut base = CleanMmr::new(&mut hasher);
+            let mut base = Mmr::new(&mut hasher);
             for _ in 0..1001 {
                 assert!(
                     base.size().is_mmr_size(),
@@ -1136,11 +1113,11 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let mut test_mmr = CleanMmr::new(&mut hasher);
+            let mut test_mmr = Mmr::new(&mut hasher);
             test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let batched_mmr = CleanMmr::new(&mut hasher);
+            let batched_mmr = Mmr::new(&mut hasher);
 
             // Build the entire MMR in one diff.
             let changeset = {
@@ -1171,7 +1148,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let test_mmr = CleanMmr::new(&mut hasher);
+            let test_mmr = Mmr::new(&mut hasher);
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
@@ -1214,8 +1191,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut reference_mmr = CleanMmr::new(&mut hasher);
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut reference_mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&mut hasher);
             for i in 0u64..200 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1249,7 +1226,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 100;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
 
             // Pop off one node at a time until empty, confirming the root matches reference.
@@ -1261,7 +1238,7 @@ mod tests {
                 };
                 mmr.apply(changeset);
                 let root = *mmr.root();
-                let reference_mmr = CleanMmr::new(&mut hasher);
+                let reference_mmr = Mmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
@@ -1303,7 +1280,7 @@ mod tests {
             };
             mmr.apply(changeset);
 
-            let reference_mmr = CleanMmr::new(&mut hasher);
+            let reference_mmr = Mmr::new(&mut hasher);
             let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
             assert_eq!(*mmr.root(), *reference_mmr.root());
 
@@ -1324,7 +1301,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1362,7 +1339,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
             let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
@@ -1377,7 +1354,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
             let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
@@ -1390,7 +1367,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
             do_batch_update(&mut hasher, mmr, None);
         });
@@ -1424,7 +1401,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1475,7 +1452,7 @@ mod tests {
         executor.start(|_| async move {
             {
                 // Out of bounds: location >= leaf count.
-                let mmr = CleanMmr::new(&mut hasher);
+                let mmr = Mmr::new(&mut hasher);
                 let mmr = build_test_mmr(&mut hasher, mmr, 100);
                 let mut diff = DirtyDiff::new(&mmr);
                 let result = diff.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
@@ -1484,7 +1461,7 @@ mod tests {
 
             {
                 // Pruned leaf.
-                let mmr = CleanMmr::new(&mut hasher);
+                let mmr = Mmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
                 mmr.prune_to_pos(Position::new(50));
                 let mut diff = DirtyDiff::new(&mmr);
@@ -1496,7 +1473,7 @@ mod tests {
 
     fn do_batch_update(
         hasher: &mut Standard<Sha256>,
-        mmr: CleanMmr<sha256::Digest>,
+        mmr: Mmr<sha256::Digest>,
         pool: Option<ThreadPool>,
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
@@ -1589,7 +1566,7 @@ mod tests {
 
             // Test with correct number of pinned nodes - should succeed
             // Build a small MMR to get valid pinned nodes
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let changeset = {
                 let mut diff = DirtyDiff::new(&mmr);
                 for i in 0u64..50 {
@@ -1648,7 +1625,7 @@ mod tests {
 
             // Test with large valid size (127 = 2^7 - 1, a complete tree) - should succeed
             // Build a real MMR to get the correct structure
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let changeset = {
                 let mut diff = DirtyDiff::new(&mmr);
                 for i in 0u64..64 {
@@ -1672,7 +1649,7 @@ mod tests {
 
             // Test with non-zero pruned_to_pos - should succeed
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let changeset = {
                 let mut diff = DirtyDiff::new(&mmr);
                 for i in 0u64..11 {
@@ -1731,7 +1708,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Range end > leaves errors on empty MMR
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             let result = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
@@ -1755,7 +1732,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = Mmr::new(&mut hasher);
             let result = mmr.proof(Location::new_unchecked(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),

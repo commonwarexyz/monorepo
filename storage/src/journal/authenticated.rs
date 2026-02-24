@@ -11,9 +11,8 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        diff::DirtyDiff,
-        journaled::{CleanMmr, Mmr},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        diff::DirtyDiff, journaled::Mmr, Error as MmrError, Location, Position, Proof,
+        StandardHasher,
     },
     Persistable,
 };
@@ -47,7 +46,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: CleanMmr<E, DigestOf<H>>,
+    pub(crate) mmr: Mmr<E, DigestOf<H>>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
@@ -151,7 +150,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mut mmr: CleanMmr<E, DigestOf<H>>,
+        mut mmr: Mmr<E, DigestOf<H>>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -173,7 +172,7 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mmr: &mut CleanMmr<E, DigestOf<H>>,
+        mmr: &mut Mmr<E, DigestOf<H>>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
@@ -599,7 +598,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        CleanMmr<deterministic::Context, Digest>,
+        Mmr<deterministic::Context, Digest>,
         TestContiguousJournal,
         StandardHasher<Sha256>,
     ) {

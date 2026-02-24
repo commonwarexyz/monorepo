@@ -689,8 +689,7 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{
-        diff::DirtyDiff, hasher::Standard, location::LocationRangeExt as _, mem::CleanMmr,
-        MAX_LOCATION,
+        diff::DirtyDiff, hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION,
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -700,12 +699,12 @@ mod tests {
         Sha256::hash(&[v])
     }
 
-    /// Build a [`CleanMmr`] by adding multiple elements via the diff API.
+    /// Build a [`Mmr`] by adding multiple elements via the diff API.
     fn build_mmr(
         hasher: &mut Standard<Sha256>,
         elements: impl IntoIterator<Item = impl AsRef<[u8]>>,
-    ) -> CleanMmr<Digest> {
-        let mut mmr = CleanMmr::new(hasher);
+    ) -> Mmr<Digest> {
+        let mut mmr = Mmr::new(hasher);
         let mut diff = DirtyDiff::new(&mmr);
         for e in elements {
             diff.add(hasher, e.as_ref());
@@ -719,7 +718,7 @@ mod tests {
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = CleanMmr::new(&mut hasher);
+        let mmr = Mmr::new(&mut hasher);
         let root = mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
@@ -1465,7 +1464,7 @@ mod tests {
 
         // Empty multi-proof
         let mut hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = CleanMmr::new(&mut hasher);
+        let empty_mmr = Mmr::new(&mut hasher);
         let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(

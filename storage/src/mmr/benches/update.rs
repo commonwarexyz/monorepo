@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{diff::DirtyDiff, mem::CleanMmr, Location, StandardHasher};
+use commonware_storage::mmr::{diff::DirtyDiff, mem::Mmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -63,7 +63,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = CleanMmr::new(&mut h);
+                            let mut mmr = Mmr::new(&mut h);
                             let changeset = {
                                 let mut diff = DirtyDiff::new(&mmr);
                                 for _ in 0..leaves {

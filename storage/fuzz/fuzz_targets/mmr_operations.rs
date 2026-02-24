@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::mmr::{
-    diff::DirtyDiff, mem::CleanMmr, Location, Position, StandardHasher as Standard,
+    diff::DirtyDiff, mem::Mmr, Location, Position, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {

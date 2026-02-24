@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
     diff::DirtyDiff,
-    journaled::{CleanMmr, Config, Mmr, SyncConfig},
+    journaled::{Config, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
     mem, Error, Position, StandardHasher as Standard,
 };
@@ -98,7 +98,7 @@ fn historical_root(
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let mut hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::CleanMmr::new(&mut hasher);
+    let mut mmr = mem::Mmr::new(&mut hasher);
     let changeset = {
         let mut diff = DirtyDiff::new(&mmr);
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
@@ -374,7 +374,7 @@ fn fuzz(input: FuzzInput) {
                         pinned_nodes: None,
                     };
 
-                    if let Ok(sync_mmr) = CleanMmr::init_sync(
+                    if let Ok(sync_mmr) = Mmr::init_sync(
                         context
                             .with_label("sync")
                             .with_attribute("instance", restarts),

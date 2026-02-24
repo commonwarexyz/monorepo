@@ -19,7 +19,7 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted MMR** (`CleanMmr<Digest>`): An in-memory MMR of digests at and above the
+//! - **Grafted MMR** (`Mmr<Digest>`): An in-memory MMR of digests at and above the
 //!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
 //!   into a single authenticated structure (see below).
 //!
