@@ -333,18 +333,7 @@ impl<
         // Process nullify (and persist it if it is a first attempt)
         let (retry, nullify, entry) = self.state.handle_timeout();
         if let Some(nullify) = nullify {
-            if !retry {
-                batcher.constructed(Vote::Nullify(nullify.clone())).await;
-                self.handle_nullify(nullify.clone()).await;
-
-                // Sync the journal
-                self.sync_journal(nullify.view()).await;
-            }
-
-            // Broadcast nullify
-            debug!(round=?nullify.round(), "broadcasting nullify");
-            self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
-                .await;
+            self.emit_nullify(batcher, vote_sender, retry, nullify).await;
         }
 
         // Broadcast entry to help others enter the view
@@ -355,6 +344,27 @@ impl<
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
+    }
+
+    /// Emits a nullify vote and persists first-attempt votes for deterministic recovery.
+    async fn emit_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        retry: bool,
+        nullify: Nullify<S>,
+    ) {
+        if !retry {
+            batcher.constructed(Vote::Nullify(nullify.clone())).await;
+            self.handle_nullify(nullify.clone()).await;
+
+            // Sync the journal so first-attempt nullify votes survive restarts.
+            self.sync_journal(nullify.view()).await;
+        }
+
+        debug!(round=?nullify.round(), "broadcasting nullify");
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
+            .await;
     }
 
     /// Records a locally verified nullify vote and ensures the round exists.
@@ -979,10 +989,23 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
+
+                                // If a nullification certificate arrives before we timeout, still emit
+                                // a first-attempt nullify vote for local activity tracking.
+                                let late_timeout_nullify = if self.state.current_view() == view {
+                                    let (retry, nullify, _) = self.state.handle_timeout();
+                                    if retry { None } else { nullify }
+                                } else {
+                                    None
+                                };
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
+                                        .await;
+                                }
+                                if let Some(nullify) = late_timeout_nullify {
+                                    self.emit_nullify(&mut batcher, &mut vote_sender, false, nullify)
                                         .await;
                                 }
                                 if from_resolver {

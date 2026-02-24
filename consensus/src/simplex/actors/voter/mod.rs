@@ -2928,6 +2928,218 @@ mod tests {
         );
     }
 
+    /// Regression: exiting the current view via nullification should still emit a
+    /// nullify vote for activity tracking if we have not timed out yet.
+    fn nullification_exit_emits_nullify_vote<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"nullify_exit_late_notarization".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Build participants and voter.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Move into a concrete current view.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Receive nullification for current view (before local timeout).
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            let emitted_nullify = loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == target_view =>
+                            {
+                                break true;
+                            }
+                            batcher::Message::Update { active, .. } => {
+                                active.send(true).unwrap();
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => break false,
+                }
+            };
+
+            assert!(
+                emitted_nullify,
+                "expected nullify vote when exiting view via nullification certificate"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_nullification_exit_emits_nullify_vote() {
+        nullification_exit_emits_nullify_vote::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        nullification_exit_emits_nullify_vote::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        nullification_exit_emits_nullify_vote::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        nullification_exit_emits_nullify_vote::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        nullification_exit_emits_nullify_vote::<_, _>(ed25519::fixture);
+        nullification_exit_emits_nullify_vote::<_, _>(secp256r1::fixture);
+    }
+
+    /// Regression: a notarization arriving after nullification for the same view
+    /// should still trigger certification.
+    fn late_notarization_after_nullification_still_certifies<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"late_notarization_after_nullification".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Build participants and voter.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Move into a concrete current view.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Nullify current view first.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            // Then provide notarization for that same view.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"late_notarization_after_nullification"),
+            );
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            let certified = loop {
+                select! {
+                    msg = resolver_receiver.recv() => {
+                        match msg.unwrap() {
+                            MailboxMessage::Certified { view, success } if view == target_view => {
+                                break Some(success);
+                            }
+                            MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                        }
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(6)) => break None,
+                }
+            };
+
+            assert_eq!(
+                certified,
+                Some(true),
+                "expected notarization after nullification to still trigger certification"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_late_notarization_after_nullification_still_certifies() {
+        late_notarization_after_nullification_still_certifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        late_notarization_after_nullification_still_certifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        late_notarization_after_nullification_still_certifies::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        late_notarization_after_nullification_still_certifies::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        late_notarization_after_nullification_still_certifies::<_, _>(ed25519::fixture);
+        late_notarization_after_nullification_still_certifies::<_, _>(secp256r1::fixture);
+    }
+
     /// Tests certification after: timeout -> receive notarization -> certify.
     /// This test does NOT send a notarize vote first (we timeout before receiving a proposal).
     fn certification_after_timeout<S, F>(mut fixture: F)
