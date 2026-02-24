@@ -41,6 +41,36 @@ use std::{
     thread::LocalKey,
 };
 
+/// Restores slot state if `take` returns early or unwinds.
+///
+/// While active, drop clears the "held" bit and puts any cached value
+/// back into the TLS slot.
+struct TakeCleanup<T: 'static> {
+    cache: &'static LocalKey<RefCell<(bool, Option<T>)>>,
+    cached: Option<T>,
+    armed: bool,
+}
+
+impl<T: 'static> TakeCleanup<T> {
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<T: 'static> Drop for TakeCleanup<T> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cache.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            debug_assert!(slot.0, "cache expected to be held");
+            slot.0 = false;
+            slot.1 = self.cached.take();
+        });
+    }
+}
+
 /// RAII guard that borrows a value from a thread-local cache and returns it
 /// on drop.
 ///
@@ -73,34 +103,22 @@ impl<T: 'static> Cached<T> {
             slot.0 = true;
             slot.1.take()
         });
-        let value = match cached {
+        let mut cleanup = TakeCleanup {
+            cache,
+            cached,
+            armed: true,
+        };
+        let value = match cleanup.cached.take() {
             Some(mut v) => {
                 if let Err(err) = reset(&mut v) {
-                    // Restore the previous value on reset failure so transient errors
-                    // do not permanently evict the cache entry.
-                    cache.with(|cell| {
-                        let mut slot = cell.borrow_mut();
-                        debug_assert!(slot.0, "cache expected to be held");
-                        slot.0 = false;
-                        slot.1 = Some(v);
-                    });
+                    cleanup.cached = Some(v);
                     return Err(err);
                 }
                 v
             }
-            None => match create() {
-                Ok(v) => v,
-                Err(err) => {
-                    // Return to uninitialized state if creation fails.
-                    cache.with(|cell| {
-                        let mut slot = cell.borrow_mut();
-                        debug_assert!(slot.0, "cache expected to be held");
-                        slot.0 = false;
-                    });
-                    return Err(err);
-                }
-            },
+            None => create()?,
         };
+        cleanup.disarm();
         Ok(Self {
             value: Some(value),
             cache,
@@ -269,5 +287,43 @@ mod tests {
         // Outer guard should have returned its value while unwinding.
         let cached = NESTED_CACHE.with(|cell| cell.borrow().1.clone());
         assert_eq!(cached, Some(vec![1, 10]));
+    }
+
+    thread_local_cache!(static PANIC_CREATE_CACHE: u32);
+
+    #[test]
+    fn test_create_panic_does_not_poison_held_flag() {
+        let result = std::panic::catch_unwind(|| {
+            let _ = Cached::take(
+                &PANIC_CREATE_CACHE,
+                || -> Result<u32, ()> { panic!("create panic") },
+                |_| Ok(()),
+            );
+        });
+        assert!(result.is_err());
+
+        let guard = Cached::take(&PANIC_CREATE_CACHE, || Ok::<_, ()>(7), |_| Ok(())).unwrap();
+        assert_eq!(*guard, 7);
+    }
+
+    thread_local_cache!(static PANIC_RESET_CACHE: u32);
+
+    #[test]
+    fn test_reset_panic_does_not_poison_held_flag() {
+        {
+            let _guard = Cached::take(&PANIC_RESET_CACHE, || Ok::<_, ()>(42), |_| Ok(())).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = Cached::take(
+                &PANIC_RESET_CACHE,
+                || Ok::<_, ()>(0),
+                |_| -> Result<(), ()> { panic!("reset panic") },
+            );
+        });
+        assert!(result.is_err());
+
+        let guard = Cached::take(&PANIC_RESET_CACHE, || Ok::<_, ()>(9), |_| Ok(())).unwrap();
+        assert_eq!(*guard, 9);
     }
 }
