@@ -1,5 +1,5 @@
 use crate::{
-    simplex,
+    simplex_protocol,
     strategy::{SmallScope, Strategy},
     utils::Partition,
     FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
@@ -20,14 +20,11 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use commonware_utils::{channel::mpsc::Receiver, FuzzRng};
+use commonware_runtime::{deterministic, Metrics};
+use commonware_utils::channel::mpsc::Receiver;
 use futures::FutureExt;
 use rand::Rng;
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 50;
@@ -78,21 +75,9 @@ impl Arbitrary<'_> for NodeFuzzInput {
     }
 }
 
-pub trait RecoveryMode {
-    const ENABLE_RECOVERY: bool;
-}
-
 pub struct WithoutRecovery;
 
-impl RecoveryMode for WithoutRecovery {
-    const ENABLE_RECOVERY: bool = false;
-}
-
 pub struct WithRecovery;
-
-impl RecoveryMode for WithRecovery {
-    const ENABLE_RECOVERY: bool = true;
-}
 
 struct NodeDriver<S>
 where
@@ -1186,17 +1171,7 @@ where
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: RecoveryMode>(input: NodeFuzzInput) {
-    let raw_bytes_for_panic = input.raw_bytes.clone();
-    let run_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner::<P, M>(input)));
-    if let Err(payload) = run_result {
-        println!("Panicked with raw_bytes: {:?}", raw_bytes_for_panic);
-        std::panic::resume_unwind(payload);
-    }
-}
-
-async fn run_primary<P: simplex::Simplex>(
+pub(crate) async fn run_primary<P: simplex_protocol::Simplex>(
     context: &mut deterministic::Context,
     input: &NodeFuzzInput,
 ) -> (Vec<PublicKeyOf<P>>, Vec<P::Scheme>)
@@ -1292,63 +1267,10 @@ where
     (participants, schemes)
 }
 
-fn run_inner<P: simplex::Simplex, M: RecoveryMode>(input: NodeFuzzInput)
-where
-    PublicKeyOf<P>: Send,
-{
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
-    let executor = deterministic::Runner::new(cfg);
-
-    if M::ENABLE_RECOVERY {
-        let ((participants, schemes), checkpoint) =
-            executor.start_and_recover(|mut context| async move {
-                run_primary::<P>(&mut context, &input).await
-            });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (network, mut oracle) = simulated::Network::new(
-                context.with_label("network_recovery"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
-            let relay =
-                std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
-            let honest = participants[3].clone();
-            let mut registrations =
-                crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
-            let honest_channels = registrations
-                .remove(&honest)
-                .expect("honest participant must exist in recovery");
-            let mut reporter = crate::spawn_honest_validator::<P>(
-                context.with_label("honest_validator_recovery"),
-                &oracle,
-                &participants,
-                schemes[3].clone(),
-                honest,
-                relay,
-                honest_channels,
-            )
-            .with_strict(false);
-
-            let _ = reporter.subscribe().await;
-            context.sleep(Duration::from_millis(50)).await;
-        });
-    } else {
-        executor.start(|mut context| async move {
-            let _ = run_primary::<P>(&mut context, &input).await;
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fuzz_node;
 
     #[test]
     fn test_simplex_node_smoke() {
@@ -1369,7 +1291,7 @@ mod tests {
                 },
             ],
         };
-        fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
+        fuzz_node::<simplex_protocol::SimplexEd25519, WithoutRecovery>(input);
     }
 
     #[test]
@@ -1391,6 +1313,6 @@ mod tests {
                 },
             ],
         };
-        fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
+        fuzz_node::<simplex_protocol::SimplexEd25519, WithRecovery>(input);
     }
 }

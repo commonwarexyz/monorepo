@@ -3,8 +3,8 @@ pub mod disrupter;
 pub mod invariants;
 pub mod network;
 pub mod scheme;
-pub mod simplex;
 pub mod simplex_node;
+pub mod simplex_protocol;
 pub mod strategy;
 pub mod types;
 pub mod utils;
@@ -12,6 +12,7 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     network::ByzantineFirstReceiver,
+    simplex_node::NodeFuzzInput,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, register, Action, Partition},
 };
@@ -31,6 +32,7 @@ use commonware_cryptography::{
     certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
 };
 use commonware_p2p::{
+    simulated,
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
 };
@@ -40,7 +42,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
-pub use simplex::{
+pub use simplex_protocol::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
     SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
     SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
@@ -198,7 +200,7 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+type PublicKeyOf<P> = <<P as simplex_protocol::Simplex>::Scheme as Scheme>::PublicKey;
 
 type NetworkChannels<P> = (
     (
@@ -216,7 +218,7 @@ type NetworkChannels<P> = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-async fn setup_network<P: simplex::Simplex>(
+async fn setup_network<P: simplex_protocol::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
@@ -263,7 +265,7 @@ async fn setup_network<P: simplex::Simplex>(
 }
 
 /// Start a Disrupter with the given strategy and network channels.
-fn start_disrupter<P: simplex::Simplex>(
+fn start_disrupter<P: simplex_protocol::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     strategy: &StrategyChoice,
@@ -317,7 +319,7 @@ fn start_disrupter<P: simplex::Simplex>(
 }
 
 /// Spawn a Disrupter for a Byzantine node.
-fn spawn_disrupter<P: simplex::Simplex>(
+fn spawn_disrupter<P: simplex_protocol::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
@@ -334,7 +336,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
     );
 }
 
-fn spawn_honest_validator<P: simplex::Simplex>(
+fn spawn_honest_validator<P: simplex_protocol::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -358,7 +360,7 @@ fn spawn_honest_validator<P: simplex::Simplex>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator_with_network<P: simplex::Simplex>(
+fn spawn_honest_validator_with_network<P: simplex_protocol::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -437,7 +439,7 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
+fn spawn_honest_validator_in_adversarial_network<P: simplex_protocol::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -487,7 +489,7 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     )
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput) {
+fn run<P: simplex_protocol::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -547,7 +549,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
+fn run_with_adversarial_network<P: simplex_protocol::Simplex>(mut input: FuzzInput) {
     // Partition will be connected, but we will randomly delete messages in the adversarial network wrapper.
     input.partition = Partition::Connected;
 
@@ -620,7 +622,7 @@ fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
     });
 }
 
-fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -839,11 +841,66 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
+fn run_fuzz_node<P: simplex_protocol::Simplex, M: FuzzMode>(input: NodeFuzzInput)
+where
+    PublicKeyOf<P>: Send,
+{
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    if M::MODE == Mode::WithRecovery {
+        let ((participants, schemes), checkpoint) =
+            executor.start_and_recover(|mut context| async move {
+                crate::simplex_node::run_primary::<P>(&mut context, &input).await
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (network, mut oracle) = simulated::Network::new(
+                context.with_label("network_recovery"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let relay =
+                std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+            let honest = participants[3].clone();
+            let mut registrations =
+                crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
+            let honest_channels = registrations
+                .remove(&honest)
+                .expect("honest participant must exist in recovery");
+            let mut reporter = crate::spawn_honest_validator::<P>(
+                context.with_label("honest_validator_recovery"),
+                &oracle,
+                &participants,
+                schemes[3].clone(),
+                honest,
+                relay,
+                honest_channels,
+            )
+            .with_strict(false);
+
+            let _ = reporter.subscribe().await;
+            context.sleep(Duration::from_millis(50)).await;
+        });
+    } else {
+        executor.start(|mut context| async move {
+            let _ = crate::simplex_node::run_primary::<P>(&mut context, &input).await;
+        });
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
     Twin,
     AdversarialNetwork,
+    WithRecovery,
 }
 
 pub trait FuzzMode {
@@ -860,12 +917,20 @@ impl FuzzMode for Twinable {
     const MODE: Mode = Mode::Twin;
 }
 
+impl FuzzMode for simplex_node::WithoutRecovery {
+    const MODE: Mode = Mode::Standard;
+}
+
+impl FuzzMode for simplex_node::WithRecovery {
+    const MODE: Mode = Mode::WithRecovery;
+}
+
 pub struct AdversarialNetwork;
 impl FuzzMode for AdversarialNetwork {
     const MODE: Mode = Mode::AdversarialNetwork;
 }
 
-pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
+pub fn fuzz<P: simplex_protocol::Simplex, M: FuzzMode>(input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
@@ -875,6 +940,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
         Mode::Twin => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
         })),
+        Mode::WithRecovery => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
     };
     match run_result {
         Ok(()) => {}
@@ -882,5 +948,14 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
             println!("Panicked with raw_bytes: {:?}", raw_bytes);
             panic::resume_unwind(payload);
         }
+    }
+}
+
+pub fn fuzz_node<P: simplex_protocol::Simplex, M: FuzzMode>(input: NodeFuzzInput) {
+    let raw_bytes_for_panic = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
+    if let Err(payload) = run_result {
+        println!("Panicked with raw_bytes: {:?}", raw_bytes_for_panic);
+        panic::resume_unwind(payload);
     }
 }
