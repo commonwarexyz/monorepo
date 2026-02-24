@@ -279,6 +279,170 @@ mod tests {
         certificate_forwarding_from_network(secp256r1::fixture);
     }
 
+    /// Regression: an old notarization for view `V` is still forwarded to voter even
+    /// after a nullification for `V` has been observed and current view moved to `V+1`.
+    fn old_notarization_after_nullification_is_forwarded<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_old_notarization_after_nullification".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Setup reporter mock.
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor.
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to.
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            // Create a peer to inject certificates.
+            let injector_pk = PrivateKey::from_seed(1_000_001).public_key();
+            let (mut injector_sender, _injector_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Set up link from injector to batcher.
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(injector_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            // Start the batcher.
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Initialize batcher at target view.
+            let target_view = View::new(1);
+            let active = batcher_mailbox
+                .update(target_view, Participant::new(0), View::zero())
+                .await;
+            assert!(active);
+
+            // Build certificates for the same target view.
+            let round = Round::new(epoch, target_view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let nullification = build_nullification(&schemes, round, quorum_size);
+            let notarization = build_notarization(&schemes, &proposal, quorum_size);
+
+            // Send nullification for V first.
+            injector_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Certificate::<S, Sha256Digest>::Nullification(nullification).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+            context.sleep(Duration::from_millis(50)).await;
+
+            let output = voter_receiver.recv().await.unwrap();
+            assert!(
+                matches!(output, voter::Message::Verified(Certificate::Nullification(n), _) if n.view() == target_view)
+            );
+
+            // Simulate voter-driven view advance after nullification to V+1.
+            let active = batcher_mailbox
+                .update(target_view.next(), Participant::new(1), View::zero())
+                .await;
+            assert!(active);
+
+            // Send old notarization for V after moving current view forward.
+            injector_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Certificate::Notarization(notarization).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Old notarization must still be forwarded to voter.
+            let output = voter_receiver.recv().await.unwrap();
+            assert!(
+                matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == target_view)
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_old_notarization_after_nullification_is_forwarded() {
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        old_notarization_after_nullification_is_forwarded(ed25519::fixture);
+        old_notarization_after_nullification_is_forwarded(secp256r1::fixture);
+    }
+
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
