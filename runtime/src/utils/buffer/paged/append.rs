@@ -704,26 +704,40 @@ impl<B: Blob> Append<B> {
         let pages_to_write = buffer.data.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
         let buffer_data = buffer.data.as_ref();
+        let logical_page_size_u16 =
+            u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
+        let crc_record_size = CHECKSUM_SIZE as usize;
 
-        // For each logical page, append page data plus CRC record.
-        for page in 0..pages_to_write {
-            let start_read_idx = page * logical_page_size;
-            let end_read_idx = start_read_idx + logical_page_size;
-            let logical_page = &buffer_data[start_read_idx..end_read_idx];
-            write_buffer.append(buffer.data.slice(start_read_idx..end_read_idx));
+        if pages_to_write > 0 {
+            let total_crc_bytes = pages_to_write
+                .checked_mul(crc_record_size)
+                .expect("crc blob length overflow");
+            let mut crc_blob = self.cache_ref.pool().alloc(total_crc_bytes);
+            for page in 0..pages_to_write {
+                let start_read_idx = page * logical_page_size;
+                let end_read_idx = start_read_idx + logical_page_size;
+                let logical_page = &buffer_data[start_read_idx..end_read_idx];
+                let crc = Crc32::checksum(logical_page);
 
-            let crc = Crc32::checksum(logical_page);
-            let logical_page_size_u16 =
-                u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
+                // For the first page, if there's an old partial page CRC, construct the record
+                // to preserve the old CRC in its original slot.
+                let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
+                    Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
+                } else {
+                    Checksum::new(logical_page_size_u16, crc)
+                };
+                crc_blob.put_slice(&crc_record.to_bytes());
+            }
+            let crc_blob = crc_blob.freeze();
 
-            // For the first page, if there's an old partial page CRC, construct the record
-            // to preserve the old CRC in its original slot.
-            let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
-                Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
-            } else {
-                Checksum::new(logical_page_size_u16, crc)
-            };
-            write_buffer.append(self.checksum_to_iobuf(&crc_record));
+            for page in 0..pages_to_write {
+                let start_read_idx = page * logical_page_size;
+                let end_read_idx = start_read_idx + logical_page_size;
+                write_buffer.append(buffer.data.slice(start_read_idx..end_read_idx));
+
+                let crc_start = page * crc_record_size;
+                write_buffer.append(crc_blob.slice(crc_start..crc_start + crc_record_size));
+            }
         }
 
         if !include_partial_page {
@@ -770,13 +784,6 @@ impl<B: Blob> Append<B> {
         // Return the CRC record that matches what we wrote to disk, so that future flushes
         // correctly identify which slot is protected.
         (write_buffer, Some(crc_record))
-    }
-
-    fn checksum_to_iobuf(&self, checksum: &Checksum) -> IoBuf {
-        let bytes = checksum.to_bytes();
-        let mut out = self.cache_ref.pool().alloc(CHECKSUM_SIZE as usize);
-        out.put_slice(&bytes);
-        out.freeze()
     }
 
     /// Build a CRC record that preserves the old CRC in its original slot and places
