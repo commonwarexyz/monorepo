@@ -269,13 +269,11 @@ impl CacheRef {
         let page_cache = self.cache.read();
         while remaining > 0 {
             let Some(page) = page_cache.read_at(blob_id, logical_offset, remaining) else {
+                // Cache miss - return how many bytes we successfully read
                 break;
             };
             remaining -= page.len();
-            logical_offset = match logical_offset.checked_add(page.len() as u64) {
-                Some(next) => next,
-                None => break,
-            };
+            logical_offset += page.len() as u64;
             out.append(page);
         }
         (out, len - remaining)
@@ -322,9 +320,7 @@ impl CacheRef {
         let mut remaining = len
             .checked_sub(prefix_len)
             .expect("prefix length must not exceed requested length");
-        let mut logical_offset = logical_offset
-            .checked_add(prefix_len as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let mut logical_offset = logical_offset + prefix_len as u64;
         while remaining > 0 {
             // Probe cache first under read lock.
             if let Some(page) = {
@@ -332,9 +328,7 @@ impl CacheRef {
                 page_cache.read_at(blob_id, logical_offset, remaining)
             } {
                 remaining -= page.len();
-                logical_offset = logical_offset
-                    .checked_add(page.len() as u64)
-                    .ok_or(Error::OffsetOverflow)?;
+                logical_offset += page.len() as u64;
                 result.append(page);
                 continue;
             }
@@ -344,9 +338,7 @@ impl CacheRef {
                 .read_after_page_fault(blob, blob_id, logical_offset, remaining)
                 .await?;
             remaining -= page.len();
-            logical_offset = logical_offset
-                .checked_add(page.len() as u64)
-                .ok_or(Error::OffsetOverflow)?;
+            logical_offset += page.len() as u64;
             result.append(page);
         }
 
@@ -488,9 +480,7 @@ impl CacheRef {
         let logical_page_size = self.logical_page_size;
         let physical_page_size = self.physical_page_size();
         async move {
-            let physical_page_start = page_num
-                .checked_mul(physical_page_size)
-                .ok_or(Arc::new(Error::OffsetOverflow))?;
+            let physical_page_start = page_num * physical_page_size;
             let page = blob
                 .read_at_buf(physical_page_start, physical_page_size as usize, buf)
                 .await
@@ -536,9 +526,7 @@ impl CacheRef {
             return;
         }
         let logical_page_size = self.logical_page_size as usize;
-        let required_len = page_count
-            .checked_mul(logical_page_size)
-            .expect("logical page length overflow while caching");
+        let required_len = page_count * logical_page_size;
         assert!(required_len <= logical_pages.len());
 
         // Copy directly into cache slots.
@@ -556,7 +544,7 @@ impl CacheRef {
 
         let mut page_idx = 0;
         while page_idx < page_count {
-            let chunk_end = page_idx.saturating_add(chunk_size).min(page_count);
+            let chunk_end = (page_idx + chunk_size).min(page_count);
             let mut cache = self.cache.write();
             while page_idx < chunk_end {
                 let current_page = page_num;
