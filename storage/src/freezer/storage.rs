@@ -509,7 +509,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
             let offset = Self::table_offset(table_index);
 
             // Read both entries from the buffer.
-            let entry_buf = reader.read_exact(Entry::FULL_SIZE).await?;
+            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
             let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries

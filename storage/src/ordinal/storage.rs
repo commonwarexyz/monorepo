@@ -193,7 +193,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
-                let mut record_buf = replay_blob.read_exact(Record::<V>::SIZE).await?;
+                let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals

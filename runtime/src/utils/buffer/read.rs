@@ -10,8 +10,8 @@ use std::num::NonZeroUsize;
 /// - Refills try to reclaim mutable ownership of that same backing allocation.
 /// - If backing is still shared (for example, previously returned slices are alive), a pooled
 ///   replacement is allocated and existing backing is left alive until all aliases drop.
-/// - [Self::read_exact] returns zero-copy slices into refill buffers. Holding those
-///   slices may force allocation on subsequent refills.
+/// - [Self::read] returns zero-copy slices into refill buffers. Holding those slices may
+///   force allocation on subsequent refills.
 ///
 /// # Example
 ///
@@ -148,7 +148,7 @@ impl<B: Blob> Read<B> {
     /// allocation on later refills.
     ///
     /// Returns an error if not enough bytes are available.
-    pub async fn read_exact(&mut self, len: usize) -> Result<IoBufs, Error> {
+    pub async fn read(&mut self, len: usize) -> Result<IoBufs, Error> {
         if len == 0 {
             return Ok(IoBufs::default());
         }

@@ -113,7 +113,7 @@ mod tests {
             size <= buf.len(),
             "provided buffer is too small for requested size"
         );
-        let read = reader.read_exact(size).await?;
+        let read = reader.read(size).await?;
         buf[..size].copy_from_slice(read.coalesce().as_ref());
         Ok(())
     }
@@ -122,7 +122,7 @@ mod tests {
         reader: &mut Read<B>,
         size: usize,
     ) -> Result<crate::IoBufs, Error> {
-        reader.read_exact(size).await
+        reader.read(size).await
     }
 
     #[test_traced]
@@ -515,7 +515,7 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(10));
 
             // First read triggers a single refill of 10 bytes.
-            let first = reader.read_exact(6).await.unwrap();
+            let first = reader.read(6).await.unwrap();
             assert_eq!(first.coalesce().as_ref(), b"ABCDEF");
             assert_eq!(reader.position(), 6);
             assert_eq!(reader.buffer_remaining(), 4);
@@ -526,7 +526,7 @@ mod tests {
             assert_eq!(reader.buffer_remaining(), 3);
 
             // Consume only from the already buffered window.
-            let second = reader.read_exact(3).await.unwrap();
+            let second = reader.read(3).await.unwrap();
             assert_eq!(second.coalesce().as_ref(), b"HIJ");
             assert_eq!(reader.position(), 10);
             assert_eq!(reader.buffer_remaining(), 0);

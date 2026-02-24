@@ -195,7 +195,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (size as usize).clamp(0, MAX_SIZE);
                         let current_pos = reader.position();
                         if current_pos.checked_add(size as u64).is_some() {
-                            let _ = reader.read_exact(size).await;
+                            let _ = reader.read(size).await;
                         }
                     }
                 }
