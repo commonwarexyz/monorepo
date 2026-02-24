@@ -447,24 +447,27 @@ fn decode<H: Hasher, S: Strategy>(
     shards.extend(encoding.recovery_iter());
 
     // Build Merkle tree
-    let missing_digest_indices = shard_digests
-        .iter()
-        .enumerate()
-        .filter_map(|(i, digest)| digest.is_none().then_some(i));
-    let missing_digests =
-        strategy.map_init_collect_vec(missing_digest_indices, H::new, |hasher, i| {
+    for (i, digest) in strategy.map_init_collect_vec(
+        shard_digests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        H::new,
+        |hasher, i| {
             hasher.update(shards[i]);
             (i, hasher.finalize())
-        });
-    for (i, digest) in missing_digests {
+        },
+    ) {
         shard_digests[i] = Some(digest);
     }
 
     let mut builder = Builder::<H>::new(n);
-    for digest in shard_digests.into_iter() {
-        let digest = digest.expect("digest must be present for every shard");
-        builder.add(&digest);
-    }
+    shard_digests
+        .into_iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
     let tree = builder.build();
 
     // Confirm root is consistent
