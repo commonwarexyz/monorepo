@@ -433,12 +433,8 @@ mod tests {
         old_notarization_after_nullification_is_forwarded(
             bls12381_threshold_std::fixture::<MinSig, _>,
         );
-        old_notarization_after_nullification_is_forwarded(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        old_notarization_after_nullification_is_forwarded(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
+        old_notarization_after_nullification_is_forwarded(bls12381_multisig::fixture::<MinPk, _>);
+        old_notarization_after_nullification_is_forwarded(bls12381_multisig::fixture::<MinSig, _>);
         old_notarization_after_nullification_is_forwarded(ed25519::fixture);
         old_notarization_after_nullification_is_forwarded(secp256r1::fixture);
     }
