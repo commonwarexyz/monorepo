@@ -87,14 +87,14 @@ type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_S
 
 fn any_cfg(
     context: &(impl BufferPooler + ThreadPooler),
-) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-    AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+) -> AConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    AConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
-        log_codec_config: ((0..=10000).into(), ()),
+        log_codec_config: ((), ((0..=10000).into(), ())),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
@@ -116,14 +116,14 @@ async fn get_any_ordered(ctx: Context) -> OVariableDb {
 
 fn current_cfg(
     context: &(impl BufferPooler + ThreadPooler),
-) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-    CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+) -> CConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    CConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
-        log_codec_config: ((0..=10000).into(), ()),
+        log_codec_config: ((), ((0..=10000).into(), ())),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,

@@ -138,7 +138,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         mmr_journal_partition: format!("{test_name}-mmr"),
         mmr_metadata_partition: format!("{test_name}-meta"),
@@ -148,7 +148,7 @@ fn test_config(
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        log_codec_config: ((0..=100000).into(), ()),
+        log_codec_config: ((), ((0..=100000).into(), ())),
         translator: TwoCap,
         thread_pool: None,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),

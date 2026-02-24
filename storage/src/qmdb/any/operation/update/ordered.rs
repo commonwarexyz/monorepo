@@ -92,12 +92,12 @@ impl<K: Array, V: VariableValue> Write for Update<K, VariableEncoding<V>> {
 }
 
 impl<K: Array, V: VariableValue> Read for Update<K, VariableEncoding<V>> {
-    type Cfg = <V as Read>::Cfg;
+    type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next_key = K::read(buf)?;
+        let key = K::read_cfg(buf, &cfg.0)?;
+        let value = V::read_cfg(buf, &cfg.1)?;
+        let next_key = K::read_cfg(buf, &cfg.0)?;
         Ok(Self {
             key,
             value,

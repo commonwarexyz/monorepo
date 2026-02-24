@@ -1,26 +1,26 @@
 use crate::{
     mmr::Location,
-    qmdb::any::{
-        operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
-        value::VariableEncoding,
-        VariableValue,
+    qmdb::{
+        any::{
+            operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
+            value::VariableEncoding,
+            VariableValue,
+        },
+        operation::Key,
     },
 };
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::Array;
 
 impl<K, V, S> EncodeSize for Operation<K, VariableEncoding<V>, S>
 where
-    K: Array,
+    K: Key + EncodeSize,
     V: VariableValue,
     S: Update<K, VariableEncoding<V>> + EncodeSize,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Delete(_) => K::SIZE,
+            Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
             Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
         }
@@ -29,7 +29,7 @@ where
 
 impl<K, V, S> Write for Operation<K, VariableEncoding<V>, S>
 where
-    K: Array + Codec,
+    K: Key + Write,
     V: VariableValue,
     S: Update<K, VariableEncoding<V>> + Write,
 {
@@ -54,16 +54,16 @@ where
 
 impl<K, V, S> Read for Operation<K, VariableEncoding<V>, S>
 where
-    K: Array + Codec,
+    K: Key + Read,
     V: VariableValue,
-    S: Update<K, VariableEncoding<V>> + Read<Cfg = <V as Read>::Cfg>,
+    S: Update<K, VariableEncoding<V>> + Read<Cfg = (<K as Read>::Cfg, <V as Read>::Cfg)>,
 {
-    type Cfg = <V as Read>::Cfg;
+    type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             DELETE_CONTEXT => {
-                let key = K::read(buf)?;
+                let key = K::read_cfg(buf, &cfg.0)?;
                 Ok(Self::Delete(key))
             }
             UPDATE_CONTEXT => {
@@ -71,7 +71,7 @@ where
                 Ok(Self::Update(payload))
             }
             COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, cfg)?;
+                let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
                 let floor_loc = UInt::read(buf)?;
                 let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
                     CodecError::Invalid(
