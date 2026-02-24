@@ -171,7 +171,9 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::DirtyMmr, StandardHasher as Standard};
+    use crate::mmr::{
+        diff::DirtyDiff, location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -184,16 +186,17 @@ mod tests {
     fn test_verification_proof_store() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr = DirtyMmr::new();
-            let mut elements = Vec::new();
-            let mut element_positions = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
-            for i in 0..49 {
-                elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
-            }
-            let mmr = mmr.merkleize(&mut hasher, None);
+            let elements: Vec<_> = (0..49u8).map(test_digest).collect();
+            let mut mmr = Mmr::new(&mut hasher);
+            let changeset = {
+                let mut diff = DirtyDiff::new(&mmr);
+                for element in &elements {
+                    diff.add(&mut hasher, element);
+                }
+                diff.merkleize(&mut hasher).into_changeset()
+            };
+            mmr.apply(changeset);
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full

@@ -532,7 +532,7 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
-    /// Build a reference MMR with `n` elements via DirtyMmr for comparison.
+    /// Build a reference MMR with `n` elements for comparison.
     fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<sha256::Digest> {
         let mmr = Mmr::new(hasher);
         build_test_mmr(hasher, mmr, n)
@@ -540,15 +540,15 @@ mod tests {
 
     use commonware_cryptography::sha256;
 
-    /// For N in {1, 2, 10, 100, 199}, build via DirtyMmr and via Diff, verify same root and nodes.
+    /// For N in {1, 2, 10, 100, 199}, build via reference and via Diff, verify same root and nodes.
     #[test]
-    fn test_consistency_with_dirty_mmr() {
+    fn test_consistency_with_reference() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
 
             for &n in &[1u64, 2, 10, 100, 199] {
-                // Reference via DirtyMmr
+                // Reference via build_reference
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Diff: start from empty base, add all via diff

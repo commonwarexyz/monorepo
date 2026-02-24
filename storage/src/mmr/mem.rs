@@ -6,10 +6,9 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{nodes_to_pin, PeakIterator},
     read::MmrRead,
-    Error::{self, *},
-    Location, Position,
+    Error, Location, Position,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -438,13 +437,12 @@ impl<D: Digest> super::read::ChainInfo<D> for Mmr<D> {
 }
 
 // ---------------------------------------------------------------------------
-// DirtyMmr -- internal mutable MMR used by the diff layer and grafting code
+// DirtyMmr -- internal MMR used for reconstruction from components
 // ---------------------------------------------------------------------------
 
-/// A mutable, not-yet-merkleized MMR used internally by the diff layer and grafting code.
+/// A not-yet-merkleized MMR reconstructed from components.
 ///
-/// After building / mutating, call [`merkleize`](DirtyMmr::merkleize) to compute digests
-/// and produce an [`Mmr`].
+/// Call [`merkleize`](DirtyMmr::merkleize) to compute digests and produce an [`Mmr`].
 #[derive(Clone, Debug)]
 pub(crate) struct DirtyMmr<D: Digest> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -473,13 +471,7 @@ impl<D: Digest> Default for DirtyMmr<D> {
     }
 }
 
-#[allow(dead_code)]
 impl<D: Digest> DirtyMmr<D> {
-    /// Return a new (empty) `DirtyMmr`.
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Re-initialize with the given nodes, pruned_to_pos, and pinned_nodes.
     pub(crate) fn from_components(
         nodes: Vec<D>,
@@ -532,155 +524,6 @@ impl<D: Digest> DirtyMmr<D> {
             "pos precedes oldest retained position"
         );
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
-    }
-
-    // --- Mutation methods ---
-
-    /// Add `digest` as a new leaf in the MMR, returning its position.
-    pub(crate) fn add_leaf_digest(&mut self, digest: D) -> Position {
-        // Compute the new parent nodes, if any.
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        let leaf_pos = self.size();
-        self.nodes.push_back(digest);
-
-        let mut height = 1;
-        for _ in nodes_needing_parents {
-            let new_node_pos = self.size();
-            self.nodes.push_back(D::EMPTY);
-            self.state.dirty_nodes.insert((new_node_pos, height));
-            height += 1;
-        }
-
-        leaf_pos
-    }
-
-    /// Add `element` to the MMR and return its position.
-    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub(crate) fn add<H: Hasher<Digest = D>>(
-        &mut self,
-        hasher: &mut H,
-        element: &[u8],
-    ) -> Position {
-        let digest = hasher.leaf_digest(self.size(), element);
-        self.add_leaf_digest(digest)
-    }
-
-    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
-    pub(crate) fn pop(&mut self) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Empty);
-        }
-
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-        let num_to_drain = *(self.size() - new_size) as usize;
-        self.nodes.drain(self.nodes.len() - num_to_drain..);
-
-        // Remove dirty nodes that are now out of bounds.
-        let cutoff = (self.size(), 0);
-        self.state.dirty_nodes.split_off(&cutoff);
-
-        Ok(self.size())
-    }
-
-    /// Update the leaf at `loc` to `element`.
-    pub(crate) fn update_leaf(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        loc: Location,
-        element: &[u8],
-    ) -> Result<(), Error> {
-        self.update_leaf_batched(hasher, None, &[(loc, element)])
-    }
-
-    /// Batch update the digests of multiple retained leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
-    /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    pub(crate) fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
-        updates: &[(Location, T)],
-    ) -> Result<(), Error> {
-        if updates.is_empty() {
-            return Ok(());
-        }
-
-        let leaves = self.leaves();
-        let mut positions = Vec::with_capacity(updates.len());
-        for (loc, _) in updates {
-            if *loc >= leaves {
-                return Err(Error::LeafOutOfBounds(*loc));
-            }
-            let pos = Position::try_from(*loc)?;
-            if pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(pos));
-            }
-            positions.push(pos);
-        }
-
-        #[cfg(feature = "std")]
-        if let Some(pool) = pool {
-            if updates.len() >= MIN_TO_PARALLELIZE {
-                self.update_leaf_parallel(hasher, pool, updates, &positions);
-                return Ok(());
-            }
-        }
-
-        for ((_, element), pos) in updates.iter().zip(positions.iter()) {
-            // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(*pos, element.as_ref());
-            let index = self.pos_to_index(*pos);
-            self.nodes[index] = digest;
-            self.mark_dirty(*pos);
-        }
-
-        Ok(())
-    }
-
-    /// Batch update the digests of multiple retained leaves using multiple threads.
-    #[cfg(feature = "std")]
-    fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        pool: ThreadPool,
-        updates: &[(Location, T)],
-        positions: &[Position],
-    ) {
-        pool.install(|| {
-            let digests: Vec<(Position, D)> = updates
-                .par_iter()
-                .zip(positions.par_iter())
-                .map_init(
-                    || hasher.fork(),
-                    |hasher, ((_, elem), pos)| {
-                        let digest = hasher.leaf_digest(*pos, elem.as_ref());
-                        (*pos, digest)
-                    },
-                )
-                .collect();
-
-            for (pos, digest) in digests {
-                let index = self.pos_to_index(pos);
-                self.nodes[index] = digest;
-                self.mark_dirty(pos);
-            }
-        });
     }
 
     // --- Merkleization ---
@@ -820,33 +663,6 @@ impl<D: Digest> DirtyMmr<D> {
             }
         });
     }
-
-    /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
-    /// their digests are appropriately recomputed during the next `merkleize`.
-    fn mark_dirty(&mut self, pos: Position) {
-        for (peak_pos, mut height) in self.peak_iterator() {
-            if peak_pos < pos {
-                continue;
-            }
-
-            // We have found the mountain containing the path we are looking for. Traverse it from
-            // leaf to root, that way we can exit early if we hit a node that is already dirty.
-            let path = PathIterator::new(pos, peak_pos, height)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev();
-            height = 1;
-            for (parent_pos, _) in path {
-                if !self.state.dirty_nodes.insert((parent_pos, height)) {
-                    break;
-                }
-                height += 1;
-            }
-            return;
-        }
-
-        panic!("invalid pos {pos}:{}", self.size());
-    }
 }
 
 #[cfg(test)]
@@ -856,6 +672,8 @@ mod tests {
         conformance::build_test_mmr,
         diff::DirtyDiff,
         hasher::{Hasher as _, Standard},
+        iterator::nodes_needing_parents,
+        Error::{ElementPruned, Empty},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};
