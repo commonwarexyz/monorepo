@@ -323,6 +323,29 @@ impl<
         Some(Request(context, receiver))
     }
 
+    /// Emits a nullify vote and persists first-attempt votes for deterministic recovery.
+    async fn broadcast_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        retry: bool,
+        nullify: Nullify<S>,
+    ) {
+        // Process nullify (and persist it if it is a first attempt)
+        if !retry {
+            batcher.constructed(Vote::Nullify(nullify.clone())).await;
+            self.handle_nullify(nullify.clone()).await;
+
+            // Sync the journal so first-attempt nullify votes survive restarts.
+            self.sync_journal(nullify.view()).await;
+        }
+
+        // Broadcast nullify vote (regardless)
+        debug!(round=?nullify.round(), "broadcasting nullify");
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
+            .await;
+    }
+
     /// Handle a timeout.
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -330,10 +353,10 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
-        // Process nullify (and persist it if it is a first attempt)
+        // If we can emit a nullify vote, do so.
         let (retry, nullify, entry) = self.state.handle_timeout();
         if let Some(nullify) = nullify {
-            self.emit_nullify(batcher, vote_sender, retry, nullify)
+            self.broadcast_nullify(batcher, vote_sender, retry, nullify)
                 .await;
         }
 
@@ -345,27 +368,6 @@ impl<
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
-    }
-
-    /// Emits a nullify vote and persists first-attempt votes for deterministic recovery.
-    async fn emit_nullify<Sp: Sender>(
-        &mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        retry: bool,
-        nullify: Nullify<S>,
-    ) {
-        if !retry {
-            batcher.constructed(Vote::Nullify(nullify.clone())).await;
-            self.handle_nullify(nullify.clone()).await;
-
-            // Sync the journal so first-attempt nullify votes survive restarts.
-            self.sync_journal(nullify.view()).await;
-        }
-
-        debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
-            .await;
     }
 
     /// If a nullification certificate arrives for our current view, we may need to emit a
@@ -492,7 +494,7 @@ impl<
             self.broadcast_certificate(certificate_sender, floor).await;
         }
         if let Some(nullify) = late_timeout_nullify {
-            self.emit_nullify(batcher, vote_sender, false, nullify)
+            self.broadcast_nullify(batcher, vote_sender, false, nullify)
                 .await;
         }
     }
