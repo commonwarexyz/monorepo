@@ -13,7 +13,7 @@ use std::ops::{Bound, RangeBounds};
 /// - Logical data length is tracked separately from backing view length.
 /// - Flushing paths ([Self::take] and grow-resize in [Self::resize]) return a cloned `IoBuf` view
 ///   of logical bytes and keep backing allocated for reuse.
-/// - Subsequent writes are copy-on-write: [Self::into_writable] recovers mutable ownership when
+/// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
 /// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
 ///   possible.
@@ -74,11 +74,11 @@ impl Buffer {
         self.immutable
     }
 
-    /// Converts the buffer to immutable mode.
+    /// Set the buffer immutable.
     ///
     /// If `compact` is true, backing storage is compacted to the current logical length.
     /// This is idempotent for both state and compaction behavior.
-    pub(super) fn to_immutable(&mut self, compact: bool) {
+    pub(super) fn set_immutable(&mut self, compact: bool) {
         self.immutable = true;
         if !compact {
             return;
@@ -93,8 +93,8 @@ impl Buffer {
         self.data = shrunk.freeze();
     }
 
-    /// Converts the buffer to mutable mode.
-    pub(super) const fn to_mutable(&mut self) {
+    /// Set the buffer mutable.
+    pub(super) const fn set_mutable(&mut self) {
         self.immutable = false;
     }
 
@@ -182,7 +182,7 @@ impl Buffer {
     /// - If backing is uniquely owned and has enough capacity, no allocation occurs.
     /// - If backing is shared (for example, because a flushed/read view is still alive) or too
     ///   small, a new pooled allocation is created and existing bytes are copied.
-    fn into_writable(&mut self, needed: usize) -> IoBufMut {
+    fn writable(&mut self, needed: usize) -> IoBufMut {
         let logical_len = self.len;
         let current = std::mem::take(&mut self.data);
         match current.try_into_mut() {
@@ -233,7 +233,7 @@ impl Buffer {
         let start = (offset - self.offset) as usize;
         let end = start + data.len();
 
-        let mut writable = self.into_writable(end);
+        let mut writable = self.writable(end);
         let prev = writable.len();
 
         // Expand buffer if necessary (fills with zeros).
@@ -256,7 +256,7 @@ impl Buffer {
     /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
-        let mut writable = self.into_writable(end);
+        let mut writable = self.writable(end);
         writable.put_slice(data);
         let over_capacity = writable.len() > self.capacity;
         self.len = writable.len();

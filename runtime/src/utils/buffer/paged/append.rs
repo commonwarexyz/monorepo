@@ -230,7 +230,7 @@ impl<B: Blob> Append<B> {
             let over_capacity = buffer.append(partial_page.as_ref());
             assert!(!over_capacity);
         }
-        buffer.to_immutable(true);
+        buffer.set_immutable(true);
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
@@ -255,13 +255,13 @@ impl<B: Blob> Append<B> {
         if buf_guard.is_immutable() {
             return Ok(());
         }
-        buf_guard.to_immutable(false);
+        buf_guard.set_immutable(false);
         self.flush_internal(buf_guard, true).await?;
 
         // Compact tip backing after flush to match the post-flush logical view.
         {
             let mut buf_guard = self.buffer.write().await;
-            buf_guard.to_immutable(true);
+            buf_guard.set_immutable(true);
         }
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
@@ -276,7 +276,7 @@ impl<B: Blob> Append<B> {
         if !buffer.is_immutable() {
             return;
         }
-        buffer.to_mutable();
+        buffer.set_mutable();
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
