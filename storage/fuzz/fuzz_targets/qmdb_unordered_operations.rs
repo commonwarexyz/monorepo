@@ -118,8 +118,9 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Root => {
-                    // root requires merkleization but not commit
-                    let clean_db = db.into_merkleized();
+                    // root requires commit + merkleization
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let clean_db = durable_db.into_merkleized();
                     clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -131,11 +132,13 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let clean_db = durable_db.into_merkleized();
 
                     let current_root = clean_db.root();
                     // Adjust start_loc to be within valid range
                     // Locations are 0-indexed (first operation is at location 0)
+                    let actual_op_count = clean_db.bounds().await.end;
                     let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
                     let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 

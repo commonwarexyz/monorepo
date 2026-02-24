@@ -497,14 +497,8 @@ impl<
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

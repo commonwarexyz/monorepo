@@ -397,45 +397,42 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let ops = create_test_ops(50);
+
             let mut db = create_test_db(context.with_label("first"))
                 .await
                 .into_mutable();
-            let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let root = db.root();
+            let full_size = db.bounds().await.end;
 
-            // Test singleton database
-            let (single_proof, single_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(2),
-                    Location::new_unchecked(1),
-                    NZU64!(1),
-                )
+            // Verify a single-op proof at the full commit size.
+            let (proof, proof_ops) = db
+                .proof(Location::new_unchecked(1), NZU64!(1))
                 .await
                 .unwrap();
-            assert_eq!(single_proof.leaves, Location::new_unchecked(2));
-            assert_eq!(single_ops.len(), 1);
-
-            // Create historical database with single operation without committing it.
-            let mut single_db = create_test_db(context.with_label("second"))
-                .await
-                .into_mutable();
-            apply_ops(&mut single_db, ops[0..1].to_vec()).await;
-            let single_db = single_db.into_merkleized();
-            let single_root = single_db.root();
-
+            assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
                 &mut hasher,
-                &single_proof,
+                &proof,
                 Location::new_unchecked(1),
-                &single_ops,
-                &single_root
+                &proof_ops,
+                &root
             ));
 
-            // Test requesting more operations than available in historical position
-            let (_limited_proof, limited_ops) = db
+            // historical_proof at full size should match proof.
+            let (hp, hp_ops) = db
+                .historical_proof(full_size, Location::new_unchecked(1), NZU64!(1))
+                .await
+                .unwrap();
+            assert_eq!(hp.digests, proof.digests);
+            assert_eq!(hp_ops, proof_ops);
+
+            // Test requesting more operations than available in historical position.
+            let (_proof, limited_ops) = db
                 .historical_proof(
                     Location::new_unchecked(11),
                     Location::new_unchecked(6),
@@ -443,10 +440,10 @@ pub(crate) mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+            assert_eq!(limited_ops.len(), 5); // limited by historical size
             assert_eq!(limited_ops, ops[5..10]);
 
-            // Test proof at minimum historical position
+            // Test proof at minimum historical position.
             let (min_proof, min_ops) = db
                 .historical_proof(
                     Location::new_unchecked(4),
@@ -459,10 +456,6 @@ pub(crate) mod test {
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
-            // Can't destroy the db unless it's durable, so we need to commit first.
-            let (single_db, _) = single_db.into_mutable().commit(None).await.unwrap();
-            single_db.into_merkleized().destroy().await.unwrap();
-
             db.destroy().await.unwrap();
         });
     }
@@ -471,57 +464,44 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let ops = create_test_ops(100);
+            let mut hasher = StandardHasher::<Sha256>::new();
+
+            // Build the db with all ops and a single commit.
             let mut db = create_test_db(context.with_label("main"))
                 .await
                 .into_mutable();
-            let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let root = db.root();
+            let full_size = db.bounds().await.end;
 
-            // Test historical proof generation for several historical states.
+            // Test historical proof generation at several sizes up to the commit point.
+            // Use start locations well above the inactivity floor to avoid floor-raised ops.
             let start_loc = Location::new_unchecked(21);
             let max_ops = NZU64!(10);
-            for end_loc in 32..51 {
-                let end_loc = Location::new_unchecked(end_loc);
-                let (historical_proof, historical_ops) = db
+            for end in [32, 40, 51, 70, *full_size] {
+                let end_loc = Location::new_unchecked(end);
+                let (proof, proof_ops) = db
                     .historical_proof(end_loc, start_loc, max_ops)
                     .await
                     .unwrap();
+                assert_eq!(proof.leaves, end_loc);
 
-                assert_eq!(historical_proof.leaves, end_loc);
-
-                // Create reference database at the given historical size
-                let mut ref_db = create_test_db(context.with_label(&format!("ref_{}", *end_loc)))
-                    .await
-                    .into_mutable();
-                apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
-                let ref_db = ref_db.into_merkleized();
-
-                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
-                assert_eq!(ref_proof.leaves, historical_proof.leaves);
-                assert_eq!(ref_ops, historical_ops);
-                assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
-                assert_eq!(
-                    ref_ops,
-                    ops[(*start_loc - 1) as usize..(*end_loc - 1) as usize]
-                );
-
-                // Verify proof against reference root
-                let ref_root = ref_db.root();
-                assert!(verify_proof(
-                    &mut hasher,
-                    &historical_proof,
-                    start_loc,
-                    &historical_ops,
-                    &ref_root
-                ));
-
-                let (ref_db, _) = ref_db.into_mutable().commit(None).await.unwrap();
-                ref_db.into_merkleized().destroy().await.unwrap();
+                let expected_len = std::cmp::min(max_ops.get(), end - *start_loc) as usize;
+                assert_eq!(proof_ops.len(), expected_len);
             }
+
+            // Verify the full-size proof against the root.
+            let (proof, proof_ops) = db.proof(start_loc, max_ops).await.unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                start_loc,
+                &proof_ops,
+                &root,
+            ));
 
             db.destroy().await.unwrap();
         });

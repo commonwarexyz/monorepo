@@ -144,18 +144,21 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Root => {
-                    // root requires merkleization but not commit
-                    let clean_db = db.into_merkleized();
+                    // root requires commit + merkleization
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let clean_db = durable_db.into_merkleized();
                     clean_db.root();
                     db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    let actual_op_count = db.bounds().await.end;
+                    // proof requires commit + merkleization
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let clean_db = durable_db.into_merkleized();
+                    let actual_op_count = clean_db.bounds().await.end;
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let clean_db = db.into_merkleized();
                         let current_root = clean_db.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
@@ -175,12 +178,15 @@ fn fuzz(data: FuzzInput) {
                             ),
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                         );
-                        db = clean_db.into_mutable();
                     }
+                    db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
-                    let actual_op_count = db.bounds().await.end;
+                    // proof requires commit + merkleization
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let clean_db = durable_db.into_merkleized();
+                    let actual_op_count = clean_db.bounds().await.end;
 
                     let proof = Proof {
                         leaves: *proof_leaves,
@@ -189,7 +195,6 @@ fn fuzz(data: FuzzInput) {
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let clean_db = db.into_merkleized();
                         let current_root = clean_db.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
@@ -205,8 +210,8 @@ fn fuzz(data: FuzzInput) {
                                 );
 
                         }
-                        db = clean_db.into_mutable();
                     }
+                    db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::Get { key } => {
