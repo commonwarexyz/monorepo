@@ -32,12 +32,12 @@ pub fn bench(c: &mut Criterion) {
 
                     // Benchmark: random reads
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;
-                    let max_offset = total_size.saturating_sub(read_size);
+                    let max_offset = total_size - read_size;
                     let mut rng = StdRng::seed_from_u64(42);
 
                     let start = Instant::now();
                     for _ in 0..iters {
-                        // Exercise many random offsets; after warmup these should be cache hits.
+                        // Ensure ~1/100 reads are going to be cache misses.
                         for _ in 0..TOTAL_PAGES * 100 {
                             let offset = rng.gen_range(0..=max_offset) as u64;
                             let _ = append.read_at(offset, read_size).await.unwrap();
