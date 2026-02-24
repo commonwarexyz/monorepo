@@ -5,6 +5,7 @@ use crate::{
     FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
 };
 use arbitrary::Arbitrary;
+use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
@@ -99,7 +100,7 @@ where
     resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     strategy: SmallScope,
 
-    last_view: u64,
+    last_vote_view: u64,
     last_finalized_view: u64,
     last_notarized_view: u64,
     last_nullified_view: u64,
@@ -152,7 +153,7 @@ where
                 fault_rounds: 1,
                 fault_rounds_bound: 1,
             },
-            last_view: 1,
+            last_vote_view: 1,
             last_finalized_view: 0,
             last_notarized_view: 0,
             last_nullified_view: 0,
@@ -172,18 +173,12 @@ where
 
     fn is_round_robin_leader(&self, signer_idx: usize, view: u64) -> bool {
         let participant_count = self.byzantine_participants.len() + 1;
-        if participant_count == 0 {
-            return false;
-        }
         let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
         leader_idx == signer_idx
     }
 
     fn is_honest_round_robin_leader(&self, view: u64) -> bool {
         let participant_count = self.byzantine_participants.len() + 1;
-        if participant_count == 0 {
-            return false;
-        }
         let honest_idx = self.byzantine_participants.len();
         let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
         leader_idx == honest_idx
@@ -199,7 +194,7 @@ where
             .unwrap_or_else(|| {
                 self.strategy.random_proposal(
                     &mut self.context,
-                    self.last_view,
+                    self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
                     self.last_nullified_view,
@@ -209,7 +204,7 @@ where
         let proposal = self.strategy.mutate_proposal(
             &mut self.context,
             &base,
-            self.last_view,
+            self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
@@ -331,7 +326,7 @@ where
         let mut conflicting = self.strategy.mutate_proposal(
             &mut self.context,
             &base,
-            self.last_view,
+            self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
@@ -482,7 +477,7 @@ where
             return;
         };
 
-        self.last_view = self.last_view.max(vote.view().get());
+        self.last_vote_view = self.last_vote_view.max(vote.view().get());
 
         match vote {
             Vote::Notarize(notarize) => {
@@ -549,7 +544,7 @@ where
         match certificate {
             Certificate::Notarization(notarization) => {
                 let view = notarization.view().get();
-                self.last_view = self.last_view.max(view);
+                self.last_vote_view = self.last_vote_view.max(view);
                 self.last_notarized_view = self.last_notarized_view.max(view);
                 self.notarized_by_view
                     .insert(view, notarization.proposal.payload);
@@ -560,11 +555,11 @@ where
             Certificate::Nullification(nullification) => {
                 let view = nullification.view().get();
                 self.last_nullified_view = self.last_nullified_view.max(view);
-                self.last_view = self.last_view.max(view);
+                self.last_vote_view = self.last_vote_view.max(view);
             }
             Certificate::Finalization(finalization) => {
                 let view = finalization.view().get();
-                self.last_view = self.last_view.max(view);
+                self.last_vote_view = self.last_vote_view.max(view);
                 self.last_finalized_view = self.last_finalized_view.max(view);
                 self.finalized_by_view
                     .insert(view, finalization.proposal.payload);
@@ -705,7 +700,7 @@ where
     }
 
     async fn send_valid_broadcast_and_notarize(&mut self, signer_idx: usize) -> bool {
-        let mut view = self.last_view.clamp(1, MAX_SAFE_VIEW);
+        let mut view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
         if !self.is_round_robin_leader(signer_idx, view) {
             let next = view.saturating_add(1).min(MAX_SAFE_VIEW);
             if !self.is_round_robin_leader(signer_idx, next) {
@@ -756,14 +751,14 @@ where
         let Some(vote) = Notarize::sign(&self.schemes[signer_idx], proposal) else {
             return;
         };
-        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().to_vec();
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
     async fn send_nullify_vote(&mut self, signer_idx: usize) {
         let view = self.strategy.mutate_nullify_view(
             &mut self.context,
-            self.last_view,
+            self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
@@ -778,7 +773,7 @@ where
             return;
         };
 
-        let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().to_vec();
+        let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
@@ -797,11 +792,11 @@ where
             return;
         };
 
-        let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().to_vec();
+        let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
-    async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Vec<u8>) {
+    async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Bytes) {
         let _ = self.vote_senders[signer_idx]
             .send(Recipients::One(self.honest.clone()), msg, true)
             .await;
@@ -811,7 +806,7 @@ where
         let msg = self
             .strategy
             .mutate_resolver_bytes(&mut self.context, &[0u8]);
-        self.send_vote_bytes(signer_idx, msg).await;
+        self.send_vote_bytes(signer_idx, msg.into()).await;
     }
 
     async fn send_wrong_epoch_notarize_vote_for_proposal(
@@ -828,11 +823,11 @@ where
         let Some(vote) = Notarize::sign(&self.schemes[signer_idx], wrong_proposal) else {
             return;
         };
-        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().to_vec();
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
-    async fn send_certificate_bytes(&mut self, signer_idx: usize, msg: Vec<u8>) {
+    async fn send_certificate_bytes(&mut self, signer_idx: usize, msg: Bytes) {
         let _ = self.certificate_senders[signer_idx]
             .send(Recipients::One(self.honest.clone()), msg, true)
             .await;
@@ -842,26 +837,24 @@ where
         let msg = self
             .strategy
             .mutate_certificate_bytes(&mut self.context, &[0u8]);
-        self.send_certificate_bytes(signer_idx, msg).await;
+        self.send_certificate_bytes(signer_idx, msg.into()).await;
     }
 
     async fn send_wrong_epoch_nullification_certificate(&mut self, signer_idx: usize) {
-        let view = self.last_view.clamp(1, MAX_SAFE_VIEW);
+        let view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
         let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
         let round = Round::new(wrong_epoch, View::new(view));
         let Some(cert) = self.build_nullification_from_byz(round, &[0, 1, 2]) else {
             return;
         };
 
-        let msg = Certificate::<S, Sha256Digest>::Nullification(cert)
-            .encode()
-            .to_vec();
+        let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
     async fn send_invalid_notarization_certificate(&mut self, signer_idx: usize) {
         let view = self
-            .last_view
+            .last_vote_view
             .max(self.last_notarized_view)
             .max(self.last_finalized_view)
             .clamp(1, MAX_SAFE_VIEW);
@@ -869,15 +862,13 @@ where
             return;
         };
 
-        let msg = Certificate::<S, Sha256Digest>::Notarization(cert)
-            .encode()
-            .to_vec();
+        let msg = Certificate::<S, Sha256Digest>::Notarization(cert).encode();
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
     async fn send_invalid_nullification_certificate(&mut self, signer_idx: usize) {
         let view = self
-            .last_view
+            .last_vote_view
             .max(self.last_nullified_view)
             .max(self.last_finalized_view)
             .clamp(1, MAX_SAFE_VIEW);
@@ -885,9 +876,7 @@ where
             return;
         };
 
-        let msg = Certificate::<S, Sha256Digest>::Nullification(cert)
-            .encode()
-            .to_vec();
+        let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
@@ -1039,7 +1028,7 @@ where
     async fn send_nullification_certificate(&mut self, signer_idx: usize) {
         let view = self.strategy.mutate_nullify_view(
             &mut self.context,
-            self.last_view,
+            self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
@@ -1116,7 +1105,7 @@ where
         let mut conflicting = self.strategy.mutate_proposal(
             &mut self.context,
             &base,
-            self.last_view,
+            self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
@@ -1139,7 +1128,7 @@ where
 
     async fn send_invalid_finalization_certificate(&mut self, signer_idx: usize) -> bool {
         let view = self
-            .last_view
+            .last_vote_view
             .max(self.last_notarized_view)
             .max(self.last_finalized_view);
         let Some(cert) = self.build_invalid_finalization_for_view(view) else {
@@ -1157,7 +1146,7 @@ where
         let proposal = self.select_event_proposal();
 
         match self.context.gen_range(0..100u8) {
-            // normal nullification
+            // normal finalization
             0..=95 => {
                 self.send_finalization_certificate_for_proposal(signer_idx, proposal)
                     .await;
@@ -1242,7 +1231,7 @@ where
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
 
     let mut driver = NodeDriver::<P::Scheme>::new(
-        context.with_label("simplex_ed25519_node_driver"),
+        context.with_label("simplex_node_driver"),
         honest,
         relay,
         byzantine_participants,
@@ -1271,7 +1260,9 @@ where
 mod tests {
     use super::*;
     use crate::fuzz_node;
+    use commonware_macros::test_group;
 
+    #[test_group("slow")]
     #[test]
     fn test_simplex_node_smoke() {
         let input = NodeFuzzInput {
@@ -1294,6 +1285,7 @@ mod tests {
         fuzz_node::<simplex_protocol::SimplexEd25519, WithoutRecovery>(input);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_simplex_node_recovery_smoke() {
         let input = NodeFuzzInput {

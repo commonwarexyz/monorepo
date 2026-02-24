@@ -888,10 +888,12 @@ where
             let _ = reporter.subscribe().await;
             context.sleep(Duration::from_millis(50)).await;
         });
-    } else {
+    } else if M::MODE == Mode::Standard {
         executor.start(|mut context| async move {
-            let _ = crate::simplex_node::run_primary::<P>(&mut context, &input).await;
+            let _ = simplex_node::run_primary::<P>(&mut context, &input).await;
         });
+    } else {
+        panic!("unsupported mode for node fuzzing");
     }
 }
 

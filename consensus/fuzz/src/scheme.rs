@@ -167,14 +167,11 @@ pub struct SigningRecord {
 
 impl SigningRecord {
     fn record(&self, signer: u32, message_hash: u64) {
-        self.signed.lock().unwrap().insert((signer, message_hash));
+        self.signed.lock().insert((signer, message_hash));
     }
 
     fn contains(&self, signer: u32, message_hash: u64) -> bool {
-        self.signed
-            .lock()
-            .unwrap()
-            .contains(&(signer, message_hash))
+        self.signed.lock().contains(&(signer, message_hash))
     }
 }
 
