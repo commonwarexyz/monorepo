@@ -42,7 +42,7 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, BufferPool, Error, IoBuf, IoBufs,
+    Blob, Error, IoBuf, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -117,13 +117,9 @@ impl<B: Blob> Append<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) = Self::read_last_valid_page(
-            &blob,
-            original_blob_size,
-            cache_ref.logical_page_size(),
-            cache_ref.pool(),
-        )
-        .await?;
+        let (partial_page_state, pages, invalid_data_found) =
+            Self::read_last_valid_page(&blob, original_blob_size, cache_ref.logical_page_size())
+                .await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
             let new_blob_size = pages * cache_ref.physical_page_size();
@@ -186,13 +182,8 @@ impl<B: Blob> Append<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) = Self::read_last_valid_page(
-            &blob,
-            blob_size,
-            cache_ref.logical_page_size(),
-            cache_ref.pool(),
-        )
-        .await?;
+        let (partial_page_state, pages, invalid_data_found) =
+            Self::read_last_valid_page(&blob, blob_size, cache_ref.logical_page_size()).await?;
         if invalid_data_found {
             // Invalid data was detected, so this blob is not consistent.
             return Err(Error::InvalidChecksum);
@@ -297,7 +288,6 @@ impl<B: Blob> Append<B> {
         blob: &B,
         blob_size: u64,
         page_size: u64,
-        pool: &BufferPool,
     ) -> Result<(Option<(IoBuf, Checksum)>, u64, bool), Error> {
         let physical_page_size = page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
@@ -311,13 +301,10 @@ impl<B: Blob> Append<B> {
             // Read the last page and parse its CRC record.
             let page_start = last_page_end - physical_page_size;
             let buf = blob
-                .read_at_buf(
-                    page_start,
-                    physical_page_size as usize,
-                    pool.alloc(physical_page_size as usize),
-                )
-                .await?;
-            let buf = buf.coalesce_with_pool(pool).freeze();
+                .read_at(page_start, physical_page_size as usize)
+                .await?
+                .coalesce()
+                .freeze();
 
             match Checksum::validate_page(buf.as_ref()) {
                 Some(crc_record) => {
