@@ -455,28 +455,21 @@ impl<B: Blob> Append<B> {
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, first_payload)
                             .await?;
-
-                        // Write 2: Second CRC of first page + all remaining pages [page_size+6..end]
-                        if physical_pages.len() > 6 {
-                            let _ = physical_pages.split_to(6);
-                            blob_state
-                                .blob
-                                .write_at(
-                                    write_at_offset + (logical_page_size + 6) as u64,
-                                    physical_pages,
-                                )
-                                .await?;
-                        }
                     } else {
-                        // Write 2 only: Second CRC of first page + all remaining pages [page_size+6..end]
-                        let second_crc_start = logical_page_size + 6;
-                        if physical_pages.len() > second_crc_start {
-                            let _ = physical_pages.split_to(second_crc_start);
-                            blob_state
-                                .blob
-                                .write_at(write_at_offset + second_crc_start as u64, physical_pages)
-                                .await?;
-                        }
+                        // Skip the protected first page bytes when they are fully covered.
+                        let _ = physical_pages.split_to(logical_page_size);
+                    }
+
+                    // Write 2: Second CRC of first page + all remaining pages [page_size+6..end]
+                    if physical_pages.len() > 6 {
+                        let _ = physical_pages.split_to(6);
+                        blob_state
+                            .blob
+                            .write_at(
+                                write_at_offset + (logical_page_size + 6) as u64,
+                                physical_pages,
+                            )
+                            .await?;
                     }
                 }
                 ProtectedCrc::Second => {
@@ -490,25 +483,21 @@ impl<B: Blob> Append<B> {
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, first_payload)
                             .await?;
+                    } else {
+                        // Skip the fully protected first segment when no bytes from it need update.
+                        let _ = physical_pages.split_to(first_crc_end);
+                    }
 
-                        // Write 2: All remaining pages (if any) [physical_page_size..end]
-                        let skip = physical_page_size - first_crc_end;
-                        if physical_pages.len() > skip {
-                            let _ = physical_pages.split_to(skip);
-                            blob_state
-                                .blob
-                                .write_at(
-                                    write_at_offset + physical_page_size as u64,
-                                    physical_pages,
-                                )
-                                .await?;
-                        }
-                    } else if physical_pages.len() > physical_page_size {
-                        // Write 2 only: All remaining pages (if any) [physical_page_size..end]
-                        let _ = physical_pages.split_to(physical_page_size);
+                    // Write 2: All remaining pages (if any) [physical_page_size..end]
+                    let skip = physical_page_size - first_crc_end;
+                    if physical_pages.len() > skip {
+                        let _ = physical_pages.split_to(skip);
                         blob_state
                             .blob
-                            .write_at(write_at_offset + physical_page_size as u64, physical_pages)
+                            .write_at(
+                                write_at_offset + physical_page_size as u64,
+                                physical_pages,
+                            )
                             .await?;
                     }
                 }
