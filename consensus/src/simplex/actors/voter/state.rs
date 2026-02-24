@@ -268,8 +268,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Inserts a nullification certificate and advances into the next view.
     ///
     /// Unlike finalization, nullification does not cancel pending certification work for the
-    /// same view. We still track notarizations for potential late certification, and only treat
-    /// certification as irrelevant once a finalization proof supersedes it.
+    /// same view. The next proposer may build on a certified notarization we haven't finished processing
+    /// yet and stopping here could halt the network (stability relies on coming to a shared understanding
+    /// of what can be considered a valid parent, otherwise two regions of the network could build on ancestries
+    /// the other considers invalid with no way to resolve the conflict).
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         self.enter_view(view.next());
