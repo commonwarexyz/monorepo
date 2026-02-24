@@ -5,10 +5,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_math::{
-    algebra::{FieldNTT, Ring},
-    poly::{Interpolator, Poly},
-};
+use commonware_macros::stability;
+#[stability(ALPHA)]
+use commonware_math::algebra::{FieldNTT, Ring};
+use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 #[cfg(feature = "std")]
@@ -32,6 +32,13 @@ pub enum Mode {
     /// Assigns participants to powers of a root of unity.
     ///
     /// This mode enables sub-quadratic interpolation using NTT-based algorithms.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
     RootsOfUnity = 1,
 }
 
@@ -48,6 +55,13 @@ impl Mode {
                 // Adding 1 is critical, because f(0) will contain the secret.
                 Some(Scalar::from_u64(i.get() as u64 + 1))
             }
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
             Self::RootsOfUnity => {
                 // Participant i gets w^i. Since w^i != 0 for any i, this never
                 // collides with the secret at f(0).
@@ -66,6 +80,13 @@ impl Mode {
             Self::NonZeroCounter => (0..total.get())
                 .map(|i| Scalar::from_u64(i as u64 + 1))
                 .collect(),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
             Self::RootsOfUnity => {
                 let size = (total.get() as u64).next_power_of_two();
                 let lg_size = size.ilog2() as u8;
@@ -115,6 +136,13 @@ impl Mode {
                 }
                 Some(out)
             }
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
             Self::RootsOfUnity => {
                 // For roots of unity mode, we use the fast O(n log n) interpolation.
                 // Participant i maps to exponent i, so the evaluation point is w^i.
@@ -185,6 +213,13 @@ impl Read for Mode {
         let tag: u8 = ReadExt::read(buf)?;
         match tag {
             0 => Ok(Self::NonZeroCounter),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
             1 => Ok(Self::RootsOfUnity),
             o => Err(commonware_codec::Error::InvalidEnum(o)),
         }
