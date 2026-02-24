@@ -266,6 +266,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Inserts a nullification certificate and advances into the next view.
+    ///
+    /// Unlike finalization, nullification does not cancel pending certification work for the
+    /// same view. We still track notarizations for potential late certification, and only treat
+    /// certification as irrelevant once a finalization proof supersedes it.
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         self.enter_view(view.next());
@@ -292,10 +296,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if view > self.last_finalized {
             self.last_finalized = view;
 
-            // Prune certification candidates at or below finalized view
+            // Prune certification candidates at or below finalized view.
+            // Finalization is definitive, so these certifications are no longer relevant.
             self.certification_candidates.retain(|v| *v > view);
 
-            // Abort outstanding certifications at or below finalized view
+            // Abort outstanding certifications at or below finalized view for the same reason.
             let keep = self.outstanding_certifications.split_off(&view.next());
             for v in replace(&mut self.outstanding_certifications, keep) {
                 if let Some(round) = self.views.get_mut(&v) {
@@ -1309,6 +1314,125 @@ mod tests {
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].round.view(), View::new(11));
+        });
+    }
+
+    #[test]
+    fn nullification_keeps_notarization_as_certification_candidate() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([42u8; 32]),
+            );
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), view);
+        });
+    }
+
+    #[test]
+    fn nullification_does_not_abort_inflight_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([24u8; 32]),
+            );
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), view);
+
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(view, handle);
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+            assert!(!state.is_certify_aborted(view));
+
+            // Late certification completion is still accepted until the view is finalized.
+            assert!(state.certified(view, true).is_some());
+            assert!(state.is_certified(view).is_some());
         });
     }
 

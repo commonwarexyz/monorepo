@@ -924,6 +924,10 @@ impl<
                         else {
                             continue;
                         };
+                        // Always forward certification outcomes to resolver.
+                        // This can happen after a nullification for the same view because
+                        // certification is asynchronous; finalization is the boundary that
+                        // cancels in-flight certification and suppresses late reporting.
                         resolver.certified(view, certified).await;
                         if certified {
                             self.reporter
