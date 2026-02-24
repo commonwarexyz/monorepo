@@ -135,6 +135,7 @@
 //!
 //! - All shards MUST be sent by participants in the current epoch.
 //! - Strong shards MUST correspond to the recipient's index for participants.
+//! - For non-participants, strong shards MUST correspond to the leader's index.
 //! - Weak shards MUST be sent by the participant whose index matches
 //!   the shard index.
 //! - All shards MUST pass cryptographic verification against the commitment.
@@ -1325,7 +1326,7 @@ where
     /// - MUST be sent by a participant.
     /// - MUST correspond to self's index when self is a participant.
     /// - When self is not a participant (`scheme.me()` is `None`), the index
-    ///   check is relaxed.
+    ///   MUST correspond to the sender's participant index (which must be the leader).
     /// - MUST be sent by the leader (when the leader is known). Non-leader senders
     ///   are blocked.
     /// - The leader may only send ONE strong shard. Sending a second strong shard
@@ -1378,8 +1379,14 @@ where
                     index,
                     data,
                 };
-                self.insert_strong_shard(ctx.scheme.me().as_ref(), sender, strong, blocker)
-                    .await
+                self.insert_strong_shard(
+                    ctx.scheme.me().as_ref(),
+                    sender,
+                    sender_index,
+                    strong,
+                    blocker,
+                )
+                .await
             }
             DistributionShard::Weak(data) => {
                 let weak = WeakShard { index, data };
@@ -1409,24 +1416,24 @@ where
         &mut self,
         me: Option<&Participant>,
         sender: P,
+        sender_index: Participant,
         shard: StrongShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
-        if let Some(me) = me {
-            let expected_index: u16 = me
-                .get()
-                .try_into()
-                .expect("participant index impossibly out of bounds");
-            if shard.index != expected_index {
-                commonware_p2p::block!(
-                    blocker,
-                    sender,
-                    shard_index = shard.index,
-                    expected_index = me.get() as usize,
-                    "strong shard index does not match self index"
-                );
-                return false;
-            }
+        let expected = me.copied().unwrap_or(sender_index);
+        let expected_index: u16 = expected
+            .get()
+            .try_into()
+            .expect("participant index impossibly out of bounds");
+        if shard.index != expected_index {
+            commonware_p2p::block!(
+                blocker,
+                sender,
+                shard_index = shard.index,
+                expected_index = expected.get() as usize,
+                "strong shard index does not match expected index"
+            );
+            return false;
         }
 
         let common = self.common();
