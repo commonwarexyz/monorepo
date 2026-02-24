@@ -1,6 +1,12 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 //!
+//! # Logical vs Physical Page Sizes
+//!
+//! [CacheRef::new] is configured with a physical page size (logical bytes plus CRC record bytes).
+//! The cache itself stores only logical page bytes. The logical page size is derived as:
+//! `physical_page_size - CHECKSUM_SIZE`.
+//!
 //! # Memory Bound Semantics
 //!
 //! Cache capacity bounds resident cache slots, not total process memory retained by read results.
@@ -101,9 +107,10 @@ struct CacheEntry {
     referenced: AtomicBool,
 }
 
-/// A reference to a page cache that can be shared across threads via cloning, along with the page
-/// size that will be used with it. Provides the API for interacting with the page cache in a
-/// thread-safe manner.
+/// A shareable handle to a page cache.
+///
+/// [CacheRef] owns the sizing configuration and provides thread-safe cache operations for multiple
+/// blobs identified by caller-provided blob ids.
 #[derive(Clone)]
 pub struct CacheRef {
     /// The logical size of each page in the underlying blobs managed by this page cache.
@@ -173,13 +180,17 @@ impl CacheRef {
         )
     }
 
-    /// The physical page size used by the underlying blob format.
+    /// Returns the physical page size used by the underlying blob format.
+    ///
+    /// This is always `logical_page_size() + CHECKSUM_SIZE`.
     #[inline]
     pub const fn physical_page_size(&self) -> u64 {
         self.logical_page_size + CHECKSUM_SIZE
     }
 
-    /// The logical page size used by this page cache.
+    /// Returns the logical page size used by this page cache.
+    ///
+    /// This is the size of each cached slot and the per-page byte count returned by cache reads.
     #[inline]
     pub const fn logical_page_size(&self) -> u64 {
         self.logical_page_size
@@ -458,25 +469,20 @@ impl CacheRef {
         Ok(page_for_return.slice(offset_in_page..offset_in_page + bytes))
     }
 
-    /// Cache full logical pages in the page cache. `offset` must be page aligned.
+    /// Cache full logical pages from a contiguous logical-byte prefix.
+    ///
+    /// `logical_pages` is interpreted as a contiguous sequence of exactly `page_count` logical
+    /// pages starting at `offset`. `offset` must be logical-page aligned.
+    ///
+    /// This method is best effort: if insertion fails (for example, no evictable slot is found),
+    /// remaining pages are dropped after logging an error. This does not affect correctness; it
+    /// only reduces cache hit rate.
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If any page is not exactly one logical page in size.
-    /// - If `offset` is near `u64::MAX` and `pages` spans past the last representable page
-    ///   number.
-    ///
-    /// # Best Effort Behavior
-    ///
-    /// This method is best effort. If insertion unexpectedly fails, remaining pages are dropped
-    /// after logging an error.
-    pub fn cache(&self, blob_id: u64, pages: Vec<IoBuf>, offset: u64) {
-        self.cache_pages(blob_id, pages, offset);
-    }
-
-    /// Cache full logical pages from a contiguous logical-byte prefix.
-    pub(super) fn cache_from_logical_prefix(
+    /// Panics if `offset` is not page aligned or if `logical_pages` does not contain enough bytes
+    /// for `page_count` full logical pages.
+    pub(super) fn cache(
         &self,
         blob_id: u64,
         logical_pages: &IoBuf,
@@ -532,35 +538,6 @@ impl CacheRef {
                         .checked_add(1)
                         .expect("page number overflow while caching");
                 }
-            }
-        }
-    }
-
-    fn cache_pages(&self, blob_id: u64, pages: Vec<IoBuf>, offset: u64) {
-        let (mut page_num, offset_in_page) = self.offset_to_page(offset);
-        assert_eq!(offset_in_page, 0);
-
-        let total_pages = pages.len();
-        if total_pages == 0 {
-            return;
-        }
-        let mut cache = self.cache.write();
-
-        for (idx, page) in pages.into_iter().enumerate() {
-            let current_page = page_num;
-            if cache.insert_page((blob_id, current_page), page).is_err() {
-                error!(
-                    blob_id,
-                    page_num = current_page,
-                    dropped_pages = total_pages - idx,
-                    "failed to cache pages"
-                );
-                break;
-            }
-            if idx + 1 < total_pages {
-                page_num = page_num
-                    .checked_add(1)
-                    .expect("page number overflow while caching");
             }
         }
     }
@@ -752,6 +729,23 @@ mod tests {
         len
     }
 
+    fn cache_pages(cache_ref: &CacheRef, blob_id: u64, pages: Vec<IoBuf>, offset: u64) {
+        if pages.is_empty() {
+            return;
+        }
+        let mut logical_pages = cache_ref.pool().alloc(
+            pages
+                .iter()
+                .map(IoBuf::len)
+                .fold(0usize, usize::saturating_add),
+        );
+        for page in &pages {
+            logical_pages.put_slice(page.as_ref());
+        }
+        let logical_pages = logical_pages.freeze();
+        cache_ref.cache(blob_id, &logical_pages, offset, pages.len());
+    }
+
     #[test_traced]
     fn test_cache_basic() {
         let mut registry = Registry::default();
@@ -838,7 +832,7 @@ mod tests {
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let page = vec![3u8; PAGE_SIZE.get() as usize];
-            cache_ref.cache(0, vec![page.clone().into()], 0);
+            cache_pages(&cache_ref, 0, vec![page.clone().into()], 0);
 
             let (cached, cached_len) = cache_ref.read_cached(0, 0, PAGE_SIZE.get() as usize * 2);
             assert_eq!(cached_len, PAGE_SIZE.get() as usize);
@@ -918,7 +912,7 @@ mod tests {
             let logical_data = vec![42u8; PAGE_SIZE.get() as usize];
 
             // Caching exactly one page at the maximum offset should succeed.
-            cache_ref.cache(0, vec![logical_data.into()], aligned_max_offset);
+            cache_pages(&cache_ref, 0, vec![logical_data.into()], aligned_max_offset);
 
             // Reading from the cache should return the logical bytes.
             let mut buf = vec![0u8; PAGE_SIZE.get() as usize];
@@ -949,7 +943,12 @@ mod tests {
             // Use an offset that's a few pages below max to avoid overflow when verifying.
             let aligned_max_offset = u64::MAX - (u64::MAX % MIN_PAGE_SIZE);
             let high_offset = aligned_max_offset - (MIN_PAGE_SIZE * 2);
-            cache_ref.cache(0, vec![first.into(), second.into()], high_offset);
+            cache_pages(
+                &cache_ref,
+                0,
+                vec![first.into(), second.into()],
+                high_offset,
+            );
 
             // Verify the first page was cached correctly.
             let mut buf = vec![0u8; MIN_PAGE_SIZE as usize];
@@ -979,7 +978,7 @@ mod tests {
             assert_eq!(cache_ref.logical_page_size(), 1);
 
             // Caching one page at the maximum offset should succeed without overflow panic.
-            cache_ref.cache(0, vec![vec![0xABu8].into()], u64::MAX);
+            cache_pages(&cache_ref, 0, vec![vec![0xABu8].into()], u64::MAX);
 
             let mut buf = [0u8; 1];
             let page_cache = cache_ref.cache.read();
@@ -1117,7 +1116,7 @@ mod tests {
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let newer = vec![6u8; PAGE_SIZE.get() as usize];
-            cache_ref.cache(0, vec![newer.clone().into()], 0);
+            cache_pages(&cache_ref, 0, vec![newer.clone().into()], 0);
 
             let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(IoBuf::from(vec![
                 1u8;
@@ -1139,7 +1138,8 @@ mod tests {
             }
 
             // Insert on another key. This should not affect stale fetch-map entries for key (0, 0).
-            cache_ref.cache(
+            cache_pages(
+                &cache_ref,
                 0,
                 vec![vec![9u8; PAGE_SIZE.get() as usize].into()],
                 PAGE_SIZE_U64,
@@ -1480,7 +1480,12 @@ mod tests {
                 );
             }
 
-            cache_ref.cache(0, vec![vec![0xAAu8; PAGE_SIZE.get() as usize].into()], 0);
+            cache_pages(
+                &cache_ref,
+                0,
+                vec![vec![0xAAu8; PAGE_SIZE.get() as usize].into()],
+                0,
+            );
 
             let cache = cache_ref.cache.read();
             assert!(cache.page_fetches.contains_key(&(42, 7)));
@@ -1503,7 +1508,7 @@ mod tests {
 
             // Install newer cached data for the same key while first fetch is still in-flight.
             let newer = vec![9u8; PAGE_SIZE.get() as usize];
-            cache_ref.cache(0, vec![newer.clone().into()], 0);
+            cache_pages(&cache_ref, 0, vec![newer.clone().into()], 0);
 
             release_tx.send(()).expect("failed to release fetch");
 
