@@ -2,7 +2,7 @@ use crate::{
     simplex,
     strategy::{SmallScope, Strategy},
     utils::Partition,
-    FuzzInput, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
+    FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
 };
 use arbitrary::Arbitrary;
 use commonware_codec::{Encode, Read, ReadExt};
@@ -20,7 +20,7 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng};
 use futures::FutureExt;
 use rand::Rng;
@@ -47,25 +47,24 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
-pub struct SimplexNodeEvent {
+pub struct NodeEvent {
     pub from_node_idx: u8,
     pub event: Event,
 }
 
 #[derive(Debug, Clone)]
-pub struct SimplexNodeFuzzInput {
+pub struct NodeFuzzInput {
     pub raw_bytes: Vec<u8>,
-    pub events: Vec<SimplexNodeEvent>,
-    pub restart_node_from_checkpoint: bool,
+    pub events: Vec<NodeEvent>,
 }
 
-impl Arbitrary<'_> for SimplexNodeFuzzInput {
+impl Arbitrary<'_> for NodeFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
 
         let mut events = Vec::with_capacity(event_count);
         for _ in 0..event_count {
-            events.push(SimplexNodeEvent::arbitrary(u)?);
+            events.push(NodeEvent::arbitrary(u)?);
         }
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
@@ -75,20 +74,30 @@ impl Arbitrary<'_> for SimplexNodeFuzzInput {
             u.bytes(remaining)?.to_vec()
         };
 
-        let restart_node_from_checkpoint = u.ratio(5, 100)?;
-
-        Ok(Self {
-            raw_bytes,
-            events,
-            restart_node_from_checkpoint,
-        })
+        Ok(Self { raw_bytes, events })
     }
+}
+
+pub trait RecoveryMode {
+    const ENABLE_RECOVERY: bool;
+}
+
+pub struct WithoutRecovery;
+
+impl RecoveryMode for WithoutRecovery {
+    const ENABLE_RECOVERY: bool = false;
+}
+
+pub struct WithRecovery;
+
+impl RecoveryMode for WithRecovery {
+    const ENABLE_RECOVERY: bool = true;
 }
 
 struct NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
-    S::PublicKey: Send + Sync + 'static,
+    S::PublicKey: Send,
 {
     context: deterministic::Context,
     honest: S::PublicKey,
@@ -124,7 +133,7 @@ where
 impl<S> NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
-    S::PublicKey: Send + Sync + 'static,
+    S::PublicKey: Send,
 {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -620,7 +629,7 @@ where
         progressed
     }
 
-    async fn apply_event(&mut self, event: SimplexNodeEvent) {
+    async fn apply_event(&mut self, event: NodeEvent) {
         let signer_idx = self.signer_index(event.from_node_idx);
         match event.event {
             Event::OnBroadcastPayload => self.broadcast_payload_event(signer_idx).await,
@@ -1177,120 +1186,126 @@ where
     }
 }
 
-pub fn fuzz_simplex_node<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
-    run::<P>(input);
-}
-
-fn run<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
+pub fn fuzz_node<P: simplex::Simplex, M: RecoveryMode>(input: NodeFuzzInput) {
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner::<P>(input)));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner::<P, M>(input)));
     if let Err(payload) = run_result {
         println!("Panicked with raw_bytes: {:?}", raw_bytes_for_panic);
         std::panic::resume_unwind(payload);
     }
 }
 
-fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
+async fn run_primary<P: simplex::Simplex>(
+    context: &mut deterministic::Context,
+    input: &NodeFuzzInput,
+) -> (Vec<PublicKeyOf<P>>, Vec<P::Scheme>)
+where
+    PublicKeyOf<P>: Send,
+{
+    let base = FuzzInput {
+        raw_bytes: input.raw_bytes.clone(),
+        required_containers: MAX_REQUIRED_CONTAINERS,
+        degraded_network: false,
+        configuration: N4F3C1,
+        partition: Partition::Connected,
+        strategy: StrategyChoice::SmallScope {
+            fault_rounds: 1,
+            fault_rounds_bound: 1,
+        },
+        honest_messages_drop_percent: 0,
+    };
+
+    let (oracle, participants, schemes, mut registrations) =
+        crate::setup_network::<P>(context, &base).await;
+
+    let (fuzzer_schemes, honest_schemes) = schemes.split_at(3);
+    let honest_scheme = honest_schemes[0].clone();
+
+    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+    let byzantine_participants: Vec<_> = participants.iter().take(3).cloned().collect();
+
+    let mut vote_senders = Vec::new();
+    let mut certificate_senders = Vec::new();
+    let mut resolver_senders = Vec::new();
+    let mut vote_receivers = Vec::new();
+    let mut certificate_receivers = Vec::new();
+    let mut resolver_receivers = Vec::new();
+
+    for byz in participants.iter().take(3usize) {
+        let (
+            (vote_sender, vote_receiver),
+            (cert_sender, cert_receiver),
+            (resolver_sender, resolver_receiver),
+        ) = registrations
+            .remove(byz)
+            .expect("byzantine participant must exist");
+
+        vote_senders.push(vote_sender);
+        certificate_senders.push(cert_sender);
+        resolver_senders.push(resolver_sender);
+        vote_receivers.push(vote_receiver);
+        certificate_receivers.push(cert_receiver);
+        resolver_receivers.push(resolver_receiver);
+    }
+
+    let honest = participants[3].clone();
+    let honest_channels = registrations
+        .remove(&honest)
+        .expect("honest participant must exist");
+    let mut reporter = crate::spawn_honest_validator::<P>(
+        context.with_label("honest_validator"),
+        &oracle,
+        &participants,
+        honest_scheme,
+        honest.clone(),
+        relay.clone(),
+        honest_channels,
+    )
+    .with_strict(false);
+
+    let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+
+    let mut driver = NodeDriver::<P::Scheme>::new(
+        context.with_label("simplex_ed25519_node_driver"),
+        honest,
+        relay,
+        byzantine_participants,
+        fuzzer_schemes.to_vec(),
+        vote_senders,
+        certificate_senders,
+        resolver_senders,
+        vote_receivers,
+        certificate_receivers,
+        resolver_receivers,
+    );
+
+    for event in input.events.iter() {
+        driver.check_finalization(&mut latest, &mut monitor);
+        driver.handle_receivers().await;
+        driver
+            .inject_finalize_quorum_for_honest_notarize_views()
+            .await;
+        driver.apply_event(*event).await;
+    }
+
+    (participants, schemes)
+}
+
+fn run_inner<P: simplex::Simplex, M: RecoveryMode>(input: NodeFuzzInput)
+where
+    PublicKeyOf<P>: Send,
+{
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
-    let ((participants, schemes), checkpoint) =
-        executor.start_and_recover(|mut context| async move {
-            let base = FuzzInput {
-                raw_bytes: input.raw_bytes.clone(),
-                required_containers: MAX_REQUIRED_CONTAINERS,
-                degraded_network: false,
-                configuration: N4F3C1,
-                partition: Partition::Connected,
-                strategy: StrategyChoice::SmallScope {
-                    fault_rounds: 1,
-                    fault_rounds_bound: 1,
-                },
-                honest_messages_drop_percent: 0,
-            };
+    if M::ENABLE_RECOVERY {
+        let ((participants, schemes), checkpoint) =
+            executor.start_and_recover(|mut context| async move {
+                run_primary::<P>(&mut context, &input).await
+            });
 
-            let (oracle, participants, schemes, mut registrations) =
-                crate::setup_network::<P>(&mut context, &base).await;
-
-            let (fuzzer_schemes, honest_schemes) = schemes.split_at(3);
-            let honest_scheme = honest_schemes[0].clone();
-
-            let relay =
-                std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
-            let byzantine_participants: Vec<_> = participants.iter().take(3).cloned().collect();
-
-            let mut vote_senders = Vec::new();
-            let mut certificate_senders = Vec::new();
-            let mut resolver_senders = Vec::new();
-            let mut vote_receivers = Vec::new();
-            let mut certificate_receivers = Vec::new();
-            let mut resolver_receivers = Vec::new();
-
-            for byz in participants.iter().take(3usize) {
-                let (
-                    (vote_sender, vote_receiver),
-                    (cert_sender, cert_receiver),
-                    (resolver_sender, resolver_receiver),
-                ) = registrations
-                    .remove(byz)
-                    .expect("byzantine participant must exist");
-
-                vote_senders.push(vote_sender);
-                certificate_senders.push(cert_sender);
-                resolver_senders.push(resolver_sender);
-                vote_receivers.push(vote_receiver);
-                certificate_receivers.push(cert_receiver);
-                resolver_receivers.push(resolver_receiver);
-            }
-
-            let honest = participants[3].clone();
-            // Ensure each fuzz run starts from an empty journal for the honest node.
-            let _ = context.remove(&honest.to_string(), None).await;
-            let honest_channels = registrations
-                .remove(&honest)
-                .expect("honest participant must exist");
-            let mut reporter = crate::spawn_honest_validator::<P>(
-                context.with_label("honest_validator"),
-                &oracle,
-                &participants,
-                honest_scheme,
-                honest.clone(),
-                relay.clone(),
-                honest_channels,
-            )
-            .with_strict(false);
-
-            let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-
-            let mut driver = NodeDriver::<P::Scheme>::new(
-                context.with_label("simplex_ed25519_node_driver"),
-                honest,
-                relay,
-                byzantine_participants,
-                fuzzer_schemes.to_vec(),
-                vote_senders,
-                certificate_senders,
-                resolver_senders,
-                vote_receivers,
-                certificate_receivers,
-                resolver_receivers,
-            );
-
-            for event in input.events.iter() {
-                driver.check_finalization(&mut latest, &mut monitor);
-                driver.handle_receivers().await;
-                driver
-                    .inject_finalize_quorum_for_honest_notarize_views()
-                    .await;
-                driver.apply_event(*event).await;
-            }
-            (participants, schemes)
-        });
-
-    // restart the honest node from the checkpoint
-    if input.restart_node_from_checkpoint {
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let (network, mut oracle) = simulated::Network::new(
                 context.with_label("network_recovery"),
@@ -1324,6 +1339,10 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
             let _ = reporter.subscribe().await;
             context.sleep(Duration::from_millis(50)).await;
         });
+    } else {
+        executor.start(|mut context| async move {
+            let _ = run_primary::<P>(&mut context, &input).await;
+        });
     }
 }
 
@@ -1333,24 +1352,45 @@ mod tests {
 
     #[test]
     fn test_simplex_node_smoke() {
-        let input = SimplexNodeFuzzInput {
+        let input = NodeFuzzInput {
             raw_bytes: vec![1, 2, 3, 4, 5],
             events: vec![
-                SimplexNodeEvent {
+                NodeEvent {
                     from_node_idx: 0,
                     event: Event::OnNotarize,
                 },
-                SimplexNodeEvent {
+                NodeEvent {
                     from_node_idx: 1,
                     event: Event::OnNotarization,
                 },
-                SimplexNodeEvent {
+                NodeEvent {
                     from_node_idx: 2,
                     event: Event::OnFinalization,
                 },
             ],
-            restart_node_from_checkpoint: true,
         };
-        fuzz_simplex_node::<simplex::SimplexEd25519>(input);
+        fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
+    }
+
+    #[test]
+    fn test_simplex_node_recovery_smoke() {
+        let input = NodeFuzzInput {
+            raw_bytes: vec![9, 8, 7, 6, 5],
+            events: vec![
+                NodeEvent {
+                    from_node_idx: 0,
+                    event: Event::OnBroadcastAndNotarize,
+                },
+                NodeEvent {
+                    from_node_idx: 1,
+                    event: Event::OnNotarization,
+                },
+                NodeEvent {
+                    from_node_idx: 2,
+                    event: Event::OnFinalization,
+                },
+            ],
+        };
+        fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
 }

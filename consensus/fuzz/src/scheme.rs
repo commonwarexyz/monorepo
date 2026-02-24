@@ -1,10 +1,11 @@
+use crate::utils::fnv1a_hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_consensus::simplex::{scheme::Namespace, types::Subject};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Subject as CertificateSubject, Signers},
+    certificate::{self, Attestation, Signers, Subject as CertificateSubject},
     Digest,
 };
 use commonware_parallel::Strategy;
@@ -13,7 +14,6 @@ use commonware_utils::{
     sequence::U32,
     Array, Faults, Participant, Span, TryCollect,
 };
-use crate::utils::fnv1a_hash;
 use core::{
     fmt::{Display, Formatter},
     ops::Deref,
@@ -173,7 +173,10 @@ impl SigningRecord {
     }
 
     fn contains(&self, signer: u32, message_hash: u64) -> bool {
-        self.signed.lock().unwrap().contains(&(signer, message_hash))
+        self.signed
+            .lock()
+            .unwrap()
+            .contains(&(signer, message_hash))
     }
 }
 

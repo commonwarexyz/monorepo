@@ -1,11 +1,11 @@
 #![no_main]
 
 use commonware_consensus_fuzz::{
-    simplex_node::{fuzz_simplex_node, SimplexNodeFuzzInput},
+    simplex_node::{fuzz_node, NodeFuzzInput, WithoutRecovery},
     SimplexBls12381MinSig,
 };
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|input: SimplexNodeFuzzInput| {
-    fuzz_simplex_node::<SimplexBls12381MinSig>(input);
+fuzz_target!(|input: NodeFuzzInput| {
+    fuzz_node::<SimplexBls12381MinSig, WithoutRecovery>(input);
 });

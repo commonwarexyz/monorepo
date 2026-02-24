@@ -1232,7 +1232,6 @@ dependencies = [
  "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
- "commonware-storage",
  "commonware-utils",
  "futures",
  "libfuzzer-sys",

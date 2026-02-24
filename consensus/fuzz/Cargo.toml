@@ -20,7 +20,6 @@ commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-runtime.workspace = true
-commonware-storage.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
@@ -160,8 +159,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_node_recovery"
+path = "fuzz_targets/simplex_ed25519_node_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_node"
 path = "fuzz_targets/simplex_id_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_node_recovery"
+path = "fuzz_targets/simplex_id_node_recovery.rs"
 test = false
 doc = false
 bench = false
