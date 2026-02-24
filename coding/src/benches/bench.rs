@@ -11,10 +11,10 @@ mod zoda;
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
+            for conc in [1, 8] {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
@@ -96,10 +96,10 @@ const SELECTIONS: [ShardSelection; 4] = [
 
 pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
         for chunks in [10u16, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
+            for conc in [1, 8] {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
