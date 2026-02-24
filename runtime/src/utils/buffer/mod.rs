@@ -534,57 +534,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_up_to_behaves_as_expected() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let data = b"hello world";
-            let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, 0);
-            blob.write_at(0, data).await.unwrap();
-
-            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(4));
-
-            // max_len larger than remaining: return remaining bytes only.
-            let first = reader.read_up_to(32).await.unwrap();
-            assert_eq!(first.coalesce().as_ref(), b"hello world");
-            assert_eq!(reader.position(), data.len() as u64);
-
-            // Now at EOF: returns BlobInsufficientLength.
-            let err = reader.read_up_to(1).await.unwrap_err();
-            assert!(matches!(err, Error::BlobInsufficientLength));
-
-            // zero-length request always returns empty.
-            let empty = reader.read_up_to(0).await.unwrap();
-            assert!(empty.is_empty());
-        });
-    }
-
-    #[test_traced]
-    fn test_read_up_to_after_partial_buffering() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let data = b"hello world";
-            let (blob, size) = context
-                .open("partition", b"read_up_to_partial")
-                .await
-                .unwrap();
-            assert_eq!(size, 0);
-            blob.write_at(0, data).await.unwrap();
-
-            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(4));
-
-            // Prime internal buffer with a partial consume from the first refill.
-            let head = reader.read_exact(3).await.unwrap();
-            assert_eq!(head.coalesce().as_ref(), b"hel");
-
-            // Now read up to 5 bytes; this should include buffered remainder + refill.
-            let next = reader.read_up_to(5).await.unwrap();
-            assert_eq!(next.coalesce().as_ref(), b"lo wo");
-            assert_eq!(reader.position(), 8);
-        });
-    }
-
-    #[test_traced]
     fn test_read_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -115,22 +115,20 @@ impl<B: Blob> Read<B> {
         // Reuse existing allocation when uniquely owned. If readers still hold slices from
         // previous reads, allocate a replacement and leave old memory alive until dropped.
         let current = std::mem::take(&mut self.buffer);
-        let mut buf = match current.try_into_mut() {
-            Ok(mut reusable) => {
+        let buf = match current.try_into_mut() {
+            Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {
                 reusable.clear();
                 reusable
             }
-            Err(_) => self.pool.alloc(bytes_to_read),
+            Ok(_) | Err(_) => self.pool.alloc(bytes_to_read),
         };
-        if buf.capacity() < bytes_to_read {
-            buf = self.pool.alloc(bytes_to_read);
-        }
         let read_result = self
             .blob
             .read_at_buf(self.blob_position, bytes_to_read, buf)
             .await?;
         self.buffer = read_result.coalesce_with_pool(&self.pool).freeze();
         self.buffer_valid_len = self.buffer.len();
+
         Ok(self.buffer_valid_len)
     }
 
@@ -143,39 +141,35 @@ impl<B: Blob> Read<B> {
             return Ok(IoBufs::default());
         }
 
-        // Quick check if we have enough bytes total before attempting reads.
+        // Quick check if we have enough bytes total before attempting reads
         if (self.buffer_remaining() + self.blob_remaining() as usize) < len {
             return Err(Error::BlobInsufficientLength);
         }
 
         let mut out = IoBufs::default();
         let mut remaining = len;
+
+        // Read until we have enough bytes
         while remaining > 0 {
+            // Check if we need to refill
             if self.buffer_position >= self.buffer_valid_len {
                 self.refill().await?;
             }
 
+            // Calculate how many bytes we can take from the buffer
             let bytes_to_take = std::cmp::min(remaining, self.buffer_remaining());
-            let start = self.buffer_position;
-            let end = start + bytes_to_take;
-            out.append(self.buffer.slice(start..end));
-            self.buffer_position = end;
+
+            // Append bytes from buffer to output
+            out.append(
+                self.buffer
+                    .slice(self.buffer_position..(self.buffer_position + bytes_to_take)),
+            );
+
+            self.buffer_position += bytes_to_take;
             remaining -= bytes_to_take;
         }
 
         Ok(out)
-    }
-
-    /// Reads up to `max_len` bytes and returns available immutable bytes.
-    pub async fn read_up_to(&mut self, max_len: usize) -> Result<IoBufs, Error> {
-        if max_len == 0 {
-            return Ok(IoBufs::default());
-        }
-        let available = std::cmp::min(max_len, self.blob_remaining() as usize);
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        self.read_exact(available).await
     }
 
     /// Returns the current absolute position in the blob.
@@ -185,20 +179,20 @@ impl<B: Blob> Read<B> {
 
     /// Repositions the buffer to read from the specified position in the blob.
     pub const fn seek_to(&mut self, position: u64) -> Result<(), Error> {
-        // Check if the seek position is valid.
+        // Check if the seek position is valid
         if position > self.blob_size {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Check if the position is within the current buffer.
+        // Check if the position is within the current buffer
         let buffer_start = self.blob_position;
         let buffer_end = self.blob_position + self.buffer_valid_len as u64;
 
         if position >= buffer_start && position < buffer_end {
-            // Position is within the current buffer, adjust buffer_position.
+            // Position is within the current buffer, adjust buffer_position
             self.buffer_position = (position - self.blob_position) as usize;
         } else {
-            // Position is outside the current buffer, reset buffer state.
+            // Position is outside the current buffer, reset buffer state
             self.blob_position = position;
             self.buffer_position = 0;
             self.buffer_valid_len = 0;
