@@ -4,6 +4,15 @@ use std::num::NonZeroUsize;
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
 ///
+/// # Allocation Semantics
+///
+/// - The internal read buffer is allocated eagerly in [Self::new].
+/// - Refills try to reclaim mutable ownership of that same backing allocation.
+/// - If backing is still shared (for example, previously returned slices are alive), a pooled
+///   replacement is allocated and existing backing is left alive until all aliases drop.
+/// - [Self::read_exact] returns zero-copy slices into refill buffers. Holding those
+///   slices may force allocation on subsequent refills.
+///
 /// # Example
 ///
 /// ```
@@ -113,14 +122,14 @@ impl<B: Blob> Read<B> {
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
         // Reuse existing allocation when uniquely owned. If readers still hold slices from
-        // previous reads, allocate a replacement and leave old memory alive until dropped.
+        // previous reads, allocate a pooled replacement and leave old memory alive until dropped.
         let current = std::mem::take(&mut self.buffer);
         let buf = match current.try_into_mut() {
             Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {
                 reusable.clear();
                 reusable
             }
-            Ok(_) | Err(_) => self.pool.alloc(bytes_to_read),
+            Ok(_) | Err(_) => self.pool.alloc(self.buffer_size),
         };
         let read_result = self
             .blob
@@ -134,7 +143,10 @@ impl<B: Blob> Read<B> {
 
     /// Reads exactly `len` bytes and returns them as immutable bytes.
     ///
-    /// Returned bytes are composed of zero-copy slices from the internal read cache.
+    /// Returned bytes are composed of zero-copy slices from the internal read buffer.
+    /// Holding returned slices can keep the current backing shared, which may require
+    /// allocation on later refills.
+    ///
     /// Returns an error if not enough bytes are available.
     pub async fn read_exact(&mut self, len: usize) -> Result<IoBufs, Error> {
         if len == 0 {
