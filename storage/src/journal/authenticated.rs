@@ -11,6 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
+        hasher::Hasher as MmrHasher,
         journaled::{CleanMmr, DirtyMmr, Mmr, State},
         mem::{Clean, Dirty},
         Error as MmrError, Location, Position, Proof, StandardHasher,
@@ -33,6 +34,15 @@ pub enum Error {
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
+}
+
+impl From<Error> for super::Error {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Journal(inner) => inner,
+            Error::Mmr(inner) => Self::Mmr(anyhow::Error::from(inner)),
+        }
+    }
 }
 
 /// An append-only data structure that maintains a sequential journal of items alongside a Merkle
@@ -314,6 +324,51 @@ where
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
+    /// Compute dirty node digests up to `target_size` while remaining in Dirty state.
+    pub fn merkleize_to(
+        &self,
+        hasher: &mut impl MmrHasher<Digest = DigestOf<H>>,
+        target_size: Position,
+    ) -> Result<(), crate::mmr::Error> {
+        self.mmr.merkleize_to(hasher, target_size)
+    }
+
+    /// Generate a historical proof with respect to a past MMR state.
+    ///
+    /// Returns [Error::Mmr] with [MmrError::Unmerkleized] if the requested historical size
+    /// exceeds the merkleized frontier. Calling [merkleize_to](Self::merkleize_to) advances
+    /// the frontier and allows the proof to succeed on retry.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
+        let reader = self.journal.reader().await;
+        let bounds = reader.bounds();
+
+        if *historical_leaves > bounds.end {
+            return Err(MmrError::RangeOutOfBounds(Location::new_unchecked(bounds.end)).into());
+        }
+        if start_loc >= historical_leaves {
+            return Err(MmrError::RangeOutOfBounds(start_loc).into());
+        }
+
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+
+        let proof = self
+            .mmr
+            .historical_range_proof(historical_leaves, start_loc..end_loc)
+            .await?;
+
+        let futures = (*start_loc..*end_loc)
+            .map(|i| reader.read(i))
+            .collect::<Vec<_>>();
+        let ops = try_join_all(futures).await?;
+
+        Ok((proof, ops))
+    }
+
     /// Merkleize the journal and compute the root digest.
     pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
         let Self {
@@ -472,10 +527,7 @@ where
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
-        let res = self.append(item).await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })?;
+        let res = self.append(item).await.map_err(JournalError::from)?;
 
         Ok(*res)
     }
@@ -508,24 +560,15 @@ where
     type Error = JournalError;
 
     async fn commit(&self) -> Result<(), JournalError> {
-        self.commit().await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })
+        self.commit().await.map_err(JournalError::from)
     }
 
     async fn sync(&self) -> Result<(), JournalError> {
-        self.sync().await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })
+        self.sync().await.map_err(JournalError::from)
     }
 
     async fn destroy(self) -> Result<(), JournalError> {
-        self.destroy().await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })
+        self.destroy().await.map_err(JournalError::from)
     }
 }
 
