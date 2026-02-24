@@ -183,36 +183,22 @@ impl Buffer {
     /// - If backing is shared (for example, because a flushed/read view is still alive) or too
     ///   small, a new pooled allocation is created and existing bytes are copied.
     fn writable(&mut self, needed: usize) -> IoBufMut {
-        let logical_len = self.len;
         let current = std::mem::take(&mut self.data);
-        match current.try_into_mut() {
+        let source = match current.try_into_mut() {
             Ok(mut writable) => {
-                writable.truncate(logical_len);
+                writable.truncate(self.len);
                 if writable.capacity() >= needed {
                     return writable;
                 }
-                let target = needed.max(self.capacity);
-                let mut grown = self.pool.alloc(target);
-                grown.put_slice(writable.as_ref());
-                grown
+                writable.freeze()
             }
-            Err(shared) => {
-                let target = needed.max(self.capacity);
-                let mut grown = self.pool.alloc(target);
-                grown.put_slice(&shared.as_ref()[..logical_len]);
-                grown
-            }
-        }
-    }
+            Err(shared) => shared,
+        };
 
-    fn append_zeros(dst: &mut IoBufMut, len: usize) {
-        const ZERO_CHUNK: [u8; 256] = [0; 256];
-        let mut remaining = len;
-        while remaining > 0 {
-            let take = remaining.min(ZERO_CHUNK.len());
-            dst.put_slice(&ZERO_CHUNK[..take]);
-            remaining -= take;
-        }
+        let target = needed.max(self.capacity);
+        let mut grown = self.pool.alloc(target);
+        grown.put_slice(&source.as_ref()[..self.len]);
+        grown
     }
 
     /// Merges the provided `data` into the buffer at the provided blob `offset` if it falls
@@ -236,9 +222,9 @@ impl Buffer {
         let mut writable = self.writable(end);
         let prev = writable.len();
 
-        // Expand buffer if necessary (fills with zeros).
+        // Extend logical length to end, zero-filling any gap.
         if end > prev {
-            Self::append_zeros(&mut writable, end - prev);
+            writable.put_bytes(0, end - prev);
         }
 
         // Copy the provided data into the buffer.
