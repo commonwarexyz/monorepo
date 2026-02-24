@@ -333,7 +333,8 @@ impl<
         // Process nullify (and persist it if it is a first attempt)
         let (retry, nullify, entry) = self.state.handle_timeout();
         if let Some(nullify) = nullify {
-            self.emit_nullify(batcher, vote_sender, retry, nullify).await;
+            self.emit_nullify(batcher, vote_sender, retry, nullify)
+                .await;
         }
 
         // Broadcast entry to help others enter the view

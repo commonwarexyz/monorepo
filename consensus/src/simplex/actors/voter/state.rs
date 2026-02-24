@@ -1550,11 +1550,8 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(
-                        scheme,
-                        Rnd::new(Epoch::new(1), parent_view),
-                    )
-                    .unwrap()
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), parent_view))
+                        .unwrap()
                 })
                 .collect();
             let nullification =
