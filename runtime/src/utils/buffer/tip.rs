@@ -21,8 +21,6 @@ pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
     /// Bytes in `[0,len)` are logically buffered.
-    /// Callers should use [Self::slice] or [Self::bytes] instead of reading this
-    /// field directly.
     data: IoBuf,
 
     /// Number of logical buffered bytes in `data`.
@@ -39,7 +37,7 @@ pub(super) struct Buffer {
 
     /// Whether this buffer should allow new data.
     // TODO(#2371): Use a distinct state-type for immutable vs immutable.
-    pub(super) immutable: bool,
+    immutable: bool,
 
     /// Pool used to allocate backing buffers.
     pool: BufferPool,
@@ -71,6 +69,35 @@ impl Buffer {
         self.len == 0
     }
 
+    /// Returns true if the buffer is immutable.
+    pub(super) const fn is_immutable(&self) -> bool {
+        self.immutable
+    }
+
+    /// Converts the buffer to immutable mode.
+    ///
+    /// If `compact` is true, backing storage is compacted to the current logical length.
+    /// This is idempotent for both state and compaction behavior.
+    pub(super) fn to_immutable(&mut self, compact: bool) {
+        self.immutable = true;
+        if !compact {
+            return;
+        }
+        if self.len == 0 {
+            self.data = IoBuf::default();
+            self.len = 0;
+            return;
+        }
+        let mut shrunk = self.pool.alloc(self.len);
+        shrunk.put_slice(self.as_ref());
+        self.data = shrunk.freeze();
+    }
+
+    /// Converts the buffer to mutable mode.
+    pub(super) const fn to_mutable(&mut self) {
+        self.immutable = false;
+    }
+
     /// Returns the logical number of buffered bytes.
     pub(super) const fn len(&self) -> usize {
         self.len
@@ -95,17 +122,6 @@ impl Buffer {
         assert!(start <= end, "slice start must be <= end");
         assert!(end <= self.len, "slice out of bounds");
         self.data.slice(range)
-    }
-
-    /// Returns logical bytes as a contiguous slice.
-    pub(super) fn bytes(&self) -> &[u8] {
-        &self.data.as_ref()[..self.len]
-    }
-
-    /// Replaces the buffer contents with `data` and sets logical length to `data.len()`.
-    pub(super) fn replace(&mut self, data: IoBuf) {
-        self.len = data.len();
-        self.data = data;
     }
 
     /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
@@ -274,6 +290,12 @@ impl Buffer {
     /// This resets logical length and keeps backing allocation for reuse.
     pub(super) const fn clear(&mut self) {
         self.len = 0;
+    }
+}
+
+impl AsRef<[u8]> for Buffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.data.as_ref()[..self.len]
     }
 }
 

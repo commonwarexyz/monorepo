@@ -230,7 +230,7 @@ impl<B: Blob> Append<B> {
             let over_capacity = buffer.append(partial_page.as_ref());
             assert!(!over_capacity);
         }
-        buffer.immutable = true;
+        buffer.to_immutable(true);
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
@@ -242,9 +242,7 @@ impl<B: Blob> Append<B> {
 
     /// Returns `true` if this blob is in the immutable state.
     pub async fn is_immutable(&self) -> bool {
-        let buffer = self.buffer.read().await;
-
-        buffer.immutable
+        self.buffer.read().await.is_immutable()
     }
 
     /// Convert this blob to the immutable state if it's not already in it.
@@ -254,23 +252,16 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data. When flush_internal returns, write_at has completed and data
         // has been written to the underlying blob.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Ok(());
         }
-        buf_guard.immutable = true;
+        buf_guard.to_immutable(false);
         self.flush_internal(buf_guard, true).await?;
 
-        // Shrink the buffer to release the pooled allocation since we won't be appending.
+        // Compact tip backing after flush to match the post-flush logical view.
         {
             let mut buf_guard = self.buffer.write().await;
-            let len = buf_guard.len();
-            if len > 0 {
-                let mut shrunk = self.cache_ref.pool().alloc(len);
-                shrunk.put_slice(buf_guard.bytes());
-                buf_guard.replace(shrunk.freeze());
-            } else {
-                buf_guard.replace(IoBuf::default());
-            }
+            buf_guard.to_immutable(true);
         }
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
@@ -282,10 +273,10 @@ impl<B: Blob> Append<B> {
     /// Convert this blob to the mutable state if it's not already in it.
     pub async fn to_mutable(&self) {
         let mut buffer = self.buffer.write().await;
-        if !buffer.immutable {
+        if !buffer.is_immutable() {
             return;
         }
-        buffer.immutable = false;
+        buffer.to_mutable();
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
@@ -367,7 +358,7 @@ impl<B: Blob> Append<B> {
     /// * `Error::ImmutableBlob` - The blob is in the immutable state.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if buffer.immutable {
+        if buffer.is_immutable() {
             return Err(Error::ImmutableBlob);
         }
 
@@ -701,7 +692,7 @@ impl<B: Blob> Append<B> {
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
-        let buffer_data = buffer.bytes();
+        let buffer_data = buffer.as_ref();
         let logical_page_size_u16 =
             u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
         let crc_record_size = CHECKSUM_SIZE as usize;
@@ -824,7 +815,7 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data (without fsync) so the reader sees all written data.
         {
             let buf_guard = self.buffer.write().await;
-            if !buf_guard.immutable {
+            if !buf_guard.is_immutable() {
                 self.flush_internal(buf_guard, true).await?;
             }
         }
@@ -874,7 +865,7 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Ok(());
         }
         self.flush_internal(buf_guard, true).await?;
@@ -921,7 +912,7 @@ impl<B: Blob> Append<B> {
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Err(Error::ImmutableBlob);
         }
         let mut blob_guard = self.blob_state.write().await;
