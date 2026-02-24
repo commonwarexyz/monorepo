@@ -13,9 +13,10 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        diff::DirtyDiff,
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
-        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State as MmrState},
+        mem::{CleanMmr, Config},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -30,8 +31,12 @@ use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
     sequence::prefixed_u64::U64,
 };
+use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
+
+/// Minimum number of dirty chunks to trigger parallel pre-hashing.
+const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
@@ -54,10 +59,7 @@ mod private {
 }
 
 /// Trait for valid [BitMap] type states.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
-    /// The merkleization type state for the inner [Mmr].
-    type MmrState: MmrState<D>;
-}
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
 
 /// Merkleized state: the bitmap has been merkleized and the root is cached.
 pub struct Merkleized<D: Digest> {
@@ -66,9 +68,7 @@ pub struct Merkleized<D: Digest> {
 }
 
 impl<D: Digest> private::Sealed for Merkleized<D> {}
-impl<D: Digest> State<D> for Merkleized<D> {
-    type MmrState = Clean<D>;
-}
+impl<D: Digest> State<D> for Merkleized<D> {}
 
 /// Unmerkleized state: the bitmap has pending changes not yet merkleized.
 pub struct Unmerkleized {
@@ -82,9 +82,7 @@ pub struct Unmerkleized {
 }
 
 impl private::Sealed for Unmerkleized {}
-impl<D: Digest> State<D> for Unmerkleized {
-    type MmrState = Dirty;
-}
+impl<D: Digest> State<D> for Unmerkleized {}
 
 /// A merkleized bitmap whose root digest has been computed and cached.
 pub type MerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
@@ -131,7 +129,7 @@ pub struct BitMap<
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<D, S::MmrState>,
+    mmr: CleanMmr<D>,
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
@@ -511,7 +509,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         UnmerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
-            mmr: self.mmr.into_dirty(),
+            mmr: self.mmr,
             pool: self.pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
@@ -569,30 +567,69 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
-        // Add newly pushed complete chunks to the MMR.
+        let mut diff = DirtyDiff::new(&self.mmr).with_pool(self.pool.clone());
+
+        // Add newly pushed complete chunks to the diff.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            self.mmr.add(hasher, self.bitmap.get_chunk(i));
+            diff.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
-        // Inform the MMR of modified chunks.
-        let updates = self
-            .state
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| {
-                let loc = Location::new_unchecked(chunk as u64);
-                (loc, self.bitmap.get_chunk(chunk))
-            })
-            .collect::<Vec<_>>();
-        self.mmr
-            .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
-        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
+        // Pre-hash dirty chunks into digests and update in the diff.
+        let dirty: Vec<(Location, D)> = {
+            let updates: Vec<(Location, &[u8; N])> = self
+                .state
+                .dirty_chunks
+                .iter()
+                .map(|&chunk| {
+                    let loc = Location::new_unchecked(chunk as u64);
+                    (loc, self.bitmap.get_chunk(chunk))
+                })
+                .collect();
 
-        // Compute the bitmap root
-        let mmr_root = *mmr.root();
+            if let Some(ref pool) = self.pool {
+                if updates.len() >= MIN_TO_PARALLELIZE {
+                    pool.install(|| {
+                        updates
+                            .par_iter()
+                            .map_init(
+                                || hasher.fork(),
+                                |h, &(loc, chunk)| {
+                                    let pos = Position::try_from(loc).unwrap();
+                                    (loc, h.leaf_digest(pos, chunk.as_ref()))
+                                },
+                            )
+                            .collect()
+                    })
+                } else {
+                    updates
+                        .iter()
+                        .map(|&(loc, chunk)| {
+                            let pos = Position::try_from(loc).unwrap();
+                            (loc, hasher.leaf_digest(pos, chunk.as_ref()))
+                        })
+                        .collect()
+                }
+            } else {
+                updates
+                    .iter()
+                    .map(|&(loc, chunk)| {
+                        let pos = Position::try_from(loc).unwrap();
+                        (loc, hasher.leaf_digest(pos, chunk.as_ref()))
+                    })
+                    .collect()
+            }
+        };
+        diff.update_leaf_batched(&dirty)?;
+
+        // Merkleize and apply.
+        let changeset = diff.merkleize(hasher).into_changeset();
+        self.mmr.apply(changeset);
+
+        // Compute the bitmap root.
+        let mmr_root = *self.mmr.root();
         let cached_root = if self.bitmap.is_chunk_aligned() {
             mmr_root
         } else {
@@ -604,7 +641,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         Ok(MerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
-            mmr,
+            mmr: self.mmr,
             pool: self.pool,
             metadata: self.metadata,
             state: Merkleized { root: cached_root },

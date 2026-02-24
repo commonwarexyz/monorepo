@@ -13,7 +13,7 @@ use crate::{
         build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
-        Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -82,13 +82,9 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _, Merkleized<H>>::from_components(
-            mmr,
-            log,
-            hasher,
-            apply_batch_size as u64,
-        )
-        .await?;
+        let journal =
+            authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64)
+                .await?;
 
         let mut snapshot: Index<T, Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
@@ -165,15 +161,14 @@ mod tests {
         crate::translator::TwoCap,
     >;
 
-    /// Type alias for mutable state (Unmerkleized, NonDurable)
+    /// Type alias for mutable state (NonDurable)
     type ImmutableSyncTestMutable = immutable::Immutable<
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
         Sha256,
         crate::translator::TwoCap,
-        immutable::Unmerkleized,
-        immutable::NonDurable,
+        crate::qmdb::NonDurable,
     >;
 
     /// Create a simple config for sync tests

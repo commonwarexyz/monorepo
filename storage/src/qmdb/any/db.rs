@@ -16,13 +16,12 @@ use crate::{
         build_snapshot_from_log,
         operation::{Committable, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
-        Unmerkleized,
+        DurabilityState, Durable, Error, FloorHelper, NonDurable,
     },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
@@ -30,7 +29,7 @@ use futures::future::try_join_all;
 use tracing::debug;
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Journal<E, C, H, M>;
+pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -44,7 +43,6 @@ pub struct Db<
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     U: Send + Sync,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
@@ -54,7 +52,7 @@ pub struct Db<
     ///
     /// - The log is never pruned beyond the inactivity floor.
     /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<E, C, H, M>,
+    pub(crate) log: AuthenticatedLog<E, C, H>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -82,7 +80,7 @@ pub struct Db<
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
+impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -91,7 +89,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -117,7 +114,7 @@ where
 
 // Functionality shared across Merkleized states, such as the ability to prune the log, retrieve the
 // state root, and compute proofs.
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -175,8 +172,8 @@ where
     }
 }
 
-// Functionality specific to (Merkleized,Durable) state, such as ability to initialize and persist.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
+// Functionality specific to Durable state, such as ability to initialize and persist.
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -250,9 +247,9 @@ where
     }
 
     /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Db<E, C, I, H, U, NonDurable> {
         Db {
-            log: self.log.into_dirty(),
+            log: self.log,
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
@@ -263,86 +260,8 @@ where
     }
 }
 
-// Functionality shared across Unmerkleized states.
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
-{
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
-        Db {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
-        Db {
-            log: self.log,
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: store::NonDurable { steps: 0 },
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Merkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
-        Db {
-            log: self.log.into_dirty(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
 // Funtionality shared across NonDurable states.
-impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -351,9 +270,8 @@ where
     C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
     Operation<K, V, U>: Codec,
-    AuthenticatedLog<E, C, H, M>: Mutable<Item = Operation<K, V, U>>,
+    AuthenticatedLog<E, C, H>: Mutable<Item = Operation<K, V, U>>,
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -375,7 +293,7 @@ where
     pub async fn commit(
         mut self,
         metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, M, Durable>, Range<Location>), Error> {
+    ) -> Result<(Db<E, C, I, H, U, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
@@ -480,7 +398,7 @@ where
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, M>> {
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -488,7 +406,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Merkleized<H>, Durable>
+impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -515,7 +433,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -545,7 +463,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
+impl<E, K, V, U, C, I, H, D> LogStore for Db<E, C, I, H, U, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -554,7 +472,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -570,7 +487,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,

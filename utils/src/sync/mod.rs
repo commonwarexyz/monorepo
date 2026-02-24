@@ -23,7 +23,8 @@
 
 use core::ops::{Deref, DerefMut};
 pub use parking_lot::{
-    Condvar, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Condvar, MappedRwLockReadGuard, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
 };
 pub use tokio::sync::{
     Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock as AsyncRwLock,

@@ -191,18 +191,14 @@ fn fuzz(input: FuzzInput) {
                         .commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
-                    db = clean_db.into_mutable();
+                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
+                    db = durable_db.into_mutable();
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
-                    merkleized_db
-                        .prune(merkleized_db.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Get { key } => {
@@ -223,12 +219,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
-                    if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
-                        let root = clean_db.root();
+                    if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
+                        let root = db.root();
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -246,23 +240,19 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
-                    if let Ok((proof, log)) = clean_db
-                        .historical_proof(op_count, *start_loc, *max_ops)
-                        .await
+                    if let Ok((proof, log)) =
+                        db.historical_proof(op_count, *start_loc, *max_ops).await
                     {
                         if let Some(root) = historical_roots.get(&op_count) {
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                         }
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    clean_db.sync().await.expect("Sync should not fail");
-                    db = clean_db.into_mutable();
+                    durable_db.sync().await.expect("Sync should not fail");
+                    db = durable_db.into_mutable();
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -274,9 +264,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let clean_db = db.into_merkleized();
-                    let _ = clean_db.root();
-                    db = clean_db.into_mutable();
+                    let _ = db.root();
                 }
 
                 Operation::SimulateFailure => {
@@ -284,7 +272,7 @@ fn fuzz(input: FuzzInput) {
                     drop(db);
 
                     let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
-                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
+                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
@@ -299,7 +287,6 @@ fn fuzz(input: FuzzInput) {
         }
 
         let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
         db.destroy().await.expect("Destroy should not fail");
     });
 }

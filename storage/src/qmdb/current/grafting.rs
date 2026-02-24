@@ -751,9 +751,13 @@ mod tests {
             // Add a 5th ops leaf that has no corresponding grafted leaf (it falls below
             // the grafting height boundary since there's no complete chunk for it yet).
             let b5 = Sha256::fill(0x05);
-            let mut ops_mmr = ops_mmr.into_dirty();
-            ops_mmr.add(&mut standard, &b5);
-            let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+            let changeset = {
+                let mut diff = crate::mmr::diff::DirtyDiff::new(&ops_mmr);
+                diff.add(&mut standard, &b5);
+                diff.merkleize(&mut standard).into_changeset()
+            };
+            let mut ops_mmr = ops_mmr;
+            ops_mmr.apply(changeset);
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());

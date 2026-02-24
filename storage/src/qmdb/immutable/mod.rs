@@ -13,13 +13,12 @@ use crate::{
     kv,
     mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
-        any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error,
-        MerkleizationState, Merkleized, NonDurable, Unmerkleized,
+        any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error, NonDurable,
     },
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -32,8 +31,7 @@ use tracing::warn;
 mod operation;
 pub use operation::Operation;
 
-type Journal<E, K, V, H, S> =
-    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;
+type Journal<E, K, V, H> = authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H>;
 
 pub mod sync;
 
@@ -85,11 +83,10 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
-    journal: Journal<E, K, V, H, M>,
+    journal: Journal<E, K, V, H>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -112,9 +109,8 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Immutable<E, K, V, H, T, M, D>
+    > Immutable<E, K, V, H, T, D>
 {
     /// Return the Location of the next operation appended to this db.
     pub async fn size(&self) -> Location {
@@ -195,7 +191,7 @@ impl<
         H: CHasher,
         T: Translator,
         D: DurabilityState,
-    > Immutable<E, K, V, H, T, Merkleized<H>, D>
+    > Immutable<E, K, V, H, T, D>
 {
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
@@ -256,9 +252,9 @@ impl<
     }
 }
 
-// Functionality specific to (Merkleized, Durable) state.
+// Functionality specific to Durable state.
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Merkleized<H>, Durable>
+    Immutable<E, K, V, H, T, Durable>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -294,9 +290,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         if journal.size().await == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            let mut dirty_journal = journal.into_dirty();
-            dirty_journal.append(Operation::Commit(None)).await?;
-            journal = dirty_journal.merkleize();
+            journal.append(Operation::Commit(None)).await?;
             journal.sync().await?;
         }
 
@@ -340,22 +334,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 
     /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
-        Immutable {
-            journal: self.journal.into_dirty(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, Durable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Unmerkleized, Durable>
-{
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, NonDurable> {
         Immutable {
             journal: self.journal,
             snapshot: self.snapshot,
@@ -364,35 +343,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         }
     }
 
-    /// Convert to merkleized state.
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, Durable> {
-        Immutable {
-            journal: self.journal.merkleize(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
+    /// Identity conversion (merkleization state was removed).
+    pub fn into_merkleized(self) -> Self {
+        self
     }
 }
 
-// Functionality specific to (Merkleized, NonDurable) state.
+// Functionality specific to the NonDurable (mutable) state.
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Merkleized<H>, NonDurable>
-{
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
-        Immutable {
-            journal: self.journal.into_dirty(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, NonDurable) state - the mutable state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
+    Immutable<E, K, V, H, T, NonDurable>
 {
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
@@ -424,13 +383,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     pub async fn commit(
         mut self,
         metadata: Option<V>,
-    ) -> Result<
-        (
-            Immutable<E, K, V, H, T, Unmerkleized, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
+    ) -> Result<(Immutable<E, K, V, H, T, Durable>, Range<Location>), Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         self.last_commit_loc = loc;
@@ -446,14 +399,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         Ok((db, range))
     }
 
-    /// Convert to merkleized state without committing (for read-only merkle operations).
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, NonDurable> {
-        Immutable {
-            journal: self.journal.merkleize(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
+    /// Identity conversion (merkleization state was removed).
+    pub fn into_merkleized(self) -> Self {
+        self
     }
 }
 
@@ -463,9 +411,8 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Immutable<E, K, V, H, T, M, D>
+    > kv::Gettable for Immutable<E, K, V, H, T, D>
 {
     type Key = K;
     type Value = V;
@@ -482,9 +429,8 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
+    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, D>
 {
     type Value = V;
 
@@ -504,7 +450,7 @@ impl<
         H: CHasher,
         T: Translator,
         D: DurabilityState,
-    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
+    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -972,17 +918,8 @@ pub(super) mod test {
         qmdb::store::tests::{assert_log_store, assert_merkleized_store},
     };
 
-    type MerkleizedDb =
-        Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
-    type MutableDb = Immutable<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        Unmerkleized,
-        NonDurable,
-    >;
+    type MerkleizedDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type MutableDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, NonDurable>;
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {

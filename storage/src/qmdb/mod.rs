@@ -53,10 +53,9 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{journaled::State as MerkleizationState, Location},
+    mmr::Location,
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
-use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -128,10 +127,6 @@ impl From<crate::journal::authenticated::Error> for Error {
     }
 }
 
-/// Type alias for merkleized state of a QMDB.
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state of a QMDB.
-pub type Unmerkleized = crate::mmr::mem::Dirty;
 /// Type alias for durable state of a QMDB.
 pub type Durable = store::Durable;
 /// Type alias for non-durable state of a QMDB.

@@ -22,7 +22,7 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,
-        Durable, Error, Merkleized,
+        Durable, Error,
     },
     translator::Translator,
 };
@@ -125,7 +125,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -154,7 +154,7 @@ where
         page_cache: cfg.page_cache,
     };
 
-    let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -166,10 +166,8 @@ where
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -185,7 +183,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -216,7 +214,7 @@ where
         write_buffer: cfg.log_write_buffer,
     };
 
-    let log = authenticated::Journal::<_, VJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -228,10 +226,8 @@ where
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
         log
     };
