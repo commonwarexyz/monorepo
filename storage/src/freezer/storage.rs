@@ -1034,9 +1034,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         }
 
         // Put the writes into the table.
-        // Convert once to immutable shared storage so we can issue both writes without
-        // cloning the full byte vector.
-        let writes: IoBuf = writes.into();
+        let writes = IoBuf::from(writes);
         let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
         let new_write = self.table.write_at(new_offset, writes);
