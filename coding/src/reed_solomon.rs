@@ -662,6 +662,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
+    type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
 
     fn checked(
@@ -839,8 +840,6 @@ mod tests {
 
     #[test]
     fn test_mismatched_config_rejected_during_weaken_and_check() {
-        type RS = ReedSolomon<Sha256>;
-
         let config_expected = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(2),
@@ -1058,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_too_many_total_shards() {
-        assert!(ReedSolomon::<Sha256>::encode(
+        assert!(RS::encode(
             &Config {
                 minimum_shards: NZU16!(u16::MAX / 2 + 1),
                 extra_shards: NZU16!(u16::MAX),
