@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_exact_structure_single_vs_chunked() {
+    fn test_read_structure_single_vs_chunked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let data = b"ABCDEFGHIJKL";
@@ -339,10 +339,12 @@ mod tests {
 
             // First read fits in one fetched chunk.
             let first = reader.read(3).await.unwrap();
+            assert!(first.is_single());
             assert_eq!(first.coalesce().as_ref(), b"ABC");
 
-            // This read spans refill boundaries and is returned as one contiguous buffer.
+            // This read spans refill boundaries and should be represented as multiple chunks.
             let second = reader.read(7).await.unwrap();
+            assert!(!second.is_single());
             assert_eq!(second.coalesce().as_ref(), b"DEFGHIJ");
         });
     }
@@ -916,7 +918,7 @@ mod tests {
             });
             pin_mut!(write_task);
 
-            // Let scheduler poll the write task; it should be blocked on the tip write lock.
+            // Let scheduler poll the write task, it should be blocked on the tip write lock.
             reschedule().await;
             assert!(
                 write_task.as_mut().now_or_never().is_none(),
