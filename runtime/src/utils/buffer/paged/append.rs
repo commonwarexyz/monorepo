@@ -494,10 +494,7 @@ impl<B: Blob> Append<B> {
                         let _ = physical_pages.split_to(skip);
                         blob_state
                             .blob
-                            .write_at(
-                                write_at_offset + physical_page_size as u64,
-                                physical_pages,
-                            )
+                            .write_at(write_at_offset + physical_page_size as u64, physical_pages)
                             .await?;
                     }
                 }
