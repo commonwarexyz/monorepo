@@ -114,9 +114,6 @@ pub struct CacheRef {
     /// on blobs that were written with a different page size will fail their integrity check.)
     logical_page_size: u64,
 
-    /// The physical on-disk page size in bytes, including checksum record bytes.
-    physical_page_size: u64,
-
     /// The next id to assign to a blob that will be managed by this cache.
     next_id: Arc<AtomicU64>,
 
@@ -139,12 +136,12 @@ impl CacheRef {
     /// Capacity bounds the number of resident slots in this cache. Read results may outlive
     /// eviction and retain memory until dropped by readers.
     pub fn new(pool: BufferPool, physical_page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let physical_page_size_u64 = physical_page_size.get() as u64;
+        let physical_page_size = physical_page_size.get() as u64;
         assert!(
-            physical_page_size_u64 > CHECKSUM_SIZE,
+            physical_page_size > CHECKSUM_SIZE,
             "physical page size must be larger than checksum record"
         );
-        let logical_page_size_u64 = physical_page_size_u64 - CHECKSUM_SIZE;
+        let logical_page_size_u64 = physical_page_size - CHECKSUM_SIZE;
         let logical_page_size_u16 =
             u16::try_from(logical_page_size_u64).expect("logical page size must fit in u16");
         let logical_page_size =
@@ -152,7 +149,6 @@ impl CacheRef {
 
         Self {
             logical_page_size: logical_page_size_u64,
-            physical_page_size: physical_page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(
                 pool.clone(),
@@ -180,7 +176,7 @@ impl CacheRef {
     /// The physical page size used by the underlying blob format.
     #[inline]
     pub const fn physical_page_size(&self) -> u64 {
-        self.physical_page_size
+        self.logical_page_size + CHECKSUM_SIZE
     }
 
     /// The logical page size used by this page cache.
@@ -338,7 +334,7 @@ impl CacheRef {
 
                 let create_fetch = || {
                     let logical_page_size = self.logical_page_size;
-                    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+                    let physical_page_size = self.physical_page_size();
                     let buf = self.pool.alloc(physical_page_size as usize);
                     let blob = blob.clone();
                     let future = async move {

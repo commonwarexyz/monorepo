@@ -2,10 +2,6 @@
 //! the underlying blob which has a page-oriented structure that provides integrity guarantees. The
 //! wrapper also provides read caching managed by a page cache.
 //!
-//! # Writing
-//!
-//! Writing new data to the blob is done through [`Append::append`].
-//!
 //! # Immutability
 //!
 //! The wrapper can be created in (or converted to) an immutable state, which will prevent any
@@ -24,6 +20,21 @@
 //! accompanied by a valid CRC, treating it as the result of an incomplete write that may be
 //! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
 //! validated by a CRC.
+//!
+//! # Allocation Semantics
+//!
+//! - [Append::new] and [Append::new_immutable] allocate tip backing eagerly through the buffer
+//!   pool. Capacity is floored to hold at least one full logical page plus potential recovered
+//!   partial-page bytes.
+//! - [Append::append] and overwrite-in-tip paths typically reuse existing tip backing. Copy-on-write
+//!   allocation occurs only when immutable views still alias the backing or additional capacity is
+//!   required.
+//! - Flush paths ([Append::sync], capacity-triggered flushes inside [Append::append], and
+//!   [Append::to_immutable]) emit immutable views to storage and keep tip backing reusable.
+//! - [Append::resize] may allocate one temporary physical-page buffer when recovering a retained
+//!   partial page from disk for CRC validation.
+//! - Read misses that go through the page cache allocate fetch buffers at physical-page size, cached
+//!   slots store logical-page bytes.
 
 use super::read::{PageReader, Replay};
 use crate::{
@@ -47,21 +58,6 @@ use tracing::warn;
 enum ProtectedCrc {
     First,
     Second,
-}
-
-/// Return a zero-copy slice view over `[start, end)` of `bufs`.
-fn iobufs_slice(bufs: &IoBufs, start: usize, end: usize) -> IoBufs {
-    assert!(start <= end);
-    assert!(end <= bufs.len());
-    if start == end {
-        return IoBufs::default();
-    }
-
-    let mut out = bufs.clone();
-    if start > 0 {
-        let _ = out.split_to(start);
-    }
-    out.split_to(end - start)
 }
 
 /// Describes the state of the underlying blob with respect to the buffer.
@@ -130,7 +126,7 @@ impl<B: Blob> Append<B> {
         .await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (cache_ref.logical_page_size() + CHECKSUM_SIZE);
+            let new_blob_size = pages * cache_ref.physical_page_size();
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -382,7 +378,7 @@ impl<B: Blob> Append<B> {
         let buffer = &mut *buf_guard;
 
         let logical_page_size = self.cache_ref.logical_page_size() as usize;
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
+        let physical_page_size = self.cache_ref.physical_page_size() as usize;
         let pages_to_cache = buffer.len() / logical_page_size;
         let bytes_to_drain = pages_to_cache * logical_page_size;
 
@@ -463,12 +459,25 @@ impl<B: Blob> Append<B> {
         // Write the physical pages to the blob.
         // If there are protected regions in the first page, we need to write around them.
         if let Some((prefix_len, protected_crc)) = protected_regions {
+            let subrange = |start: usize, end: usize| {
+                assert!(start <= end);
+                assert!(end <= physical_pages.len());
+                if start == end {
+                    return IoBufs::default();
+                }
+                let mut out = physical_pages.clone();
+                if start > 0 {
+                    let _ = out.split_to(start);
+                }
+                out.split_to(end - start)
+            };
+
             match protected_crc {
                 ProtectedCrc::First => {
                     // Protected CRC is first: [page_size..page_size+6]
                     // Write 1: New data in first page [prefix_len..page_size]
                     if prefix_len < logical_page_size {
-                        let payload = iobufs_slice(&physical_pages, prefix_len, logical_page_size);
+                        let payload = subrange(prefix_len, logical_page_size);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
@@ -477,8 +486,7 @@ impl<B: Blob> Append<B> {
                     // Write 2: Second CRC of first page + all remaining pages [page_size+6..end]
                     let second_crc_start = logical_page_size + 6;
                     if second_crc_start < physical_pages.len() {
-                        let payload =
-                            iobufs_slice(&physical_pages, second_crc_start, physical_pages.len());
+                        let payload = subrange(second_crc_start, physical_pages.len());
                         blob_state
                             .blob
                             .write_at(write_at_offset + second_crc_start as u64, payload)
@@ -490,7 +498,7 @@ impl<B: Blob> Append<B> {
                     // Write 1: New data + first CRC of first page [prefix_len..page_size+6]
                     let first_crc_end = logical_page_size + 6;
                     if prefix_len < first_crc_end {
-                        let payload = iobufs_slice(&physical_pages, prefix_len, first_crc_end);
+                        let payload = subrange(prefix_len, first_crc_end);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
@@ -498,8 +506,7 @@ impl<B: Blob> Append<B> {
                     }
                     // Write 2: All remaining pages (if any) [physical_page_size..end]
                     if physical_pages.len() > physical_page_size {
-                        let payload =
-                            iobufs_slice(&physical_pages, physical_page_size, physical_pages.len());
+                        let payload = subrange(physical_page_size, physical_pages.len());
                         blob_state
                             .blob
                             .write_at(write_at_offset + physical_page_size as u64, payload)
@@ -690,7 +697,7 @@ impl<B: Blob> Append<B> {
         old_crc_record: Option<&Checksum>,
     ) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.logical_page_size() as usize;
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
+        let physical_page_size = self.cache_ref.physical_page_size() as usize;
         let pages_to_write = buffer.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
         let buffer_data = buffer.as_ref();
@@ -821,7 +828,7 @@ impl<B: Blob> Append<B> {
             }
         }
 
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+        let physical_page_size = self.cache_ref.physical_page_size();
 
         // Convert buffer size (bytes) to page count
         let prefetch_pages = buffer_size.get() / physical_page_size as usize;
@@ -905,7 +912,7 @@ impl<B: Blob> Append<B> {
         // page, if any old data hasn't expired naturally by then.
 
         let logical_page_size = self.cache_ref.logical_page_size();
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+        let physical_page_size = self.cache_ref.physical_page_size();
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
