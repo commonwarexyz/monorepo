@@ -323,6 +323,12 @@ impl<
         Some(Request(context, receiver))
     }
 
+    /// Records a locally verified nullify vote and ensures the round exists.
+    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
+        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
+            .await;
+    }
+
     /// Emits a nullify vote (and persists it if it is a first attempt).
     async fn broadcast_nullify<Sp: Sender>(
         &mut self,
@@ -370,32 +376,6 @@ impl<
         }
     }
 
-    /// If a nullification certificate arrives for our current view, we may need to emit a
-    /// first-attempt nullify vote for local activity tracking.
-    ///
-    /// Returns `Some(nullify)` only when:
-    /// 1. The certificate is for the current view.
-    /// 2. We have not already emitted nullify for that view.
-    ///
-    /// Any "entry certificate" from timeout handling is intentionally ignored in this path,
-    /// because the incoming nullification certificate already provides entry material for peers.
-    fn try_construct_nullify_on_nullification(&mut self, view: View) -> Option<Nullify<S>> {
-        if self.state.current_view() != view {
-            return None;
-        }
-        let (retry, nullify, _) = self.state.handle_timeout();
-        if retry {
-            return None;
-        }
-        nullify
-    }
-
-    /// Records a locally verified nullify vote and ensures the round exists.
-    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
-            .await;
-    }
-
     /// Tracks a verified nullification certificate if it is new.
     ///
     /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
@@ -419,6 +399,50 @@ impl<
             .leader_index(view)
             .filter(|&leader| self.state.is_me(leader))
             .and_then(|_| self.state.parent_certificate(view))
+    }
+
+    /// If a nullification certificate arrives for our current view, we may need to emit a
+    /// first-attempt nullify vote for local activity tracking.
+    ///
+    /// Returns `Some(nullify)` only when:
+    /// 1. The certificate is for the current view.
+    /// 2. We have not already emitted nullify for that view.
+    ///
+    /// Any "entry certificate" from timeout handling is intentionally ignored in this path,
+    /// because the incoming nullification certificate already provides entry material for peers.
+    fn try_construct_nullify(&mut self, view: View) -> Option<Nullify<S>> {
+        if self.state.current_view() != view {
+            return None;
+        }
+        let (retry, nullify, _) = self.state.handle_timeout();
+        if retry {
+            return None;
+        }
+        nullify
+    }
+
+    /// Handles an externally received nullification certificate.
+    ///
+    /// We may need to emit a same-view nullify vote for local activity tracking if the
+    /// certificate arrives before our local timeout. This must happen before applying the
+    /// certificate because applying nullification advances to `view.next()`.
+    async fn handle_verified_nullification<Sp: Sender, Sr: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
+        nullification: Nullification<S>,
+    ) {
+        let view = nullification.view();
+        let late_timeout_nullify = self.try_construct_nullify(view);
+        if let Some(floor) = self.handle_nullification(nullification).await {
+            warn!(?floor, "broadcasting nullification floor");
+            self.broadcast_certificate(certificate_sender, floor).await;
+        }
+        if let Some(nullify) = late_timeout_nullify {
+            self.broadcast_nullify(batcher, vote_sender, false, nullify)
+                .await;
+        }
     }
 
     /// Persists our notarize vote to the journal for crash recovery.
@@ -473,30 +497,6 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
-    }
-
-    /// Handles an externally received nullification certificate.
-    ///
-    /// We may need to emit a same-view nullify vote for local activity tracking if the
-    /// certificate arrives before our local timeout. This must happen before applying the
-    /// certificate because applying nullification advances to `view.next()`.
-    async fn handle_verified_nullification<Sp: Sender, Sr: Sender>(
-        &mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
-        nullification: Nullification<S>,
-    ) {
-        let view = nullification.view();
-        let late_timeout_nullify = self.try_construct_nullify_on_nullification(view);
-        if let Some(floor) = self.handle_nullification(nullification).await {
-            warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_certificate(certificate_sender, floor).await;
-        }
-        if let Some(nullify) = late_timeout_nullify {
-            self.broadcast_nullify(batcher, vote_sender, false, nullify)
-                .await;
-        }
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
