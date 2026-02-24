@@ -136,6 +136,29 @@ pub enum Error {
     ChunkMismatch(String, Height),
 }
 
+impl Error {
+    /// Returns whether the error indicates provably malicious behavior
+    /// that warrants blocking the peer.
+    ///
+    /// Blockable errors are those that can only occur if the sender is
+    /// deliberately misbehaving (invalid signatures, decode failures,
+    /// peer/signer mismatch, conflicting chunks). Race conditions such
+    /// as epoch or height being out of bounds are NOT blockable because
+    /// they can occur naturally when participants have different views
+    /// of the current state.
+    pub const fn is_blockable(&self) -> bool {
+        matches!(
+            self,
+            Self::PeerMismatch
+                | Self::InvalidSequencerSignature
+                | Self::InvalidCertificate
+                | Self::InvalidNodeSignature
+                | Self::InvalidAckSignature
+                | Self::ChunkMismatch(_, _)
+        )
+    }
+}
+
 /// Interface responsible for providing the set of sequencers active at a given epoch.
 pub trait SequencersProvider: Clone + Send + Sync + 'static {
     /// Public key used to identify sequencers.
