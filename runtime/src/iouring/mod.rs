@@ -624,11 +624,12 @@ impl IoUringLoop {
     ///
     /// Advances `processed_seq` by exactly the number of drained submissions.
     ///
-    /// Returns whether staging ended at waiter capacity, or `None` if producer
-    /// channel disconnected.
+    /// Returns whether staging ended at waiter or SQ capacity, or `None` if
+    /// producer channel disconnected.
     fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
+        let mut at_sq_capacity = false;
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
@@ -639,9 +640,16 @@ impl IoUringLoop {
         // Stage until we either run out of channel work or hit waiter capacity.
         //
         // Capacity is bounded by `cfg.size` active waiters. This remains correct
-        // when `op_timeout` is enabled because `new_ring` doubles ring size to
-        // accommodate `op + linked timeout` SQE pairs.
+        // when `op_timeout` is enabled because each operation consumes 2 SQEs
+        // (`op + linked timeout`) and staging is budgeted by SQ entries.
         while self.waiters.len() < self.cfg.size as usize {
+            let available = submission_queue.capacity() - submission_queue.len();
+            let needed = if self.cfg.op_timeout.is_some() { 2 } else { 1 };
+            if available < needed {
+                at_sq_capacity = true;
+                break;
+            }
+
             let op = match self.receiver.try_recv() {
                 Ok(work) => work,
                 Err(TryRecvError::Disconnected) => return None,
@@ -728,7 +736,8 @@ impl IoUringLoop {
         // Track which submitted sequence has been consumed.
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
-        Some(self.waiters.len() == self.cfg.size as usize)
+        let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
+        Some(at_waiter_capacity || at_sq_capacity)
     }
 
     /// Handle a single CQE from the ring.
@@ -878,15 +887,11 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 
     // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
     // timeout). We double the ring size to ensure users get the number of
-    // concurrent operations they configured. We also reserve one extra SQE for
-    // the internal wake poll.
+    // concurrent operations they configured.
     let ring_size = if cfg.op_timeout.is_some() {
-        cfg.size
-            .checked_mul(2)
-            .and_then(|size| size.checked_add(1))
-            .expect("ring size overflow")
+        cfg.size.checked_mul(2).expect("ring size overflow")
     } else {
-        cfg.size.checked_add(1).expect("ring size overflow")
+        cfg.size
     };
 
     builder.build(ring_size)
