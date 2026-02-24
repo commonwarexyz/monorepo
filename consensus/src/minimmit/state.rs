@@ -255,7 +255,7 @@ where
             if !state.set_proposal(proposal.clone()) {
                 return Vec::new();
             }
-            state.mark_verified(proposal.payload)
+            state.mark_verified(&proposal)
         };
         if !inserted {
             return Vec::new();
@@ -302,7 +302,7 @@ where
         let view = proposal.view();
         let marked = {
             let state = self.ensure_view(view);
-            state.mark_verified(proposal.payload)
+            state.mark_verified(&proposal)
         };
         if !marked {
             return Vec::new();
@@ -807,7 +807,7 @@ where
                 if should_broadcast {
                     let broadcasted = {
                         let state = self.ensure_view(view);
-                        state.mark_broadcast_m_notarization(proposal.payload)
+                        state.mark_broadcast_m_notarization(&proposal)
                     };
                     if broadcasted {
                         actions.push(Action::BroadcastCertificate(Certificate::MNotarization(
@@ -1915,6 +1915,118 @@ mod tests {
         );
         let past_actions = state.receive_proposal(Participant::new(2), past);
         assert!(past_actions.is_empty(), "past proposals must be ignored");
+    }
+
+    /// Regression test: a valid proposal must not be dropped when an invalid
+    /// proposal with the same payload was seen first.
+    #[test]
+    fn proposal_same_payload_different_parent_must_still_verify() {
+        let (mut state, schemes, _rng) = setup_state();
+
+        // Seed ancestry with an M-notarized parent at view 1, then advance to view 2.
+        let parent_payload = Sha256Digest::from([0x33u8; 32]);
+        let parent = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            Sha256Digest::from([0u8; 32]),
+            parent_payload,
+        );
+        let parent_votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, parent.clone()).unwrap())
+            .collect();
+        let parent_m_not =
+            MNotarization::from_notarizes(&schemes[0], parent_votes.iter(), &Sequential).unwrap();
+        let _ = state.receive_certificate(Certificate::MNotarization(parent_m_not));
+        assert_eq!(state.view(), View::new(2));
+
+        // Round-robin leader for epoch=1, view=2 is participant 3.
+        let leader = Participant::new(3);
+        let payload = Sha256Digest::from([0x44u8; 32]);
+
+        // First proposal is invalid ancestry, but inserts this payload into view state.
+        let invalid = Proposal::new(
+            Round::new(Epoch::new(1), View::new(2)),
+            View::new(1),
+            Sha256Digest::from([0xEEu8; 32]),
+            payload,
+        );
+        let first = state.receive_proposal(leader, invalid.clone());
+        assert!(first
+            .iter()
+            .any(|a| matches!(a, Action::VerifyProposal(p) if *p == invalid)));
+        let _ = state.proposal_verified(invalid, false);
+
+        // Second proposal has the same payload but valid ancestry and must still be verified.
+        let valid = Proposal::new(
+            Round::new(Epoch::new(1), View::new(2)),
+            View::new(1),
+            parent_payload,
+            payload,
+        );
+        let second = state.receive_proposal(leader, valid.clone());
+        assert!(
+            second
+                .iter()
+                .any(|a| matches!(a, Action::VerifyProposal(p) if *p == valid)),
+            "valid proposal must not be deduplicated by payload digest"
+        );
+    }
+
+    /// Regression test: all distinct M-notarizations must be forwarded.
+    ///
+    /// The protocol requires forwarding newly observed M-notarizations; otherwise,
+    /// peers can permanently miss valid ancestry options.
+    #[test]
+    fn distinct_m_notarizations_in_same_view_must_all_broadcast() {
+        let (mut state, schemes, _rng) = setup_state();
+        let genesis = Sha256Digest::from([0u8; 32]);
+
+        let proposal_a = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            genesis,
+            Sha256Digest::from([0xA1u8; 32]),
+        );
+        let proposal_b = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            genesis,
+            Sha256Digest::from([0xB2u8; 32]),
+        );
+
+        let votes_a: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, proposal_a.clone()).unwrap())
+            .collect();
+        let votes_b: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
+            .collect();
+
+        let m_not_a = MNotarization::from_notarizes(&schemes[0], votes_a.iter(), &Sequential)
+            .expect("m-notarization A");
+        let m_not_b = MNotarization::from_notarizes(&schemes[1], votes_b.iter(), &Sequential)
+            .expect("m-notarization B");
+
+        let first = state.receive_certificate(Certificate::MNotarization(m_not_a));
+        assert!(first.iter().any(|a| matches!(
+            a,
+            Action::BroadcastCertificate(Certificate::MNotarization(_))
+        )));
+
+        let second = state.receive_certificate(Certificate::MNotarization(m_not_b));
+        assert!(
+            second.iter().any(|a| matches!(
+                a,
+                Action::BroadcastCertificate(Certificate::MNotarization(_))
+            )),
+            "each distinct M-notarization should be forwarded, even within the same view"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::minimmit::{
     types::{Certificate, Notarize, Proposal},
 };
 use commonware_cryptography::Digest;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Phase within a view to prevent invalid transitions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -23,9 +23,9 @@ pub enum Phase<D: Digest> {
 #[derive(Debug)]
 pub struct ViewState<D: Digest> {
     phase: Phase<D>,
-    proposals: BTreeMap<D, Proposal<D>>,
-    verified: BTreeSet<D>,
-    broadcast_m_notarization: Option<D>,
+    proposals: BTreeSet<Proposal<D>>,
+    verified: BTreeSet<Proposal<D>>,
+    broadcast_m_notarizations: BTreeSet<Proposal<D>>,
     propose_sent: bool,
     broadcast_notarize: bool,
     broadcast_nullify: bool,
@@ -36,9 +36,9 @@ impl<D: Digest> Default for ViewState<D> {
     fn default() -> Self {
         Self {
             phase: Phase::Idle,
-            proposals: BTreeMap::new(),
+            proposals: BTreeSet::new(),
             verified: BTreeSet::new(),
-            broadcast_m_notarization: None,
+            broadcast_m_notarizations: BTreeSet::new(),
             propose_sent: false,
             broadcast_notarize: false,
             broadcast_nullify: false,
@@ -53,9 +53,9 @@ impl<D: Digest> ViewState<D> {
         &self.phase
     }
 
-    /// Returns true if the proposal for the digest is verified.
-    pub fn is_verified(&self, digest: D) -> bool {
-        self.verified.contains(&digest)
+    /// Returns true if the proposal is verified.
+    pub fn is_verified(&self, proposal: &Proposal<D>) -> bool {
+        self.verified.contains(proposal)
     }
 
     /// Returns true if we already sent a proposal in this view.
@@ -89,27 +89,22 @@ impl<D: Digest> ViewState<D> {
 
     /// Records a proposal for this view.
     pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        let digest = proposal.payload;
-        if self.proposals.contains_key(&digest) {
-            return false;
-        }
-        self.proposals.insert(digest, proposal);
-        true
+        self.proposals.insert(proposal)
     }
 
-    /// Marks the proposal for `digest` as verified.
-    pub fn mark_verified(&mut self, digest: D) -> bool {
-        if !self.proposals.contains_key(&digest) {
+    /// Marks the proposal as verified.
+    pub fn mark_verified(&mut self, proposal: &Proposal<D>) -> bool {
+        if !self.proposals.contains(proposal) {
             return false;
         }
-        self.verified.insert(digest)
+        self.verified.insert(proposal.clone())
     }
 
     /// Returns proposals that have not been verified yet.
     pub fn unverified_proposals(&self) -> impl Iterator<Item = &Proposal<D>> {
         self.proposals
-            .values()
-            .filter(|proposal| !self.verified.contains(&proposal.payload))
+            .iter()
+            .filter(|proposal| !self.verified.contains(*proposal))
     }
 
     /// Records that we voted for a proposal digest.
@@ -150,15 +145,9 @@ impl<D: Digest> ViewState<D> {
 
     /// Marks that we've broadcast an M-notarization certificate.
     ///
-    /// Returns true if this is the first M-notarization broadcast for this view.
-    /// Only the first M-notarization is broadcast; subsequent ones for different
-    /// digests are processed but not re-broadcast.
-    pub const fn mark_broadcast_m_notarization(&mut self, digest: D) -> bool {
-        if self.broadcast_m_notarization.is_some() {
-            return false;
-        }
-        self.broadcast_m_notarization = Some(digest);
-        true
+    /// Returns true if this M-notarization has not been broadcast for this view.
+    pub fn mark_broadcast_m_notarization(&mut self, proposal: &Proposal<D>) -> bool {
+        self.broadcast_m_notarizations.insert(proposal.clone())
     }
 
     /// Marks that we've broadcast a nullification certificate.
@@ -181,8 +170,8 @@ impl<D: Digest> ViewState<D> {
     }
 
     /// Returns true if an M-notarization certificate was broadcast for this view.
-    pub const fn has_broadcast_m_notarization(&self) -> bool {
-        self.broadcast_m_notarization.is_some()
+    pub fn has_broadcast_m_notarization(&self) -> bool {
+        !self.broadcast_m_notarizations.is_empty()
     }
 
     /// Returns true if the nullification certificate was broadcast.
@@ -192,15 +181,15 @@ impl<D: Digest> ViewState<D> {
 
     /// Returns true if a certificate of the same type was already broadcast.
     ///
-    /// For M-notarizations, this returns true if ANY M-notarization was broadcast
-    /// (regardless of digest), since we only broadcast the first one per view.
+    /// For M-notarizations, this returns true only if the same proposal was already
+    /// broadcast in this view.
     ///
     /// For Finalizations, this always returns false since Finalizations are never
     /// broadcast (per the Minimmit paper). Deduplication for Finalizations is
     /// handled by the ancestry tracker.
-    pub const fn has_certificate<S: Scheme<D>>(&self, certificate: &Certificate<S, D>) -> bool {
+    pub fn has_certificate<S: Scheme<D>>(&self, certificate: &Certificate<S, D>) -> bool {
         match certificate {
-            Certificate::MNotarization(_) => self.broadcast_m_notarization.is_some(),
+            Certificate::MNotarization(m) => self.broadcast_m_notarizations.contains(&m.proposal),
             Certificate::Nullification(_) => self.broadcast_nullification,
             Certificate::Finalization(_) => false,
         }
@@ -211,12 +200,11 @@ impl<D: Digest> ViewState<D> {
     /// Sets internal state to reflect that we already voted for this proposal,
     /// preventing double-voting and double-broadcasting after restart.
     pub fn replay_notarize<S: Scheme<D>>(&mut self, notarize: &Notarize<S, D>) {
-        let digest = notarize.proposal.payload;
-        self.proposals
-            .entry(digest)
-            .or_insert_with(|| notarize.proposal.clone());
-        self.verified.insert(digest);
-        self.phase = Phase::Voted { digest };
+        self.proposals.insert(notarize.proposal.clone());
+        self.verified.insert(notarize.proposal.clone());
+        self.phase = Phase::Voted {
+            digest: notarize.proposal.payload,
+        };
         self.broadcast_notarize = true;
     }
 
@@ -233,10 +221,10 @@ impl<D: Digest> ViewState<D> {
     ///
     /// Sets internal broadcast flags to prevent double-broadcasting after restart.
     /// Finalizations are not tracked here since they are never broadcast.
-    pub const fn replay_certificate<S: Scheme<D>>(&mut self, certificate: &Certificate<S, D>) {
+    pub fn replay_certificate<S: Scheme<D>>(&mut self, certificate: &Certificate<S, D>) {
         match certificate {
             Certificate::MNotarization(m) => {
-                self.broadcast_m_notarization = Some(m.proposal.payload);
+                self.broadcast_m_notarizations.insert(m.proposal.clone());
             }
             Certificate::Nullification(_) => {
                 self.broadcast_nullification = true;
@@ -282,11 +270,10 @@ mod tests {
             parent_payload,
             Sha256Digest::from([4u8; 32]),
         );
-        let digest = proposal.payload;
         assert!(state.set_proposal(proposal.clone()));
-        assert!(!state.set_proposal(proposal));
-        assert!(state.mark_verified(digest));
-        assert!(!state.mark_verified(digest));
-        assert!(state.is_verified(digest));
+        assert!(!state.set_proposal(proposal.clone()));
+        assert!(state.mark_verified(&proposal));
+        assert!(!state.mark_verified(&proposal));
+        assert!(state.is_verified(&proposal));
     }
 }

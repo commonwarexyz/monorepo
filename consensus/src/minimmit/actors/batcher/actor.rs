@@ -39,7 +39,7 @@ use prometheus_client::metrics::{
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 /// Batcher actor for Minimmit consensus.
 ///
@@ -164,6 +164,17 @@ where
         )
     }
 
+    /// Records that an M-notarization exists for `view`.
+    ///
+    /// The replay hint can arrive before any votes for the view are observed.
+    /// In that case we still need a round so the verifier can batch toward
+    /// L-quorum once additional votes arrive.
+    fn mark_m_notarization_exists(&self, work: &mut BTreeMap<View, Round<S, B, D, R>>, view: View) {
+        work.entry(view)
+            .or_insert_with(|| self.new_round())
+            .mark_m_quorum_reached();
+    }
+
     /// Start the batcher actor.
     pub fn start(
         mut self,
@@ -256,9 +267,7 @@ where
                         // Mark that M-quorum was reached for this view.
                         // This allows batching toward L-quorum even after crash
                         // recovery where the verified vote count is lost.
-                        if let Some(round) = work.get_mut(&view) {
-                            round.mark_m_quorum_reached();
-                        }
+                        self.mark_m_notarization_exists(&mut work, view);
                         // No verification needed, just continue
                         continue;
                     }
@@ -268,8 +277,7 @@ where
             Ok((sender, message)) = certificate_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
-                    warn!(?sender, "blocking peer for decoding error");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "malformed certificate received");
                     continue;
                 };
 
@@ -283,8 +291,7 @@ where
 
                 // If the epoch is not the current epoch, block
                 if message.epoch() != self.epoch {
-                    warn!(?sender, "blocking peer for epoch mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch in certificate");
                     continue;
                 }
 
@@ -326,8 +333,7 @@ where
                 };
 
                 if !valid {
-                    warn!(?sender, %view, "blocking peer for invalid certificate");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "invalid certificate received");
                     continue;
                 }
 
@@ -340,56 +346,53 @@ where
             },
             // Handle votes from the network
             Ok((sender, message)) = vote_receiver.recv() else break => {
+                // If there is a decoding error, block
+                let Ok(message) = message else {
+                    commonware_p2p::block!(self.blocker, sender, "malformed vote received");
+                    continue;
+                };
 
-                    // If there is a decoding error, block
-                    let Ok(message) = message else {
-                        warn!(?sender, "blocking peer for decoding error");
-                        self.blocker.block(sender).await;
-                        continue;
-                    };
+                // Update metrics
+                let label = match &message {
+                    Vote::Notarize(_) => Inbound::notarize(&sender),
+                    Vote::Nullify(_) => Inbound::nullify(&sender),
+                };
+                self.inbound_messages.get_or_create(&label).inc();
 
-                    // Update metrics
-                    let label = match &message {
-                        Vote::Notarize(_) => Inbound::notarize(&sender),
-                        Vote::Nullify(_) => Inbound::nullify(&sender),
-                    };
-                    self.inbound_messages.get_or_create(&label).inc();
+                // If the epoch is not the current epoch, block
+                if message.epoch() != self.epoch {
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch in vote");
+                    continue;
+                }
 
-                    // If the epoch is not the current epoch, block
-                    if message.epoch() != self.epoch {
-                        warn!(?sender, "blocking peer for epoch mismatch");
-                        self.blocker.block(sender).await;
-                        continue;
+                // If the view isn't interesting, we can skip
+                let view = message.view();
+                if !interesting(
+                    self.activity_timeout,
+                    finalized,
+                    current,
+                    view,
+                    false,
+                ) {
+                    continue;
+                }
+
+                // Add the vote to the verifier
+                let peer = Peer::new(&sender);
+                if work
+                    .entry(view)
+                    .or_insert_with(|| self.new_round())
+                    .add_network(sender, message)
+                    .await {
+                        self.added.inc();
+
+                        // Update per-peer latest vote metric (only if higher than current)
+                        let _ = self
+                            .latest_vote
+                            .get_or_create(&peer)
+                            .try_set_max(view.get());
                     }
-
-                    // If the view isn't interesting, we can skip
-                    let view = message.view();
-                    if !interesting(
-                        self.activity_timeout,
-                        finalized,
-                        current,
-                        view,
-                        false,
-                    ) {
-                        continue;
-                    }
-
-                    // Add the vote to the verifier
-                    let peer = Peer::new(&sender);
-                    if work
-                        .entry(view)
-                        .or_insert_with(|| self.new_round())
-                        .add_network(sender, message)
-                        .await {
-                            self.added.inc();
-
-                            // Update per-peer latest vote metric (only if higher than current)
-                            let _ = self
-                                .latest_vote
-                                .get_or_create(&peer)
-                                .try_set_max(view.get());
-                        }
-                    updated_view = view;
+                updated_view = view;
             },
             on_end => {
                 assert!(
@@ -443,8 +446,7 @@ where
                     // Block invalid signers
                     for invalid in failed {
                         if let Some(signer) = self.participants.key(invalid) {
-                            warn!(?signer, "blocking peer for invalid signature");
-                            self.blocker.block(signer.clone()).await;
+                            commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature in vote");
                         }
                     }
 
@@ -484,7 +486,7 @@ mod tests {
     use super::*;
     use crate::{
         minimmit::{scheme::ed25519, types::Nullify},
-        types::{Epoch, Round as Rnd, View},
+        types::{Epoch, Participant, Round as Rnd, View},
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, Scheme as _},
@@ -645,5 +647,78 @@ mod tests {
             round.has_m_notarization(&m_notarization_b.proposal),
             "marked M-notarization should dedup by full proposal identity"
         );
+    }
+
+    #[test]
+    fn regression_replay_m_notarization_hint_survives_before_round_creation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let schemes = ed25519_fixture();
+            let view = View::new(2);
+            let leader = Participant::new(0);
+            let round_id = Rnd::new(Epoch::new(1), view);
+            let parent_payload = Sha256Digest::from([1u8; 32]);
+            let proposal = crate::minimmit::types::Proposal::new(
+                round_id,
+                View::new(1),
+                parent_payload,
+                Sha256Digest::from([2u8; 32]),
+            );
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: NoopBlocker,
+                reporter: NoopReporter,
+                strategy: Sequential,
+                epoch: Epoch::new(1),
+                mailbox_size: 8,
+                activity_timeout: ViewDelta::new(3),
+                skip_timeout: ViewDelta::new(1),
+            };
+            let (actor, _mailbox) = Actor::new(context.with_label("batcher"), cfg);
+
+            let mut work = BTreeMap::new();
+
+            // Simulate replay notifying the batcher before any round state exists.
+            actor.mark_m_notarization_exists(&mut work, view);
+
+            let round = work
+                .get_mut(&view)
+                .expect("round should exist after replay hint");
+            round.set_leader(leader);
+
+            // Only two post-restart votes arrive; without the replay hint the verifier
+            // would wait forever for M-quorum again and never continue toward L-quorum.
+            let leader_vote =
+                crate::minimmit::types::Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+            let other_vote =
+                crate::minimmit::types::Notarize::sign(&schemes[1], proposal.clone()).unwrap();
+            let leader_peer = schemes[0]
+                .participants()
+                .key(leader)
+                .expect("leader key")
+                .clone();
+            let other_peer = schemes[0]
+                .participants()
+                .key(Participant::new(1))
+                .expect("participant key")
+                .clone();
+
+            assert!(
+                round
+                    .add_network(leader_peer, Vote::Notarize(leader_vote))
+                    .await
+            );
+            assert!(
+                round
+                    .add_network(other_peer, Vote::Notarize(other_vote))
+                    .await
+            );
+
+            assert!(
+                round.ready_notarizes(),
+                "replayed M-notarization hint must allow batching toward L-quorum even when no round existed at replay time"
+            );
+        });
     }
 }

@@ -58,7 +58,11 @@ pub trait Faults {
     /// Compute the quorum size for `n` participants.
     ///
     /// This is the minimum number of participants that must agree for the protocol
-    /// to make progress. It equals `n - max_faults(n)`.
+    /// to make progress.
+    ///
+    /// The default implementation returns `n - max_faults(n)`, but specific models
+    /// may override this. For example, [`M5f1`] uses M-quorum (`2f + 1`) while
+    /// preserving [`Faults::max_faults`] from [`N5f1`].
     ///
     /// # Panics
     ///
@@ -452,6 +456,29 @@ mod tests {
                 N5f1::max_faults(n),
                 "M5f1::max_faults({}) != N5f1::max_faults({})",
                 n, n
+            );
+        }
+
+        /// Minimmit safety boundary: M-quorum and L-quorum must intersect in
+        /// more than `f` participants, guaranteeing at least one honest overlap.
+        ///
+        /// Mathematically: `m + l > n + f` where:
+        /// - `m = 2f + 1` (M-quorum)
+        /// - `l = n - f` (L-quorum)
+        #[test]
+        fn test_n5f1_m_l_intersection_exceeds_faults(n in 1u32..10_000) {
+            let f = N5f1::max_faults(n);
+            let m = M5f1::quorum(n);
+            let l = N5f1::l_quorum(n);
+
+            prop_assert!(
+                m + l > n + f,
+                "N5f1/M5f1 intersection violated for n={}: {} + {} <= {} + {}",
+                n,
+                m,
+                l,
+                n,
+                f
             );
         }
 

@@ -30,7 +30,7 @@ const GENESIS_VIEW: View = View::zero();
 #[derive(Debug)]
 pub struct Ancestry<S: Scheme<D>, D: Digest> {
     genesis: D,
-    m_notarizations: BTreeMap<View, BTreeMap<D, MNotarization<S, D>>>,
+    m_notarizations: BTreeMap<View, BTreeMap<Proposal<D>, MNotarization<S, D>>>,
     finalizations: BTreeMap<View, Finalization<S, D>>,
     nullifications: BTreeMap<View, Nullification<S>>,
 }
@@ -54,12 +54,12 @@ impl<S: Scheme<D>, D: Digest> Ancestry<S, D> {
     /// Adds an M-notarization, returning true if it was newly inserted.
     pub fn add_m_notarization(&mut self, notarization: MNotarization<S, D>) -> bool {
         let view = notarization.proposal.round.view();
-        let digest = notarization.proposal.payload;
+        let proposal = notarization.proposal.clone();
         let entry = self.m_notarizations.entry(view).or_default();
-        if entry.contains_key(&digest) {
+        if entry.contains_key(&proposal) {
             return false;
         }
-        entry.insert(digest, notarization);
+        entry.insert(proposal, notarization);
         true
     }
 
@@ -85,7 +85,10 @@ impl<S: Scheme<D>, D: Digest> Ancestry<S, D> {
 
     /// Returns the M-notarization for a given view and digest, if present.
     pub fn m_notarization(&self, view: View, digest: D) -> Option<&MNotarization<S, D>> {
-        self.m_notarizations.get(&view).and_then(|m| m.get(&digest))
+        self.m_notarizations.get(&view).and_then(|m| {
+            m.values()
+                .find(|notarization| notarization.proposal.payload == digest)
+        })
     }
 
     /// Returns any M-notarization for a given view, if present.
@@ -171,9 +174,10 @@ impl<S: Scheme<D>, D: Digest> Ancestry<S, D> {
         if let Some(finalization) = self.finalizations.get(&view) {
             return finalization.proposal.payload == payload;
         }
-        self.m_notarizations
-            .get(&view)
-            .is_some_and(|m| m.contains_key(&payload))
+        self.m_notarizations.get(&view).is_some_and(|m| {
+            m.values()
+                .any(|notarization| notarization.proposal.payload == payload)
+        })
     }
 
     /// Drops stored proofs strictly before the provided view.
@@ -227,9 +231,11 @@ impl<S: Scheme<D>, D: Digest> Ancestry<S, D> {
         if let Some(finalization) = self.finalizations.get(&view) {
             return Some(finalization.proposal.payload);
         }
-        self.m_notarizations
-            .get(&view)
-            .and_then(|m| m.keys().next().copied())
+        self.m_notarizations.get(&view).and_then(|m| {
+            m.values()
+                .next()
+                .map(|notarization| notarization.proposal.payload)
+        })
     }
 }
 
@@ -551,6 +557,43 @@ mod tests {
         assert!(
             ancestry_c.is_proposal_valid(&proposal_v2_on_y, GENESIS_VIEW),
             "C should accept proposal building on Y"
+        );
+    }
+
+    /// Regression test: proposals with the same payload but different parents
+    /// are distinct and must not be deduplicated.
+    #[test]
+    fn m_notarization_same_payload_different_parent_is_distinct() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 6);
+
+        let genesis = Sha256Digest::from([0u8; 32]);
+        let mut ancestry = Ancestry::<Scheme, Sha256Digest>::new(genesis);
+
+        let payload = Sha256Digest::from([0xAAu8; 32]);
+        let proposal_a = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(3)),
+            View::new(1),
+            Sha256Digest::from([0x11u8; 32]),
+            payload,
+        );
+        let proposal_b = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(3)),
+            View::new(2),
+            Sha256Digest::from([0x22u8; 32]),
+            payload,
+        );
+
+        let m_notarization_a = m_notarization_fixture(&schemes, &verifier, proposal_a);
+        let m_notarization_b = m_notarization_fixture(&schemes, &verifier, proposal_b);
+
+        assert!(ancestry.add_m_notarization(m_notarization_a));
+        assert!(
+            ancestry.add_m_notarization(m_notarization_b),
+            "distinct proposals must not be collapsed by payload digest"
         );
     }
 }

@@ -24,7 +24,6 @@ use commonware_utils::{
 };
 use rand_core::CryptoRngCore;
 use std::collections::BTreeSet;
-use tracing::warn;
 
 /// Per-view state for vote tracking and verification.
 ///
@@ -109,8 +108,7 @@ where
     pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer");
-            self.blocker.block(sender).await;
+            commonware_p2p::block!(self.blocker, sender, "vote received from non-participant");
             return false;
         };
 
@@ -119,8 +117,11 @@ where
             Vote::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(
+                        self.blocker,
+                        sender,
+                        "notarize vote received with invalid signer"
+                    );
                     return false;
                 }
 
@@ -135,8 +136,11 @@ where
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(
+                                self.blocker,
+                                sender,
+                                "conflicting notarize votes"
+                            );
                         }
                         false
                     }
@@ -152,8 +156,11 @@ where
             Vote::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(
+                        self.blocker,
+                        sender,
+                        "nullify vote received with invalid signer"
+                    );
                     return false;
                 }
 
@@ -161,8 +168,11 @@ where
                 match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
-                            warn!(?sender, "blocking peer");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(
+                                self.blocker,
+                                sender,
+                                "conflicting nullify votes"
+                            );
                         }
                         false
                     }

@@ -1392,12 +1392,8 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub const fn verified(&self) -> bool {
         match self {
-            Self::Notarize(_)
-            | Self::Nullify(_)
-            | Self::MNotarization(_)
-            | Self::Nullification(_)
-            | Self::Finalization(_) => true,
-            Self::ConflictingNotarize(_) => false,
+            Self::MNotarization(_) | Self::Nullification(_) | Self::Finalization(_) => true,
+            Self::Notarize(_) | Self::Nullify(_) | Self::ConflictingNotarize(_) => false,
         }
     }
 }
