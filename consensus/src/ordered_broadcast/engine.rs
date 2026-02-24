@@ -478,7 +478,7 @@ impl<
                         continue;
                     }
                 };
-                if let Err(err) = self.validate_ack_cheap(&ack, &sender) {
+                if let Err(err) = self.validate_ack(&ack, &sender) {
                     debug!(?err, ?sender, "ack validate failed");
                     self.metrics.acks.inc(Status::Dropped);
                     continue;
@@ -961,12 +961,12 @@ impl<
         )
     }
 
-    /// Performs cheap validation on an ack from the network.
+    /// Validates an ack from the network.
     ///
     /// Checks epoch bounds, sender/signer match, and height range.
     /// Does NOT verify the cryptographic signature -- that is deferred
     /// to the batch verifier for efficiency.
-    fn validate_ack_cheap(
+    fn validate_ack(
         &self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,

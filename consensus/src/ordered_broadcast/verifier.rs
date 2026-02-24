@@ -629,4 +629,60 @@ mod tests {
         prune_heights(bls12381_threshold::fixture::<MinPk, _>);
         prune_heights(bls12381_threshold::fixture::<MinSig, _>);
     }
+
+    /// Test that invalid signatures are detected and reported.
+    fn invalid_signatures<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let num_validators = 4;
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, num_validators);
+        let quorum = N3f1::quorum(num_validators);
+
+        let mut verifier = Verifier::<PublicKey, S, Sha256Digest>::new(quorum);
+        let epoch = Epoch::new(1);
+        let chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"payload"),
+        );
+
+        // Create quorum - 1 valid acks.
+        for i in 0..quorum as usize - 1 {
+            let ack = create_ack(&fixture.schemes[i], chunk.clone(), epoch);
+            verifier.add(ack, false);
+        }
+
+        // Create one invalid ack: sign over a different chunk, then swap
+        // in the real chunk so the signature mismatches.
+        let wrong_chunk = Chunk::new(
+            fixture.participants[0].clone(),
+            crate::types::Height::new(1),
+            Sha256::hash(b"wrong_payload"),
+        );
+        let bad_ack = create_ack(&fixture.schemes[quorum as usize - 1], wrong_chunk, epoch);
+        let bad_ack = Ack::new(chunk, epoch, bad_ack.attestation);
+        verifier.add(bad_ack, false);
+
+        assert!(verifier.ready());
+        let result = verifier.verify(&mut rng, &fixture.schemes[0], &Sequential);
+
+        // Valid acks should be verified.
+        assert_eq!(result.acks.len(), quorum as usize - 1);
+
+        // The forged ack's signer should appear in invalid.
+        assert_eq!(result.invalid.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_signatures() {
+        invalid_signatures(ed25519::fixture);
+        invalid_signatures(secp256r1::fixture);
+        invalid_signatures(bls12381_multisig::fixture::<MinPk, _>);
+        invalid_signatures(bls12381_multisig::fixture::<MinSig, _>);
+        invalid_signatures(bls12381_threshold::fixture::<MinPk, _>);
+        invalid_signatures(bls12381_threshold::fixture::<MinSig, _>);
+    }
 }
