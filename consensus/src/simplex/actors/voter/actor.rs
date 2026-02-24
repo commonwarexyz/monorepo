@@ -323,7 +323,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Emits a nullify vote and persists first-attempt votes for deterministic recovery.
+    /// Emits a nullify vote (and persists it if it is a first attempt).
     async fn broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
