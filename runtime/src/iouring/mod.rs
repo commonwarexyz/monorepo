@@ -699,8 +699,8 @@ impl IoUringLoop {
                 // SAFETY: `buffer`, `timespec`, and `fd` are stored in `self.waiters`
                 // until the CQE is processed, ensuring memory referenced by the SQEs
                 // remains valid and the FD cannot be reused. The ring was doubled in
-                // size for timeout support, and `self.waiters.len() < cfg.size`
-                // guarantees space for both entries.
+                // size for timeout support, and we checked `available >= needed` above,
+                // so the submission fits in the queue.
                 unsafe {
                     submission_queue
                         .push(&work)
@@ -716,9 +716,8 @@ impl IoUringLoop {
                 //
                 // SAFETY: `buffer` and `fd` are stored in `self.waiters` until the
                 // CQE is processed, ensuring memory referenced by the SQE remains
-                // valid and the FD cannot be reused. The loop condition
-                // `self.waiters.len() < cfg.size` guarantees space in the submission
-                // queue.
+                // valid and the FD cannot be reused. We checked `available >= needed`
+                // above, so the submission fits in the queue.
                 unsafe {
                     submission_queue
                         .push(&work)
