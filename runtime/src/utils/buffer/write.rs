@@ -81,21 +81,21 @@ impl<B: Blob> Write<B> {
         buffer.size()
     }
 
-    /// Read immutable bytes starting at `offset`.
-    ///
-    /// This method holds the tip-buffer read lock for the entire read, including persisted blob
-    /// I/O, to preserve a consistent view when concurrent writes may flush or mutate overlapping
-    /// ranges.
+    /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         if len == 0 {
             return Ok(IoBufs::default());
         }
 
+        // Ensure the read doesn't overflow.
         let end_offset = offset
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
+        // Acquire a read lock on the buffer.
         let buffer = self.buffer.read().await;
+
+        // If the data required is beyond the size of the blob, return an error.
         if end_offset > buffer.size() {
             return Err(Error::BlobInsufficientLength);
         }
@@ -107,33 +107,33 @@ impl<B: Blob> Write<B> {
             return Ok(buffer.slice(start..end).into());
         }
 
-        // Entirely persisted.
+        // Entirely in blob.
         if end_offset <= buffer.offset {
             return Ok(self.blob.read_at(offset, len).await?.freeze());
         }
 
-        // Overlaps persisted range and buffered tip.
-        let persisted_len = (buffer.offset - offset) as usize;
-        let tip_len = len - persisted_len;
+        // Overlaps blob and buffered tip.
+        let blob_len = (buffer.offset - offset) as usize;
+        let tip_len = len - blob_len;
         let tip = buffer.slice(..tip_len);
 
-        let mut persisted = self.blob.read_at(offset, persisted_len).await?.freeze();
-        persisted.append(tip);
-        Ok(persisted)
+        let mut blob = self.blob.read_at(offset, blob_len).await?.freeze();
+        blob.append(tip);
+        Ok(blob)
     }
 
     /// Write bytes from `buf` at `offset`.
     ///
-    /// Data is merged into the in-memory tip buffer when possible; otherwise buffered data may be
+    /// Data is merged into the in-memory tip buffer when possible, otherwise buffered data may be
     /// flushed and chunks are written directly to the underlying blob.
     ///
-    /// Returns [Error::OffsetOverflow] when `offset + buf.len()` overflows.
-    pub async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let mut buf = buf.into();
+    /// Returns [Error::OffsetOverflow] when `offset + bufs.len()` overflows.
+    pub async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
         offset
-            .checked_add(buf.remaining() as u64)
+            .checked_add(bufs.remaining() as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a write lock on the buffer.
@@ -142,13 +142,13 @@ impl<B: Blob> Write<B> {
         // Process each chunk of the input buffer, attempting to merge into the tip buffer
         // or writing directly to the underlying blob.
         let mut current_offset = offset;
-        while buf.has_remaining() {
-            let chunk = buf.chunk();
+        while bufs.has_remaining() {
+            let chunk = bufs.chunk();
             let chunk_len = chunk.len();
 
             // Chunk falls entirely within the buffer's current range and can be merged.
             if buffer.merge(chunk, current_offset) {
-                buf.advance(chunk_len);
+                bufs.advance(chunk_len);
                 current_offset += chunk_len as u64;
                 continue;
             }
@@ -160,7 +160,7 @@ impl<B: Blob> Write<B> {
                 if let Some((old_buf, old_offset)) = buffer.take() {
                     self.blob.write_at(old_offset, old_buf).await?;
                     if buffer.merge(chunk, current_offset) {
-                        buf.advance(chunk_len);
+                        bufs.advance(chunk_len);
                         current_offset += chunk_len as u64;
                         continue;
                     }
@@ -171,7 +171,7 @@ impl<B: Blob> Write<B> {
             // write directly. Note that we may end up writing an intersecting range twice:
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
-            let direct = buf.split_to(chunk_len);
+            let direct = bufs.split_to(chunk_len);
             self.blob.write_at(current_offset, direct).await?;
             current_offset += chunk_len as u64;
 

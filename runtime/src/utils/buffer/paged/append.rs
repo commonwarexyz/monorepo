@@ -548,7 +548,7 @@ impl<B: Blob> Append<B> {
         self.read_at(logical_offset, available).await
     }
 
-    /// Read immutable bytes starting at `logical_offset`.
+    /// Read exactly `len` immutable bytes starting at `logical_offset`.
     ///
     /// # Errors
     ///
