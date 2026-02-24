@@ -1489,6 +1489,10 @@ mod tests {
             // With RoundRobin and 4 participants, epoch=1 implies view=3 leader is index 0 (our signer).
             assert_eq!(state.leader_index(child_view), Some(Participant::new(0)));
 
+            // Before late certification arrives, we cannot build a child because parent ancestry
+            // is still incomplete for this node.
+            assert!(state.try_propose().is_none());
+
             // Late certification after nullification is still recorded.
             assert!(state.certified(parent_view, true).is_some());
 
