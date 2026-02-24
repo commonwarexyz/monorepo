@@ -1506,6 +1506,87 @@ mod tests {
     }
 
     #[test]
+    fn nullification_then_late_certification_unblocks_follower_verify() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            // With RoundRobin (epoch=1), child view=3 has leader index 0, so signer index 1 is a follower.
+            let local_scheme = schemes[1].clone();
+            let cfg = Config {
+                scheme: local_scheme,
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let parent_view = View::new(2);
+            let child_view = parent_view.next();
+            let parent_payload = Sha256Digest::from([77u8; 32]);
+            let parent_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                parent_payload,
+            );
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(
+                        scheme,
+                        Rnd::new(Epoch::new(1), parent_view),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), child_view);
+            assert_eq!(state.leader_index(child_view), Some(Participant::new(0)));
+
+            // Proposal at child view depends on the parent view.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                parent_view,
+                Sha256Digest::from([78u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal.clone()));
+
+            // Before late certification of parent, follower cannot verify this child proposal.
+            assert!(state.try_verify().is_none());
+
+            // Late certification after nullification should unblock parent check for verification.
+            assert!(state.certified(parent_view, true).is_some());
+            let verified = state.try_verify();
+            assert!(verified.is_some());
+            let (ctx, proposal) = verified.expect("verify context should exist");
+            assert_eq!(ctx.round.view(), child_view);
+            assert_eq!(ctx.parent, (parent_view, parent_payload));
+            assert_eq!(proposal, child_proposal);
+        });
+    }
+
+    #[test]
     fn only_notarize_before_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
