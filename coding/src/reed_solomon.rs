@@ -33,8 +33,6 @@ pub enum Error {
     InvalidDataLength(usize),
     #[error("invalid index: {0}")]
     InvalidIndex(u16),
-    #[error("wrong index: {0}")]
-    WrongIndex(u16),
     #[error("too many total shards: {0}")]
     TooManyTotalShards(u32),
 }
@@ -597,13 +595,20 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn weaken(
-        _config: &Config,
+        config: &Config,
         commitment: &Self::Commitment,
         index: u16,
         shard: Self::StrongShard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
+        let total = total_shards(config)?;
+        if index >= total {
+            return Err(Error::InvalidIndex(index));
+        }
+        if shard.proof.leaf_count != u32::from(total) {
+            return Err(Error::InvalidProof);
+        }
         if shard.index != index {
-            return Err(Error::WrongIndex(index));
+            return Err(Error::InvalidIndex(index));
         }
         let checked_shard = shard
             .verify::<H>(shard.index, commitment)
@@ -612,14 +617,21 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn check(
-        _config: &Config,
+        config: &Config,
         commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
         index: u16,
         weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
+        let total = total_shards(config)?;
+        if index >= total {
+            return Err(Error::InvalidIndex(index));
+        }
+        if weak_shard.proof.leaf_count != u32::from(total) {
+            return Err(Error::InvalidProof);
+        }
         if weak_shard.index != index {
-            return Err(Error::WrongIndex(weak_shard.index));
+            return Err(Error::InvalidIndex(weak_shard.index));
         }
         weak_shard
             .verify::<H>(weak_shard.index, commitment)
@@ -823,6 +835,36 @@ mod tests {
         // Attempt to decode with malicious root
         let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_mismatched_config_rejected_during_weaken_and_check() {
+        type RS = ReedSolomon<Sha256>;
+
+        let config_expected = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+        let config_actual = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(3),
+        };
+
+        let data = b"leaf_count mismatch proof";
+        let (commitment, shards) = RS::encode(&config_actual, data.as_slice(), &STRATEGY).unwrap();
+
+        // Previously this passed because weaken() ignored config and only verified
+        // against commitment root. It must now fail immediately.
+        let strong = shards[0].clone();
+        let weaken_result = RS::weaken(&config_expected, &commitment, 0, strong);
+        assert!(matches!(weaken_result, Err(Error::InvalidProof)));
+
+        // Produce a valid weak shard under the actual config, then ensure check()
+        // also rejects it when validated under the wrong config.
+        let (checking_data, _, weak) =
+            RS::weaken(&config_actual, &commitment, 1, shards[1].clone()).unwrap();
+        let check_result = RS::check(&config_expected, &commitment, &checking_data, 1, weak);
+        assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 
     #[test]
