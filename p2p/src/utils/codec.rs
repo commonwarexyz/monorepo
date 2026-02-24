@@ -11,7 +11,6 @@ use commonware_utils::{
     futures::Pool,
 };
 use std::time::SystemTime;
-use tracing::warn;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
@@ -252,8 +251,7 @@ where
                 sender.send_lossy((peer, value)).await;
             }
             Err(err) => {
-                warn!(?peer, ?err, "received invalid message, blocking peer");
-                blocker.block(peer).await;
+                crate::block!(blocker, peer, ?err, "received invalid message");
             }
         }
     }

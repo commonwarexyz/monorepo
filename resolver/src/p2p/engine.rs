@@ -437,7 +437,7 @@ impl<
 
         // If the data is invalid, we need to block the peer and try again
         // (blocking the peer also removes any targets associated with it)
-        self.blocker.block(peer.clone()).await;
+        commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);

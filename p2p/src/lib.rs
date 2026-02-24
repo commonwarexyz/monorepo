@@ -293,3 +293,30 @@ stability_scope!(BETA {
         fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
     }
 });
+
+/// Logs a warning and blocks a peer in a single call.
+///
+/// This macro combines a [`tracing::warn!`] with a [`Blocker::block`] call
+/// to ensure consistent logging at every block site. The peer is always
+/// included as a `peer` field in the log output.
+///
+/// # Examples
+///
+/// ```ignore
+/// block!(self.blocker, sender, "invalid message");
+/// block!(self.blocker, sender, ?err, "invalid ack signature");
+/// block!(self.blocker, sender, %view, "blocking peer for epoch mismatch");
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! block {
+    ($blocker:expr, $peer:expr, $($arg:tt)+) => {
+        tracing::warn!(peer = ?$peer, $($arg)+);
+        $blocker.block($peer).await;
+    };
+}

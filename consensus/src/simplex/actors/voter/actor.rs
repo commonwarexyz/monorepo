@@ -294,8 +294,7 @@ impl<
         let Some(equivocator) = equivocator else {
             return;
         };
-        warn!(?equivocator, "blocking equivocator");
-        self.blocker.block(equivocator).await;
+        commonware_p2p::block!(self.blocker, equivocator, "blocking equivocator");
     }
 
     /// Attempt to propose a new block.

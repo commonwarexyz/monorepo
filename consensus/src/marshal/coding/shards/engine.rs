@@ -1110,8 +1110,7 @@ where
         let Ok((checking_data, checked, weak_shard_data)) =
             C::weaken(&commitment.config(), &commitment.root(), index, data)
         else {
-            warn!(?sender, "invalid strong shard received, blocking peer");
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "invalid strong shard received");
             return false;
         };
 
@@ -1160,8 +1159,7 @@ where
             });
 
         for peer in to_block {
-            warn!(?peer, "invalid shard received, blocking peer");
-            blocker.block(peer).await;
+            commonware_p2p::block!(blocker, peer, "invalid shard received");
         }
         self.common.checked_shards.extend(new_checked);
 
@@ -1329,8 +1327,7 @@ where
         X: Blocker<PublicKey = P>,
     {
         let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
-            warn!(?sender, "shard sent by non-participant, blocking peer");
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "shard sent by non-participant");
             return false;
         };
         let commitment = shard.commitment();
@@ -1378,11 +1375,7 @@ where
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let Some(me) = me else {
-            warn!(
-                ?sender,
-                "strong shard sent to non-participant, blocking peer"
-            );
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "strong shard sent to non-participant");
             return false;
         };
 
@@ -1391,33 +1384,29 @@ where
             .try_into()
             .expect("participant index impossibly out of bounds");
         if shard.index != expected_index {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 shard_index = shard.index,
                 expected_index = me.get() as usize,
-                "strong shard index does not match self index, blocking peer"
+                "strong shard index does not match self index"
             );
-            blocker.block(sender).await;
             return false;
         }
 
         let common = self.common();
         if sender != common.leader {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 leader = ?common.leader,
-                "strong shard from non-leader, blocking peer"
+                "strong shard from non-leader"
             );
-            blocker.block(sender).await;
             return false;
         }
         if let Some(received_strong) = common.received_strong.as_ref() {
             if received_strong != &shard.data {
-                warn!(
-                    ?sender,
-                    "strong shard equivocation from leader, blocking peer"
-                );
-                blocker.block(sender).await;
+                commonware_p2p::block!(blocker, sender, "strong shard equivocation from leader");
             }
             return false;
         }
@@ -1443,13 +1432,13 @@ where
             .try_into()
             .expect("participant index impossibly out of bounds");
         if shard.index != expected_index {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 shard_index = shard.index,
                 expected_index = sender_index.get() as usize,
-                "weak shard index does not match participant index, blocking peer"
+                "weak shard index does not match participant index"
             );
-            blocker.block(sender).await;
             return false;
         }
 
@@ -1460,11 +1449,7 @@ where
                     if state.pending_weak_shards.get(&sender).is_some_and(|existing| existing.data != shard.data)
             );
             if equivocated {
-                warn!(
-                    ?sender,
-                    "duplicate weak shard with different data, blocking peer"
-                );
-                blocker.block(sender).await;
+                commonware_p2p::block!(blocker, sender, "duplicate weak shard with different data");
             }
             return false;
         }
