@@ -1325,8 +1325,8 @@ where
     /// Strong shards (`CodingScheme::StrongShard`):
     /// - MUST be sent by a participant.
     /// - MUST correspond to self's index when self is a participant.
-    /// - When self is not a participant (`scheme.me()` is `None`), the index
-    ///   MUST correspond to the sender's participant index (which must be the leader).
+    /// - MUST correspond to the sender's participant index (which MUST be the leader)
+    ///   when self is not a participant
     /// - MUST be sent by the leader (when the leader is known). Non-leader senders
     ///   are blocked.
     /// - The leader may only send ONE strong shard. Sending a second strong shard
