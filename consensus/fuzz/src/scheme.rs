@@ -12,6 +12,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Quorum, Set},
     sequence::U32,
+    sync::Mutex,
     Array, Faults, Participant, Span, TryCollect,
 };
 use core::{
@@ -19,10 +20,7 @@ use core::{
     ops::Deref,
 };
 use rand::{CryptoRng, RngCore};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct Identity(U32);
