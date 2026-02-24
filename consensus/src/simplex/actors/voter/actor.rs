@@ -1012,7 +1012,6 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-                                let view = nullification.view();
                                 let late_timeout_nullify = self.try_construct_nullify(view);
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
