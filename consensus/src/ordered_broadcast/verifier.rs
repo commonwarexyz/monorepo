@@ -83,6 +83,11 @@ pub struct Verified<P: PublicKey, S: Scheme, D: Digest> {
 pub struct Verifier<P: PublicKey, S: Scheme, D: Digest> {
     batches: HashMap<BatchKey<P, D>, Batch<P, S, D>>,
     quorum: usize,
+
+    /// Whether any batch is ready for verification. Set when a pending
+    /// ack makes its batch reach the readiness threshold, cleared after
+    /// `verify()`.
+    ready: bool,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
@@ -91,6 +96,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         Self {
             batches: HashMap::new(),
             quorum: quorum as usize,
+            ready: false,
         }
     }
 
@@ -127,14 +133,15 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
             batch.verified += 1;
         } else {
             batch.pending.push(ack);
+            if batch.is_ready(self.quorum) {
+                self.ready = true;
+            }
         }
     }
 
     /// Returns true if any batch is ready for verification.
-    pub fn ready(&self) -> bool {
-        self.batches
-            .values()
-            .any(|batch| batch.is_ready(self.quorum))
+    pub const fn ready(&self) -> bool {
+        self.ready
     }
 
     /// Batch-verifies all ready batches and returns verified acks and invalid signers.
@@ -203,6 +210,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Verifier<P, S, D> {
         // Remove batches that are fully resolved (verified >= quorum and no pending).
         self.batches
             .retain(|_, batch| !batch.pending.is_empty() || batch.verified < self.quorum);
+
+        self.ready = false;
 
         Verified {
             acks: all_acks,
