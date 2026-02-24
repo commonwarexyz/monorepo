@@ -60,9 +60,8 @@
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
-//!     // Create a page cache. The constructor takes physical page size:
-//!     // 1024 logical bytes + 12-byte CRC record = 1036.
-//!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1036), NZUsize!(10));
+//!     // Create a page cache
+//!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
 //!
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config {

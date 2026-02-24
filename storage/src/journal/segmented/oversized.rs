@@ -464,6 +464,10 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU16};
 
+    const CHECKSUM_SIZE: usize = 12;
+    const ENTRY_PHYSICAL_PAGE_SIZE: u16 = TestEntry::SIZE as u16 + CHECKSUM_SIZE as u16;
+    const ENTRY_PHYSICAL_PAGE_SIZE_U64: u64 = ENTRY_PHYSICAL_PAGE_SIZE as u64;
+
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
         offset + u64::from(size)
@@ -530,7 +534,11 @@ mod tests {
         Config {
             index_partition: "test-index".into(),
             value_partition: "test-values".into(),
-            index_page_cache: CacheRef::from_pooler(pooler, NZU16!(76), NZUsize!(8)),
+            index_page_cache: CacheRef::from_pooler(
+                pooler,
+                NZU16!(64 + CHECKSUM_SIZE as u16),
+                NZUsize!(8),
+            ),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -918,11 +926,14 @@ mod tests {
         executor.start(|context| async move {
             // Use page size = entry size so each entry is on its own page.
             // This allows corrupting just the last entry's page without affecting others.
-            // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
+                    NZUsize!(8),
+                ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -953,12 +964,10 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
 
-            // Physical page size = 20 + 12 = 32 bytes
-            // 5 entries = 5 pages = 160 bytes total
-            // Last page CRC starts at offset 160 - 12 = 148
-            assert_eq!(size, 160);
-            let last_page_crc_offset = size - 12;
-            blob.write_at(last_page_crc_offset, vec![0xFF; 12])
+            // 5 entries = 5 pages
+            assert_eq!(size, 5 * ENTRY_PHYSICAL_PAGE_SIZE_U64);
+            let last_page_crc_offset = size - CHECKSUM_SIZE as u64;
+            blob.write_at(last_page_crc_offset, vec![0xFF; CHECKSUM_SIZE])
                 .await
                 .expect("Failed to corrupt");
             blob.sync().await.expect("Failed to sync");
@@ -1458,7 +1467,11 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
+                    NZUsize!(8),
+                ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1493,9 +1506,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Keep only first 2 index entries (2 full pages)
-            // Physical page size = logical (20) + CRC record (12) = 32 bytes
-            let physical_page_size = (TestEntry::SIZE + 12) as u64;
-            blob.resize(2 * physical_page_size)
+            blob.resize(2 * ENTRY_PHYSICAL_PAGE_SIZE_U64)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -1739,7 +1750,11 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
+                    NZUsize!(8),
+                ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1771,9 +1786,7 @@ mod tests {
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            // Physical page size = logical (20) + CRC record (12) = 32 bytes
-            let physical_page_size = (TestEntry::SIZE + 12) as u64;
-            blob.resize(2 * physical_page_size)
+            blob.resize(2 * ENTRY_PHYSICAL_PAGE_SIZE_U64)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -2458,11 +2471,15 @@ mod tests {
         // when added to size is detected as invalid during recovery.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Use page size = entry size so one entry per page
+            // Use page size = entry size so one entry per page.
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(&context, NZU16!(32), NZUsize!(8)),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
+                    NZUsize!(8),
+                ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2499,7 +2516,7 @@ mod tests {
             100u32.write(&mut entry_data); // value_size (offset + size overflows)
             assert_eq!(entry_data.len(), TestEntry::SIZE);
 
-            // Build page-level CRC record (12 bytes):
+            // Build page-level CRC record.
             // len1 (2) + crc1 (4) + len2 (2) + crc2 (4)
             let crc = Crc32::checksum(&entry_data);
             let len1 = TestEntry::SIZE as u16;
@@ -2508,7 +2525,7 @@ mod tests {
             crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
             crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
             crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
-            assert_eq!(crc_record.len(), 12);
+            assert_eq!(crc_record.len(), CHECKSUM_SIZE);
 
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
