@@ -134,7 +134,7 @@
 //! The engine enforces strict validation to prevent Byzantine attacks:
 //!
 //! - All shards MUST be sent by participants in the current epoch.
-//! - Strong shards MUST correspond to the recipient's index.
+//! - Strong shards MUST correspond to the recipient's index for participants.
 //! - Weak shards MUST be sent by the participant whose index matches
 //!   the shard index.
 //! - All shards MUST pass cryptographic verification against the commitment.
@@ -187,7 +187,7 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    ordered::Quorum,
+    ordered::{Quorum, Set},
     Participant,
 };
 use rand::Rng;
@@ -330,6 +330,9 @@ where
     /// Subscription to peer set changes.
     peer_set_subscription: PeerSetSubscription<P>,
 
+    /// Latest union of tracked peers from the peer set subscription.
+    tracked_peers: Set<P>,
+
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
 
@@ -382,6 +385,7 @@ where
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
                 peer_set_subscription: config.peer_set_subscription,
+                tracked_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
@@ -538,8 +542,8 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                self.peer_buffers
-                    .retain(|peer, _| tracked_peers.as_ref().contains(peer));
+                self.tracked_peers = tracked_peers.clone();
+                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
             },
         }
     }
@@ -636,11 +640,6 @@ where
             warn!(%commitment, "no scheme for epoch, ignoring external proposal");
             return;
         };
-        if scheme.me().is_none() {
-            // If we're not a participant, we won't be receiving any shards for this commitment,
-            // so we can ignore it.
-            return;
-        }
         let participants = scheme.participants();
         if participants.index(&leader).is_none() {
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
@@ -729,7 +728,10 @@ where
         self.notify_block_subscribers(block);
     }
 
-    /// Broadcasts the shards of a [`CodedBlock`] to all participants and caches the block.
+    /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
+    ///
+    /// - Participants receive the strong shard matching their participant index.
+    /// - Tracked non-participants receive the leader's strong shard.
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -743,7 +745,13 @@ where
             return;
         };
         let participants = scheme.participants();
-        let me = scheme.me();
+        let Some(me) = scheme.me() else {
+            warn!(
+                %commitment,
+                "cannot broadcast shards: local proposer is not a participant"
+            );
+            return;
+        };
 
         let shard_count = block.shards(&self.strategy).len();
         if shard_count != participants.len() {
@@ -756,9 +764,19 @@ where
             return;
         }
 
-        // Broadcast each shard to the corresponding participant.
+        let my_index = me.get() as usize;
+        let Some(leader_shard) = block.shard(my_index as u16) else {
+            warn!(
+                %commitment,
+                index = my_index,
+                "cannot broadcast shards: missing leader shard"
+            );
+            return;
+        };
+
+        // Broadcast each participant their corresponding shard.
         for (index, peer) in participants.iter().enumerate() {
-            if me.is_some_and(|m| m.get() as usize == index) {
+            if index == my_index {
                 continue;
             }
 
@@ -775,6 +793,16 @@ where
                 .await;
         }
 
+        // Send the leader's strong shard to tracked peers outside the participant set.
+        for peer in self.tracked_peers.iter() {
+            if participants.index(peer).is_some() {
+                continue;
+            }
+            let _ = sender
+                .send(Recipients::One(peer.clone()), leader_shard.clone(), true)
+                .await;
+        }
+
         // Cache the block so we don't have to reconstruct it again.
         let block = Arc::new(block);
         self.cache_block(block);
@@ -783,7 +811,7 @@ where
         // for "our valid shard arrived" still need a notification.
         self.notify_shard_subscribers(commitment);
 
-        debug!(?commitment, "broadcasted shards to participants");
+        debug!(?commitment, "broadcasted shards");
     }
 
     /// Broadcasts a [`Shard`] to all participants.
@@ -810,12 +838,19 @@ where
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
     ) {
+        let should_broadcast_weak = self
+            .state
+            .get(&commitment)
+            .and_then(|state| self.scheme_provider.scoped(state.round().epoch()))
+            .is_some_and(|scheme| scheme.me().is_some());
         if let Some(weak_shard) = self
             .state
             .get_mut(&commitment)
             .and_then(|s| s.take_weak_shard())
         {
-            self.broadcast_weak_shard(sender, weak_shard).await;
+            if should_broadcast_weak {
+                self.broadcast_weak_shard(sender, weak_shard).await;
+            }
             self.notify_shard_subscribers(commitment);
         }
 
@@ -1288,7 +1323,9 @@ where
     ///
     /// Strong shards (`CodingScheme::StrongShard`):
     /// - MUST be sent by a participant.
-    /// - MUST correspond to self's index (self must be a participant).
+    /// - MUST correspond to self's index when self is a participant.
+    /// - When self is not a participant (`scheme.me()` is `None`), the index
+    ///   check is relaxed.
     /// - MUST be sent by the leader (when the leader is known). Non-leader senders
     ///   are blocked.
     /// - The leader may only send ONE strong shard. Sending a second strong shard
@@ -1375,24 +1412,21 @@ where
         shard: StrongShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
-        let Some(me) = me else {
-            commonware_p2p::block!(blocker, sender, "strong shard sent to non-participant");
-            return false;
-        };
-
-        let expected_index: u16 = me
-            .get()
-            .try_into()
-            .expect("participant index impossibly out of bounds");
-        if shard.index != expected_index {
-            commonware_p2p::block!(
-                blocker,
-                sender,
-                shard_index = shard.index,
-                expected_index = me.get() as usize,
-                "strong shard index does not match self index"
-            );
-            return false;
+        if let Some(me) = me {
+            let expected_index: u16 = me
+                .get()
+                .try_into()
+                .expect("participant index impossibly out of bounds");
+            if shard.index != expected_index {
+                commonware_p2p::block!(
+                    blocker,
+                    sender,
+                    shard_index = shard.index,
+                    expected_index = me.get() as usize,
+                    "strong shard index does not match self index"
+                );
+                return false;
+            }
         }
 
         let common = self.common();
@@ -4126,6 +4160,339 @@ mod tests {
                 assert_blocked(&oracle, &peers[receiver_idx].public_key, &leader_pk).await;
             },
         );
+    }
+
+    #[test_traced]
+    fn test_broadcast_routes_participant_and_non_participant_shards() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let num_participants = 4usize;
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let mut private_keys = (0..num_participants)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+
+            let participant_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(participant_keys.clone());
+
+            let leader_idx = 0usize;
+            let leader_pk = participant_keys[leader_idx].clone();
+            let participant_receiver_pk = participant_keys[1].clone();
+            let non_participant_pk = PrivateKey::from_seed(10_000).public_key();
+
+            let leader_control = oracle.control(leader_pk.clone());
+            let (leader_sender, leader_receiver) = leader_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let participant_control = oracle.control(participant_receiver_pk.clone());
+            let (_participant_sender, mut participant_receiver) = participant_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let non_participant_control = oracle.control(non_participant_pk.clone());
+            let (_non_participant_sender, mut non_participant_receiver) = non_participant_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            oracle
+                .add_link(
+                    leader_pk.clone(),
+                    participant_receiver_pk.clone(),
+                    DEFAULT_LINK,
+                )
+                .await
+                .expect("link should be added");
+            oracle
+                .add_link(leader_pk.clone(), non_participant_pk.clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+
+            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
+
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[leader_idx].clone(),
+            )
+            .expect("leader scheme should be created");
+
+            let config: Config<_, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: leader_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_set_subscription: peer_set_rx,
+            };
+
+            let (engine, mailbox) = ShardEngine::new(context.with_label("leader"), config);
+            engine.start((leader_sender, leader_receiver));
+
+            // Ensure the leader sees a tracked non-participant before proposing.
+            let tracked: Set<P> = Set::from_iter_dedup(vec![
+                leader_pk.clone(),
+                participant_receiver_pk.clone(),
+                non_participant_pk.clone(),
+            ]);
+            peer_set_tx.send((1, tracked.clone(), tracked)).unwrap();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let coding_config = coding_config_for_participants(num_participants as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let leader_index = participants
+                .index(&leader_pk)
+                .expect("leader must be a participant")
+                .get() as u16;
+            let participant_index = participants
+                .index(&participant_receiver_pk)
+                .expect("participant receiver must be a participant")
+                .get() as u16;
+
+            mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(1)), coded_block)
+                .await;
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            let (participant_sender, participant_wire) = participant_receiver
+                .recv()
+                .await
+                .expect("participant should receive shard");
+            assert_eq!(participant_sender, leader_pk, "unexpected shard sender");
+            let mut participant_wire = participant_wire.as_ref();
+            let participant_shard = Shard::<C, H>::decode_cfg(
+                &mut participant_wire,
+                &CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+            )
+            .expect("participant shard should decode");
+            assert!(
+                participant_shard.is_strong(),
+                "participant shard should be strong"
+            );
+            assert_eq!(
+                participant_shard.index(),
+                participant_index,
+                "participant should receive its own strong shard",
+            );
+
+            let (non_participant_sender, non_participant_wire) = non_participant_receiver
+                .recv()
+                .await
+                .expect("non-participant should receive shard");
+            assert_eq!(
+                non_participant_sender, leader_pk,
+                "unexpected shard sender for non-participant"
+            );
+            let mut non_participant_wire = non_participant_wire.as_ref();
+            let non_participant_shard = Shard::<C, H>::decode_cfg(
+                &mut non_participant_wire,
+                &CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+            )
+            .expect("non-participant shard should decode");
+            assert!(
+                non_participant_shard.is_strong(),
+                "non-participant shard should be strong"
+            );
+            assert_eq!(
+                non_participant_shard.index(),
+                leader_index,
+                "non-participant should receive leader strong shard",
+            );
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "no peer should be blocked in participant/non-participant shard routing test"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_non_participant_reconstructs_after_discovered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let num_participants = 4usize;
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let mut private_keys = (0..num_participants)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+            let participant_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(participant_keys.clone());
+
+            let leader_idx = 0usize;
+            let contributor_idx = 1usize;
+            let leader_pk = participant_keys[leader_idx].clone();
+            let contributor_pk = participant_keys[contributor_idx].clone();
+            let non_participant_sk = PrivateKey::from_seed(20_000);
+            let non_participant_pk = non_participant_sk.public_key();
+
+            let leader_control = oracle.control(leader_pk.clone());
+            let (mut leader_sender, _leader_receiver) = leader_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let contributor_control = oracle.control(contributor_pk.clone());
+            let (mut contributor_sender, _contributor_receiver) = contributor_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let non_participant_control = oracle.control(non_participant_pk.clone());
+            let (non_participant_sender, non_participant_receiver) = non_participant_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            oracle
+                .add_link(leader_pk.clone(), non_participant_pk.clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+            oracle
+                .add_link(
+                    contributor_pk.clone(),
+                    non_participant_pk.clone(),
+                    DEFAULT_LINK,
+                )
+                .await
+                .expect("link should be added");
+
+            let (peer_set_tx, peer_set_rx) = mpsc::unbounded_channel();
+
+            let scheme = Scheme::verifier(SCHEME_NAMESPACE, participants.clone());
+            let config: Config<_, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: non_participant_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_set_subscription: peer_set_rx,
+            };
+
+            let (engine, mailbox) = ShardEngine::new(context.with_label("observer"), config);
+            engine.start((non_participant_sender, non_participant_receiver));
+
+            let tracked: Set<P> = Set::from_iter_dedup(
+                participant_keys
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(non_participant_pk.clone())),
+            );
+            peer_set_tx.send((1, tracked.clone(), tracked)).unwrap();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let coding_config = coding_config_for_participants(num_participants as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            mailbox
+                .discovered(commitment, leader_pk.clone(), round)
+                .await;
+            let shard_sub = mailbox.subscribe_shard(commitment).await;
+
+            let leader_index = participants
+                .index(&leader_pk)
+                .expect("leader must be participant")
+                .get() as u16;
+            let strong_shard = coded_block
+                .shard(leader_index)
+                .expect("missing leader strong shard")
+                .encode();
+            leader_sender
+                .send(
+                    Recipients::One(non_participant_pk.clone()),
+                    strong_shard,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            let leader_blocked = blocked
+                .iter()
+                .any(|(a, b)| a == &non_participant_pk && b == &leader_pk);
+            assert!(
+                !leader_blocked,
+                "non-participant must not block leader when accepting leader-index strong shard"
+            );
+
+            let contributor_index = participants
+                .index(&contributor_pk)
+                .expect("contributor must be participant")
+                .get() as u16;
+            let weak_shard = coded_block
+                .shard(contributor_index)
+                .expect("missing contributor shard")
+                .verify_into_weak()
+                .expect("failed to build weak shard")
+                .encode();
+            contributor_sender
+                .send(Recipients::One(non_participant_pk), weak_shard, true)
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            select! {
+                _ = shard_sub => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("non-participant shard subscription did not resolve");
+                },
+            }
+
+            let reconstructed = mailbox
+                .get(commitment)
+                .await
+                .expect("non-participant should reconstruct block");
+            assert_eq!(reconstructed.commitment(), commitment);
+            assert_eq!(reconstructed.height(), Height::new(1));
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "no peer should be blocked in non-participant reconstruction test"
+            );
+        });
     }
 
     #[test_traced]
