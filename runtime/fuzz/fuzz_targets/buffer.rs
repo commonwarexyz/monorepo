@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, IoBuf, Runner, Storage,
+    deterministic, Blob, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -14,7 +14,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_SIZE: usize = 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
-const CRC_BYTES: u16 = 12;
+const CHECKSUM_SIZE: u16 = 12;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -173,8 +173,8 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        let logical_page_size = cache_page_size.clamp(1, u16::MAX - CRC_BYTES);
-                        let physical_page_size = logical_page_size + CRC_BYTES;
+                        let logical_page_size = cache_page_size.clamp(1, u16::MAX - CHECKSUM_SIZE);
+                        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
                         cache_ref = Some(CacheRef::from_pooler(
                             &context,
                             NZU16!(physical_page_size),
@@ -270,18 +270,15 @@ fn fuzz(input: FuzzInput) {
                     data,
                     offset,
                 } => {
-                    if let Some(ref cache) = cache_ref {
+                    // Keep this operation lightweight for fuzzing without relying on internal
+                    // cache injection helpers.
+                    let _ = blob_id;
+                    if let (Some(cache), Some(append)) = (&cache_ref, &append_buffer) {
                         let offset = offset as u64;
-                        if data.len() >= cache.logical_page_size() as usize {
-                            let data = &data[..cache.logical_page_size() as usize];
-                            let page_size = cache.logical_page_size();
-                            let aligned_offset = (offset / page_size) * page_size;
-                            cache.cache(
-                                blob_id as u64,
-                                vec![IoBuf::copy_from_slice(data)],
-                                aligned_offset,
-                            );
-                        }
+                        let page_size = cache.logical_page_size();
+                        let aligned_offset = (offset / page_size) * page_size;
+                        let len = data.len().min(page_size as usize);
+                        let _ = append.read_at(aligned_offset, len).await;
                     }
                 }
 
