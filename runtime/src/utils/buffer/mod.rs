@@ -1039,38 +1039,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_write_read_at_up_to_behavior() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (blob, size) = context
-                .open("partition", b"read_at_up_to_writer")
-                .await
-                .unwrap();
-            assert_eq!(size, 0);
-            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
-
-            writer.write_at(0, b"hello").await.unwrap();
-            writer.write_at(5, b" world").await.unwrap();
-
-            // Max len larger than available: should return only available bytes.
-            let tail = writer.read_at_up_to(9, 16).await.unwrap().coalesce();
-            assert_eq!(tail, b"ld");
-
-            // Max len smaller than available: should cap output at max len.
-            let capped = writer.read_at_up_to(6, 3).await.unwrap().coalesce();
-            assert_eq!(capped, b"wor");
-
-            // Exact EOF offset should error.
-            let err = writer.read_at_up_to(11, 1).await.unwrap_err();
-            assert!(matches!(err, Error::BlobInsufficientLength));
-
-            // Zero-length requests return empty.
-            let empty = writer.read_at_up_to(11, 0).await.unwrap();
-            assert!(empty.is_empty());
-        });
-    }
-
-    #[test_traced]
     fn test_write_straddling_non_mergeable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -5,6 +5,15 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
 ///
+/// # Allocation Semantics
+///
+/// - [Self::new] allocates tip backing eagerly at `capacity` via [Buffer::new].
+/// - Most writes reuse that backing, copy-on-write allocation only occurs when buffered data is
+///   shared (for example, after handing out immutable views) or a merge needs more capacity.
+/// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
+/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) drain
+///   logical bytes to the blob while keeping tip backing available for reuse.
+///
 /// # Example
 ///
 /// ```
@@ -70,19 +79,6 @@ impl<B: Blob> Write<B> {
     pub async fn size(&self) -> u64 {
         let buffer = self.buffer.read().await;
         buffer.size()
-    }
-
-    /// Reads up to `max_len` bytes starting at `offset`, but only as many as are available.
-    pub async fn read_at_up_to(&self, offset: u64, max_len: usize) -> Result<IoBufs, Error> {
-        if max_len == 0 {
-            return Ok(IoBufs::default());
-        }
-        let size = self.size().await;
-        let available = (size.saturating_sub(offset) as usize).min(max_len);
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        self.read_at(offset, available).await
     }
 
     /// Read immutable bytes starting at `offset`.
