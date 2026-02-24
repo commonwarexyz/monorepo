@@ -604,7 +604,7 @@ impl<B: Blob> Append<B> {
 
         // Fast path: try to read *only* from page cache without acquiring blob lock. This allows
         // concurrent reads even while a flush is in progress.
-        let (cached, cached_len) =
+        let (mut cached, cached_len) =
             self.cache_ref
                 .read_cached(self.id, logical_offset, persisted_len);
 
@@ -615,16 +615,22 @@ impl<B: Blob> Append<B> {
             // Slow path: cache miss (partial or full), acquire blob read lock to ensure any
             // in-flight write completes before we read from the blob.
             let blob_guard = self.blob_state.read().await;
-            self.cache_ref
-                .read(
-                    &blob_guard.blob,
-                    self.id,
-                    logical_offset,
-                    persisted_len,
-                    cached,
-                    cached_len,
-                )
-                .await?
+            if cached_len == 0 {
+                self.cache_ref
+                    .read(&blob_guard.blob, self.id, logical_offset, persisted_len)
+                    .await?
+            } else {
+                self.cache_ref
+                    .read_append(
+                        &blob_guard.blob,
+                        self.id,
+                        logical_offset,
+                        persisted_len,
+                        &mut cached,
+                    )
+                    .await?;
+                cached
+            }
         };
 
         if let Some(tip) = tip {

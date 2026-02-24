@@ -33,6 +33,7 @@
 
 use super::{read_page_from_blob_into, CHECKSUM_SIZE};
 use crate::{Blob, BufMut, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
+use bytes::Buf;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -265,23 +266,44 @@ impl CacheRef {
         (out, len - remaining)
     }
 
-    /// Read `len` bytes, starting from `logical_offset`.
+    /// Read `len` bytes for `[logical_offset, logical_offset + len)`.
     ///
-    /// `result` may contain an existing prefix of length `prefix_len` that corresponds to this same
-    /// logical range. Any missing suffix bytes are fetched from cache/blob and appended.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `prefix_len > len`.
+    /// This is the convenience form that starts from an empty output buffer. For continuation
+    /// reads with an already-cached prefix, use [Self::read_append].
     pub(super) async fn read<B: Blob>(
         &self,
         blob: &B,
         blob_id: u64,
         logical_offset: u64,
         len: usize,
-        mut result: IoBufs,
-        prefix_len: usize,
     ) -> Result<IoBufs, Error> {
+        let mut result = IoBufs::default();
+        self.read_append(blob, blob_id, logical_offset, len, &mut result)
+            .await?;
+        Ok(result)
+    }
+
+    /// Continue reading `[logical_offset, logical_offset + len)` into `result`.
+    ///
+    /// Existing bytes in `result` are treated as a prefix for this same range. The method appends
+    /// only the missing suffix bytes.
+    ///
+    /// Typical usage:
+    /// - `read_cached(...)` fills an initial prefix
+    /// - `read_append(...)` fetches and appends the remainder
+    ///
+    /// # Panics
+    ///
+    /// Panics if `result` already contains more than `len` bytes.
+    pub(super) async fn read_append<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        logical_offset: u64,
+        len: usize,
+        result: &mut IoBufs,
+    ) -> Result<(), Error> {
+        let prefix_len = result.remaining();
         let mut remaining = len
             .checked_sub(prefix_len)
             .expect("prefix length must not exceed requested length");
@@ -289,7 +311,7 @@ impl CacheRef {
             .checked_add(prefix_len as u64)
             .ok_or(Error::OffsetOverflow)?;
         while remaining > 0 {
-            // Read lock the page cache and see if we can get (some of) the data from it.
+            // Probe cache first under read lock.
             if let Some(page) = {
                 let page_cache = self.cache.read();
                 page_cache.read_at(blob_id, logical_offset, remaining)
@@ -302,7 +324,7 @@ impl CacheRef {
                 continue;
             }
 
-            // Handle page fault.
+            // Cache miss: resolve one page fault (deduped by key across concurrent readers).
             let page = self
                 .read_after_page_fault(blob, blob_id, logical_offset, remaining)
                 .await?;
@@ -313,7 +335,7 @@ impl CacheRef {
             result.append(page);
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Resolve one page miss for `(blob_id, page_num)`.
@@ -898,14 +920,7 @@ mod tests {
             for i in 0..11 {
                 // Read expects logical bytes only (CRCs are stripped).
                 let read = cache_ref
-                    .read(
-                        &blob,
-                        0,
-                        i * PAGE_SIZE_U64,
-                        PAGE_SIZE.get() as usize,
-                        IoBufs::default(),
-                        0,
-                    )
+                    .read(&blob, 0, i * PAGE_SIZE_U64, PAGE_SIZE.get() as usize)
                     .await
                     .unwrap()
                     .coalesce();
@@ -917,14 +932,7 @@ mod tests {
             // page 0 should be evicted.
             for i in 1..11 {
                 let read = cache_ref
-                    .read(
-                        &blob,
-                        0,
-                        i * PAGE_SIZE_U64,
-                        PAGE_SIZE.get() as usize,
-                        IoBufs::default(),
-                        0,
-                    )
+                    .read(&blob, 0, i * PAGE_SIZE_U64, PAGE_SIZE.get() as usize)
                     .await
                     .unwrap()
                     .coalesce();
@@ -1048,11 +1056,7 @@ mod tests {
                     .insert((0, 0), Arc::new(PageFetchState::new(stale)));
             }
 
-            let read = cache_ref
-                .read(&blob, 0, 0, 64, IoBufs::default(), 0)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = cache_ref.read(&blob, 0, 0, 64).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), vec![9u8; 64].as_slice());
 
             let cache = cache_ref.cache.read();
@@ -1089,7 +1093,7 @@ mod tests {
             }
 
             let read = cache_ref
-                .read(&blob, 0, 0, PAGE_SIZE.get() as usize, IoBufs::default(), 0)
+                .read(&blob, 0, 0, PAGE_SIZE.get() as usize)
                 .await
                 .unwrap()
                 .coalesce();
@@ -1131,11 +1135,7 @@ mod tests {
                     .insert((7, 7), Arc::new(PageFetchState::new(stale)));
             }
 
-            let read = cache_ref
-                .read(&blob, 0, 0, 64, IoBufs::default(), 0)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = cache_ref.read(&blob, 0, 0, 64).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), vec![4u8; 64].as_slice());
 
             let cache = cache_ref.cache.read();
@@ -1197,10 +1197,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let err = cache_ref
-                .read(&blob, 0, 0, 64, IoBufs::default(), 0)
-                .await
-                .unwrap_err();
+            let err = cache_ref.read(&blob, 0, 0, 64).await.unwrap_err();
             assert!(matches!(err, Error::ReadFailed));
 
             {
@@ -1221,7 +1218,7 @@ mod tests {
             blob.write_at(0, page_data).await.unwrap();
 
             let read = cache_ref
-                .read(&blob, 0, 0, PAGE_SIZE.get() as usize, IoBufs::default(), 0)
+                .read(&blob, 0, 0, PAGE_SIZE.get() as usize)
                 .await
                 .unwrap()
                 .coalesce();
@@ -1257,11 +1254,7 @@ mod tests {
 
             // If the fetch buffer reused a logical-sized slot allocation, this read can panic
             // inside read_at_buf(set_len). We assert it succeeds and returns correct bytes.
-            let read = cache_ref
-                .read(&blob, 0, 0, 64, IoBufs::default(), 0)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = cache_ref.read(&blob, 0, 0, 64).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &logical_data[..64]);
         });
     }
@@ -1287,8 +1280,8 @@ mod tests {
             page1.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc1).to_bytes());
             blob.write_at(physical_page_size, page1).await.unwrap();
 
-            let fut0 = cache_ref.read(&blob, 0, 0, 64, IoBufs::default(), 0);
-            let fut1 = cache_ref.read(&blob, 0, PAGE_SIZE_U64, 64, IoBufs::default(), 0);
+            let fut0 = cache_ref.read(&blob, 0, 0, 64);
+            let fut1 = cache_ref.read(&blob, 0, PAGE_SIZE_U64, 64);
             let (read0, read1) = futures::join!(fut0, fut1);
 
             assert_eq!(
@@ -1445,9 +1438,7 @@ mod tests {
 
             let cache_ref_for_task = cache_ref.clone();
             let first_fetcher = context.clone().spawn(move |_| async move {
-                let _ = cache_ref_for_task
-                    .read(&pending_blob, 0, 0, 64, IoBufs::default(), 0)
-                    .await;
+                let _ = cache_ref_for_task.read(&pending_blob, 0, 0, 64).await;
             });
 
             started_rx.await.expect("missing start signal");
@@ -1470,9 +1461,7 @@ mod tests {
             let first_cache = cache_ref.clone();
             let first_blob = blocking_blob.clone();
             let first = context.clone().spawn(move |_| async move {
-                let _ = first_cache
-                    .read(&first_blob, 0, 0, 64, IoBufs::default(), 0)
-                    .await;
+                let _ = first_cache.read(&first_blob, 0, 0, 64).await;
             });
 
             started_rx.await.expect("missing start signal");
@@ -1480,10 +1469,7 @@ mod tests {
             let second_cache = cache_ref.clone();
             let second_blob = blocking_blob.clone();
             let second = context.clone().spawn(move |_| async move {
-                second_cache
-                    .read(&second_blob, 0, 0, 64, IoBufs::default(), 0)
-                    .await
-                    .unwrap()
+                second_cache.read(&second_blob, 0, 0, 64).await.unwrap()
             });
 
             context.sleep(Duration::from_millis(1)).await;
@@ -1541,10 +1527,7 @@ mod tests {
 
             let cache_ref_for_task = cache_ref.clone();
             let read_task = context.spawn(move |_| async move {
-                cache_ref_for_task
-                    .read(&blob, 0, 0, 64, IoBufs::default(), 0)
-                    .await
-                    .unwrap()
+                cache_ref_for_task.read(&blob, 0, 0, 64).await.unwrap()
             });
 
             started_rx.await.expect("missing start signal");
