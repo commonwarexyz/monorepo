@@ -136,7 +136,7 @@ enum ItemInfo {
     Incomplete {
         /// Length of the varint prefix.
         ///
-        /// We still carry this in the incomplete case to compute the read offset for the
+        /// We carry this in the incomplete case to compute the read offset for the
         /// remaining bytes from storage.
         varint_len: usize,
         /// Bytes of item data available in buffer.
@@ -266,10 +266,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 total_len,
             } => {
                 // Read remainder and chain with prefix to avoid copying
-                let read_offset = offset
-                    .checked_add(varint_len as u64)
-                    .and_then(|o| o.checked_add(prefix_len as u64))
-                    .ok_or(Error::OffsetOverflow)?;
+                let read_offset = offset + varint_len as u64 + prefix_len as u64;
                 let remainder_len = total_len - prefix_len;
                 let remainder = blob.read_at(read_offset, remainder_len).await?;
                 let chained = header.chain(remainder);
@@ -657,9 +654,7 @@ mod tests {
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
 
-    // Test logical page size is 1024, so physical page size passed to CacheRef is 1036.
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
-    const PHYSICAL_PAGE_SIZE: NonZeroU16 = NZU16!(1036);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
@@ -674,7 +669,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
@@ -737,7 +732,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -809,7 +804,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -903,7 +898,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1007,7 +1002,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1066,7 +1061,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1098,7 +1093,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1153,7 +1148,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1210,7 +1205,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1272,7 +1267,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1344,7 +1339,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1493,7 +1488,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1560,7 +1555,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1615,7 +1610,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1668,7 +1663,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1729,7 +1724,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1792,7 +1787,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1840,7 +1835,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1880,7 +1875,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1942,7 +1937,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1987,7 +1982,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2063,7 +2058,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2137,7 +2132,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2256,7 +2251,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2349,7 +2344,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2418,7 +2413,7 @@ mod tests {
         // - Physical page = 16 + 12 = 28 bytes
         // - Each [u8; 128] item = 2-byte varint + 128 bytes data = 130 bytes
         // - This spans multiple 16-byte pages, testing cross-page reading
-        const SMALL_PHYSICAL_PAGE: NonZeroU16 = NZU16!(28);
+        const SMALL_PAGE: NonZeroU16 = NZU16!(28);
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2426,7 +2421,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PHYSICAL_PAGE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal: Journal<_, [u8; 128]> =
@@ -2494,7 +2489,7 @@ mod tests {
                 partition: "clear-test".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
