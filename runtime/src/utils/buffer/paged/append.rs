@@ -263,13 +263,13 @@ impl<B: Blob> Append<B> {
         // Shrink the buffer to release the pooled allocation since we won't be appending.
         {
             let mut buf_guard = self.buffer.write().await;
-            let len = buf_guard.data.len();
+            let len = buf_guard.len();
             if len > 0 {
                 let mut shrunk = self.cache_ref.pool().alloc(len);
-                shrunk.put_slice(buf_guard.data.as_ref());
-                buf_guard.data = shrunk.freeze();
+                shrunk.put_slice(buf_guard.bytes());
+                buf_guard.replace(shrunk.freeze());
             } else {
-                buf_guard.data = IoBuf::default();
+                buf_guard.replace(IoBuf::default());
             }
         }
 
@@ -391,7 +391,7 @@ impl<B: Blob> Append<B> {
 
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let pages_to_cache = buffer.data.len() / logical_page_size;
+        let pages_to_cache = buffer.len() / logical_page_size;
         let bytes_to_drain = pages_to_cache * logical_page_size;
 
         // Read the old partial page state before doing the heavy work of preparing physical pages.
@@ -420,9 +420,7 @@ impl<B: Blob> Append<B> {
         let cache_pages = if pages_to_cache > 0 {
             Some((
                 buffer.offset,
-                buffer
-                    .data
-                    .slice(..pages_to_cache.saturating_mul(logical_page_size)),
+                buffer.slice(..pages_to_cache.saturating_mul(logical_page_size)),
             ))
         } else {
             None
@@ -589,7 +587,7 @@ impl<B: Blob> Append<B> {
         if logical_offset >= buffer.offset {
             let start = (logical_offset - buffer.offset) as usize;
             let end = start + len;
-            return Ok(buffer.data.slice(start..end).into());
+            return Ok(buffer.slice(start..end).into());
         }
 
         // Entirely persisted: serve through page cache + blob.
@@ -622,7 +620,7 @@ impl<B: Blob> Append<B> {
         // Overlaps persisted range and buffered tip.
         let persisted_len = (buffer.offset - logical_offset) as usize;
         let tip_len = len - persisted_len;
-        let tip = buffer.data.slice(..tip_len);
+        let tip = buffer.slice(..tip_len);
         drop(buffer);
 
         let (mut cached, cached_len) =
@@ -701,9 +699,9 @@ impl<B: Blob> Append<B> {
     ) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let pages_to_write = buffer.data.len() / logical_page_size;
+        let pages_to_write = buffer.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
-        let buffer_data = buffer.data.as_ref();
+        let buffer_data = buffer.bytes();
         let logical_page_size_u16 =
             u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
         let crc_record_size = CHECKSUM_SIZE as usize;
@@ -733,7 +731,7 @@ impl<B: Blob> Append<B> {
             for page in 0..pages_to_write {
                 let start_read_idx = page * logical_page_size;
                 let end_read_idx = start_read_idx + logical_page_size;
-                write_buffer.append(buffer.data.slice(start_read_idx..end_read_idx));
+                write_buffer.append(buffer.slice(start_read_idx..end_read_idx));
 
                 let crc_start = page * crc_record_size;
                 write_buffer.append(crc_blob.slice(crc_start..crc_start + crc_record_size));

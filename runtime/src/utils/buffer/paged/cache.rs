@@ -496,21 +496,7 @@ impl CacheRef {
             .expect("logical page length overflow while caching");
         assert!(required_len <= logical_pages.len());
 
-        // Zero-copy fast path only for very small batches, to keep retention bounded.
-        if required_len == logical_pages.len() {
-            const MAX_SHARED_ZERO_COPY_PAGES: usize = 2;
-            if page_count <= MAX_SHARED_ZERO_COPY_PAGES {
-                let mut pages = Vec::with_capacity(page_count);
-                for page_idx in 0..page_count {
-                    let page_start = page_idx * logical_page_size;
-                    pages.push(logical_pages.slice(page_start..page_start + logical_page_size));
-                }
-                self.cache_pages(blob_id, pages, offset);
-                return;
-            }
-        }
-
-        // Copy directly into cache slots for larger batches.
+        // Copy directly into cache slots.
         let logical_bytes = logical_pages.as_ref();
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);

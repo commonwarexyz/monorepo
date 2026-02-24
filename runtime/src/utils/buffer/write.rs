@@ -108,7 +108,7 @@ impl<B: Blob> Write<B> {
         if offset >= buffer.offset {
             let start = (offset - buffer.offset) as usize;
             let end = start + len;
-            return Ok(buffer.data.slice(start..end).into());
+            return Ok(buffer.slice(start..end).into());
         }
 
         // Entirely persisted.
@@ -119,7 +119,7 @@ impl<B: Blob> Write<B> {
         // Overlaps persisted range and buffered tip.
         let persisted_len = (buffer.offset - offset) as usize;
         let tip_len = len - persisted_len;
-        let tip = buffer.data.slice(..tip_len);
+        let tip = buffer.slice(..tip_len);
 
         let mut persisted = self.blob.read_at(offset, persisted_len).await?.freeze();
         persisted.append(tip);
