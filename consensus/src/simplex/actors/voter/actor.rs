@@ -421,30 +421,6 @@ impl<
         nullify
     }
 
-    /// Handles an externally received nullification certificate.
-    ///
-    /// We may need to emit a same-view nullify vote for local activity tracking if the
-    /// certificate arrives before our local timeout. This must happen before applying the
-    /// certificate because applying nullification advances to `view.next()`.
-    async fn handle_verified_nullification<Sp: Sender, Sr: Sender>(
-        &mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
-        nullification: Nullification<S>,
-    ) {
-        let view = nullification.view();
-        let late_timeout_nullify = self.try_construct_nullify(view);
-        if let Some(floor) = self.handle_nullification(nullification).await {
-            warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_certificate(certificate_sender, floor).await;
-        }
-        if let Some(nullify) = late_timeout_nullify {
-            self.broadcast_nullify(batcher, vote_sender, false, nullify)
-                .await;
-        }
-    }
-
     /// Persists our notarize vote to the journal for crash recovery.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
         self.append_journal(notarize.view(), Artifact::Notarize(notarize))
@@ -1036,13 +1012,23 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-                                self.handle_verified_nullification(
-                                    &mut batcher,
-                                    &mut vote_sender,
-                                    &mut certificate_sender,
-                                    nullification,
-                                )
-                                .await;
+                                let view = nullification.view();
+                                let late_timeout_nullify = self.try_construct_nullify(view);
+                                if let Some(floor) = self.handle_nullification(nullification).await
+                                {
+                                    warn!(?floor, "broadcasting nullification floor");
+                                    self.broadcast_certificate(&mut certificate_sender, floor)
+                                        .await;
+                                }
+                                if let Some(nullify) = late_timeout_nullify {
+                                    self.broadcast_nullify(
+                                        &mut batcher,
+                                        &mut vote_sender,
+                                        false,
+                                        nullify,
+                                    )
+                                    .await;
+                                }
                                 if from_resolver {
                                     resolved = Resolved::Nullification;
                                 }
