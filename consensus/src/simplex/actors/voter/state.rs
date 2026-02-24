@@ -1461,11 +1461,8 @@ mod tests {
             let parent_view = View::new(2);
             let child_view = parent_view.next();
             let payload = Sha256Digest::from([91u8; 32]);
-            let proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), parent_view),
-                GENESIS_VIEW,
-                payload,
-            );
+            let proposal =
+                Proposal::new(Rnd::new(Epoch::new(1), parent_view), GENESIS_VIEW, payload);
 
             let notarize_votes: Vec<_> = schemes
                 .iter()
@@ -1480,11 +1477,8 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(
-                        scheme,
-                        Rnd::new(Epoch::new(1), parent_view),
-                    )
-                    .unwrap()
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), parent_view))
+                        .unwrap()
                 })
                 .collect();
             let nullification =
