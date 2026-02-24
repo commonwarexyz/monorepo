@@ -25,10 +25,7 @@
 //! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
 //! validated by a CRC.
 
-use super::{
-    read::{PageReader, Replay},
-    read_at_buf_single,
-};
+use super::read::{PageReader, Replay};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
@@ -127,13 +124,13 @@ impl<B: Blob> Append<B> {
         let (partial_page_state, pages, invalid_data_found) = Self::read_last_valid_page(
             &blob,
             original_blob_size,
-            cache_ref.page_size(),
+            cache_ref.logical_page_size(),
             cache_ref.pool(),
         )
         .await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (cache_ref.page_size() + CHECKSUM_SIZE);
+            let new_blob_size = pages * (cache_ref.logical_page_size() + CHECKSUM_SIZE);
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -142,7 +139,7 @@ impl<B: Blob> Append<B> {
             blob.sync().await?;
         }
 
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
+        let capacity = capacity_with_floor(capacity, cache_ref.logical_page_size());
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
@@ -164,7 +161,7 @@ impl<B: Blob> Append<B> {
         };
 
         let mut buffer = Buffer::new(
-            blob_state.current_page * cache_ref.page_size(),
+            blob_state.current_page * cache_ref.logical_page_size(),
             capacity,
             cache_ref.pool().clone(),
         );
@@ -193,15 +190,19 @@ impl<B: Blob> Append<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, blob_size, cache_ref.page_size(), cache_ref.pool())
-                .await?;
+        let (partial_page_state, pages, invalid_data_found) = Self::read_last_valid_page(
+            &blob,
+            blob_size,
+            cache_ref.logical_page_size(),
+            cache_ref.pool(),
+        )
+        .await?;
         if invalid_data_found {
             // Invalid data was detected, so this blob is not consistent.
             return Err(Error::InvalidChecksum);
         }
 
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
+        let capacity = capacity_with_floor(capacity, cache_ref.logical_page_size());
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
@@ -222,7 +223,7 @@ impl<B: Blob> Append<B> {
             ),
         };
         let mut buffer = Buffer::new(
-            blob_state.current_page * cache_ref.page_size(),
+            blob_state.current_page * cache_ref.logical_page_size(),
             capacity,
             cache_ref.pool().clone(),
         );
@@ -320,7 +321,7 @@ impl<B: Blob> Append<B> {
                     pool.alloc(physical_page_size as usize),
                 )
                 .await?;
-            let buf = read_at_buf_single(buf)?;
+            let buf = buf.coalesce_with_pool(pool).freeze();
 
             match Checksum::validate_page(buf.as_ref()) {
                 Some(crc_record) => {
@@ -380,7 +381,7 @@ impl<B: Blob> Append<B> {
     ) -> Result<(), Error> {
         let buffer = &mut *buf_guard;
 
-        let logical_page_size = self.cache_ref.page_size() as usize;
+        let logical_page_size = self.cache_ref.logical_page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_cache = buffer.len() / logical_page_size;
         let bytes_to_drain = pages_to_cache * logical_page_size;
@@ -455,7 +456,7 @@ impl<B: Blob> Append<B> {
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(
-            blob_state.current_page * self.cache_ref.page_size(),
+            blob_state.current_page * self.cache_ref.logical_page_size(),
             new_offset
         );
 
@@ -688,7 +689,7 @@ impl<B: Blob> Append<B> {
         include_partial_page: bool,
         old_crc_record: Option<&Checksum>,
     ) -> (IoBufs, Option<Checksum>) {
-        let logical_page_size = self.cache_ref.page_size() as usize;
+        let logical_page_size = self.cache_ref.logical_page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
@@ -808,7 +809,7 @@ impl<B: Blob> Append<B> {
     /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
     pub async fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
-        let logical_page_size = self.cache_ref.page_size();
+        let logical_page_size = self.cache_ref.logical_page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
@@ -854,7 +855,6 @@ impl<B: Blob> Append<B> {
             logical_blob_size,
             prefetch_pages,
             logical_page_size_nz,
-            self.cache_ref.pool().clone(),
         );
         Ok(Replay::new(reader))
     }
@@ -904,7 +904,7 @@ impl<B: Blob> Append<B> {
         // always updated should the blob grow back to the point where we have new data for the same
         // page, if any old data hasn't expired naturally by then.
 
-        let logical_page_size = self.cache_ref.page_size();
+        let logical_page_size = self.cache_ref.logical_page_size();
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
         // Flush any buffered data first to ensure we have a consistent state on disk.

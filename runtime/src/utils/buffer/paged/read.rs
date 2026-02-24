@@ -1,5 +1,5 @@
-use super::{read_at_buf_single, Checksum};
-use crate::{Blob, Buf, BufferPool, Error, IoBuf};
+use super::Checksum;
+use crate::{Blob, Buf, Error, IoBuf};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -37,8 +37,6 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
-    /// Pool used for replay read buffers.
-    pool: BufferPool,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -56,7 +54,6 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         prefetch_count: usize,
         logical_page_size: NonZeroU16,
-        pool: BufferPool,
     ) -> Self {
         let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
@@ -69,7 +66,6 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
-            pool,
         }
     }
 
@@ -79,7 +75,7 @@ impl<B: Blob> PageReader<B> {
     }
 
     /// Returns the physical page size.
-    pub(super) const fn page_size(&self) -> usize {
+    pub(super) const fn physical_page_size(&self) -> usize {
         self.page_size
     }
 
@@ -114,9 +110,10 @@ impl<B: Blob> PageReader<B> {
         // Read physical data
         let physical_buf = self
             .blob
-            .read_at_buf(start_offset, bytes_to_read, self.pool.alloc(bytes_to_read))
-            .await?;
-        let physical_buf = read_at_buf_single(physical_buf)?;
+            .read_at(start_offset, bytes_to_read)
+            .await?
+            .coalesce()
+            .freeze();
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -289,11 +286,11 @@ pub struct Replay<B: Blob> {
 impl<B: Blob> Replay<B> {
     /// Creates a new Replay from a PageReader.
     pub(super) const fn new(reader: PageReader<B>) -> Self {
-        let page_size = reader.page_size();
+        let physical_page_size = reader.physical_page_size();
         let logical_page_size = reader.logical_page_size();
         Self {
             reader,
-            buffer: ReplayBuf::new(page_size, logical_page_size),
+            buffer: ReplayBuf::new(physical_page_size, logical_page_size),
             exhausted: false,
         }
     }
@@ -378,8 +375,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
 
-    const PAGE_SIZE: NonZeroU16 = NZU16!(103);
-    const PHYSICAL_PAGE_SIZE: NonZeroU16 = NZU16!(115);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(115);
     const BUFFER_PAGES: usize = 2;
 
     #[test_traced("DEBUG")]
@@ -389,11 +385,15 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
-                .await
-                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
@@ -427,14 +427,19 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
-                .await
-                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let logical_page_size = cache_ref.logical_page_size() as usize;
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
 
             // Write data that doesn't fill the last page
-            let data: Vec<u8> = (1u8..=(PAGE_SIZE.get() + 10) as u8).collect();
+            let data: Vec<u8> = (1u8..=(logical_page_size + 10) as u8).collect();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
@@ -456,21 +461,27 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
-                .await
-                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
 
-            // Write data spanning 4 pages (4 * 103 = 412 bytes, with last page partial)
+            // Write data spanning 4 pages (with last page partial).
             let data: Vec<u8> = (0u8..=255).cycle().take(400).collect();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
             // Create Replay with buffer size that results in prefetch_count=1.
-            // Physical page size = 103 + 12 = 115 bytes.
-            // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append.replay(NZUsize!(115)).await.unwrap();
+            // Buffer size of one physical page gives prefetch_pages=1.
+            let mut replay = append
+                .replay(std::num::NonZeroUsize::new(PAGE_SIZE.get() as usize).unwrap())
+                .await
+                .unwrap();
 
             // Ensure all data - this requires 4 separate fill() calls (one per page).
             // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
@@ -512,11 +523,15 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
-                .await
-                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
 
             // Don't write any data - blob remains empty
             assert_eq!(append.size().await, 0);
@@ -551,11 +566,15 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
-                .await
-                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();

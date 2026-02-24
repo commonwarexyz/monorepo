@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf, IoBufMut, IoBufsMut};
+use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf, IoBufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
@@ -38,19 +38,6 @@ use tracing::{debug, error};
 
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
-
-/// Convert a `read_at_buf` result into a single immutable buffer.
-///
-/// We always pass exactly one destination buffer to `read_at_buf`, so chunked output indicates
-/// a violated contract in the blob implementation.
-fn read_at_buf_single(bufs: IoBufsMut) -> Result<IoBuf, Error> {
-    if bufs.is_single() {
-        return Ok(bufs.freeze().coalesce());
-    }
-
-    error!("blob.read_at_buf returned chunked output for single-buffer input");
-    Err(Error::ReadFailed)
-}
 
 /// Read the designated page from the underlying blob and return its logical bytes as an `IoBuf` if
 /// it passes the integrity check, returning error otherwise. Safely handles partial pages. Caller
@@ -92,8 +79,9 @@ async fn read_page_from_blob_into(
 
     let page = blob
         .read_at_buf(physical_page_start, physical_page_size, buf)
-        .await?;
-    let page = read_at_buf_single(page)?;
+        .await?
+        .coalesce()
+        .freeze();
 
     let Some(record) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);

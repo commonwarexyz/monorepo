@@ -177,16 +177,16 @@ impl CacheRef {
         )
     }
 
-    /// The logical page size used by this page cache.
-    #[inline]
-    pub const fn page_size(&self) -> u64 {
-        self.logical_page_size
-    }
-
     /// The physical page size used by the underlying blob format.
     #[inline]
     pub const fn physical_page_size(&self) -> u64 {
         self.physical_page_size
+    }
+
+    /// The logical page size used by this page cache.
+    #[inline]
+    pub const fn logical_page_size(&self) -> u64 {
+        self.logical_page_size
     }
 
     /// Returns the storage buffer pool associated with this cache.
@@ -980,7 +980,7 @@ mod tests {
             // Smallest logical page size is 1, so physical must be 1 + CHECKSUM_SIZE.
             let cache_ref =
                 CacheRef::from_pooler(&context, NZU16!((CHECKSUM_SIZE as u16) + 1), NZUsize!(1));
-            assert_eq!(cache_ref.page_size(), 1);
+            assert_eq!(cache_ref.logical_page_size(), 1);
 
             // Caching one page at the maximum offset should succeed without overflow panic.
             cache_ref.cache(0, vec![vec![0xABu8].into()], u64::MAX);

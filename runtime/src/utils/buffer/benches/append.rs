@@ -16,7 +16,7 @@ pub fn bench(c: &mut Criterion) {
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
-                    let logical_page_size = cache_ref.page_size() as usize;
+                    let logical_page_size = cache_ref.logical_page_size() as usize;
                     let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();

@@ -272,9 +272,9 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Some(ref cache) = cache_ref {
                         let offset = offset as u64;
-                        if data.len() >= cache.page_size() as usize {
-                            let data = &data[..cache.page_size() as usize];
-                            let page_size = cache.page_size();
+                        if data.len() >= cache.logical_page_size() as usize {
+                            let data = &data[..cache.logical_page_size() as usize];
+                            let page_size = cache.logical_page_size();
                             let aligned_offset = (offset / page_size) * page_size;
                             cache.cache(
                                 blob_id as u64,
