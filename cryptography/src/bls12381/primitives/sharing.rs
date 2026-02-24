@@ -10,6 +10,8 @@ use commonware_macros::stability;
 use commonware_math::algebra::{FieldNTT, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
+#[stability(ALPHA)]
+use commonware_utils::{ordered::BiMap, TryFromIterator};
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 #[cfg(feature = "std")]
 use core::iter;
@@ -166,6 +168,7 @@ impl Mode {
                     return None;
                 }
 
+                let points = BiMap::try_from_iter(points).ok()?;
                 Some(Interpolator::roots_of_unity(ntt_total, points))
             }
         }

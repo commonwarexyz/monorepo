@@ -1,5 +1,5 @@
 use commonware_math::{fields::goldilocks::F, poly::Interpolator};
-use commonware_utils::{Faults, N3f1};
+use commonware_utils::{ordered::BiMap, Faults, N3f1, TryFromIterator};
 use core::num::NonZeroU32;
 use criterion::{criterion_group, criterion_main, Criterion};
 
@@ -8,7 +8,8 @@ fn bench_interpolator_creation(c: &mut Criterion) {
         let t = N3f1::quorum(n);
         let total = NonZeroU32::new(n).unwrap();
 
-        let points: Vec<(u32, u32)> = (0..t).map(|i| (i, i + 1)).collect();
+        let points = BiMap::try_from_iter((0..t).map(|i| (i, i + 1)))
+            .expect("points should be in bijection");
 
         let naive_label = format!(
             "{module}::interpolator_creation/type=naive n={n}",
@@ -17,7 +18,7 @@ fn bench_interpolator_creation(c: &mut Criterion) {
         c.bench_function(&naive_label, |b| {
             b.iter(|| {
                 let _: Interpolator<u32, F> =
-                    Interpolator::roots_of_unity_naive(total, points.iter().copied());
+                    Interpolator::roots_of_unity_naive(total, points.clone());
             });
         });
 
@@ -27,8 +28,7 @@ fn bench_interpolator_creation(c: &mut Criterion) {
         );
         c.bench_function(&fast_label, |b| {
             b.iter(|| {
-                let _: Interpolator<u32, F> =
-                    Interpolator::roots_of_unity(total, points.iter().copied());
+                let _: Interpolator<u32, F> = Interpolator::roots_of_unity(total, points.clone());
             });
         });
     }

@@ -5,7 +5,12 @@ use crate::algebra::{
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
+use commonware_utils::{
+    non_empty_vec,
+    ordered::{BiMap, Map},
+    vec::NonEmptyVec,
+    TryCollect, TryFromIterator,
+};
 use core::{
     fmt::Debug,
     iter,
@@ -483,41 +488,15 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// Each `(I, u32)` pair maps an index `I` to an evaluation point `w^k` where `w` is
     /// a primitive root of unity of order `next_power_of_two(total)`.
     ///
-    /// Indices `k >= total` are ignored. Duplicate `I` keys are deduped (last one wins).
-    pub fn roots_of_unity(total: NonZeroU32, points: impl IntoIterator<Item = (I, u32)>) -> Self {
-        #[cfg(any(
-            commonware_stability_BETA,
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON,
-            commonware_stability_RESERVED
-        ))]
-        {
-            return Self::roots_of_unity_naive(total, points);
-        }
-
-        #[cfg(not(any(
-            commonware_stability_BETA,
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON,
-            commonware_stability_RESERVED
-        )))]
-        {
-            let total_u32 = total.get();
-            let indices_to_key: Map<u32, I> = Map::from_iter_dedup(
-                points
-                    .into_iter()
-                    .filter(|(_, k)| *k < total_u32)
-                    .map(|(i, k)| (k, i)),
-            );
-            let weights = Map::from_iter_dedup(
-                crate::ntt::lagrange_coefficients(total, indices_to_key.keys().iter().copied())
-                    .into_iter()
-                    .filter_map(|(k, coeff)| Some((indices_to_key.get_value(&k)?.clone(), coeff))),
-            );
-            Self { weights }
-        }
+    /// Indices `k >= total` are ignored.
+    pub fn roots_of_unity(total: NonZeroU32, points: BiMap<I, u32>) -> Self {
+        let weights = Map::try_from_iter(
+            crate::ntt::lagrange_coefficients(total, points.values().iter().copied())
+                .into_iter()
+                .filter_map(|(k, coeff)| Some((points.get_key(&k)?.clone(), coeff))),
+        )
+        .expect("points has already been deduped");
+        Self { weights }
     }
 
     /// Create an interpolator for evaluation points at roots of unity using naive O(n^2) algorithm.
@@ -526,10 +505,7 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// Useful for testing against [`Self::roots_of_unity`].
     ///
     /// Indices `k >= total` are ignored.
-    pub fn roots_of_unity_naive(
-        total: NonZeroU32,
-        points: impl IntoIterator<Item = (I, u32)>,
-    ) -> Self {
+    pub fn roots_of_unity_naive(total: NonZeroU32, points: BiMap<I, u32>) -> Self {
         let total_u32 = total.get();
         let size = (total_u32 as u64).next_power_of_two();
         let lg_size = size.ilog2() as u8;
@@ -671,8 +647,8 @@ pub mod fuzz {
                 Self::RootsOfUnityEqNaive(n) => {
                     let n = (u32::from(n) % 256) + 1;
                     let total = NonZeroU32::new(n).expect("n is in 1..=256");
-                    let points: Vec<(usize, u32)> =
-                        (0..n as usize).map(|i| (i, i as u32)).collect();
+                    let points = BiMap::try_from_iter((0..n as usize).map(|i| (i, i as u32)))
+                        .expect("interpolation points should be bijective");
                     let fast = Interpolator::<usize, crate::fields::goldilocks::F>::roots_of_unity(
                         total,
                         points.clone(),
