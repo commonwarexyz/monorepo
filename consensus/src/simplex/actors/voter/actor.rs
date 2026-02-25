@@ -532,7 +532,7 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) {
-        let Some((retry, nullify)) = self.state.try_nullify(view, false) else {
+        let Some((retry, nullify)) = self.state.construct_nullify(view, false) else {
             return;
         };
         self.broadcast_nullify(batcher, vote_sender, retry, nullify)

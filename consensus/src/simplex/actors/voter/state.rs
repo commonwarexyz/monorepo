@@ -215,15 +215,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Constructs a nullify vote for `view`, if eligible.
     ///
-    /// For non-current views, returns `None` unless we have already observed a
-    /// nullification certificate for `view`.
-    ///
-    /// When `retry` is false, only returns a vote on the first attempt.
-    /// When `retry` is true, returns a vote on both first attempts and retries.
+    /// When `retry` is true, this is the timeout path and `view` must be the current view.
+    /// When `retry` is false, this is the certificate path and `view` must already have a
+    /// nullification certificate.
     ///
     /// Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn try_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
-        if view != self.view && self.nullification(view).is_none() {
+    pub fn construct_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
+        if retry {
+            if view != self.view {
+                return None;
+            }
+        } else if self.nullification(view).is_none() {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
@@ -238,7 +240,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the nullify vote and optionally an entry certificate for the previous view
     /// (if this is a retry timeout and we can construct one).
     pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
-        let Some((retry, nullify)) = self.try_nullify(self.view, true) else {
+        let Some((retry, nullify)) = self.construct_nullify(self.view, true) else {
             return (false, None, None);
         };
 
@@ -832,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn try_nullify_current_or_nullified_view() {
+    fn construct_nullify_current_or_nullified_view() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -855,16 +857,16 @@ mod tests {
             let future = current.next();
 
             // Without a nullification certificate, non-current views are not eligible.
-            assert!(state.try_nullify(future, false).is_none());
+            assert!(state.construct_nullify(future, false).is_none());
 
             // First attempt for current view succeeds.
             let (retry, _) = state
-                .try_nullify(current, false)
+                .construct_nullify(current, true)
                 .expect("first nullify should be emitted");
             assert!(!retry);
 
             // A non-retry request for the same view should not emit again.
-            assert!(state.try_nullify(current, false).is_none());
+            assert!(state.construct_nullify(current, false).is_none());
 
             // After observing a nullification for future view, we can emit its nullify vote.
             let future_round = Rnd::new(Epoch::new(4), future);
@@ -878,15 +880,12 @@ mod tests {
             assert!(state.add_nullification(future_nullification));
 
             let (retry, _) = state
-                .try_nullify(future, false)
+                .construct_nullify(future, false)
                 .expect("first nullify for nullified future view should be emitted");
             assert!(!retry);
 
-            // Retry requests should still emit for views that already nullified once.
-            let (retry, _) = state
-                .try_nullify(future, true)
-                .expect("retry nullify should be emitted");
-            assert!(retry);
+            // Retry path is reserved for current view timeout handling.
+            assert!(state.construct_nullify(future, true).is_none());
         });
     }
 
