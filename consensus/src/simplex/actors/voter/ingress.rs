@@ -34,7 +34,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
-    /// Signal that the current leader broadcast a nullify vote for `view`.
+    /// Signal that the current view should be expired (if not already).
     pub async fn expire(&mut self, view: View) {
         self.sender.send_lossy(Message::Expire(view)).await;
     }
