@@ -525,6 +525,20 @@ impl<
             .await;
     }
 
+    /// Broadcast a nullify vote for `view` after we observe a nullification certificate.
+    async fn try_broadcast_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        view: View,
+    ) {
+        let Some((retry, nullify)) = self.state.try_nullify(view, false) else {
+            return;
+        };
+        self.broadcast_nullify(batcher, vote_sender, retry, nullify)
+            .await;
+    }
+
     /// Broadcast a nullification certificate if the round provides a candidate.
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
@@ -652,7 +666,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
+        self.try_broadcast_nullify(batcher, vote_sender, view).await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -993,28 +1007,12 @@ impl<
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
 
-                                // Construct a nullify vote before updating current view (occurs during
-                                // `handle_nullification`), if we haven't timed out already
-                                let nullify =
-                                    self.state.try_nullify(view, false).map(|(_, nullify)| nullify);
-
                                 // Handle the nullification certificate
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;
-                                }
-
-                                // Broadcast the nullify vote
-                                if let Some(nullify) = nullify {
-                                    self.broadcast_nullify(
-                                        &mut batcher,
-                                        &mut vote_sender,
-                                        false,
-                                        nullify,
-                                    )
-                                    .await;
                                 }
                                 if from_resolver {
                                     resolved = Resolved::Nullification;

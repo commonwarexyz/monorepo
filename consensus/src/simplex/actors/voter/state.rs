@@ -215,14 +215,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Constructs a nullify vote for `view`, if eligible.
     ///
-    /// Returns `None` when `view` is not the current view.
+    /// For non-current views, returns `None` unless we have already observed a
+    /// nullification certificate for `view`.
     ///
     /// When `retry` is false, only returns a vote on the first attempt.
     /// When `retry` is true, returns a vote on both first attempts and retries.
     ///
     /// Returns `None` if we have already broadcast a finalize vote for this view.
     pub fn try_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
-        if view != self.view {
+        if view != self.view && self.nullification(view).is_none() {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
@@ -831,11 +832,13 @@ mod tests {
     }
 
     #[test]
-    fn try_nullify_requires_current_view() {
+    fn try_nullify_current_or_nullified_view() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[0].clone();
             let cfg = Config {
                 scheme: local_scheme,
@@ -849,9 +852,10 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
             let current = state.current_view();
+            let future = current.next();
 
-            // Guard non-current views from mutating nullify state.
-            assert!(state.try_nullify(current.next(), false).is_none());
+            // Without a nullification certificate, non-current views are not eligible.
+            assert!(state.try_nullify(future, false).is_none());
 
             // First attempt for current view succeeds.
             let (retry, _) = state
@@ -861,6 +865,28 @@ mod tests {
 
             // A non-retry request for the same view should not emit again.
             assert!(state.try_nullify(current, false).is_none());
+
+            // After observing a nullification for future view, we can emit its nullify vote.
+            let future_round = Rnd::new(Epoch::new(4), future);
+            let future_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, future_round).expect("nullify"))
+                .collect();
+            let future_nullification =
+                Nullification::from_nullifies(&verifier, &future_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(future_nullification));
+
+            let (retry, _) = state
+                .try_nullify(future, false)
+                .expect("first nullify for nullified future view should be emitted");
+            assert!(!retry);
+
+            // Retry requests should still emit for views that already nullified once.
+            let (retry, _) = state
+                .try_nullify(future, true)
+                .expect("retry nullify should be emitted");
+            assert!(retry);
         });
     }
 
