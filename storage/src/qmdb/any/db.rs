@@ -162,7 +162,7 @@ where
     }
 }
 
-// Functionality specific to (Merkleized,Durable) state: root, proof.
+// Functionality specific to Clean state: root, proof.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
@@ -188,7 +188,7 @@ where
     }
 }
 
-// Functionality specific to (Merkleized,Durable) state: initialization and persistence.
+// Functionality specific to Clean state with persistable jounral: initialization and persistence.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
@@ -302,7 +302,7 @@ where
     }
 }
 
-// Functionality specific to (Unmerkleized,Durable) state.
+// Functionality specific to Clean state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
