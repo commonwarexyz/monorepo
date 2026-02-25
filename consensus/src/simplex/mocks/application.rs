@@ -383,7 +383,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
-                        // Drop the sender to simulate an application that is not ready.
                         if self.drop_proposals {
                             continue;
                         }
@@ -395,7 +394,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
-                        // Drop the sender to simulate an application that is not ready.
                         if self.drop_verifications {
                             continue;
                         }

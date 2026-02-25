@@ -1037,10 +1037,7 @@ impl<
                         }
                     }
                     Message::Expire(nullified_view) => {
-                        // When the elected leader nullifies a view, it is signaling that this
-                        // view cannot make progress. Expire the round so the normal timeout
-                        // transition runs on the next tick.
-                        debug!(%nullified_view, "leader nullify observed, expiring round");
+                        debug!(%nullified_view, "leader abandoned view");
                         self.state.abandon(nullified_view, SkipReason::Abandoned);
                         continue;
                     }

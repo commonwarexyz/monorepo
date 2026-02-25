@@ -241,17 +241,20 @@ impl<
                     // If we already buffered a leader nullify for this now-current view
                     // (allowed because we accept votes up to `current+1`), we can skip
                     // the leader timeout immediately via the `is_active` response below.
-                    let is_local_leader = self.scheme.me().is_some_and(|me| me == leader);
-                    let abandoned = !is_local_leader
-                        && work
-                            .get(&current.0)
-                            .is_some_and(|round| round.has_nullify(leader));
+                    let abandoned = work
+                        .get(&current.0)
+                        .is_some_and(|round| round.has_nullify(leader));
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
                     let abandon_reason = if abandoned {
                         Some(SkipReason::Abandoned)
-                    } else if work.len() >= skip_timeout
+                    } else if
+                        // Ensure we have enough data to judge activity (none of this
+                        // data may be in the last skip_timeout views if we jumped ahead
+                        // to a new view)
+                        work.len() >= skip_timeout
+                        // Leader not active in any recent round
                         && !work
                             .iter()
                             .rev()
