@@ -543,9 +543,7 @@ impl<
         view: View,
         timeout: bool,
     ) -> Option<bool> {
-        let Some((was_retry, nullify)) = self.state.construct_nullify(view, timeout) else {
-            return None;
-        };
+        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
         Some(was_retry)
