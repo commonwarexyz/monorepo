@@ -237,6 +237,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return (false, None, None);
         };
 
+        // If was retry, we need to get entry certificates for the previous view
         let entry_view = self.view.previous().unwrap_or(GENESIS_VIEW);
         if !retry || entry_view == GENESIS_VIEW {
             return (retry, Some(nullify), None);
