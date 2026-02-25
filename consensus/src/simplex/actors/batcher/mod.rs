@@ -1509,7 +1509,10 @@ mod tests {
             let skip = batcher_mailbox
                 .update(next_view, leader, View::zero())
                 .await;
-            assert!(skip.is_none(), "leader should remain active with nullify activity");
+            assert!(
+                skip.is_none(),
+                "leader should remain active with nullify activity"
+            );
         });
     }
 

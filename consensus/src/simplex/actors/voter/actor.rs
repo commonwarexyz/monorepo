@@ -813,7 +813,8 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        self.state.abandon(observed_view, SkipReason::Initialization);
+        self.state
+            .abandon(observed_view, SkipReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
