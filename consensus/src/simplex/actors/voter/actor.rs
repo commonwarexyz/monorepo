@@ -401,15 +401,12 @@ impl<
             .and_then(|_| self.state.parent_certificate(view))
     }
 
-    /// If a nullification certificate arrives for our current view, we may need to emit a
-    /// first-attempt nullify vote for local activity tracking.
+    /// If a nullification certificate arrives for our current view, we should emit
+    /// a nullify vote (just like we would for a notarization or finalization).
     ///
     /// Returns `Some(nullify)` only when:
-    /// 1. The certificate is for the current view.
+    /// 1. The view is the current view.
     /// 2. We have not already emitted nullify for that view.
-    ///
-    /// Any "entry certificate" from timeout handling is intentionally ignored in this path,
-    /// because the incoming nullification certificate already provides entry material for peers.
     fn try_construct_nullify(&mut self, view: View) -> Option<Nullify<S>> {
         if self.state.current_view() != view {
             return None;
