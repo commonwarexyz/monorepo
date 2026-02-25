@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::{Inbound, Peer},
+        metrics::{Inbound, Peer, SkipReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
@@ -242,27 +242,27 @@ impl<
                     // (allowed because we accept votes up to `current+1`), we can skip
                     // the leader timeout immediately via the `is_active` response below.
                     let is_local_leader = self.scheme.me().is_some_and(|me| me == leader);
-                    let should_expire = !is_local_leader
+                    let abandoned = !is_local_leader
                         && work
                             .get(&current.0)
                             .is_some_and(|round| round.has_nullify(leader));
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
-                    let is_active = !should_expire
-                        && (
-                            // Ensure we have enough data to judge activity (none of this
-                            // data may be in the last skip_timeout views if we jumped ahead
-                            // to a new view)
-                            work.len() < skip_timeout
-                            // Leader active in at least one recent round
-                            || work
-                                .iter()
-                                .rev()
-                                .take(skip_timeout)
-                                .any(|(_, round)| round.is_active(leader))
-                        );
-                    active.send_lossy(is_active);
+                    let abandon_reason = if abandoned {
+                        Some(SkipReason::Abandoned)
+                    } else if work.len() >= skip_timeout
+                        && !work
+                            .iter()
+                            .rev()
+                            .take(skip_timeout)
+                            .any(|(_, round)| round.is_active(leader))
+                    {
+                        Some(SkipReason::Inactivity)
+                    } else {
+                        None
+                    };
+                    active.send_lossy(abandon_reason);
 
                     // Setting leader may enable batch verification
                     updated_view = current.0;

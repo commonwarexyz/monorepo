@@ -1,5 +1,5 @@
 use crate::{
-    simplex::types::Vote,
+    simplex::{metrics::SkipReason, types::Vote},
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
         leader: Participant,
         finalized: View,
 
-        active: oneshot::Sender<bool>,
+        active: oneshot::Sender<Option<SkipReason>>,
     },
     /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
@@ -31,7 +31,15 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message.
-    pub async fn update(&mut self, current: View, leader: Participant, finalized: View) -> bool {
+    ///
+    /// Returns `None` if the leader is active, or `Some(reason)` if the round
+    /// should be abandoned.
+    pub async fn update(
+        &mut self,
+        current: View,
+        leader: Participant,
+        finalized: View,
+    ) -> Option<SkipReason> {
         self.sender
             .request_or(
                 |active| Message::Update {
@@ -40,7 +48,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                     finalized,
                     active,
                 },
-                true,
+                None,
             )
             .await
     }

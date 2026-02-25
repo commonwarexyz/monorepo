@@ -14,6 +14,32 @@ impl Peer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum SkipReason {
+    Inactivity,
+    Abandoned,
+    LeaderTimeout,
+    RoundTimeout,
+    FailedProposal,
+    Initialization,
+    CertificationFailure,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Skip {
+    pub peer: String,
+    pub reason: SkipReason,
+}
+
+impl Skip {
+    pub fn new(peer: &impl Array, reason: SkipReason) -> Self {
+        Self {
+            peer: peer.to_string(),
+            reason,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageType {
     Notarize,

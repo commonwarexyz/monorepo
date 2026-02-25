@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::Peer,
+        metrics::{Peer, Skip, SkipReason},
         min_active,
         scheme::Scheme,
         types::{
@@ -64,7 +64,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    skips_per_leader: Family<Peer, Counter>,
+    skips_per_leader: Family<Skip, Counter>,
     nullifications_per_leader: Family<Peer, Counter>,
 }
 
@@ -74,7 +74,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skips_per_leader = Family::<Peer, Counter>::default();
+        let skips_per_leader = Family::<Skip, Counter>::default();
         let nullifications_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
@@ -89,7 +89,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             nullifications_per_leader.clone(),
         );
         for participant in cfg.scheme.participants().iter() {
-            let _ = skips_per_leader.get_or_create(&Peer::new(participant));
             let _ = nullifications_per_leader.get_or_create(&Peer::new(participant));
         }
 
@@ -292,12 +291,21 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
 
-        // Track skipped view per leader if we know who the leader was
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
-        if let Some(leader) = added.then(|| round.leader()).flatten() {
+        let leader = added.then(|| round.leader()).flatten();
+        let has_proposal = round.proposal().is_some();
+        if let Some(leader) = leader {
             self.nullifications_per_leader
                 .get_or_create(&Peer::new(&leader.key))
+                .inc();
+            let reason = if has_proposal {
+                SkipReason::RoundTimeout
+            } else {
+                SkipReason::LeaderTimeout
+            };
+            self.skips_per_leader
+                .get_or_create(&Skip::new(&leader.key, reason))
                 .inc();
         }
 
@@ -413,8 +421,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .map(|round| round.elapsed_since_start(now))
     }
 
-    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
-    pub fn expire_round(&mut self, view: View) {
+    /// Immediately abandons `view`, forcing its timeouts to trigger on the next tick.
+    pub fn abandon(&mut self, view: View, reason: SkipReason) {
         if view != self.view {
             return;
         }
@@ -423,10 +431,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         round.set_deadlines(now, now);
 
-        // Update metrics
         if let Some(leader) = round.leader() {
             self.skips_per_leader
-                .get_or_create(&Peer::new(&leader.key))
+                .get_or_create(&Skip::new(&leader.key, reason))
                 .inc();
         }
     }
@@ -555,7 +562,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.expire_round(view);
+            self.abandon(view, SkipReason::CertificationFailure);
         }
 
         Some(notarization)
@@ -836,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_old_round_is_noop() {
+    fn abandon_old_round_is_noop() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -857,12 +864,12 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.expire_round(View::zero());
+            state.abandon(View::zero(), SkipReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
                 !state.views.contains_key(&View::zero()),
-                "old round should not be created when expire is ignored"
+                "old round should not be created when abandon is ignored"
             );
 
             // Move to view 2 so view 1 becomes stale.
@@ -880,7 +887,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.expire_round(view_1);
+            state.abandon(view_1, SkipReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });

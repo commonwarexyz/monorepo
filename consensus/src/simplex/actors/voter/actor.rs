@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, Outbound},
+        metrics::{self, Outbound, SkipReason},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
@@ -813,7 +813,7 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        self.state.expire_round(observed_view);
+        self.state.abandon(observed_view, SkipReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -904,7 +904,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.expire_round(context.view());
+                        self.state.abandon(context.view(), SkipReason::FailedProposal);
                         continue;
                     }
                 };
@@ -942,12 +942,12 @@ impl<
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.expire_round(context.view());
+                        self.state.abandon(context.view(), SkipReason::FailedProposal);
                         continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
-                        self.state.expire_round(context.view());
+                        self.state.abandon(context.view(), SkipReason::FailedProposal);
                         continue;
                     }
                 };
@@ -1041,7 +1041,7 @@ impl<
                         // view cannot make progress. Expire the round so the normal timeout
                         // transition runs on the next tick.
                         debug!(%nullified_view, "leader nullify observed, expiring round");
-                        self.state.expire_round(nullified_view);
+                        self.state.abandon(nullified_view, SkipReason::Abandoned);
                         continue;
                     }
                 }
@@ -1076,13 +1076,14 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // If the leader is not active (and not us), we should reduce leader timeout to now
-                    let is_active = batcher
+                    let abandon_reason = batcher
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
-                    if !is_active && !self.state.is_me(leader) {
-                        debug!(%view, %leader, "skipping leader timeout due to inactivity");
-                        self.state.expire_round(current_view);
+                    if let Some(reason) = abandon_reason {
+                        if reason == SkipReason::Abandoned || !self.state.is_me(leader) {
+                            debug!(%view, %leader, ?reason, "abandoning round");
+                            self.state.abandon(current_view, reason);
+                        }
                     }
                 }
             },
