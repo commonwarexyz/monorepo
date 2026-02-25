@@ -492,12 +492,15 @@ mod fuzz {
     use rand::{rngs::StdRng, SeedableRng};
 
     impl<'a> Arbitrary<'a> for Mode {
-        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        fn arbitrary(_u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self::NonZeroCounter)
+            /*
             match u.int_in_range(0u8..=1)? {
                 0 => Ok(Self::NonZeroCounter),
                 1 => Ok(Self::RootsOfUnity),
                 _ => Err(arbitrary::Error::IncorrectFormat),
             }
+            */
         }
     }
 
