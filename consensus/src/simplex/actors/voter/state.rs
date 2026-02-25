@@ -215,54 +215,50 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Constructs a nullify vote for `view`, if eligible.
     ///
-    /// Returns `None` when `view` is not the current view.
-    ///
-    /// When `retry` is false, only returns a vote on the first attempt.
-    /// When `retry` is true, returns a vote on both first attempts and retries.
+    /// When `timeout` is true, this is the timeout path and `view` must be the current view.
+    /// When `timeout` is false, this is the certificate path and `view` must already have a
+    /// nullification certificate.
     ///
     /// Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn try_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
-        if view != self.view {
+    pub fn construct_nullify(&mut self, view: View, timeout: bool) -> Option<(bool, Nullify<S>)> {
+        if timeout {
+            if view != self.view {
+                return None;
+            }
+        } else if self.nullification(view).is_none() {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
-        if !retry && is_retry {
+        if !timeout && is_retry {
             return None;
         }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         Some((is_retry, nullify))
     }
 
-    /// Handle a timeout event for the current view.
-    /// Returns the nullify vote and optionally an entry certificate for the previous view
-    /// (if this is a retry timeout and we can construct one).
-    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
-        let Some((retry, nullify)) = self.try_nullify(self.view, true) else {
-            return (false, None, None);
-        };
-
-        // If was retry, we need to get entry certificates for the previous view
-        let entry_view = self.view.previous().unwrap_or(GENESIS_VIEW);
-        if !retry || entry_view == GENESIS_VIEW {
-            return (retry, Some(nullify), None);
+    /// Returns the best certificate for `view` to help peers enter it.
+    ///
+    /// Finalization is strongest, then nullification, then notarization.
+    pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
+        if view == GENESIS_VIEW {
+            return None;
         }
 
-        // Get the certificate for the previous view. Prefer finalizations since they are the
-        // strongest proof available. Prefer nullifications over notarizations because a
-        // nullification overwrites an uncertified notarization (if we only heard of notarizations,
+        // Prefer finalizations since they are the strongest proof available.
+        // Prefer nullifications over notarizations because a nullification
+        // overwrites an uncertified notarization (if we only heard notarizations,
         // we may never exit a view with an uncertifiable notarization).
         #[allow(clippy::option_if_let_else)]
-        let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
+        if let Some(finalization) = self.finalization(view).cloned() {
             Some(Certificate::Finalization(finalization))
-        } else if let Some(nullification) = self.nullification(entry_view).cloned() {
+        } else if let Some(nullification) = self.nullification(view).cloned() {
             Some(Certificate::Nullification(nullification))
-        } else if let Some(notarization) = self.notarization(entry_view).cloned() {
+        } else if let Some(notarization) = self.notarization(view).cloned() {
             Some(Certificate::Notarization(notarization))
         } else {
-            warn!(%entry_view, "entry certificate not found during timeout");
+            warn!(%view, "entry certificate not found");
             None
-        };
-        (retry, Some(nullify), cert)
+        }
     }
 
     /// Inserts a notarization certificate and prepares the next view's leader.
@@ -798,8 +794,10 @@ mod tests {
             let second = state.next_timeout_deadline();
             assert_eq!(first, second, "cached deadline should be reused");
 
-            // Handle timeout should return false (not a retry)
-            let (was_retry, _, _) = state.handle_timeout();
+            // Timeout-mode nullify: first emission should not be marked as retry.
+            let (was_retry, _) = state
+                .construct_nullify(state.current_view(), true)
+                .expect("first timeout nullify should exist");
             assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
@@ -819,8 +817,10 @@ mod tests {
             let fifth = state.next_timeout_deadline();
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
-            // Handle timeout should return true whenever called (can be before registered deadline)
-            let (was_retry, _, _) = state.handle_timeout();
+            // Timeout-mode nullify: second emission should be marked as retry.
+            let (was_retry, _) = state
+                .construct_nullify(state.current_view(), true)
+                .expect("retry timeout nullify should exist");
             assert!(was_retry, "subsequent timeout should be treated as retry");
 
             // Confirm retry deadline is set
@@ -831,11 +831,13 @@ mod tests {
     }
 
     #[test]
-    fn try_nullify_requires_current_view() {
+    fn construct_nullify_current_or_nullified_view() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[0].clone();
             let cfg = Config {
                 scheme: local_scheme,
@@ -849,18 +851,48 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
             let current = state.current_view();
+            let next = current.next();
 
-            // Guard non-current views from mutating nullify state.
-            assert!(state.try_nullify(current.next(), false).is_none());
+            // Without a nullification certificate, non-current views are not eligible.
+            assert!(state.construct_nullify(next, false).is_none());
+            // Timeout mode is reserved for current-view timeout handling.
+            assert!(state.construct_nullify(next, true).is_none());
 
-            // First attempt for current view succeeds.
-            let (retry, _) = state
-                .try_nullify(current, false)
-                .expect("first nullify should be emitted");
-            assert!(!retry);
+            // Observe a nullification for current view, which advances us to the next view.
+            let current_round = Rnd::new(Epoch::new(4), current);
+            let current_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, current_round).expect("nullify")
+                })
+                .collect();
+            let current_nullification =
+                Nullification::from_nullifies(&verifier, &current_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(current_nullification));
+            assert_eq!(state.current_view(), next);
 
-            // A non-retry request for the same view should not emit again.
-            assert!(state.try_nullify(current, false).is_none());
+            // We can emit a first-attempt nullify vote for the now-past nullified view.
+            let (was_retry, _) = state
+                .construct_nullify(current, false)
+                .expect("first nullify for nullified past view should be emitted");
+            assert!(!was_retry);
+
+            // A second certificate-path request for the same view does not emit again.
+            assert!(state.construct_nullify(current, false).is_none());
+
+            // Timeout mode remains current-view only.
+            assert!(state.construct_nullify(current, true).is_none());
+
+            // Timeout path on current view: first attempt then retry.
+            let (was_retry, _) = state
+                .construct_nullify(next, true)
+                .expect("first timeout nullify for current view should be emitted");
+            assert!(!was_retry);
+            let (was_retry, _) = state
+                .construct_nullify(next, true)
+                .expect("retry timeout nullify for current view should be emitted");
+            assert!(was_retry);
         });
     }
 
@@ -1668,8 +1700,11 @@ mod tests {
             assert!(state.try_verify().is_some());
             assert!(state.verified(view));
 
-            // Handle timeout
-            assert!(!state.handle_timeout().0);
+            // Timeout path emits a first-attempt nullify.
+            let (retry, _) = state
+                .construct_nullify(view, true)
+                .expect("timeout nullify should exist");
+            assert!(!retry);
 
             // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());

@@ -359,18 +359,25 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
-        // If we can emit a nullify vote, do so.
-        let (retry, nullify, entry) = self.state.handle_timeout();
-        if let Some(nullify) = nullify {
-            self.broadcast_nullify(batcher, vote_sender, retry, nullify)
-                .await;
-        }
+        let view = self.state.current_view();
+        let Some(retry) = self
+            .try_broadcast_nullify(batcher, vote_sender, view, true)
+            .await
+        else {
+            return;
+        };
 
         // Broadcast entry to help others enter the view
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
-        if let Some(certificate) = entry {
+        if !retry {
+            return;
+        }
+        let Some(past_view) = view.previous() else {
+            return;
+        };
+        if let Some(certificate) = self.state.get_best_certificate(past_view) {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
@@ -525,6 +532,23 @@ impl<
             .await;
     }
 
+    /// Broadcast a nullify vote for `view` if the state machine allows it.
+    ///
+    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
+    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
+    async fn try_broadcast_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        view: View,
+        timeout: bool,
+    ) -> Option<bool> {
+        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
+            .await;
+        Some(was_retry)
+    }
+
     /// Broadcast a nullification certificate if the round provides a candidate.
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
@@ -652,7 +676,9 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
+        let _ = self
+            .try_broadcast_nullify(batcher, vote_sender, view, false)
+            .await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -993,28 +1019,12 @@ impl<
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
 
-                                // Construct a nullify vote before updating current view (occurs during
-                                // `handle_nullification`), if we haven't timed out already
-                                let nullify =
-                                    self.state.try_nullify(view, false).map(|(_, nullify)| nullify);
-
                                 // Handle the nullification certificate
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;
-                                }
-
-                                // Broadcast the nullify vote
-                                if let Some(nullify) = nullify {
-                                    self.broadcast_nullify(
-                                        &mut batcher,
-                                        &mut vote_sender,
-                                        false,
-                                        nullify,
-                                    )
-                                    .await;
                                 }
                                 if from_resolver {
                                     resolved = Resolved::Nullification;
