@@ -867,17 +867,18 @@ impl Cache {
 
         match result {
             Ok(page) => {
-                if page.len() < self.logical_page_size {
+                if page.len() < self.physical_page_size {
                     error!(
                         ?key,
                         page_len = page.len(),
-                        logical_page_size = self.logical_page_size,
-                        "fetched page shorter than logical page size"
+                        physical_page_size = self.physical_page_size,
+                        "fetched page shorter than physical page size"
                     );
                     self.evict_slot(slot);
                     return;
                 }
-                // `page` may include a physical suffix, reads remain bounded to logical size.
+                // Slot buffers are always physical-page sized so take_slot_buffer can
+                // recycle them for future fetches without reallocation.
                 let slot_ref = &mut self.slots[slot];
                 slot_ref.buf = page;
                 slot_ref.state = SlotState::Filled {
@@ -894,15 +895,28 @@ impl Cache {
     /// Take a writable slot buffer for fetch or cache refill.
     ///
     /// Reuses the existing slot allocation when uniquely owned; otherwise allocates from the pool.
+    ///
+    /// # Invariant
+    ///
+    /// Slot buffers are always at least `physical_page_size` capacity. This is maintained by:
+    /// - [Cache::new]: allocates physical-page-sized buffers.
+    /// - [Cache::insert_page]: receives a buffer from this method (physical-sized), writes
+    ///   logical bytes, freezes -- `freeze()` preserves allocation capacity.
+    /// - [Cache::finish_fetch_if_current]: rejects pages shorter than `physical_page_size`.
     fn take_slot_buffer(&mut self, slot: usize) -> crate::IoBufMut {
         let current = std::mem::take(&mut self.slots[slot].buf);
         match current.try_into_mut() {
             Ok(mut writable) => {
-                assert!(writable.capacity() >= self.physical_page_size);
+                assert!(
+                    writable.capacity() >= self.physical_page_size,
+                    "slot buffer capacity ({}) < physical_page_size ({})",
+                    writable.capacity(),
+                    self.physical_page_size,
+                );
                 writable.clear();
                 writable
             }
-            // Slot buffer is aliased by readers
+            // Slot buffer is aliased by readers, allocate a fresh one.
             Err(_) => self.pool.alloc(self.physical_page_size),
         }
     }
@@ -945,6 +959,18 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PHYSICAL_PAGE_SIZE: NonZeroU16 = NZU16!(1036);
     const PAGE_SIZE_U64: u64 = PAGE_SIZE.get() as u64;
+
+    /// Build a physical-page-sized IoBuf (logical data filled with `fill` + valid CRC record).
+    /// This mirrors what `make_fetch_future` returns from a real blob read.
+    fn physical_page(fill: u8) -> IoBuf {
+        let logical = vec![fill; PAGE_SIZE.get() as usize];
+        let crc = Crc32::checksum(&logical);
+        let record = Checksum::new(PAGE_SIZE.get(), crc);
+        let mut buf = logical;
+        buf.extend_from_slice(&record.to_bytes());
+        assert_eq!(buf.len(), PHYSICAL_PAGE_SIZE.get() as usize);
+        IoBuf::from(buf)
+    }
 
     fn read_cache(cache: &Cache, blob_id: u64, buf: &mut [u8], offset: u64) -> usize {
         let Some(page) = cache.read_at(blob_id, offset, buf.len()) else {
@@ -1378,13 +1404,9 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let (blob, _) = context.open("test", b"stale_success").await.unwrap();
 
-            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(IoBuf::from(vec![
-                9u8;
-                PAGE_SIZE.get()
-                    as usize
-            ])))
-            .boxed()
-            .shared();
+            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(physical_page(9)))
+                .boxed()
+                .shared();
             let _ = stale.clone().await;
             install_fetch_state(&cache_ref, (0, 0), Arc::new(PageFetchState::new(stale)));
 
@@ -1447,13 +1469,9 @@ mod tests {
             page_data.extend_from_slice(&record.to_bytes());
             blob.write_at(0, page_data).await.unwrap();
 
-            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(IoBuf::from(vec![
-                9u8;
-                PAGE_SIZE.get()
-                    as usize
-            ])))
-            .boxed()
-            .shared();
+            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(physical_page(9)))
+                .boxed()
+                .shared();
             let _ = stale.clone().await;
             install_fetch_state(&cache_ref, (7, 7), Arc::new(PageFetchState::new(stale)));
 
@@ -1474,13 +1492,9 @@ mod tests {
             let newer = vec![6u8; PAGE_SIZE.get() as usize];
             cache_pages(&cache_ref, 0, vec![newer.clone().into()], 0);
 
-            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(IoBuf::from(vec![
-                1u8;
-                PAGE_SIZE.get()
-                    as usize
-            ])))
-            .boxed()
-            .shared();
+            let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(physical_page(1)))
+                .boxed()
+                .shared();
             let _ = stale.clone().await;
             install_fetch_state(&cache_ref, (7, 7), Arc::new(PageFetchState::new(stale)));
 
