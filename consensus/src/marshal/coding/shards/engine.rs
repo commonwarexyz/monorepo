@@ -538,7 +538,8 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
+                self.peer_buffers
+                    .retain(|peer, _| tracked_peers.as_ref().contains(peer));
             },
         }
     }

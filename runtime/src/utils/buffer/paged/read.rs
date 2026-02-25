@@ -209,7 +209,11 @@ impl ReplayBuf {
             0
         };
         self.buffers.push_back(state);
-        self.remaining += logical_bytes.saturating_sub(skip);
+        assert!(
+            logical_bytes >= skip,
+            "fill returned fewer logical bytes ({logical_bytes}) than the seek offset within the page ({skip})"
+        );
+        self.remaining += logical_bytes - skip;
     }
 
     /// Returns the logical length of the given page in the given buffer.

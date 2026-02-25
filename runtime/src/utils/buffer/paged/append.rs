@@ -358,6 +358,13 @@ impl<B: Blob> Append<B> {
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
     /// in any final partial page. If `write_partial_page` is true, the partial page will be written
     /// to the blob as well along with a CRC record.
+    ///
+    /// # Serialization
+    ///
+    /// This method reads `partial_page_state` from `blob_state` under a read lock, then later
+    /// acquires `blob_state` as a write lock to commit the new state. This is safe because the
+    /// caller always holds the buffer write lock (`buf_guard`), and all paths into `flush_internal`
+    /// require that lock, so concurrent flushes are impossible.
     async fn flush_internal(
         &self,
         mut buf_guard: AsyncRwLockWriteGuard<'_, Buffer>,

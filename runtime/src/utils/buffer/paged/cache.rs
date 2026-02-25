@@ -653,7 +653,7 @@ impl Cache {
         // Serve only logical bytes even if slot backing currently includes CRC/trailing bytes.
         let bytes = std::cmp::min(max_len, self.logical_page_size - offset_in_page as usize);
         let end = offset_in_page as usize + bytes;
-        debug_assert!(page.len() >= end);
+        assert!(page.len() >= end);
         Some(page.slice(offset_in_page as usize..end))
     }
 
@@ -664,17 +664,30 @@ impl Cache {
     ///
     /// Returns `Err(())` only when no slot is currently reservable.
     fn insert_page(&mut self, key: (u64, u64), page: &[u8]) -> Result<(), ()> {
-        // Duplicate key update: reuse the same slot and refresh the reference bit.
+        // Duplicate key update: reuse the same slot.
         let slot = if let Some(&slot) = self.index.get(&key) {
             let (blob_id, page_num) = key;
-            debug!(blob_id, page_num, "updating duplicate page");
-            if let SlotState::Filled {
-                key: state_key,
-                referenced,
-            } = &self.slots[slot].state
-            {
-                assert_eq!(*state_key, key);
-                referenced.store(true, Ordering::Relaxed);
+            match &self.slots[slot].state {
+                SlotState::Filled {
+                    key: state_key,
+                    referenced,
+                } => {
+                    debug!(blob_id, page_num, "updating duplicate page");
+                    assert_eq!(*state_key, key);
+                    referenced.store(true, Ordering::Relaxed);
+                }
+                SlotState::Reserved { key: state_key, .. } => {
+                    // A flush is inserting a page for a key that has an in-flight fetch.
+                    // The flush data is authoritative, so we overwrite the Reserved slot.
+                    debug!(
+                        blob_id,
+                        page_num, "overwriting reserved slot with flush data"
+                    );
+                    assert_eq!(*state_key, key);
+                }
+                SlotState::Vacant => {
+                    unreachable!("index entry must point to Filled or Reserved slot");
+                }
             }
             slot
         } else {
@@ -717,7 +730,10 @@ impl Cache {
     /// Pass 2 force-selects the first non-fetching slot if needed.
     ///
     /// Orphaned reserved entries (no active waiters) are reclaimed opportunistically.
-    /// Returns `None` only when all slots are currently fetching with active waiters.
+    /// Returns `None` only when every slot is currently in [`SlotState::Reserved`] with active
+    /// waiters. In that case, the caller should fall back to an uncached fetch. This is expected
+    /// to be rare in practice: it requires that every cache slot has a concurrent in-flight I/O
+    /// with at least one live waiter, and the new miss targets a key not already being fetched.
     fn reserve_slot(&mut self) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
@@ -880,18 +896,15 @@ impl Cache {
     /// Reuses the existing slot allocation when uniquely owned; otherwise allocates from the pool.
     fn take_slot_buffer(&mut self, slot: usize) -> crate::IoBufMut {
         let current = std::mem::take(&mut self.slots[slot].buf);
-        let mut dst = match current.try_into_mut() {
+        match current.try_into_mut() {
             Ok(mut writable) => {
+                assert!(writable.capacity() >= self.physical_page_size);
                 writable.clear();
                 writable
             }
+            // Slot buffer is aliased by readers
             Err(_) => self.pool.alloc(self.physical_page_size),
-        };
-        // A logical-sized recycled buffer is not large enough for physical-page fetches.
-        if dst.capacity() < self.physical_page_size {
-            dst = self.pool.alloc(self.physical_page_size);
         }
-        dst
     }
 
     /// Evict any key currently assigned to `slot`, leaving the slot vacant.
@@ -1746,6 +1759,100 @@ mod tests {
             assert_eq!(bytes, PAGE_SIZE.get() as usize);
             assert_eq!(buf, newer);
             assert!(!is_fetching(&cache, (0, 0)));
+        });
+    }
+
+    #[test_traced]
+    fn test_all_slots_reserved_falls_back_to_uncached_fetch() {
+        // When every cache slot is Reserved with a live waiter, a miss for a different key
+        // should fall back to an uncached fetch and still return correct data.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let (blob, size) = context
+                .open("test", b"all_reserved_fallback")
+                .await
+                .unwrap();
+            assert_eq!(size, 0);
+
+            // Write two valid physical pages to backing storage.
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page_size = PHYSICAL_PAGE_SIZE.get() as u64;
+
+            let logical0 = vec![0xAAu8; page_size];
+            let crc0 = Crc32::checksum(&logical0);
+            let mut phys0 = logical0.clone();
+            phys0.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc0).to_bytes());
+            blob.write_at(0, phys0).await.unwrap();
+
+            let logical1 = vec![0xBBu8; page_size];
+            let crc1 = Crc32::checksum(&logical1);
+            let mut phys1 = logical1.clone();
+            phys1.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc1).to_bytes());
+            blob.write_at(physical_page_size, phys1).await.unwrap();
+
+            // Fill the only slot with a Reserved entry that has a live waiter.
+            let pending_fut: PageFetchFut = async {
+                pending::<()>().await;
+                unreachable!("pending future never resolves")
+            }
+            .boxed()
+            .shared();
+            let state = Arc::new(PageFetchState::new(pending_fut));
+            let _waiter = state.clone(); // keep strong count > 1
+            install_fetch_state(&cache_ref, (42, 0), state);
+
+            // Read a different key. All slots are reserved so this must use the uncached path.
+            let read = cache_ref
+                .read(&blob, 0, PAGE_SIZE_U64, 64)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), vec![0xBBu8; 64].as_slice());
+
+            // The reserved slot for the other key should still be intact.
+            let cache = cache_ref.cache.read();
+            assert!(is_fetching(&cache, (42, 0)));
+        });
+    }
+
+    #[test_traced]
+    fn test_insert_page_overwrites_reserved_slot() {
+        // When a flush inserts a page for a key that has an in-flight Reserved fetch,
+        // the insert should overwrite the slot with Filled state.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+
+            // Install a Reserved slot for key (0, 0).
+            let pending_fut: PageFetchFut = async {
+                pending::<()>().await;
+                unreachable!("pending future never resolves")
+            }
+            .boxed()
+            .shared();
+            install_fetch_state(
+                &cache_ref,
+                (0, 0),
+                Arc::new(PageFetchState::new(pending_fut)),
+            );
+
+            {
+                let cache = cache_ref.cache.read();
+                assert!(is_fetching(&cache, (0, 0)));
+            }
+
+            // Insert a page for the same key via the flush path.
+            let page_data = vec![0xCCu8; PAGE_SIZE.get() as usize];
+            cache_pages(&cache_ref, 0, vec![page_data.clone().into()], 0);
+
+            // The slot should now be Filled, not Reserved.
+            let mut buf = vec![0u8; PAGE_SIZE.get() as usize];
+            let cache = cache_ref.cache.read();
+            assert!(!is_fetching(&cache, (0, 0)));
+            let bytes_read = read_cache(&cache, 0, &mut buf, 0);
+            assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
+            assert_eq!(buf, page_data);
         });
     }
 }
