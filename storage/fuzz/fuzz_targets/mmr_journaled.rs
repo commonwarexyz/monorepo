@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
-    diff::DirtyDiff,
+    diff::Batch,
     journaled::{Config, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
     mem, Error, Position, StandardHasher as Standard,
@@ -100,7 +100,7 @@ fn historical_root(
     let mut hasher = Standard::<Sha256>::new();
     let mut mmr = mem::Mmr::new(&mut hasher);
     let changeset = {
-        let mut diff = DirtyDiff::new(&mmr);
+        let mut diff = Batch::new(&mmr);
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
             diff.add(&mut hasher, element);
         }
@@ -144,7 +144,7 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let changeset = {
                         let inner = mmr.inner_mmr();
-                        let mut diff = DirtyDiff::new(&*inner);
+                        let mut diff = Batch::new(&*inner);
                         diff.add(&mut hasher, limited_data);
                         diff.merkleize(&mut hasher).into_changeset()
                     };
@@ -170,7 +170,7 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let changeset = {
                         let inner = mmr.inner_mmr();
-                        let mut diff = DirtyDiff::new(&*inner);
+                        let mut diff = Batch::new(&*inner);
                         diff.add(&mut hasher, limited_data);
                         diff.merkleize(&mut hasher).into_changeset()
                     };

@@ -3,13 +3,11 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
-    kv::{Deletable as _, Updatable as _},
+    kv::{Batchable, Deletable as _, Gettable, Updatable as _},
     qmdb::{
         any::{
-            ordered::variable::Db as OVariable,
-            states::{MutableAny, UnmerkleizedDurableAny},
-            unordered::variable::Db as UVariable,
-            VariableConfig as AConfig,
+            ordered::variable::Db as OVariable, states::CleanAny,
+            unordered::variable::Db as UVariable, VariableConfig as AConfig,
         },
         current::{
             ordered::variable::Db as OVCurrent, unordered::variable::Db as UVCurrent,
@@ -154,16 +152,15 @@ async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
 ///
-/// Takes a mutable database and returns it in durable state after final commit.
+/// Takes a database and returns it after final commit.
 async fn gen_random_kv<M>(
     mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: u32,
-) -> M::Durable
+) -> M
 where
-    M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
+    M: CleanAny + Batchable + Gettable<Key = Digest> + LogStore<Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -187,13 +184,13 @@ where
         assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             assert!(db.write_batch(batch.into_iter()).await.is_ok());
-            let (durable, _) = db.commit(None).await.unwrap();
-            db = durable.into_mutable();
+            let (committed, _) = db.commit(None).await.unwrap();
+            db = committed.into_mutable();
             batch = db.start_batch();
         }
     }
 
     assert!(db.write_batch(batch.into_iter()).await.is_ok());
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    let (committed, _) = db.commit(None).await.expect("commit shouldn't fail");
+    committed
 }

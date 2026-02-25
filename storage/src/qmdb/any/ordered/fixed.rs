@@ -10,7 +10,7 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_fixed, ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Durable, Error,
+        Error,
     },
     translator::Translator,
 };
@@ -23,11 +23,11 @@ pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Durable>
+    Db<E, K, V, H, T>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -67,7 +67,7 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_fixed, FixedConfig as Config, FixedValue},
-            Durable, Error,
+            Error,
         },
         translator::Translator,
     };
@@ -84,13 +84,12 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, D = Durable> = crate::qmdb::any::ordered::Db<
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
         H,
         Update<K, V>,
-        D,
     >;
 
     impl<
@@ -100,7 +99,7 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Durable>
+        > Db<E, K, V, H, T, P>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -130,13 +129,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 1, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 2, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -167,7 +166,7 @@ pub(crate) mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            verify_proof, Durable, NonDurable,
+            verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
@@ -184,10 +183,8 @@ pub(crate) mod test {
     use std::collections::{BTreeMap, HashMap};
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    pub(crate) type CleanAnyTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Durable>;
-    pub(crate) type MutableAnyTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, NonDurable>;
+    pub(crate) type CleanAnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(crate) type MutableAnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
@@ -262,10 +259,9 @@ pub(crate) mod test {
         executor.start(|mut context| async move {
             let seed = context.next_u64();
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
-            let db =
-                Db::<Context, FixedBytes<2>, i32, Sha256, OneCap, Durable>::init(context, config)
-                    .await
-                    .unwrap();
+            let db = Db::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context, config)
+                .await
+                .unwrap();
             let mut db = db.into_mutable();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
             let key2 = FixedBytes::<2>::new([1u8, 3u8]);
@@ -827,9 +823,9 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                mut db: Db<Context, Digest, i32, Sha256, T, NonDurable>,
+                mut db: Db<Context, Digest, i32, Sha256, T>,
                 rng: &mut StdRng,
-            ) -> Db<Context, Digest, i32, Sha256, T, NonDurable> {
+            ) -> Db<Context, Digest, i32, Sha256, T> {
                 let mut keys = BTreeMap::new();
 
                 // Insert 1000 random keys into both the db and an ordered map.
@@ -889,7 +885,7 @@ pub(crate) mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
-            let db = Db::<Context, Digest, i32, Sha256, OneCap, Durable>::init(
+            let db = Db::<Context, Digest, i32, Sha256, OneCap>::init(
                 context.with_label("first"),
                 config,
             )
@@ -901,7 +897,7 @@ pub(crate) mod test {
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-            let db = Db::<Context, Digest, i32, Sha256, TwoCap, Durable>::init(
+            let db = Db::<Context, Digest, i32, Sha256, TwoCap>::init(
                 context.with_label("second"),
                 config,
             )

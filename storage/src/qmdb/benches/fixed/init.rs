@@ -13,9 +13,9 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _,
 };
-use commonware_storage::qmdb::{
-    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
-    store::LogStore,
+use commonware_storage::{
+    kv::{Batchable, Gettable},
+    qmdb::{any::states::CleanAny, store::LogStore},
 };
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
@@ -37,14 +37,11 @@ cfg_if::cfg_if! {
 /// Helper function to setup a database with random data, prune, and close it.
 async fn setup_db<C>(db: C, elements: u64, operations: u64)
 where
-    C: CleanAny<Key = Digest>,
-    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    <C::Mutable as MutableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
+    C: CleanAny + Batchable + Gettable<Key = Digest> + LogStore<Value = Digest>,
 {
     let mutable = db.into_mutable();
-    let durable = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
-    let mut clean = durable.into_merkleized().await.unwrap();
+    let committed = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
+    let mut clean = committed.into_merkleized().await.unwrap();
     clean
         .prune(clean.inactivity_floor_loc().await)
         .await

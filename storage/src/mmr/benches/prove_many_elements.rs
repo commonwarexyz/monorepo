@@ -1,7 +1,7 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::mmr::{
-    diff::DirtyDiff, location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
+    diff::Batch, location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -24,7 +24,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
 
         block_on(async {
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
                     diff.add(&mut hasher, &element);

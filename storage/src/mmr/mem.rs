@@ -1,7 +1,7 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 //!
 //! The base [`Mmr`] is always merkleized (has a computed root). Mutations go
-//! through a [`super::diff::DirtyDiff`] which borrows the base, accumulates
+//! through a [`super::diff::Batch`] which borrows the base, accumulates
 //! changes, and produces a [`super::diff::Changeset`] that is applied back.
 
 use crate::mmr::{
@@ -115,9 +115,9 @@ pub struct Config<D: Digest> {
 /// # Mutations
 ///
 /// The base MMR is always merkleized. To mutate it, create a
-/// [`super::diff::DirtyDiff`], apply mutations, call `merkleize()` to get a
-/// [`super::diff::CleanDiff`], extract a [`super::diff::Changeset`], and
-/// [`apply`](Mmr::apply) it back.
+/// [`super::diff::Batch`] via [`new_batch`](Mmr::new_batch), apply mutations,
+/// and call [`finalize`](super::diff::Batch::finalize) to get a
+/// [`super::diff::Changeset`] that can be [`apply`](Mmr::apply)'d back.
 #[derive(Clone, Debug)]
 pub struct Mmr<D: Digest> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -272,6 +272,20 @@ impl<D: Digest> Mmr<D> {
         hasher.finalize()
     }
 
+    /// Create a batch for buffering mutations.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let mut batch = mmr.new_batch();
+    /// batch.add(&mut hasher, element);
+    /// let cs = batch.finalize(&mut hasher);
+    /// mmr.apply(cs);
+    /// ```
+    pub fn new_batch(&self) -> super::diff::Batch<'_, D, Self> {
+        super::diff::Batch::new(self)
+    }
+
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
@@ -319,7 +333,7 @@ impl<D: Digest> Mmr<D> {
         element: &[u8],
     ) -> Result<(), Error> {
         let changeset = {
-            let mut diff = super::diff::DirtyDiff::new(self as &Self);
+            let mut diff = super::diff::Batch::new(self as &Self);
             diff.update_leaf(hasher, loc, element)?;
             diff.merkleize(hasher).into_changeset()
         };
@@ -670,7 +684,7 @@ mod tests {
     use super::*;
     use crate::mmr::{
         conformance::build_test_mmr,
-        diff::DirtyDiff,
+        diff::Batch,
         hasher::{Hasher as _, Standard},
         iterator::nodes_needing_parents,
         Error::{ElementPruned, Empty},
@@ -700,7 +714,7 @@ mod tests {
 
             // Pop on empty via diff should fail.
             {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 assert!(matches!(diff.pop(), Err(Empty)));
             }
 
@@ -730,7 +744,7 @@ mod tests {
             let mut leaves: Vec<Position> = Vec::new();
             for _ in 0..11 {
                 let changeset = {
-                    let mut diff = DirtyDiff::new(&base);
+                    let mut diff = Batch::new(&base);
                     let pos = diff.add(&mut hasher, &element);
                     leaves.push(pos);
                     let peaks: Vec<(Position, u32)> = PeakIterator::new(diff.size()).collect();
@@ -879,7 +893,7 @@ mod tests {
             for _ in 0..1000 {
                 mmr.prune_all();
                 let changeset = {
-                    let mut diff = DirtyDiff::new(&mmr);
+                    let mut diff = Batch::new(&mmr);
                     diff.add(&mut hasher, &element);
                     diff.merkleize(&mut hasher).into_changeset()
                 };
@@ -905,7 +919,7 @@ mod tests {
                 );
                 let old_size = base.size();
                 let changeset = {
-                    let mut diff = DirtyDiff::new(&base);
+                    let mut diff = Batch::new(&base);
                     diff.add(&mut hasher, &element);
                     let new_size = diff.size();
                     for size in *old_size + 1..*new_size {
@@ -937,7 +951,7 @@ mod tests {
 
             // Build the entire MMR in one diff.
             let changeset = {
-                let mut diff = DirtyDiff::new(&batched_mmr);
+                let mut diff = Batch::new(&batched_mmr);
                 for i in 0..NUM_ELEMENTS {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -982,7 +996,7 @@ mod tests {
             .unwrap();
 
             let changeset = {
-                let mut diff = DirtyDiff::new(&base).with_pool(Some(pool));
+                let mut diff = Batch::new(&base).with_pool(Some(pool));
                 let mut hasher: Standard<Sha256> = Standard::new();
                 for i in 0u64..NUM_ELEMENTS {
                     hasher.inner().update(&i.to_be_bytes());
@@ -1015,14 +1029,14 @@ mod tests {
 
                 // Add to both via diff.
                 let ref_changeset = {
-                    let mut diff = DirtyDiff::new(&reference_mmr);
+                    let mut diff = Batch::new(&reference_mmr);
                     diff.add(&mut hasher, &element);
                     diff.merkleize(&mut hasher).into_changeset()
                 };
                 reference_mmr.apply(ref_changeset);
 
                 let changeset = {
-                    let mut diff = DirtyDiff::new(&mmr);
+                    let mut diff = Batch::new(&mmr);
                     diff.add(&mut hasher, &element);
                     diff.merkleize(&mut hasher).into_changeset()
                 };
@@ -1048,7 +1062,7 @@ mod tests {
             // Pop off one node at a time until empty, confirming the root matches reference.
             for i in (0..NUM_ELEMENTS).rev() {
                 let changeset = {
-                    let mut diff = DirtyDiff::new(&mmr);
+                    let mut diff = Batch::new(&mmr);
                     assert!(diff.pop().is_ok());
                     diff.merkleize(&mut hasher).into_changeset()
                 };
@@ -1065,7 +1079,7 @@ mod tests {
 
             // Pop on empty should fail.
             {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 assert!(
                     matches!(diff.pop().unwrap_err(), Empty),
                     "pop on empty MMR should fail"
@@ -1074,7 +1088,7 @@ mod tests {
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in 0u64..NUM_ELEMENTS {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -1088,7 +1102,7 @@ mod tests {
             mmr.prune_to_pos(leaf_pos);
 
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 while diff.size() > leaf_pos {
                     diff.pop().unwrap();
                 }
@@ -1102,7 +1116,7 @@ mod tests {
 
             // Pop past pruned boundary should fail.
             {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 let result = diff.pop();
                 assert!(matches!(result, Err(ElementPruned(_))));
                 assert!(mmr.bounds().is_empty());
@@ -1228,9 +1242,9 @@ mod tests {
             let leaf_pos = Position::try_from(loc).unwrap();
             let original_digest = mmr.get_node(leaf_pos).unwrap();
 
-            // Update a leaf via DirtyDiff::update_leaf_digest, merkleize, and confirm root changes.
+            // Update a leaf via Batch::update_leaf_digest, merkleize, and confirm root changes.
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 diff.update_leaf_digest(loc, updated_digest).unwrap();
                 diff.merkleize(&mut hasher).into_changeset()
             };
@@ -1240,7 +1254,7 @@ mod tests {
 
             // Restore the original digest and confirm the root reverts.
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 diff.update_leaf_digest(loc, original_digest).unwrap();
                 diff.merkleize(&mut hasher).into_changeset()
             };
@@ -1249,7 +1263,7 @@ mod tests {
 
             // Update multiple leaves before a single merkleize.
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in [0u64, 1, 50, 100, 199] {
                     diff.update_leaf_digest(Location::new_unchecked(i), updated_digest)
                         .unwrap();
@@ -1270,7 +1284,7 @@ mod tests {
                 // Out of bounds: location >= leaf count.
                 let mmr = Mmr::new(&mut hasher);
                 let mmr = build_test_mmr(&mut hasher, mmr, 100);
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 let result = diff.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::InvalidPosition(_))));
             }
@@ -1280,7 +1294,7 @@ mod tests {
                 let mmr = Mmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
                 mmr.prune_to_pos(Position::new(50));
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 let result = diff.update_leaf_digest(Location::new_unchecked(0), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::ElementPruned(_))));
             }
@@ -1295,7 +1309,7 @@ mod tests {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let root = *mmr.root();
 
-        // Change a handful of leaves using a batch update via DirtyDiff.
+        // Change a handful of leaves using a batch update via Batch.
         // update_leaf_batched takes pre-computed leaf digests, so hash through leaf_digest.
         let leaf_locs: Vec<Location> = [0u64, 1, 10, 50, 100, 150, 197, 198]
             .iter()
@@ -1310,7 +1324,7 @@ mod tests {
             })
             .collect();
         let changeset = {
-            let mut diff = DirtyDiff::new(&mmr);
+            let mut diff = Batch::new(&mmr);
             if let Some(pool) = pool {
                 diff = diff.with_pool(Some(pool));
             }
@@ -1335,7 +1349,7 @@ mod tests {
             })
             .collect();
         let changeset = {
-            let mut diff = DirtyDiff::new(&mmr);
+            let mut diff = Batch::new(&mmr);
             diff.update_leaf_batched(&restore_updates).unwrap();
             diff.merkleize(hasher).into_changeset()
         };
@@ -1384,7 +1398,7 @@ mod tests {
             // Build a small MMR to get valid pinned nodes
             let mmr = Mmr::new(&mut hasher);
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in 0u64..50 {
                     diff.add(&mut hasher, &i.to_be_bytes());
                 }
@@ -1443,7 +1457,7 @@ mod tests {
             // Build a real MMR to get the correct structure
             let mmr = Mmr::new(&mut hasher);
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in 0u64..64 {
                     diff.add(&mut hasher, &i.to_be_bytes());
                 }
@@ -1467,7 +1481,7 @@ mod tests {
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
             let mmr = Mmr::new(&mut hasher);
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in 0u64..11 {
                     diff.add(&mut hasher, &i.to_be_bytes());
                 }

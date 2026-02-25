@@ -13,7 +13,7 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        diff::DirtyDiff,
+        diff::Batch,
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr},
@@ -567,7 +567,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
-        let mut diff = DirtyDiff::new(&self.mmr).with_pool(self.pool.clone());
+        let mut diff = Batch::new(&self.mmr).with_pool(self.pool.clone());
 
         // Add newly pushed complete chunks to the diff.
         let start = self.authenticated_len;

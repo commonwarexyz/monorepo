@@ -14,7 +14,6 @@ use crate::{
             FixedValue, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
-        Durable,
     },
     translator::Translator,
 };
@@ -67,8 +66,8 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 }
 
 macro_rules! impl_resolver {
-    ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T, Durable>>
+    ($db:ident, $op:ident, $val_bound:ident $(, $extra:ty)*) => {
+        impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T $(, $extra)*>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -97,7 +96,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<E, K, V, H, T, Durable>>>
+        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<E, K, V, H, T $(, $extra)*>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -127,7 +126,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<E, K, V, H, T, Durable>>>>
+        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<E, K, V, H, T $(, $extra)*>>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,

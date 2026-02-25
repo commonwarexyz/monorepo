@@ -87,7 +87,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub use diff::{Changeset, CleanDiff, DirtyDiff};
+pub use diff::{Batch, Changeset, CleanDiff};
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};

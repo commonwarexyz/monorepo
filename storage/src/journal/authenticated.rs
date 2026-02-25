@@ -11,8 +11,8 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        diff::DirtyDiff, journaled::Mmr, Error as MmrError, Location, Position, Proof,
-        StandardHasher,
+        diff::Batch, hasher::Hasher as MmrHasher, journaled::Mmr, Error as MmrError, Location,
+        Position, Proof, StandardHasher,
     },
     Persistable,
 };
@@ -209,7 +209,7 @@ where
                 // Create the diff and apply (guard does not span await).
                 let changeset = {
                     let guard = mmr.inner_mmr();
-                    let mut diff = DirtyDiff::new(&*guard);
+                    let mut diff = Batch::new(&*guard);
                     for encoded in &encoded_items {
                         diff.add(hasher, encoded);
                     }
@@ -231,7 +231,7 @@ where
         let loc = self.journal.append(item).await?;
         let changeset = {
             let guard = self.mmr.inner_mmr();
-            let mut diff = DirtyDiff::new(&*guard);
+            let mut diff = Batch::new(&*guard);
             diff.add(&mut self.hasher, &encoded_item);
             diff.merkleize(&mut self.hasher).into_changeset()
         };
@@ -301,6 +301,109 @@ where
         )?;
 
         Ok(())
+    }
+}
+
+/// The result of [`AuthBatch::finalize`], ready to be applied via
+/// [`Journal::apply`].
+pub struct AuthChangeset<Item, D: commonware_cryptography::Digest> {
+    items: Vec<Item>,
+    mmr_changeset: crate::mmr::diff::Changeset<D>,
+}
+
+/// A buffered batch of item appends against an authenticated [`Journal`].
+///
+/// Created via [`Journal::new_batch`]. Supports chaining:
+/// ```ignore
+/// let cs = journal.new_batch()
+///     .append(item1)
+///     .append(item2)
+///     .finalize();
+/// journal.apply(cs).await?;
+/// journal.sync().await?;
+/// ```
+pub struct AuthBatch<'a, E, C, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+{
+    journal: &'a Journal<E, C, H>,
+    items: Vec<C::Item>,
+}
+
+impl<'a, E, C, H> AuthBatch<'a, E, C, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Mutable<Item: EncodeShared>,
+    H: Hasher,
+{
+    /// Buffer an item for appending.
+    pub fn append(mut self, item: C::Item) -> Self {
+        self.items.push(item);
+        self
+    }
+
+    /// Consume batch, produce changeset with items + MMR delta.
+    pub fn finalize(self) -> AuthChangeset<C::Item, DigestOf<H>> {
+        let mut hasher = self.journal.hasher.fork();
+        let encoded: Vec<_> = self.items.iter().map(|i| i.encode()).collect();
+        let mmr_changeset = {
+            let guard = self.journal.mmr.inner_mmr();
+            let mut diff = crate::mmr::diff::Batch::new(&*guard);
+            for enc in &encoded {
+                diff.add(&mut hasher, enc);
+            }
+            diff.finalize(&mut hasher)
+        };
+        AuthChangeset {
+            items: self.items,
+            mmr_changeset,
+        }
+    }
+
+    /// The root of the parent journal's MMR (pre-batch state).
+    pub fn root(&self) -> DigestOf<H> {
+        self.journal.root()
+    }
+}
+
+impl<E, C, H> Journal<E, C, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Mutable<Item: EncodeShared>,
+    H: Hasher,
+{
+    /// Create a batch for buffering item appends.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let cs = journal.new_batch()
+    ///     .append(item1)
+    ///     .append(item2)
+    ///     .finalize();
+    /// journal.apply(cs).await?;
+    /// journal.sync().await?;
+    /// ```
+    pub const fn new_batch(&self) -> AuthBatch<'_, E, C, H> {
+        AuthBatch {
+            journal: self,
+            items: Vec::new(),
+        }
+    }
+
+    /// Apply a changeset produced by [`AuthBatch::finalize`].
+    pub async fn apply(
+        &mut self,
+        changeset: AuthChangeset<C::Item, DigestOf<H>>,
+    ) -> Result<Location, Error> {
+        let mut loc = 0;
+        for item in changeset.items {
+            loc = self.journal.append(item).await?;
+        }
+        self.mmr.apply(changeset.mmr_changeset);
+        Ok(Location::new_unchecked(loc))
     }
 }
 
@@ -674,7 +777,7 @@ mod tests {
                 let encoded = op.encode();
                 let changeset = {
                     let guard = mmr.inner_mmr();
-                    let mut diff = DirtyDiff::new(&*guard);
+                    let mut diff = Batch::new(&*guard);
                     diff.add(&mut hasher, &encoded);
                     diff.merkleize(&mut hasher).into_changeset()
                 };

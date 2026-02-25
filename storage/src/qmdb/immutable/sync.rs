@@ -110,7 +110,6 @@ where
             journal,
             snapshot,
             last_commit_loc,
-            _durable: core::marker::PhantomData,
         };
 
         db.sync().await?;
@@ -152,7 +151,6 @@ mod tests {
         sync::Arc,
     };
 
-    /// Type alias for sync tests with simple codec config (Merkleized, Durable)
     type ImmutableSyncTest = immutable::Immutable<
         deterministic::Context,
         sha256::Digest,
@@ -161,15 +159,7 @@ mod tests {
         crate::translator::TwoCap,
     >;
 
-    /// Type alias for mutable state (NonDurable)
-    type ImmutableSyncTestMutable = immutable::Immutable<
-        deterministic::Context,
-        sha256::Digest,
-        sha256::Digest,
-        Sha256,
-        crate::translator::TwoCap,
-        crate::qmdb::NonDurable,
-    >;
+    type ImmutableSyncTestMutable = ImmutableSyncTest;
 
     /// Create a simple config for sync tests
     fn create_sync_config(

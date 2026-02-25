@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{diff::DirtyDiff, mem::Mmr, StandardHasher};
+use commonware_storage::mmr::{diff::Batch, mem::Mmr, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
@@ -27,7 +27,7 @@ fn bench_append(c: &mut Criterion) {
                     let mut h = StandardHasher::<Sha256>::new();
                     let mut mmr = Mmr::new(&mut h);
                     let changeset = {
-                        let mut diff = DirtyDiff::new(&mmr);
+                        let mut diff = Batch::new(&mmr);
                         for digest in &elements {
                             diff.add(&mut h, digest);
                         }

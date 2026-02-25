@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{diff::DirtyDiff, mem::Mmr, Location, StandardHasher};
+use commonware_storage::mmr::{diff::Batch, mem::Mmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -65,7 +65,7 @@ fn bench_update(c: &mut Criterion) {
                             // Append random elements to MMR
                             let mut mmr = Mmr::new(&mut h);
                             let changeset = {
-                                let mut diff = DirtyDiff::new(&mmr);
+                                let mut diff = Batch::new(&mmr);
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
@@ -102,7 +102,7 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let changeset = {
-                                        let mut diff = DirtyDiff::new(&mmr);
+                                        let mut diff = Batch::new(&mmr);
                                         if let Some(ref p) = pool {
                                             diff = diff.with_pool(Some(p.clone()));
                                         }

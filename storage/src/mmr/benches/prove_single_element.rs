@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{diff::DirtyDiff, mem::Mmr, Location, StandardHasher};
+use commonware_storage::mmr::{diff::Batch, mem::Mmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -21,7 +21,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for i in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
                     diff.add(&mut hasher, &element);

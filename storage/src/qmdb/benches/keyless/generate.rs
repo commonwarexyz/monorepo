@@ -7,10 +7,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
     BufferPooler, ThreadPooler,
 };
-use commonware_storage::qmdb::{
-    keyless::{Config as KConfig, Keyless},
-    NonDurable,
-};
+use commonware_storage::qmdb::keyless::{Config as KConfig, Keyless};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -52,35 +49,27 @@ fn keyless_cfg(
     }
 }
 
-/// Clean (Merkleized, Durable) db type alias for Keyless.
 type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
-
-/// Mutable (NonDurable) type alias for Keyless.
-type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, NonDurable>;
 
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let keyless_cfg = keyless_cfg(&ctx);
-    let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
+    let mut db = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 
-    // Convert to mutable state for operations.
-    let mut db: KeylessMutable = clean.into_mutable();
-
-    // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
     for _ in 0u64..num_operations {
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 300) + 10) as usize];
         db.append(v).await.unwrap();
         if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-            let (durable, _) = db.commit(None).await.unwrap();
-            db = durable.into_mutable();
+            let (committed, _) = db.commit(None).await.unwrap();
+            db = committed.into_mutable();
         }
     }
-    let (mut clean, _) = db.commit(None).await.unwrap();
-    clean.sync().await.unwrap();
+    let (mut db, _) = db.commit(None).await.unwrap();
+    db.sync().await.unwrap();
 
-    clean
+    db
 }
 
 /// Benchmark the generation of a large randomly generated keyless db.

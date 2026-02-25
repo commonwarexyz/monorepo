@@ -6,7 +6,7 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_fixed, unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Durable, Error,
+        Error,
     },
     translator::Translator,
 };
@@ -19,11 +19,11 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Durable>
+    Db<E, K, V, H, T>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -63,7 +63,7 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_fixed, FixedConfig as Config, FixedValue},
-            Durable, Error,
+            Error,
         },
         translator::Translator,
     };
@@ -80,13 +80,12 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, D = Durable> = crate::qmdb::any::unordered::Db<
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
         H,
         Update<K, V>,
-        D,
     >;
 
     impl<
@@ -96,7 +95,7 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Durable>
+        > Db<E, K, V, H, T, P>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -126,13 +125,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 1, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 2, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -146,7 +145,6 @@ pub(crate) mod test {
         mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::{
-                states::{MutableAny as _, UnmerkleizedDurableAny as _},
                 test::fixed_db_config,
                 unordered::{
                     fixed::Operation,
@@ -161,7 +159,7 @@ pub(crate) mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            verify_proof, NonDurable,
+            verify_proof,
         },
         translator::TwoCap,
     };
@@ -176,8 +174,8 @@ pub(crate) mod test {
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Durable>;
-    pub(crate) type DirtyAnyTest = Db<Context, Digest, Digest, Sha256, TwoCap, NonDurable>;
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(crate) type DirtyAnyTest = Db<Context, Digest, Digest, Sha256, TwoCap>;
 
     #[inline]
     fn to_digest(i: u64) -> Digest {

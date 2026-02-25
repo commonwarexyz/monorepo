@@ -121,7 +121,7 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{
-        diff::DirtyDiff, iterator::nodes_to_pin, location::LocationRangeExt as _, mem::Mmr,
+        diff::Batch, iterator::nodes_to_pin, location::LocationRangeExt as _, mem::Mmr,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -139,7 +139,7 @@ mod tests {
     fn build_mmr(hasher: &mut Standard<Sha256>, elements: &[impl AsRef<[u8]>]) -> Mmr<Digest> {
         let mut mmr = Mmr::new(hasher);
         let changeset = {
-            let mut diff = DirtyDiff::new(&mmr);
+            let mut diff = Batch::new(&mmr);
             for element in elements {
                 diff.add(hasher, element.as_ref());
             }
@@ -275,7 +275,7 @@ mod tests {
             let mut hasher = test_hasher();
 
             // Add some operations to the MMR
-            let operations = vec![1, 2, 3, 4];
+            let operations = [1, 2, 3, 4];
             let encoded: Vec<_> = operations.iter().map(|op| op.encode()).collect();
             let mmr = build_mmr(&mut hasher, &encoded);
             let root = mmr.root();

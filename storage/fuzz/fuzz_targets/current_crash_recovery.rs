@@ -260,7 +260,7 @@ fn fuzz(input: FuzzInput) {
             let mut hasher = Sha256::new();
 
             // Verify all committed KV pairs survived the crash and are provable.
-            let root = db.root();
+            let root = db.root().expect("root should be available after init");
             for (key, value) in &committed {
                 let k = Key::new(*key);
                 let v = Value::new(*value);

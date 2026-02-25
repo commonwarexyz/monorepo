@@ -351,8 +351,8 @@ impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::build_test_mmr, diff::DirtyDiff, iterator::PeakIterator, mem::Mmr,
-        verification, Position, StandardHasher,
+        conformance::build_test_mmr, diff::Batch, iterator::PeakIterator, mem::Mmr, verification,
+        Position, StandardHasher,
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
@@ -384,7 +384,7 @@ mod tests {
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
         let mut mmr = Mmr::new(&mut grafted_hasher);
         let changeset = {
-            let mut diff = DirtyDiff::new(&mmr);
+            let mut diff = Batch::new(&mmr);
             for digest in leaf_digests {
                 diff.add_leaf_digest(digest);
             }
@@ -537,7 +537,7 @@ mod tests {
         // Build ops MMR with 4 leaves.
         let mut ops_mmr = Mmr::new(&mut standard);
         let changeset = {
-            let mut diff = DirtyDiff::new(&ops_mmr);
+            let mut diff = Batch::new(&ops_mmr);
             for i in 0u8..4 {
                 diff.add(&mut standard, &Sha256::fill(i));
             }
@@ -565,7 +565,7 @@ mod tests {
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
         let mut grafted = Mmr::new(&mut grafted_hasher);
         let changeset = {
-            let mut diff = DirtyDiff::new(&grafted);
+            let mut diff = Batch::new(&grafted);
             diff.add_leaf_digest(leaf0);
             diff.add_leaf_digest(leaf1);
             diff.merkleize(&mut grafted_hasher).into_changeset()
@@ -597,7 +597,7 @@ mod tests {
             // Build an ops MMR with 4 leaves.
             let mut ops_mmr = Mmr::new(&mut standard);
             let changeset = {
-                let mut diff = DirtyDiff::new(&ops_mmr);
+                let mut diff = Batch::new(&ops_mmr);
                 diff.add(&mut standard, &b1);
                 diff.add(&mut standard, &b2);
                 diff.add(&mut standard, &b3);
@@ -772,11 +772,10 @@ mod tests {
             // the grafting height boundary since there's no complete chunk for it yet).
             let b5 = Sha256::fill(0x05);
             let changeset = {
-                let mut diff = crate::mmr::diff::DirtyDiff::new(&ops_mmr);
+                let mut diff = crate::mmr::diff::Batch::new(&ops_mmr);
                 diff.add(&mut standard, &b5);
                 diff.merkleize(&mut standard).into_changeset()
             };
-            let mut ops_mmr = ops_mmr;
             ops_mmr.apply(changeset);
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
@@ -821,13 +820,13 @@ mod tests {
         let grafting_height = 1u32;
         let standard: StandardHasher<Sha256> = StandardHasher::new();
 
-        // Build a grafted MMR with 2 leaves via DirtyDiff + GraftedHasher.
+        // Build a grafted MMR with 2 leaves via Batch + GraftedHasher.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
         let mut grafted = Mmr::new(&mut grafted_hasher);
         let changeset = {
-            let mut diff = DirtyDiff::new(&grafted);
+            let mut diff = Batch::new(&grafted);
             diff.add_leaf_digest(d0);
             diff.add_leaf_digest(d1);
             diff.merkleize(&mut grafted_hasher).into_changeset()
@@ -872,7 +871,7 @@ mod tests {
             vec![pinned_digest],
         );
         let changeset = {
-            let mut diff = DirtyDiff::new(&grafted);
+            let mut diff = Batch::new(&grafted);
             diff.add_leaf_digest(d4);
             diff.merkleize(&mut grafted_hasher).into_changeset()
         };

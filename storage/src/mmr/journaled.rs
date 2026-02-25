@@ -322,7 +322,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let pos = mem_mmr.size();
             warn!(?pos, "recovering orphaned leaf");
             let changeset = {
-                let mut d = diff::DirtyDiff::new(&mem_mmr);
+                let mut d = diff::Batch::new(&mem_mmr);
                 d.add_leaf_digest(leaf);
                 d.merkleize(hasher).into_changeset()
             };
@@ -710,9 +710,28 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         inner.mem_mmr.apply(changeset);
     }
 
+    /// Create a batch for buffering leaf additions.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let cs = mmr.new_batch()
+    ///     .add(elem1)
+    ///     .add(elem2)
+    ///     .finalize(&mut hasher);
+    /// mmr.apply(cs);
+    /// mmr.sync().await?;
+    /// ```
+    pub const fn new_batch(&self) -> Batch<'_, E, D> {
+        Batch {
+            mmr: self,
+            leaves: Vec::new(),
+        }
+    }
+
     /// Returns a read guard to the inner in-memory MMR.
     ///
-    /// Use this to create diffs: `DirtyDiff::new(&*mmr.inner_mmr())`
+    /// Use this to create diffs: `Batch::new(&*mmr.inner_mmr())`
     ///
     /// The guard must be dropped before calling `apply()`.
     pub fn inner_mmr(&self) -> MappedRwLockReadGuard<'_, MemMmr<D>> {
@@ -829,6 +848,75 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     }
 }
 
+/// A leaf to add, either as raw bytes (position-dependent hashing deferred)
+/// or as a pre-computed digest.
+enum Leaf<D: Digest> {
+    /// Raw element bytes; hashed in [`Batch::finalize`] with correct position.
+    Raw(Vec<u8>),
+    /// Pre-computed leaf digest.
+    Digest(D),
+}
+
+/// A buffered batch of leaf additions against a journaled [`Mmr`].
+///
+/// Created via [`Mmr::new_batch`]. Supports chaining:
+/// ```ignore
+/// let cs = mmr.new_batch()
+///     .add(elem)
+///     .finalize(&mut hasher);
+/// ```
+pub struct Batch<'a, E: RStorage + Clock + Metrics, D: Digest> {
+    mmr: &'a Mmr<E, D>,
+    leaves: Vec<Leaf<D>>,
+}
+
+impl<'a, E: RStorage + Clock + Metrics, D: Digest> Batch<'a, E, D> {
+    /// Buffer an element for hashing and addition as a leaf.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, element: &[u8]) -> Self {
+        self.leaves.push(Leaf::Raw(element.to_vec()));
+        self
+    }
+
+    /// Buffer a pre-computed leaf digest.
+    pub fn add_leaf_digest(mut self, leaf: D) -> Self {
+        self.leaves.push(Leaf::Digest(leaf));
+        self
+    }
+
+    /// Finalize this batch into a [`diff::Changeset`].
+    pub fn finalize(self, hasher: &mut impl Hasher<Digest = D>) -> diff::Changeset<D> {
+        let guard = self.mmr.inner_mmr();
+        let mut d = diff::Batch::new(&*guard);
+        for leaf in self.leaves {
+            match leaf {
+                Leaf::Raw(bytes) => {
+                    d.add(hasher, &bytes);
+                }
+                Leaf::Digest(digest) => {
+                    d.add_leaf_digest(digest);
+                }
+            }
+        }
+        d.finalize(hasher)
+    }
+
+    /// The root of the parent MMR (pre-batch state).
+    pub fn root(&self) -> D {
+        self.mmr.root()
+    }
+
+    /// The size of the parent MMR (pre-batch state).
+    pub fn size(&self) -> Position {
+        self.mmr.size()
+    }
+
+    /// The number of leaves in the parent MMR (pre-batch state).
+    pub fn leaves(&self) -> Location {
+        self.mmr.leaves()
+    }
+}
+
 impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for Mmr<E, D> {
     async fn size(&self) -> Position {
         self.size()
@@ -881,7 +969,7 @@ mod tests {
     fn add_element(mmr: &mut Mmr<Context, Digest>, hasher: &mut Standard<Sha256>, element: &[u8]) {
         let changeset = {
             let guard = mmr.inner_mmr();
-            let mut d = diff::DirtyDiff::new(&*guard);
+            let mut d = diff::Batch::new(&*guard);
             d.add(hasher, element);
             d.merkleize(hasher).into_changeset()
         };
@@ -896,7 +984,7 @@ mod tests {
     ) {
         let changeset = {
             let guard = mmr.inner_mmr();
-            let mut d = diff::DirtyDiff::new(&*guard);
+            let mut d = diff::Batch::new(&*guard);
             for e in elements {
                 d.add(hasher, e.as_ref());
             }
@@ -1037,7 +1125,7 @@ mod tests {
                 let root = mmr.root();
                 let mut reference_mmr = mem::Mmr::new(&mut hasher);
                 let changeset = {
-                    let mut diff = diff::DirtyDiff::new(&reference_mmr);
+                    let mut diff = diff::Batch::new(&reference_mmr);
                     for j in 0..i {
                         c_hasher.update(&j.to_be_bytes());
                         let element = c_hasher.finalize();
@@ -1404,7 +1492,7 @@ mod tests {
                     let last_leaf = *leaves.last().unwrap();
                     let changeset = {
                         let guard = mmr.inner_mmr();
-                        let mut d = diff::DirtyDiff::new(&*guard);
+                        let mut d = diff::Batch::new(&*guard);
                         d.add(&mut hasher, &last_leaf);
                         d.add(&mut hasher, &last_leaf);
                         d.merkleize(&mut hasher).into_changeset()
@@ -1415,7 +1503,7 @@ mod tests {
                     let last_leaf = *leaves.last().unwrap();
                     let changeset = {
                         let guard = mmr.inner_mmr();
-                        let mut d = diff::DirtyDiff::new(&*guard);
+                        let mut d = diff::Batch::new(&*guard);
                         d.add(&mut hasher, &last_leaf);
                         d.add(&mut hasher, &last_leaf);
                         d.merkleize(&mut hasher).into_changeset()
@@ -2241,7 +2329,7 @@ mod tests {
             // Build via the diff path on the journaled MMR.
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 0u64..50 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -2272,7 +2360,7 @@ mod tests {
                     .unwrap();
                 let changeset = {
                     let guard = mmr.inner_mmr();
-                    let mut d = diff::DirtyDiff::new(&*guard);
+                    let mut d = diff::Batch::new(&*guard);
                     for i in 0u64..30 {
                         hasher.inner().update(&i.to_be_bytes());
                         let element = hasher.inner().finalize();
@@ -2310,7 +2398,7 @@ mod tests {
             // Add 50 elements (not synced yet, so nodes remain in mem).
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 0u64..50 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -2323,7 +2411,7 @@ mod tests {
             // Pop the last 10 leaves via a second diff (mem still has all 50 nodes).
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for _ in 0..10 {
                     d.pop().unwrap();
                 }
@@ -2364,7 +2452,7 @@ mod tests {
             // Add 50 elements and sync so journal has 50 nodes.
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 0u64..50 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -2378,7 +2466,7 @@ mod tests {
             // Add 20 more elements (not synced, so mem retains [50,70)).
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 50u64..70 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -2391,7 +2479,7 @@ mod tests {
             // Pop all 20 unsaved elements via diff (goes back to boundary at size 50).
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for _ in 0..20 {
                     d.pop().unwrap();
                 }
@@ -2429,7 +2517,7 @@ mod tests {
             // Add 20 elements.
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 0u64..20 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -2443,7 +2531,7 @@ mod tests {
             let new_digest = Sha256::hash(b"updated_leaf_5");
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 d.update_leaf_digest(Location::new_unchecked(5), new_digest)
                     .unwrap();
                 d.merkleize(&mut hasher).into_changeset()
@@ -2454,7 +2542,7 @@ mod tests {
             let mut ref_mmr = mem::Mmr::new(&mut hasher);
             {
                 let changeset = {
-                    let mut diff = diff::DirtyDiff::new(&ref_mmr);
+                    let mut diff = diff::Batch::new(&ref_mmr);
                     for i in 0u64..20 {
                         hasher.inner().update(&i.to_be_bytes());
                         let element = hasher.inner().finalize();
@@ -2466,7 +2554,7 @@ mod tests {
             }
             {
                 let changeset = {
-                    let mut diff = diff::DirtyDiff::new(&ref_mmr);
+                    let mut diff = diff::Batch::new(&ref_mmr);
                     diff.update_leaf_digest(Location::new_unchecked(5), new_digest)
                         .unwrap();
                     diff.merkleize(&mut hasher).into_changeset()
@@ -2492,7 +2580,7 @@ mod tests {
             // Add 30 elements via diff.
             let changeset = {
                 let guard = mmr.inner_mmr();
-                let mut d = diff::DirtyDiff::new(&*guard);
+                let mut d = diff::Batch::new(&*guard);
                 for i in 0u64..30 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();

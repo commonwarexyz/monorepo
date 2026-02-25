@@ -252,7 +252,7 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{diff::DirtyDiff, hasher::Standard, mem::Mmr, Location};
+    use crate::mmr::{diff::Batch, hasher::Standard, mem::Mmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 let pos = diff.add(&mut hasher, &digest);
                 loc_to_pos.push(pos);
                 diff.merkleize(&mut hasher).into_changeset()
@@ -331,7 +331,7 @@ mod tests {
             }
 
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 diff.add(&mut hasher, &digest);
                 diff.merkleize(&mut hasher).into_changeset()
             };

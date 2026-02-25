@@ -8,7 +8,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
 use commonware_storage::mmr::{
-    diff::DirtyDiff,
+    diff::Batch,
     journaled::{Config, Mmr},
     Location, Position, StandardHasher,
 };
@@ -134,7 +134,7 @@ async fn run_operations(
 
                 let changeset = {
                     let inner = mmr.inner_mmr();
-                    let mut diff = DirtyDiff::new(&*inner);
+                    let mut diff = Batch::new(&*inner);
                     diff.add(hasher, data);
                     diff.merkleize(hasher).into_changeset()
                 };
@@ -385,7 +385,7 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let changeset = {
             let inner = mmr.inner_mmr();
-            let mut diff = DirtyDiff::new(&*inner);
+            let mut diff = Batch::new(&*inner);
             diff.add(&mut hasher, &test_data);
             diff.merkleize(&mut hasher).into_changeset()
         };

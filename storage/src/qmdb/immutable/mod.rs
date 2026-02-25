@@ -12,9 +12,7 @@ use crate::{
     },
     kv,
     mmr::{journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{
-        any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error, NonDurable,
-    },
+    qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -83,7 +81,6 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
     journal: Journal<E, K, V, H>,
@@ -97,20 +94,54 @@ pub struct Immutable<
 
     /// The location of the last commit operation.
     last_commit_loc: Location,
-
-    /// Marker for the durability state.
-    _durable: core::marker::PhantomData<D>,
 }
 
-// Functionality shared across all DB states.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > Immutable<E, K, V, H, T, D>
+/// The result of [`Batch::finalize`], ready to be committed via [`Immutable::commit_changeset`].
+pub struct Changeset<K, V> {
+    writes: Vec<(K, V)>,
+    metadata: Option<V>,
+}
+
+/// A buffered batch of mutations against an [`Immutable`].
+///
+/// Created via [`Immutable::new_batch`]. Supports chaining:
+/// ```ignore
+/// let cs = db.new_batch()
+///     .set(key, value)
+///     .finalize(metadata);
+/// ```
+pub struct Batch<
+    'a,
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: VariableValue,
+    H: CHasher,
+    T: Translator,
+> {
+    _db: &'a Immutable<E, K, V, H, T>,
+    writes: Vec<(K, V)>,
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Batch<'_, E, K, V, H, T>
+{
+    /// Buffer a key-value set operation.
+    pub fn set(mut self, key: K, value: V) -> Self {
+        self.writes.push((key, value));
+        self
+    }
+
+    /// Finalize this batch into a [`Changeset`].
+    pub fn finalize(self, metadata: Option<V>) -> Changeset<K, V> {
+        Changeset {
+            writes: self.writes,
+            metadata,
+        }
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T>
 {
     /// Return the Location of the next operation appended to this db.
     pub async fn size(&self) -> Location {
@@ -181,18 +212,6 @@ impl<
 
         Ok(metadata)
     }
-}
-
-// Functionality shared across Merkleized states.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > Immutable<E, K, V, H, T, D>
-{
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
@@ -250,12 +269,7 @@ impl<
 
         Ok(())
     }
-}
 
-// Functionality specific to Durable state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Durable>
-{
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -317,7 +331,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             journal,
             snapshot,
             last_commit_loc,
-            _durable: core::marker::PhantomData,
         })
     }
 
@@ -333,76 +346,83 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         Ok(self.journal.destroy().await?)
     }
 
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, NonDurable> {
-        Immutable {
-            journal: self.journal,
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
+    /// Create a batch for buffering mutations.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let cs = db.new_batch()
+    ///     .set(key, value)
+    ///     .finalize(metadata);
+    /// let range = db.commit_changeset(cs).await?;
+    /// ```
+    pub const fn new_batch(&self) -> Batch<'_, E, K, V, H, T> {
+        Batch {
+            _db: self,
+            writes: Vec::new(),
         }
+    }
+
+    /// Commit a changeset, persisting all changes to disk.
+    pub async fn commit_changeset(
+        &mut self,
+        changeset: Changeset<K, V>,
+    ) -> Result<Range<Location>, Error> {
+        self.commit_inner(changeset).await
+    }
+
+    async fn commit_inner(&mut self, changeset: Changeset<K, V>) -> Result<Range<Location>, Error> {
+        let start = self.size().await;
+
+        for (key, value) in changeset.writes {
+            let bounds = self.bounds().await;
+            self.snapshot
+                .insert_and_prune(&key, bounds.end, |v| *v < bounds.start);
+            self.journal.append(Operation::Set(key, value)).await?;
+        }
+
+        let loc = self
+            .journal
+            .append(Operation::Commit(changeset.metadata))
+            .await?;
+        self.journal.commit().await?;
+        self.last_commit_loc = loc;
+
+        Ok(start..loc + 1)
     }
 }
 
-// Functionality specific to the NonDurable (mutable) state.
+// Test-compatibility methods that preserve the old consuming API.
+#[cfg(any(test, feature = "test-traits"))]
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, NonDurable>
+    Immutable<E, K, V, H, T>
 {
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.journal.append(op).await?;
-
-        Ok(())
+    /// Convert this database into a mutable state for batched updates.
+    pub const fn into_mutable(self) -> Self {
+        self
     }
 
-    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
-    /// is reflected in the snapshot, but will be subject to rollback until the next successful
-    /// `commit`. Attempting to set an already-set key results in undefined behavior.
-    ///
-    /// Any keys that have been pruned and map to the same translated key will be dropped
-    /// during this call.
+    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let bounds = self.bounds().await;
         self.snapshot
             .insert_and_prune(&key, bounds.end, |v| *v < bounds.start);
-
-        let op = Operation::Set(key, value);
-        self.apply_op(op).await
+        self.journal.append(Operation::Set(key, value)).await?;
+        Ok(())
     }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    /// Returns the committed database and the range of committed locations. Note that even if no
-    /// operations were added since the last commit, this is a root-state changing operation.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V>,
-    ) -> Result<(Immutable<E, K, V, H, T, Durable>, Range<Location>), Error> {
+    /// Commit any pending operations to the database, ensuring their durability upon return.
+    pub async fn commit(mut self, metadata: Option<V>) -> Result<(Self, Range<Location>), Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         self.last_commit_loc = loc;
         let range = loc..loc + 1;
-
-        let db = Immutable {
-            journal: self.journal,
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        };
-
-        Ok((db, range))
+        Ok((self, range))
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > kv::Gettable for Immutable<E, K, V, H, T, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    kv::Gettable for Immutable<E, K, V, H, T>
 {
     type Key = K;
     type Value = V;
@@ -413,14 +433,8 @@ impl<
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    crate::qmdb::store::LogStore for Immutable<E, K, V, H, T>
 {
     type Value = V;
 
@@ -433,14 +447,8 @@ impl<
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -899,26 +907,19 @@ pub(super) mod test {
         qmdb::store::tests::{assert_log_store, assert_merkleized_store},
     };
 
-    type MerkleizedDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
-    type MutableDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, NonDurable>;
+    type TestDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
+    fn assert_db_futures_are_send(db: &mut TestDb, key: Digest, loc: Location, value: Vec<u8>) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
         assert_send(db.set(key, value));
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+    fn assert_db_commit_is_send(db: TestDb) {
         assert_send(db.commit(None));
     }
 }

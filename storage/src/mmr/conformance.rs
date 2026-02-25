@@ -14,7 +14,7 @@ pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
     elements: u64,
 ) -> Mmr<sha256::Digest> {
     let changeset = {
-        let mut diff = crate::mmr::diff::DirtyDiff::new(&mmr);
+        let mut diff = crate::mmr::diff::Batch::new(&mmr);
         for i in 0u64..elements {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();

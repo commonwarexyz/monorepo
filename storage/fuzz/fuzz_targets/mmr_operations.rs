@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::mmr::{
-    diff::DirtyDiff, mem::Mmr, Location, Position, StandardHasher as Standard,
+    diff::Batch, mem::Mmr, Location, Position, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
 
                     let size_before = mmr.size();
                     let changeset = {
-                        let mut diff = DirtyDiff::new(&mmr);
+                        let mut diff = Batch::new(&mmr);
                         let _ = diff.add(&mut hasher, limited_data);
                         diff.merkleize(&mut hasher).into_changeset()
                     };
@@ -182,7 +182,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::Pop => {
                     let size_before = mmr.size();
-                    let mut diff = DirtyDiff::new(&mmr);
+                    let mut diff = Batch::new(&mmr);
                     let mmr_result = diff.pop();
                     let ref_result = reference.pop();
 

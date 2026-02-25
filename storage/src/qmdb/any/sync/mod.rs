@@ -35,7 +35,6 @@ use crate::{
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
         operation::{Committable, Operation},
-        Durable,
     },
     translator::Translator,
 };
@@ -57,7 +56,7 @@ async fn build_db<E, O, I, H, U, C>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: Range<Location>,
     apply_batch_size: usize,
-) -> Result<Db<E, C, I, H, U, Durable>, qmdb::Error>
+) -> Result<Db<E, C, I, H, U>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
@@ -110,7 +109,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -152,7 +151,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for UnorderedVariableDb<E, K, V, H, T, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedVariableDb<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -194,7 +193,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -236,7 +235,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for OrderedVariableDb<E, K, V, H, T, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedVariableDb<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,

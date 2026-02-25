@@ -340,7 +340,7 @@ impl commonware_codec::Read for Position {
 mod tests {
     use super::{Location, Position};
     use crate::mmr::{
-        diff::DirtyDiff, mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION,
+        diff::Batch, mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION,
     };
     use commonware_cryptography::Sha256;
 
@@ -527,7 +527,7 @@ mod tests {
             }
             assert!(size_to_check.is_mmr_size());
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 diff.add(&mut hasher, &digest);
                 diff.merkleize(&mut hasher).into_changeset()
             };

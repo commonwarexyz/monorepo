@@ -1,15 +1,19 @@
 //! A mutable key-value database that supports variable-sized values, but without authentication.
 //!
-//! # Lifecycle
+//! ## Mutation via Batches
 //!
-//! Unlike authenticated stores which have 4 potential states, an unauthenticated store only has
-//! two:
+//! All mutations go through a [`Batch`]:
 //!
-//! - **Clean**: The store has no uncommitted operations and its key/value state is immutable. Use
-//!   `into_dirty` to transform it into a dirty state.
+//! ```ignore
+//! let cs = db.new_batch()
+//!     .write_batch([(key, Some(value))])
+//!     .finalize(metadata);
+//! let range = db.commit(cs).await?;
+//! ```
 //!
-//! - **Dirty**: The store has uncommitted operations and its key/value state is mutable. Use
-//!   `commit` to transform it into a clean state.
+//! The batch borrows the database immutably, buffering writes in memory.
+//! [`Batch::finalize`] produces a [`Changeset`] without I/O.
+//! [`Db::commit`] atomically applies the changeset and persists to disk.
 //!
 //! # Example
 //!
@@ -38,7 +42,7 @@
 //!         translator: TwoCap,
 //!         page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
-//!     let db =
+//!     let mut db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
 //!             .await
 //!             .unwrap();
@@ -46,27 +50,24 @@
 //!     // Insert a key-value pair
 //!     let k = Digest::random(&mut ctx);
 //!     let v = Digest::random(&mut ctx);
-//!     let mut db = db.into_dirty();
-//!     db.write_batch([(k, Some(v))]).await.unwrap();
+//!     let cs = db.new_batch()
+//!         .write_batch([(k, Some(v))])
+//!         .finalize(Some(Digest::random(&mut ctx)));
+//!     let _ = TestStore::commit(&mut db, cs).await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
-//!     // Commit the operation to make it persistent
-//!     let metadata = Some(Digest::random(&mut ctx));
-//!     let (db, _) = db.commit(metadata).await.unwrap();
-//!
 //!     // Delete the key's value
-//!     let mut db = db.into_dirty();
-//!     db.write_batch([(k, None)]).await.unwrap();
+//!     let cs = db.new_batch()
+//!         .write_batch([(k, None)])
+//!         .finalize(None);
+//!     let _ = TestStore::commit(&mut db, cs).await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
 //!     assert!(fetched_value.is_none());
-//!
-//!     // Commit the operation to make it persistent
-//!     let (db, _) = db.commit(None).await.unwrap();
 //!
 //!     // Destroy the store
 //!     db.destroy().await.unwrap();
@@ -79,7 +80,6 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         Mutable as _, Reader,
     },
-    kv::Batchable,
     mmr::Location,
     qmdb::{
         any::{
@@ -88,7 +88,7 @@ use crate::{
         },
         build_snapshot_from_log, delete_key,
         operation::{Committable as _, Operation as _},
-        store::{Durable, LogStore, NonDurable, PrunableStore, State},
+        store::{LogStore, PrunableStore},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -127,13 +127,12 @@ pub struct Config<T: Translator, C> {
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Db<E, K, V, T, S = Durable>
+pub struct Db<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
-    S: State,
 {
     /// A log of all [Operation]s that have been applied to the store.
     ///
@@ -160,18 +159,39 @@ where
 
     /// The location of the last commit operation.
     pub last_commit_loc: Location,
-
-    /// The state of the store.
-    pub state: S,
 }
 
-impl<E, K, V, T, S> Db<E, K, V, T, S>
+/// A buffered batch of mutations against a [`Db`].
+///
+/// Created via [`Db::new_batch`]. Supports chaining:
+/// ```ignore
+/// let cs = db.new_batch()
+///     .write_batch(writes)
+///     .finalize(metadata);
+/// ```
+pub struct Batch<'a, E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
-    S: State,
+{
+    _db: &'a Db<E, K, V, T>,
+    writes: Vec<(K, Option<V>)>,
+}
+
+/// The result of [`Batch::finalize`], ready to be committed via [`Db::commit`].
+pub struct Changeset<K, V> {
+    writes: Vec<(K, Option<V>)>,
+    metadata: Option<V>,
+}
+
+impl<E, K, V, T> Db<E, K, V, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue,
+    T: Translator,
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -262,15 +282,7 @@ where
 
         Ok(())
     }
-}
 
-impl<E, K, V, T> Db<E, K, V, T, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
     /// Initializes a new [Db] with the given configuration.
     pub async fn init(
         context: E,
@@ -325,20 +337,104 @@ where
             active_keys,
             inactivity_floor_loc,
             last_commit_loc,
-            state: Durable,
         })
     }
 
-    /// Convert this clean store into its dirty counterpart for making updates.
-    pub fn into_dirty(self) -> Db<E, K, V, T, NonDurable> {
-        Db {
-            log: self.log,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            state: NonDurable::default(),
+    /// Create a batch for buffering mutations.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let cs = db.new_batch()
+    ///     .write_batch([(key, Some(value))])
+    ///     .finalize(metadata);
+    /// let range = db.commit(cs).await?;
+    /// ```
+    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T> {
+        Batch {
+            _db: self,
+            writes: Vec::new(),
         }
+    }
+
+    const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, Index<T, Location>, Journal<E, Operation<K, V>>> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+        }
+    }
+
+    /// Commit a changeset, persisting all changes to disk.
+    pub async fn commit(&mut self, changeset: Changeset<K, V>) -> Result<Range<Location>, Error> {
+        let start_loc = self.last_commit_loc + 1;
+
+        // Apply writes.
+        let mut steps: u64 = 0;
+        for (key, value) in changeset.writes {
+            if let Some(value) = value {
+                let updated = {
+                    let reader = self.log.reader().await;
+                    let new_loc = reader.bounds().end;
+                    update_key(
+                        &mut self.snapshot,
+                        &reader,
+                        &key,
+                        Location::new_unchecked(new_loc),
+                    )
+                    .await?
+                };
+                if updated.is_some() {
+                    steps += 1;
+                } else {
+                    self.active_keys += 1;
+                }
+                self.log
+                    .append(Operation::Update(Update(key, value)))
+                    .await?;
+            } else {
+                let deleted = {
+                    let reader = self.log.reader().await;
+                    delete_key(&mut self.snapshot, &reader, &key).await?
+                };
+                if deleted.is_some() {
+                    self.log.append(Operation::Delete(key)).await?;
+                    steps += 1;
+                    self.active_keys -= 1;
+                }
+            }
+        }
+
+        // Raise the inactivity floor by taking `steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.size().await;
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+            }
+        }
+
+        // Apply the commit operation with the new inactivity floor.
+        self.last_commit_loc = Location::new_unchecked(
+            self.log
+                .append(Operation::CommitFloor(
+                    changeset.metadata,
+                    self.inactivity_floor_loc,
+                ))
+                .await?,
+        );
+
+        let range = start_loc..self.size().await;
+
+        // Commit the log to ensure durability.
+        self.log.commit().await?;
+
+        Ok(range)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -354,125 +450,29 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T, NonDurable>
+impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
 {
-    const fn as_floor_helper(
-        &mut self,
-    ) -> FloorHelper<'_, Index<T, Location>, Journal<E, Operation<K, V>>> {
-        FloorHelper {
-            snapshot: &mut self.snapshot,
-            log: &mut self.log,
-        }
+    /// Buffer writes into this batch.
+    pub fn write_batch(mut self, iter: impl IntoIterator<Item = (K, Option<V>)>) -> Self {
+        self.writes.extend(iter);
+        self
     }
 
-    /// Writes a batch of key-value pairs to the database.
-    ///
-    /// For each item in the iterator:
-    /// - `(key, Some(value))` updates or creates the key with the given value
-    /// - `(key, None)` deletes the key
-    pub async fn write_batch(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V>)> + Send,
-    ) -> Result<(), Error> {
-        for (key, value) in iter {
-            if let Some(value) = value {
-                let updated = {
-                    let reader = self.log.reader().await;
-                    let new_loc = reader.bounds().end;
-                    update_key(
-                        &mut self.snapshot,
-                        &reader,
-                        &key,
-                        Location::new_unchecked(new_loc),
-                    )
-                    .await?
-                };
-                if updated.is_some() {
-                    self.state.steps += 1;
-                } else {
-                    self.active_keys += 1;
-                }
-                self.log
-                    .append(Operation::Update(Update(key, value)))
-                    .await?;
-            } else {
-                let deleted = {
-                    let reader = self.log.reader().await;
-                    delete_key(&mut self.snapshot, &reader, &key).await?
-                };
-                if deleted.is_some() {
-                    self.log.append(Operation::Delete(key)).await?;
-                    self.state.steps += 1;
-                    self.active_keys -= 1;
-                }
-            }
+    /// Finalize this batch into a [`Changeset`].
+    pub fn finalize(self, metadata: Option<V>) -> Changeset<K, V> {
+        Changeset {
+            writes: self.writes,
+            metadata,
         }
-        Ok(())
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
-    ///
-    /// Note that even if no operations were added since the last commit, this is a root-state
-    /// changing operation.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    ///
-    /// Consumes this dirty store and returns a clean one.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V>,
-    ) -> Result<(Db<E, K, V, T, Durable>, Range<Location>), Error> {
-        let start_loc = self.last_commit_loc + 1;
-
-        // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.size().await;
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.state.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-        }
-
-        // Apply the commit operation with the new inactivity floor.
-        self.last_commit_loc = Location::new_unchecked(
-            self.log
-                .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
-                .await?,
-        );
-
-        let range = start_loc..self.size().await;
-
-        // Commit the log to ensure durability.
-        self.log.commit().await?;
-
-        Ok((
-            Db {
-                log: self.log,
-                snapshot: self.snapshot,
-                active_keys: self.active_keys,
-                inactivity_floor_loc: self.inactivity_floor_loc,
-                last_commit_loc: self.last_commit_loc,
-                state: Durable,
-            },
-            range,
-        ))
     }
 }
 
-impl<E, K, V, T> Persistable for Db<E, K, V, T, Durable>
+impl<E, K, V, T> Persistable for Db<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -495,13 +495,12 @@ where
     }
 }
 
-impl<E, K, V, T, S> LogStore for Db<E, K, V, T, S>
+impl<E, K, V, T> LogStore for Db<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
-    S: State,
 {
     type Value = V;
 
@@ -514,13 +513,12 @@ where
     }
 }
 
-impl<E, K, V, T, S> PrunableStore for Db<E, K, V, T, S>
+impl<E, K, V, T> PrunableStore for Db<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
-    S: State,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         Self::prune(self, prune_loc).await
@@ -531,13 +529,12 @@ where
     }
 }
 
-impl<E, K, V, T, S> crate::kv::Gettable for Db<E, K, V, T, S>
+impl<E, K, V, T> crate::kv::Gettable for Db<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
-    S: State,
 {
     type Key = K;
     type Value = V;
@@ -548,30 +545,11 @@ where
     }
 }
 
-impl<E, K, V, T> Batchable for Db<E, K, V, T, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Self::Error>
-    where
-        Iter: IntoIterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
-        Iter::IntoIter: Send,
-    {
-        self.write_batch(iter).await
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        kv::{
-            tests::{assert_batchable, assert_gettable, assert_send},
-            Gettable as _, Updatable as _,
-        },
+        kv::tests::{assert_gettable, assert_send},
         qmdb::store::tests::{assert_log_store, assert_prunable_store},
         translator::TwoCap,
     };
@@ -589,7 +567,7 @@ mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     /// The type of the store used in tests.
-    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Durable>;
+    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
@@ -622,37 +600,36 @@ mod test {
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
             let v1 = vec![1, 2, 3];
-            let mut dirty = db.into_dirty();
-            dirty.write_batch([(d1, Some(v1))]).await.unwrap();
-            drop(dirty);
+            let _cs = db.new_batch().write_batch([(d1, Some(v1))]).finalize(None);
+            // Don't commit - simulates crash
+            drop(db);
 
-            let db = create_test_store(context.with_label("store_1"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(context.with_label("store_1")).await;
             assert_eq!(db.bounds().await.end, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
-            let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
+            let cs = db.new_batch().finalize(Some(metadata.clone()));
+            let range = TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
             assert_eq!(db.bounds().await.end, 2);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            let mut db = create_test_store(context.with_label("store_2"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(context.with_label("store_2")).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
             // non-empty db.
-            db.write_batch([(Digest::random(&mut context), Some(vec![1, 2, 3]))])
-                .await
-                .unwrap();
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(Digest::random(&mut context), Some(vec![1, 2, 3]))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             for _ in 1..100 {
-                (db, _) = db.into_dirty().commit(None).await.unwrap();
+                let cs = db.new_batch().finalize(None);
+                TestStore::commit(&mut db, cs).await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.bounds().await.end - db.inactivity_floor_loc <= 3);
@@ -668,9 +645,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0"))
-                .await
-                .into_dirty();
+            let db = create_test_store(ctx.with_label("store_0")).await;
 
             // Ensure the store is empty
             assert_eq!(db.bounds().await.end, 1);
@@ -683,23 +658,20 @@ mod test {
             let result = db.get(&key).await;
             assert!(result.unwrap().is_none());
 
-            // Insert a key-value pair
-            db.write_batch([(key, Some(value.clone()))]).await.unwrap();
-
-            assert_eq!(db.bounds().await.end, 2);
+            // Insert a key-value pair and commit
+            let cs = db
+                .new_batch()
+                .write_batch([(key, Some(value.clone()))])
+                .finalize(None);
+            // Check state before commit (batch doesn't modify db)
+            assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
 
-            // Fetch the value
-            let fetched_value = db.get(&key).await.unwrap();
-            assert_eq!(fetched_value.unwrap(), value);
-
-            // Simulate commit failure.
-            drop(db);
+            // Simulate commit failure by dropping the changeset.
+            drop(cs);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_1"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_1")).await;
 
             // Ensure the re-opened store removed the uncommitted operations
             assert_eq!(db.bounds().await.end, 1);
@@ -707,14 +679,12 @@ mod test {
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Insert a key-value pair
-            db.write_batch([(key, Some(value.clone()))]).await.unwrap();
-
-            assert_eq!(db.bounds().await.end, 2);
-            assert_eq!(db.inactivity_floor_loc, 0);
-
-            // Persist the changes
             let metadata = vec![99, 100];
-            let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(key, Some(value.clone()))])
+                .finalize(Some(metadata.clone()));
+            let range = TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -726,9 +696,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_2"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_2")).await;
 
             // Ensure the re-opened store retained the committed operations
             assert_eq!(db.bounds().await.end, 4);
@@ -741,20 +709,19 @@ mod test {
             // Insert two new k/v pairs to force pruning of the first section.
             let (k1, v1) = (Digest::random(&mut ctx), vec![2, 3, 4, 5, 6]);
             let (k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8]);
-            db.write_batch([(k1, Some(v1.clone()))]).await.unwrap();
-            db.write_batch([(k2, Some(v2.clone()))]).await.unwrap();
-
-            assert_eq!(db.bounds().await.end, 6);
-            assert_eq!(db.inactivity_floor_loc, 2);
 
             // Make sure we can still get metadata.
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-            let (db, range) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k1, Some(v1.clone()))])
+                .write_batch([(k2, Some(v2.clone()))])
+                .finalize(None);
+            let range = TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(range.start, 4);
             assert_eq!(range.end, db.bounds().await.end);
             assert_eq!(db.get_metadata().await.unwrap(), None);
-            let mut db = db.into_dirty();
 
             assert_eq!(db.bounds().await.end, 8);
             assert_eq!(db.inactivity_floor_loc, 3);
@@ -767,15 +734,20 @@ mod test {
             // Update existing key with modified value.
             let mut v1_updated = db.get(&k1).await.unwrap().unwrap();
             v1_updated.push(7);
-            db.write_batch([(k1, Some(v1_updated))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k1, Some(v1_updated))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), vec![2, 3, 4, 5, 6, 7]);
 
             // Create new key.
-            let mut db = db.into_dirty();
             let k3 = Digest::random(&mut ctx);
-            db.write_batch([(k3, Some(vec![8]))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k3, Some(vec![8]))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(db.get(&k3).await.unwrap().unwrap(), vec![8]);
 
             // Destroy the store
@@ -788,22 +760,22 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_0")).await;
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
             let k = Digest::random(&mut ctx);
+            let mut batch = db.new_batch();
             for _ in 0..UPDATES {
                 let v = vec![1, 2, 3, 4, 5];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                batch = batch.write_batch([(k, Some(v.clone()))]);
             }
+            let cs = batch.finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
 
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -836,9 +808,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_0")).await;
 
             let (k1, v1) = (Digest::random(&mut ctx), vec![1, 2, 3, 4, 5]);
             let (mut k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8, 9, 10]);
@@ -846,13 +816,16 @@ mod test {
             // Ensure k2 shares 2 bytes with k1 (test DB uses `TwoCap` translator.)
             k2.0[0..2].copy_from_slice(&k1.0[0..2]);
 
-            db.write_batch([(k1, Some(v1.clone()))]).await.unwrap();
-            db.write_batch([(k2, Some(v2.clone()))]).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k1, Some(v1.clone()))])
+                .write_batch([(k2, Some(v2.clone()))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
 
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -872,61 +845,55 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_0")).await;
 
             // Insert a key-value pair
             let k = Digest::random(&mut ctx);
             let v = vec![1, 2, 3, 4, 5];
-            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k, Some(v.clone()))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
 
             // Fetch the value
             let fetched_value = db.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
 
             // Delete the key
-            let mut db = db.into_dirty();
             assert!(db.get(&k).await.unwrap().is_some());
-            db.write_batch([(k, None)]).await.unwrap();
+            let cs = db.new_batch().write_batch([(k, None)]).finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
 
             // Ensure the key is no longer present
             let fetched_value = db.get(&k).await.unwrap();
             assert!(fetched_value.is_none());
             assert!(db.get(&k).await.unwrap().is_none());
 
-            // Commit the changes
-            let _ = db.commit(None).await.unwrap();
-
             // Re-open the store and ensure the key is still deleted
-            let mut db = create_test_store(ctx.with_label("store_1"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_1")).await;
             let fetched_value = db.get(&k).await.unwrap();
             assert!(fetched_value.is_none());
 
             // Re-insert the key
-            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k, Some(v.clone()))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             let fetched_value = db.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
 
-            // Commit the changes
-            let _ = db.commit(None).await.unwrap();
-
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
-            let mut db = create_test_store(ctx.with_label("store_2"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_2")).await;
             let fetched_value = db.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
 
             // Delete a non-existent key (no-op)
             let k_n = Digest::random(&mut ctx);
-            db.write_batch([(k_n, None)]).await.unwrap();
-
-            let (db, range) = db.commit(None).await.unwrap();
+            let cs = db.new_batch().write_batch([(k_n, None)]).finalize(None);
+            let range = TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(range.start, 9);
             assert_eq!(range.end, 11);
 
@@ -944,9 +911,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store")).await;
 
             let k_a = Digest::random(&mut ctx);
             let k_b = Digest::random(&mut ctx);
@@ -955,19 +920,22 @@ mod test {
             let v_b = vec![];
             let v_c = vec![4, 5, 6];
 
-            db.write_batch([(k_a, Some(v_a.clone()))]).await.unwrap();
-            db.write_batch([(k_b, Some(v_b.clone()))]).await.unwrap();
-
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k_a, Some(v_a.clone()))])
+                .write_batch([(k_b, Some(v_b.clone()))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(db.bounds().await.end, 5);
             assert_eq!(db.inactivity_floor_loc, 2);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_a);
 
-            let mut db = db.into_dirty();
-            db.write_batch([(k_b, Some(v_a.clone()))]).await.unwrap();
-            db.write_batch([(k_a, Some(v_c.clone()))]).await.unwrap();
-
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(k_b, Some(v_a.clone()))])
+                .write_batch([(k_a, Some(v_c.clone()))])
+                .finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(db.bounds().await.end, 11);
             assert_eq!(db.inactivity_floor_loc, 8);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
@@ -983,96 +951,98 @@ mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = create_test_store(context.with_label("store_0"))
-                .await
-                .into_dirty();
+            let db = create_test_store(context.with_label("store_0")).await;
 
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                batch = batch.write_batch([(k, Some(v.clone()))]);
             }
-
-            // Simulate a failed commit and test that we rollback to the previous root.
+            // Simulate a failed commit by dropping the changeset.
+            let _cs = batch.finalize(None);
             drop(db);
-            let db = create_test_store(context.with_label("store_1")).await;
+
+            let mut db = create_test_store(context.with_label("store_1")).await;
             assert_eq!(db.bounds().await.end, 1);
 
             // re-apply the updates and commit them this time.
-            let mut db = db.into_dirty();
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                batch = batch.write_batch([(k, Some(v.clone()))]);
             }
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = batch.finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             let op_count = db.bounds().await.end;
 
             // Update every 3rd key
-            let mut db = db.into_dirty();
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
                     continue;
                 }
                 let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                batch = batch.write_batch([(k, Some(v.clone()))]);
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
+            let _cs = batch.finalize(None);
             drop(db);
-            let mut db = create_test_store(context.with_label("store_2"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(context.with_label("store_2")).await;
             assert_eq!(db.bounds().await.end, op_count);
 
             // Re-apply updates for every 3rd key and commit them this time.
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
                     continue;
                 }
                 let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                batch = batch.write_batch([(k, Some(v.clone()))]);
             }
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = batch.finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
             let op_count = db.bounds().await.end;
             assert_eq!(op_count, 1673);
             assert_eq!(db.snapshot.items(), 1000);
 
             // Delete every 7th key
-            let mut db = db.into_dirty();
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 if i % 7 != 1 {
                     continue;
                 }
                 let k = Blake3::hash(&i.to_be_bytes());
-                db.write_batch([(k, None)]).await.unwrap();
+                batch = batch.write_batch([(k, None)]);
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
+            let _cs = batch.finalize(None);
             drop(db);
             let db = create_test_store(context.with_label("store_3")).await;
             assert_eq!(db.bounds().await.end, op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
-            let db = db;
             db.sync().await.unwrap();
             drop(db);
-            let mut db = create_test_store(context.with_label("store_4"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(context.with_label("store_4")).await;
             assert_eq!(db.bounds().await.end, op_count);
 
             // Re-delete every 7th key and commit this time.
+            let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
                 if i % 7 != 1 {
                     continue;
                 }
                 let k = Blake3::hash(&i.to_be_bytes());
-                db.write_batch([(k, None)]).await.unwrap();
+                batch = batch.write_batch([(k, None)]);
             }
-            let (db, _) = db.commit(None).await.unwrap();
+            let cs = batch.finalize(None);
+            TestStore::commit(&mut db, cs).await.unwrap();
 
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(db.inactivity_floor_loc, 756);
@@ -1086,13 +1056,11 @@ mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_store_batchable() {
+    fn test_store_batch() {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store_0"))
-                .await
-                .into_dirty();
+            let db = create_test_store(ctx.with_label("store_0")).await;
 
             // Ensure the store is empty
             assert_eq!(db.bounds().await.end, 1);
@@ -1101,44 +1069,34 @@ mod test {
             let key = Digest::random(&mut ctx);
             let value = vec![2, 3, 4, 5];
 
-            let mut batch = db.start_batch();
-
-            // Attempt to get a key that does not exist
-            let result = batch.get(&key).await;
-            assert!(result.unwrap().is_none());
-
-            // Insert a key-value pair
-            batch.update(key, value.clone()).await.unwrap();
+            // Create a batch with an insert, but don't commit
+            let cs = db
+                .new_batch()
+                .write_batch([(key, Some(value.clone()))])
+                .finalize(None);
 
             assert_eq!(db.bounds().await.end, 1); // The batch is not applied yet
             assert_eq!(db.inactivity_floor_loc, 0);
 
-            // Fetch the value
-            let fetched_value = batch.get(&key).await.unwrap();
-            assert_eq!(fetched_value.unwrap(), value);
-            db.write_batch(batch.into_iter()).await.unwrap();
+            // Drop the changeset without committing
+            drop(cs);
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store_1"))
-                .await
-                .into_dirty();
+            let mut db = create_test_store(ctx.with_label("store_1")).await;
 
             // Ensure the batch was not applied since we didn't commit.
             assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
             assert!(db.get_metadata().await.unwrap().is_none());
 
-            // Insert a key-value pair
-            let mut batch = db.start_batch();
-            batch.update(key, value.clone()).await.unwrap();
-
-            // Persist the changes
-            db.write_batch(batch.into_iter()).await.unwrap();
-            assert_eq!(db.bounds().await.end, 2);
-            assert_eq!(db.inactivity_floor_loc, 0);
+            // Insert a key-value pair and persist the changes
             let metadata = vec![99, 100];
-            let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
+            let cs = db
+                .new_batch()
+                .write_batch([(key, Some(value.clone()))])
+                .finalize(Some(metadata.clone()));
+            let range = TestStore::commit(&mut db, cs).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -1161,7 +1119,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
+    fn assert_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
         assert_log_store(db);
         assert_prunable_store(db, loc);
         assert_gettable(db, &key);
@@ -1169,22 +1127,8 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_dirty_futures_are_send(
-        db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
-        key: Digest,
-        value: Vec<u8>,
-    ) {
-        assert_log_store(db);
-        assert_gettable(db, &key);
-        assert_send(db.write_batch([(key, Some(value.clone()))]));
-        assert_send(db.write_batch([(key, None)]));
-        assert_batchable(db, key, value);
-    }
-
-    #[allow(dead_code)]
-    fn assert_dirty_commit_is_send(
-        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
-    ) {
-        assert_send(db.commit(None));
+    fn assert_commit_is_send(db: &mut TestStore) {
+        let cs = db.new_batch().finalize(None);
+        assert_send(TestStore::commit(db, cs));
     }
 }

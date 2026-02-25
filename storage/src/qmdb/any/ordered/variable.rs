@@ -11,7 +11,7 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_variable, ordered, value::VariableEncoding, VariableConfig, VariableValue},
-        Durable, Error,
+        Error,
     },
     translator::Translator,
 };
@@ -25,11 +25,11 @@ pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Durable>
+    Db<E, K, V, H, T>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -72,7 +72,7 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
-            Durable, Error,
+            Error,
         },
         translator::Translator,
     };
@@ -90,13 +90,12 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, D = Durable> = crate::qmdb::any::ordered::Db<
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
         H,
         Update<K, V>,
-        D,
     >;
 
     impl<
@@ -106,7 +105,7 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Durable>
+        > Db<E, K, V, H, T, P>
     where
         Operation<K, V>: Read,
     {
@@ -141,13 +140,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 1, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, D = crate::qmdb::Durable> = super::Db<E, K, V, H, T, 2, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -170,7 +169,6 @@ pub(crate) mod test {
                 test::variable_db_config,
             },
             store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-            Durable, NonDurable,
         },
         translator::TwoCap,
     };
@@ -192,8 +190,8 @@ pub(crate) mod test {
     pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Durable>;
-    type MutableAnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, NonDurable>;
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type MutableAnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {

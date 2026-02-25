@@ -20,32 +20,6 @@ pub mod db;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 
-/// Sealed trait for store state types.
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid store state types.
-pub trait State: private::Sealed + Sized + Send + Sync {}
-
-/// Marker type for a store in a "durable" state (no uncommitted operations).
-#[derive(Clone, Copy, Debug)]
-pub struct Durable;
-
-impl private::Sealed for Durable {}
-impl State for Durable {}
-
-/// Marker type for a store in a "non-durable" state (may contain uncommitted operations).
-#[derive(Clone, Debug, Default)]
-pub struct NonDurable {
-    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
-    /// active operation to tip.
-    pub(crate) steps: u64,
-}
-
-impl private::Sealed for NonDurable {}
-impl State for NonDurable {}
-
 /// A trait for a store based on an append-only log of operations.
 pub trait LogStore: Send + Sync {
     type Value: CodecShared + Clone;

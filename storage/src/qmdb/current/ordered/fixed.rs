@@ -14,29 +14,18 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::{db::Merkleized, FixedConfig as Config},
-        Durable, Error,
+        current::FixedConfig as Config,
+        Error,
     },
     translator::Translator,
 };
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    super::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
-        Index<T, Location>,
-        H,
-        N,
-        S,
-        D,
-    >;
+pub type Db<E, K, V, H, T, const N: usize> =
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
 
-// Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -44,7 +33,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+    > Db<E, K, V, H, T, N>
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
@@ -63,12 +52,12 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{ordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
-            current::{db::Merkleized, FixedConfig as Config},
-            Durable, Error,
+            current::FixedConfig as Config,
+            Error,
         },
         translator::Translator,
     };
-    use commonware_cryptography::{DigestOf, Hasher};
+    use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
 
@@ -78,27 +67,16 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<
-        E,
-        K,
-        V,
-        H,
-        T,
-        const P: usize,
-        const N: usize,
-        S = Merkleized<DigestOf<H>>,
-        D = Durable,
-    > = crate::qmdb::current::ordered::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
-        Index<T, Location, P>,
-        H,
-        N,
-        S,
-        D,
-    >;
+    pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
+        crate::qmdb::current::ordered::db::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            K,
+            FixedEncoding<V>,
+            Index<T, Location, P>,
+            H,
+            N,
+        >;
 
     impl<
             E: RStorage + Clock + Metrics,
@@ -108,7 +86,7 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
+        > Db<E, K, V, H, T, P, N>
     {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
         /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -127,7 +105,6 @@ pub mod test {
         qmdb::{
             any::ordered::Update,
             current::{
-                db::Unmerkleized,
                 proof::{OperationProof, RangeProof},
                 tests::{apply_random_ops, fixed_config},
             },
@@ -136,7 +113,6 @@ pub mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            NonDurable,
         },
         translator::OneCap,
     };
@@ -146,19 +122,13 @@ pub mod test {
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable state).
-    type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Digest>, Durable>;
-    type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type TestDb = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
     /// Return an [Db] database initialized with a fixed config.
-    async fn open_db(
-        context: deterministic::Context,
-        partition_prefix: String,
-    ) -> CleanCurrentTest {
+    async fn open_db(context: deterministic::Context, partition_prefix: String) -> TestDb {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
-        CleanCurrentTest::init(context, cfg).await.unwrap()
+        TestDb::init(context, cfg).await.unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
@@ -183,8 +153,8 @@ pub mod test {
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
 
             // Proof should be verifiable against current root.
-            let root = db.root();
-            assert!(CleanCurrentTest::verify_key_value_proof(
+            let root = db.root().unwrap();
+            assert!(TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -194,7 +164,7 @@ pub mod test {
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v2,
@@ -204,7 +174,7 @@ pub mod test {
             // Proof should not verify against a mangled next_key.
             let mut mangled_proof = proof.clone();
             mangled_proof.next_key = Sha256::fill(0xFF);
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -217,10 +187,10 @@ pub mod test {
             db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // New value should not be verifiable against the old proof.
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v2,
@@ -230,7 +200,7 @@ pub mod test {
 
             // But the new value should verify against a new proof.
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
-            assert!(CleanCurrentTest::verify_key_value_proof(
+            assert!(TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v2,
@@ -238,7 +208,7 @@ pub mod test {
                 &root,
             ));
             // Old value will not verify against new proof.
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -267,7 +237,7 @@ pub mod test {
                 value: v1,
                 next_key: k,
             });
-            assert!(CleanCurrentTest::verify_range_proof(
+            assert!(TestDb::verify_range_proof(
                 hasher.inner(),
                 &proof_inactive.proof.range_proof,
                 proof_inactive.proof.loc,
@@ -277,7 +247,7 @@ pub mod test {
             ));
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -297,7 +267,7 @@ pub mod test {
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -317,7 +287,7 @@ pub mod test {
 
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.chunk = modified_chunk;
-            assert!(!CleanCurrentTest::verify_key_value_proof(
+            assert!(!TestDb::verify_key_value_proof(
                 hasher.inner(),
                 k,
                 v1,
@@ -336,7 +306,7 @@ pub mod test {
             let partition = "range-proofs".into();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("db"), partition).await;
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // Empty range proof should not crash or verify, since even an empty db has a single
             // commit op.
@@ -344,7 +314,7 @@ pub mod test {
                 proof: crate::mmr::Proof::default(),
                 partial_chunk_digest: None,
             };
-            assert!(!CleanCurrentTest::verify_range_proof(
+            assert!(!TestDb::verify_range_proof(
                 hasher.inner(),
                 &proof,
                 Location::new_unchecked(0),
@@ -354,12 +324,12 @@ pub mod test {
             ));
 
             let rng_seed = context.next_u64();
-            let db = apply_random_ops::<CleanCurrentTest>(200, true, rng_seed, db.into_mutable())
+            let db = apply_random_ops::<TestDb>(200, true, rng_seed, db.into_mutable())
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
@@ -374,20 +344,13 @@ pub mod test {
                     .await
                     .unwrap();
                 assert!(
-                    CleanCurrentTest::verify_range_proof(
-                        hasher.inner(),
-                        &proof,
-                        loc,
-                        &ops,
-                        &chunks,
-                        &root
-                    ),
+                    TestDb::verify_range_proof(hasher.inner(), &proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.to_vec();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!CleanCurrentTest::verify_range_proof(
+                assert!(!TestDb::verify_range_proof(
                     hasher.inner(),
                     &proof,
                     loc,
@@ -410,12 +373,12 @@ pub mod test {
             let db = open_db(context.with_label("db"), partition.clone())
                 .await
                 .into_mutable();
-            let db = apply_random_ops::<CleanCurrentTest>(500, true, context.next_u64(), db)
+            let db = apply_random_ops::<TestDb>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
@@ -438,7 +401,7 @@ pub mod test {
                 let proof = db.key_value_proof(hasher.inner(), key).await.unwrap();
 
                 // Proof should validate against the current value and correct root.
-                assert!(CleanCurrentTest::verify_key_value_proof(
+                assert!(TestDb::verify_key_value_proof(
                     hasher.inner(),
                     key,
                     value,
@@ -449,7 +412,7 @@ pub mod test {
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
                 let wrong_val = Sha256::hash(&[0xFF]);
-                assert!(!CleanCurrentTest::verify_key_value_proof(
+                assert!(!TestDb::verify_key_value_proof(
                     hasher.inner(),
                     key,
                     wrong_val,
@@ -458,7 +421,7 @@ pub mod test {
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::hash(&[0xEE]);
-                assert!(!CleanCurrentTest::verify_key_value_proof(
+                assert!(!TestDb::verify_key_value_proof(
                     hasher.inner(),
                     wrong_key,
                     value,
@@ -467,7 +430,7 @@ pub mod test {
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::hash(&[0xDD]);
-                assert!(!CleanCurrentTest::verify_key_value_proof(
+                assert!(!TestDb::verify_key_value_proof(
                     hasher.inner(),
                     key,
                     value,
@@ -477,7 +440,7 @@ pub mod test {
                 // Proof should fail with the wrong next-key.
                 let mut bad_proof = proof.clone();
                 bad_proof.next_key = wrong_key;
-                assert!(!CleanCurrentTest::verify_key_value_proof(
+                assert!(!TestDb::verify_key_value_proof(
                     hasher.inner(),
                     key,
                     value,
@@ -511,23 +474,17 @@ pub mod test {
                 let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
                 let clean_db = dirty_db.into_merkleized().await.unwrap();
                 db = clean_db;
-                let root = db.root();
+                let root = db.root().unwrap();
 
                 // Create a proof for the current value of k.
                 let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert!(
-                    CleanCurrentTest::verify_key_value_proof(hasher.inner(), k, v, &proof, &root),
+                    TestDb::verify_key_value_proof(hasher.inner(), k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CleanCurrentTest::verify_key_value_proof(
-                        hasher.inner(),
-                        k,
-                        old_val,
-                        &proof,
-                        &root
-                    ),
+                    !TestDb::verify_key_value_proof(hasher.inner(), k, old_val, &proof, &root),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
@@ -549,12 +506,12 @@ pub mod test {
             let key_exists_1 = Sha256::fill(0x10);
 
             // We should be able to prove exclusion for any key against an empty db.
-            let empty_root = db.root();
+            let empty_root = db.root().unwrap();
             let empty_proof = db
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &empty_proof,
@@ -567,7 +524,7 @@ pub mod test {
             db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
             let result = db.exclusion_proof(hasher.inner(), &key_exists_1).await;
@@ -589,20 +546,20 @@ pub mod test {
             // and the proof should verify any key but the one that exists in the db.
             assert_eq!(proof, proof2);
             // Any key except the one that exists should verify against this proof.
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
                 &proof,
                 &root,
             ));
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
                 &proof,
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &proof,
@@ -617,7 +574,7 @@ pub mod test {
             db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
 
             // Use a lesser/greater key that has a translated-key conflict based
             // on our use of OneCap translator.
@@ -630,19 +587,19 @@ pub mod test {
                 .unwrap();
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
                 &proof,
                 &root,
             ));
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
                 &proof,
                 &root,
             ));
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &middle_key,
                 &proof,
@@ -662,20 +619,20 @@ pub mod test {
                 .await
                 .unwrap();
             // `k` should fail since it's in the db.
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &middle_key,
                 &proof,
                 &root,
             ));
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_2,
                 &proof,
@@ -683,7 +640,7 @@ pub mod test {
             ));
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &conflicting_middle_key,
                 &proof,
@@ -691,13 +648,13 @@ pub mod test {
             ));
 
             // Using lesser/greater keys for the middle-proof should fail.
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &greater_key,
                 &proof,
                 &root,
             ));
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &lesser_key,
                 &proof,
@@ -712,7 +669,7 @@ pub mod test {
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
-            let root = db.root();
+            let root = db.root().unwrap();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
@@ -723,13 +680,13 @@ pub mod test {
                 .exclusion_proof(hasher.inner(), &key_exists_1)
                 .await
                 .unwrap();
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &proof,
                 &root,
             ));
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_2,
                 &proof,
@@ -737,13 +694,13 @@ pub mod test {
             ));
 
             // Try fooling the verifier with improper values.
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &empty_proof, // wrong proof
                 &root,
             ));
-            assert!(!CleanCurrentTest::verify_exclusion_proof(
+            assert!(!TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &key_exists_1,
                 &proof,
@@ -796,11 +753,11 @@ pub mod test {
                 .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
                 .await
                 .unwrap();
-            assert!(CleanCurrentTest::verify_exclusion_proof(
+            assert!(TestDb::verify_exclusion_proof(
                 hasher.inner(),
                 &Sha256::fill(0x00),
                 &proof,
-                &db.root(),
+                &db.root().unwrap(),
             ));
 
             db.destroy().await.unwrap();
@@ -817,11 +774,7 @@ pub mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(
-        db: &mut CleanCurrentTest,
-        key: Digest,
-        loc: Location,
-    ) {
+    fn assert_merkleized_db_futures_are_send(db: &mut TestDb, key: Digest, loc: Location) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
@@ -830,7 +783,7 @@ pub mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableCurrentTest, key: Digest, value: Digest) {
+    fn assert_mutable_db_futures_are_send(db: &mut TestDb, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_send(db.write_batch([(key, Some(value))]));
@@ -838,7 +791,7 @@ pub mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: MutableCurrentTest) {
+    fn assert_mutable_db_commit_is_send(db: TestDb) {
         assert_send(db.commit(None));
     }
 }

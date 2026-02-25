@@ -689,7 +689,7 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{
-        diff::DirtyDiff, hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION,
+        diff::Batch, hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION,
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -705,7 +705,7 @@ mod tests {
         elements: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) -> Mmr<Digest> {
         let mut mmr = Mmr::new(hasher);
-        let mut diff = DirtyDiff::new(&mmr);
+        let mut diff = Batch::new(&mmr);
         for e in elements {
             diff.add(hasher, e.as_ref());
         }
@@ -1029,7 +1029,7 @@ mod tests {
         // break proof verification.
         let new_elements: Vec<_> = (0..37).map(test_digest).collect();
         let changeset = {
-            let mut diff = DirtyDiff::new(&mmr);
+            let mut diff = Batch::new(&mmr);
             for e in &new_elements {
                 diff.add(&mut hasher, e);
             }

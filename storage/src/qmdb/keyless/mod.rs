@@ -14,13 +14,13 @@ use crate::{
         any::VariableValue,
         operation::Committable,
         store::{LogStore, MerkleizedStore},
-        DurabilityState, Durable, Error, NonDurable,
+        Error,
     },
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use core::{marker::PhantomData, ops::Range};
+use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -68,68 +68,43 @@ pub struct Config<C> {
 type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
-pub struct Keyless<
-    E: Storage + Clock + Metrics,
-    V: VariableValue,
-    H: Hasher,
-    D: DurabilityState = Durable,
-> {
+pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Location,
-
-    /// Marker for durability state.
-    _durability: PhantomData<D>,
 }
 
-// Impl block for functionality available in all states.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState>
-    Keyless<E, V, H, D>
-{
-    /// Get the value at location `loc` in the database.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.bounds().await.end`.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        let reader = self.journal.reader().await;
-        let op_count = reader.bounds().end;
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(
-                loc,
-                Location::new_unchecked(op_count),
-            ));
+/// The result of [`Batch::finalize`], ready to be committed via [`Keyless::commit_changeset`].
+pub struct Changeset<V> {
+    items: Vec<V>,
+    metadata: Option<V>,
+}
+
+/// A buffered batch of mutations against a [`Keyless`] database.
+pub struct Batch<'a, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
+    _db: &'a Keyless<E, V, H>,
+    items: Vec<V>,
+}
+
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Batch<'_, E, V, H> {
+    /// Buffer an append into this batch.
+    pub fn append(mut self, value: V) -> Self {
+        self.items.push(value);
+        self
+    }
+
+    /// Finalize this batch into a [`Changeset`].
+    pub fn finalize(self, metadata: Option<V>) -> Changeset<V> {
+        Changeset {
+            items: self.items,
+            metadata,
         }
-        let op = reader.read(*loc).await?;
-
-        Ok(op.into_value())
-    }
-
-    /// Returns the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location {
-        self.last_commit_loc
-    }
-
-    /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let op = self
-            .journal
-            .reader()
-            .await
-            .read(*self.last_commit_loc)
-            .await?;
-        let Operation::Commit(metadata) = op else {
-            return Ok(None);
-        };
-
-        Ok(metadata)
     }
 }
 
-// Implementation for the Clean state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, Durable> {
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -167,8 +142,46 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
         Ok(Self {
             journal,
             last_commit_loc,
-            _durability: PhantomData,
         })
+    }
+
+    /// Get the value at location `loc` in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.bounds().await.end`.
+    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+        let reader = self.journal.reader().await;
+        let op_count = reader.bounds().end;
+        if loc >= op_count {
+            return Err(Error::LocationOutOfBounds(
+                loc,
+                Location::new_unchecked(op_count),
+            ));
+        }
+        let op = reader.read(*loc).await?;
+
+        Ok(op.into_value())
+    }
+
+    /// Returns the location of the last commit.
+    pub const fn last_commit_loc(&self) -> Location {
+        self.last_commit_loc
+    }
+
+    /// Get the metadata associated with the last commit.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let op = self
+            .journal
+            .reader()
+            .await
+            .read(*self.last_commit_loc)
+            .await?;
+        let Operation::Commit(metadata) = op else {
+            return Ok(None);
+        };
+
+        Ok(metadata)
     }
 
     /// Return the root of the db.
@@ -239,18 +252,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
         Ok(self.journal.destroy().await?)
     }
 
-    /// Convert this database into the Mutable state for accepting new operations.
-    pub fn into_mutable(self) -> Keyless<E, V, H, NonDurable> {
-        Keyless {
-            journal: self.journal,
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        }
-    }
-}
-
-// Implementation for the Mutable state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, NonDurable> {
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
         self.journal
@@ -259,34 +260,57 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
             .map_err(Into::into)
     }
 
-    /// Commits any pending operations and transitions the database to the Durable state.
+    /// Commits any pending operations, persisting them to disk.
     ///
     /// The caller can associate an arbitrary `metadata` value with the commit. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned
+    /// `[start_loc, end_loc)` location range of committed operations. The end of the returned
     /// range includes the commit operation itself, and hence will always be equal to `op_count`.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V>,
-    ) -> Result<(Keyless<E, V, H, Durable>, Range<Location>), Error> {
+    async fn commit_inner(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = self.last_commit_loc + 1;
         self.last_commit_loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         let op_count = self.last_commit_loc + 1;
         debug!(size = ?op_count, "committed db");
+        Ok(start_loc..op_count)
+    }
 
-        let durable = Keyless {
-            journal: self.journal,
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        };
+    /// Create a batch for buffering mutations.
+    pub const fn new_batch(&self) -> Batch<'_, E, V, H> {
+        Batch {
+            _db: self,
+            items: Vec::new(),
+        }
+    }
 
-        Ok((durable, start_loc..op_count))
+    /// Commit a changeset, persisting all changes to disk.
+    pub async fn commit_changeset(
+        &mut self,
+        changeset: Changeset<V>,
+    ) -> Result<Range<Location>, Error> {
+        for item in changeset.items {
+            self.journal.append(Operation::Append(item)).await?;
+        }
+        self.commit_inner(changeset.metadata).await
     }
 }
 
-// Implementation of MerkleizedStore for all states.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
-    for Keyless<E, V, H, D>
+#[cfg(any(test, feature = "test-traits"))]
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+    /// Test-only: identity transition (was consuming type-state transition).
+    pub const fn into_mutable(self) -> Self {
+        self
+    }
+
+    /// Test-only: backward-compat consuming commit.
+    pub async fn commit(mut self, metadata: Option<V>) -> Result<(Self, Range<Location>), Error> {
+        let range = self.commit_inner(metadata).await?;
+        Ok((self, range))
+    }
+}
+
+// Implementation of MerkleizedStore.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
+    for Keyless<E, V, H>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
@@ -308,10 +332,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
     }
 }
 
-// Implementation of LogStore for all states.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> LogStore
-    for Keyless<E, V, H, D>
-{
+// Implementation of LogStore.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> LogStore for Keyless<E, V, H> {
     type Value = V;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
@@ -362,10 +384,10 @@ mod test {
     }
 
     /// Type alias for the Durable state.
-    type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Durable>;
+    type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
     /// Type alias for the Mutable (NonDurable) state.
-    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256, NonDurable>;
+    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {

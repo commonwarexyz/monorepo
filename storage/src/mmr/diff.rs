@@ -51,7 +51,7 @@ pub struct Diff<'a, D: Digest, P: MmrRead<D>, S: State<D> = Dirty> {
 }
 
 /// A diff whose root digest has not been computed.
-pub type DirtyDiff<'a, D, P> = Diff<'a, D, P, Dirty>;
+pub type Batch<'a, D, P> = Diff<'a, D, P, Dirty>;
 
 /// A diff whose root digest has been computed.
 pub type CleanDiff<'a, D, P> = Diff<'a, D, P, Clean<D>>;
@@ -106,9 +106,9 @@ impl<'a, D: Digest, P: MmrRead<D>, S: State<D>> Diff<'a, D, P, S> {
     }
 }
 
-// --- DirtyDiff construction and mutation ---
+// --- Batch construction and mutation ---
 
-impl<'a, D: Digest, P: MmrRead<D>> DirtyDiff<'a, D, P> {
+impl<'a, D: Digest, P: MmrRead<D>> Batch<'a, D, P> {
     /// The total number of nodes visible through this diff.
     pub fn size(&self) -> Position {
         self.effective_size()
@@ -283,7 +283,7 @@ impl<'a, D: Digest, P: MmrRead<D>> DirtyDiff<'a, D, P> {
         Ok(())
     }
 
-    /// Consume this DirtyDiff and produce an immutable CleanDiff with computed root.
+    /// Consume this batch and produce an immutable CleanDiff with computed root.
     ///
     /// If a thread pool was set via [`with_pool`](Self::with_pool) and there are
     /// enough dirty nodes, node digests at the same height are computed in parallel.
@@ -400,6 +400,14 @@ impl<'a, D: Digest, P: MmrRead<D>> DirtyDiff<'a, D, P> {
         }
     }
 
+    /// Shorthand for `self.merkleize(hasher).into_changeset()`.
+    pub fn finalize(self, hasher: &mut impl Hasher<Digest = D>) -> Changeset<D>
+    where
+        P: ChainInfo<D>,
+    {
+        self.merkleize(hasher).into_changeset()
+    }
+
     /// Mark ancestors of `pos` as dirty up to the peak.
     fn mark_dirty(&mut self, pos: Position) {
         for (peak_pos, mut height) in PeakIterator::new(self.effective_size()) {
@@ -471,7 +479,7 @@ impl<'a, D: Digest, P: MmrRead<D> + ChainInfo<D>> ChainInfo<D> for CleanDiff<'a,
 
 impl<'a, D: Digest, P: MmrRead<D>> CleanDiff<'a, D, P> {
     /// Convert back to a dirty diff for further mutations.
-    pub fn into_dirty(self) -> DirtyDiff<'a, D, P> {
+    pub fn into_dirty(self) -> Batch<'a, D, P> {
         Diff {
             parent: self.parent,
             parent_visible: self.parent_visible,
@@ -553,7 +561,7 @@ mod tests {
 
                 // Via Diff: start from empty base, add all via diff
                 let base = Mmr::new(&mut hasher);
-                let mut diff = DirtyDiff::new(&base);
+                let mut diff = Batch::new(&base);
                 for i in 0..n {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -588,7 +596,7 @@ mod tests {
             let base = build_reference(&mut hasher, 50);
             let base_root = *base.root();
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -624,7 +632,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..75 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -661,7 +669,7 @@ mod tests {
             let base_root = *base.root();
 
             // Fork A: add 10 elements.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -670,7 +678,7 @@ mod tests {
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Fork B: add 5 different elements (using different seed).
-            let mut diff_b = DirtyDiff::new(&base);
+            let mut diff_b = Batch::new(&base);
             for i in 100u64..105 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -697,7 +705,7 @@ mod tests {
             let base = build_reference(&mut hasher, 50);
 
             // Layer A: add elements 50..60.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -706,7 +714,7 @@ mod tests {
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on top of A: add elements 60..70.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             for i in 60u64..70 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -745,7 +753,7 @@ mod tests {
             let mut base = build_reference(&mut hasher, 50);
 
             // Layer A.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -754,7 +762,7 @@ mod tests {
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on top of A.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             for i in 60u64..70 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -794,7 +802,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xFF);
 
             // Update leaf and verify root changes.
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             diff.update_leaf_digest(Location::new_unchecked(5), updated_digest)
                 .unwrap();
             let clean_diff = diff.merkleize(&mut hasher);
@@ -803,7 +811,7 @@ mod tests {
             // Restore original digest and verify root reverts.
             let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
             let original_digest = base.get_node(leaf_5_pos).unwrap();
-            let mut diff2 = DirtyDiff::new(&base);
+            let mut diff2 = Batch::new(&base);
             diff2
                 .update_leaf_digest(Location::new_unchecked(5), original_digest)
                 .unwrap();
@@ -822,7 +830,7 @@ mod tests {
             let base_root = *base.root();
 
             let updated_digest = Sha256::fill(0xAA);
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             diff.update_leaf_digest(Location::new_unchecked(10), updated_digest)
                 .unwrap();
 
@@ -867,7 +875,7 @@ mod tests {
                 .map(|&i| (Location::new_unchecked(i), updated_digest))
                 .collect();
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             diff.update_leaf_batched(&updates).unwrap();
             let clean_diff = diff.merkleize(&mut hasher);
 
@@ -890,7 +898,7 @@ mod tests {
                 let original = base.get_node(pos).unwrap();
                 restore_updates.push((Location::new_unchecked(loc_val), original));
             }
-            let mut diff2 = DirtyDiff::new(&base);
+            let mut diff2 = Batch::new(&base);
             diff2.update_leaf_batched(&restore_updates).unwrap();
             let clean_diff2 = diff2.merkleize(&mut hasher);
             assert_eq!(*clean_diff2.root(), base_root);
@@ -905,7 +913,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -950,7 +958,7 @@ mod tests {
             let base = build_reference(&mut hasher, 50);
             let base_root = *base.root();
 
-            let diff = DirtyDiff::new(&base);
+            let diff = Batch::new(&base);
             let clean_diff = diff.merkleize(&mut hasher);
 
             assert_eq!(*clean_diff.root(), base_root);
@@ -972,7 +980,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..55 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -997,7 +1005,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             // Pop 5 leaves from the base.
             for _ in 0..5 {
                 diff.pop().unwrap();
@@ -1023,7 +1031,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             // Pop 5.
             for _ in 0..5 {
                 diff.pop().unwrap();
@@ -1039,7 +1047,7 @@ mod tests {
             // Build reference: 45 original elements then 10 with different seed.
             let mut reference = build_reference(&mut hasher, 45);
             let changeset = {
-                let mut diff = DirtyDiff::new(&reference);
+                let mut diff = Batch::new(&reference);
                 for i in 100u64..110 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -1062,7 +1070,7 @@ mod tests {
             let mut base = build_reference(&mut hasher, 20);
             base.prune_to_pos(Position::new(15));
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             // Pop until we hit the prune boundary.
             loop {
                 match diff.pop() {
@@ -1083,7 +1091,7 @@ mod tests {
             let base = build_reference(&mut hasher, 50);
 
             // First diff: add 5 leaves.
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..55 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1114,7 +1122,7 @@ mod tests {
             let mut base = build_reference(&mut hasher, 50);
 
             // Changeset 1: add 10 leaves.
-            let mut diff1 = DirtyDiff::new(&base);
+            let mut diff1 = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1124,7 +1132,7 @@ mod tests {
             base.apply(cs1);
 
             // Changeset 2: add 10 more leaves on updated base.
-            let mut diff2 = DirtyDiff::new(&base);
+            let mut diff2 = Batch::new(&base);
             for i in 60u64..70 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1146,7 +1154,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut base = build_reference(&mut hasher, 100);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 100u64..110 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1174,7 +1182,7 @@ mod tests {
             let mut base = build_reference(&mut hasher, 100);
             base.prune_to_pos(Position::new(50));
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 100u64..110 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1213,14 +1221,14 @@ mod tests {
             let updated_digest = Sha256::fill(0xCC);
 
             // Layer A: overwrite leaf 5.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             diff_a
                 .update_leaf_digest(Location::new_unchecked(5), updated_digest)
                 .unwrap();
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on A: add leaves.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             for i in 100u64..105 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1250,14 +1258,14 @@ mod tests {
             let mut base = build_reference(&mut hasher, 50);
 
             // Layer A: pop 5 leaves.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             for _ in 0..5 {
                 diff_a.pop().unwrap();
             }
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on A: add 10 new leaves.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             for i in 200u64..210 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1275,7 +1283,7 @@ mod tests {
             // Build reference: 45 base elements + 10 new.
             let mut reference = build_reference(&mut hasher, 45);
             let changeset = {
-                let mut diff = DirtyDiff::new(&reference);
+                let mut diff = Batch::new(&reference);
                 for i in 200u64..210 {
                     hasher.inner().update(&i.to_be_bytes());
                     let element = hasher.inner().finalize();
@@ -1299,21 +1307,21 @@ mod tests {
 
             // Layer A: overwrite leaf 5.
             let updated_digest = Sha256::fill(0xDD);
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             diff_a
                 .update_leaf_digest(Location::new_unchecked(5), updated_digest)
                 .unwrap();
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on A: pop 3 leaves.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             for _ in 0..3 {
                 diff_b.pop().unwrap();
             }
             let clean_b = diff_b.merkleize(&mut hasher);
 
             // Layer C on B: add 10 leaves.
-            let mut diff_c = DirtyDiff::new(&clean_b);
+            let mut diff_c = Batch::new(&clean_b);
             for i in 300u64..310 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1334,7 +1342,7 @@ mod tests {
             // then 10 new elements.
             let mut reference = build_reference(&mut hasher, 97);
             let changeset = {
-                let mut diff = DirtyDiff::new(&reference);
+                let mut diff = Batch::new(&reference);
                 diff.update_leaf_digest(Location::new_unchecked(5), updated_digest)
                     .unwrap();
                 for i in 300u64..310 {
@@ -1370,14 +1378,14 @@ mod tests {
             let digest_y = Sha256::fill(0xBB);
 
             // Layer A: overwrite leaf 5 with X.
-            let mut diff_a = DirtyDiff::new(&base);
+            let mut diff_a = Batch::new(&base);
             diff_a
                 .update_leaf_digest(Location::new_unchecked(5), digest_x)
                 .unwrap();
             let clean_a = diff_a.merkleize(&mut hasher);
 
             // Layer B on A: overwrite leaf 5 with Y.
-            let mut diff_b = DirtyDiff::new(&clean_a);
+            let mut diff_b = Batch::new(&clean_a);
             diff_b
                 .update_leaf_digest(Location::new_unchecked(5), digest_y)
                 .unwrap();
@@ -1405,7 +1413,7 @@ mod tests {
             let base = build_reference(&mut hasher, 50);
 
             // Add 10 leaves in diff, then update the 3rd new leaf (location 52).
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             for i in 50u64..60 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1423,7 +1431,7 @@ mod tests {
             // Build reference the same way: 60 elements, then update leaf 52.
             let mut reference = build_reference(&mut hasher, 60);
             let changeset = {
-                let mut diff = DirtyDiff::new(&reference);
+                let mut diff = Batch::new(&reference);
                 diff.update_leaf_digest(Location::new_unchecked(52), updated_digest)
                     .unwrap();
                 diff.merkleize(&mut hasher).into_changeset()
@@ -1441,7 +1449,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             let result = diff.advance_pruning(Position::new(999));
             assert!(
                 matches!(result, Err(Error::InvalidPosition(_))),
@@ -1458,7 +1466,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 100);
 
-            let mut diff = DirtyDiff::new(&base);
+            let mut diff = Batch::new(&base);
             diff.advance_pruning(Position::new(50)).unwrap();
 
             // Update at location 10 (position < 50) should fail.

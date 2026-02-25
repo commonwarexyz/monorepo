@@ -172,7 +172,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 mod tests {
     use super::*;
     use crate::mmr::{
-        diff::DirtyDiff, location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard,
+        diff::Batch, location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -190,7 +190,7 @@ mod tests {
             let elements: Vec<_> = (0..49u8).map(test_digest).collect();
             let mut mmr = Mmr::new(&mut hasher);
             let changeset = {
-                let mut diff = DirtyDiff::new(&mmr);
+                let mut diff = Batch::new(&mmr);
                 for element in &elements {
                     diff.add(&mut hasher, element);
                 }
