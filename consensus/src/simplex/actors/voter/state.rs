@@ -219,7 +219,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// When `timeout` is false, this is the certificate path and `view` must already have a
     /// nullification certificate.
     ///
-    /// Returns `None` if we have already broadcast a finalize vote for this view.
+    /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
+    /// nullify emission for `view`. Returns `None` if we have already broadcast a finalize vote for this view.
     pub fn construct_nullify(&mut self, view: View, timeout: bool) -> Option<(bool, Nullify<S>)> {
         if timeout {
             if view != self.view {
@@ -236,7 +237,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some((is_retry, nullify))
     }
 
-    /// Returns the best certificate for `view` to help peers enter it.
+    /// Returns the best certificate for `view` to help peers enter `view + 1`.
     ///
     /// Finalization is strongest, then nullification, then notarization.
     pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
