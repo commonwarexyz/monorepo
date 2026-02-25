@@ -33,8 +33,9 @@
 //!   [Append::to_immutable]) emit immutable views to storage and keep tip backing reusable.
 //! - [Append::resize] may allocate one temporary physical-page buffer when recovering a retained
 //!   partial page from disk for CRC validation.
-//! - Read misses that go through the page cache allocate fetch buffers at physical-page size, cached
-//!   slots store logical-page bytes.
+//! - Read misses that fetch through the page cache allocate physical-page buffers. Slots filled from
+//!   fetches may retain physical-page bytes, while slots filled via [CacheRef::cache] store logical
+//!   page bytes. Reads always return only logical bytes.
 
 use super::read::{PageReader, Replay};
 use crate::{
