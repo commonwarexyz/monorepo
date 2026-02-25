@@ -359,6 +359,8 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
+        // Attempt to broadcast a nullify vote for the current view (as many times as required
+        // until we exit the view)
         let view = self.state.current_view();
         let Some(retry) = self
             .try_broadcast_nullify(batcher, vote_sender, view, true)
@@ -367,7 +369,7 @@ impl<
             return;
         };
 
-        // Broadcast entry to help others enter the view
+        // Broadcast entry to help others enter the view.
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
