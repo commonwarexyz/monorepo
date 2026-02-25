@@ -9,7 +9,7 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
-    /// Signal from the batcher to expire a view after observing a leader nullify vote.
+    /// Signal that the current view should be expired (if not already).
     Expire(View),
     /// Certificate from batcher or resolver.
     ///
