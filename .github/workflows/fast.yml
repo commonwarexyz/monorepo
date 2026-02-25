@@ -281,19 +281,19 @@ jobs:
     - name: Add WASM target
       run: rustup target add wasm32-unknown-unknown
     - name: Build cryptography
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build math
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path math/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_math.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path math/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_math.wasm"
     - name: Build utils
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
     - name: Build consensus
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
     - name: Build storage
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
 
   no_std:
     runs-on: ubuntu-latest
@@ -384,7 +384,11 @@ jobs:
         uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
+      - name: Install just & cargo-hack
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+        with:
+          tool: just@1.43.0,cargo-hack@0.6.43
       - name: Print Rust version
         run: rustc --version
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --all-features
+      - name: Check feature powerset
+        run: RUSTFLAGS="-D warnings" just hack check
