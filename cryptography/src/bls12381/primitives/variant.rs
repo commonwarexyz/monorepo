@@ -31,6 +31,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Read<Cfg = ()>
         + Debug
         + Hash
+        + PartialEq
         + Copy;
 
     /// The signature type.
@@ -41,6 +42,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Read<Cfg = ()>
         + Debug
         + Hash
+        + PartialEq
         + Copy;
 
     /// The domain separator tag (DST) for a proof of possession.
