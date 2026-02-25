@@ -33,7 +33,6 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace};
 
-
 pub struct Actor<
     E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
@@ -160,7 +159,10 @@ impl<
     }
 
     /// Returns true if the leader has nullified the current view.
-    fn leader_abandoned(current: (View, Option<Participant>), work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
+    fn leader_abandoned(
+        current: (View, Option<Participant>),
+        work: &BTreeMap<View, Round<S, B, D, R>>,
+    ) -> bool {
         let (current_view, current_leader) = current;
         let Some(leader) = current_leader else {
             return false;
