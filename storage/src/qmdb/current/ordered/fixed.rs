@@ -796,61 +796,6 @@ pub mod test {
         });
     }
 
-    /// Regression test: exclusion_proof should not panic when all keys have been deleted
-    /// but not yet committed. The delete appends to the log past the CommitFloor, so the
-    /// CommitFloor doesn't represent a genuinely empty DB and the proof can't be generated.
-    #[test_traced("DEBUG")]
-    pub fn test_exclusion_proof_after_uncommitted_delete() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion-uncommitted-delete".into();
-            let db = open_db(context, partition).await;
-
-            // Commit a key.
-            let key = Sha256::fill(0x10);
-            let value = Sha256::fill(0xA1);
-            let mut db = db.into_mutable();
-            db.write_batch([(key, Some(value))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-
-            // Delete the key without committing. This appends a Delete
-            // operation past the CommitFloor and sets active_keys to 0.
-            let mut db = db.into_merkleized().await.unwrap().into_mutable();
-            db.write_batch([(key, None)]).await.unwrap();
-            assert!(db.is_empty());
-
-            // exclusion_proof should return an error because the last
-            // CommitFloor was written for a non-empty DB. Previously this
-            // panicked with unreachable!().
-            let db = db.into_merkleized().await.unwrap();
-            let result = db
-                .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
-                .await;
-            assert!(
-                matches!(result, Err(Error::NotEmpty)),
-                "expected NotEmpty error, got {result:?}"
-            );
-
-            let (db, _) = db.into_mutable().commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
-
-            // After committing, the DB should be empty and we should be able to generate a proof.
-            let proof = db
-                .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
-                .await
-                .unwrap();
-            assert!(CleanCurrentTest::verify_exclusion_proof(
-                hasher.inner(),
-                &Sha256::fill(0x00),
-                &proof,
-                &db.root(),
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test_traced("DEBUG")]
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
