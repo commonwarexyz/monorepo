@@ -851,38 +851,48 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
             let current = state.current_view();
-            let future = current.next();
+            let next = current.next();
 
             // Without a nullification certificate, non-current views are not eligible.
-            assert!(state.construct_nullify(future, false).is_none());
+            assert!(state.construct_nullify(next, false).is_none());
+            // Retry path is reserved for current view timeout handling.
+            assert!(state.construct_nullify(next, true).is_none());
 
-            // First attempt for current view succeeds.
+            // Observe a nullification for current view, which advances us to the next view.
+            let current_round = Rnd::new(Epoch::new(4), current);
+            let current_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, current_round).expect("nullify")
+                })
+                .collect();
+            let current_nullification =
+                Nullification::from_nullifies(&verifier, &current_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(current_nullification));
+            assert_eq!(state.current_view(), next);
+
+            // We can emit a first-attempt nullify vote for the now-past nullified view.
             let (retry, _) = state
-                .construct_nullify(current, true)
-                .expect("first nullify should be emitted");
+                .construct_nullify(current, false)
+                .expect("first nullify for nullified past view should be emitted");
             assert!(!retry);
 
-            // A non-retry request for the same view should not emit again.
+            // A second certificate-path request for the same view does not emit again.
             assert!(state.construct_nullify(current, false).is_none());
 
-            // After observing a nullification for future view, we can emit its nullify vote.
-            let future_round = Rnd::new(Epoch::new(4), future);
-            let future_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, future_round).expect("nullify"))
-                .collect();
-            let future_nullification =
-                Nullification::from_nullifies(&verifier, &future_votes, &Sequential)
-                    .expect("nullification");
-            assert!(state.add_nullification(future_nullification));
+            // Retry path remains current-view only.
+            assert!(state.construct_nullify(current, true).is_none());
 
+            // Timeout path on current view: first attempt then retry.
             let (retry, _) = state
-                .construct_nullify(future, false)
-                .expect("first nullify for nullified future view should be emitted");
+                .construct_nullify(next, true)
+                .expect("first timeout nullify for current view should be emitted");
             assert!(!retry);
-
-            // Retry path is reserved for current view timeout handling.
-            assert!(state.construct_nullify(future, true).is_none());
+            let (retry, _) = state
+                .construct_nullify(next, true)
+                .expect("retry timeout nullify for current view should be emitted");
+            assert!(retry);
         });
     }
 
