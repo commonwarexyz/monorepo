@@ -18,7 +18,6 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRngCore;
-use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -114,8 +113,7 @@ impl<
     pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer for unknown participant");
-            self.blocker.block(sender).await;
+            commonware_p2p::block!(self.blocker, sender, "unknown participant");
             return false;
         };
 
@@ -124,8 +122,7 @@ impl<
             Vote::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer for notarize signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "notarize signer mismatch");
                     return false;
                 }
 
@@ -137,11 +134,9 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer for conflicting notarize");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                         } else if previous != &notarize {
-                            warn!(?sender, "blocking peer for invalid signature");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }
@@ -158,8 +153,7 @@ impl<
             Vote::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer for nullify signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify signer mismatch");
                     return false;
                 }
 
@@ -169,8 +163,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer for nullify after finalize");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
 
@@ -178,8 +171,7 @@ impl<
                 match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
-                            warn!(?sender, "blocking peer for conflicting nullify");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
                         }
                         false
                     }
@@ -196,8 +188,7 @@ impl<
             Vote::Finalize(finalize) => {
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer for finalize signer mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize signer mismatch");
                     return false;
                 }
 
@@ -207,8 +198,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer for finalize after nullify");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
 
@@ -220,11 +210,9 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer for conflicting finalize");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                         } else if previous != &finalize {
-                            warn!(?sender, "blocking peer for invalid signature");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
                         }
                         false
                     }

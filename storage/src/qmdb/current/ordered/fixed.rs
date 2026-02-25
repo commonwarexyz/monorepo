@@ -140,7 +140,7 @@ pub mod test {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
@@ -343,6 +343,7 @@ pub mod test {
             let proof = RangeProof {
                 proof: crate::mmr::Proof::default(),
                 partial_chunk_digest: None,
+                ops_root: Digest::EMPTY,
             };
             assert!(!CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
@@ -396,6 +397,49 @@ pub mod test {
                     &root,
                 ));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression test: requesting a range proof for a location in a pruned bitmap chunk
+    /// must return `Error::OperationPruned`, not panic in the bitmap accessor.
+    #[test_traced("DEBUG")]
+    pub fn test_range_proof_returns_error_on_pruned_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "range-proofs-pruned".to_string();
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut db = open_db(context.with_label("db"), partition)
+                .await
+                .into_mutable();
+
+            let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
+
+            // Repeatedly update the same key to generate many inactive operations,
+            // pushing the inactivity floor past at least one full bitmap chunk.
+            let key = Sha256::fill(0x11);
+            for i in 0..chunk_bits + 10 {
+                let value = Sha256::hash(&i.to_be_bytes());
+                db.write_batch([(key, Some(value))]).await.unwrap();
+            }
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
+
+            assert!(
+                db.status.pruned_chunks() > 0,
+                "expected at least one pruned chunk"
+            );
+
+            // Requesting a range proof at location 0 (in the pruned range) should return
+            // OperationPruned, not panic.
+            let result = db
+                .range_proof(hasher.inner(), Location::new_unchecked(0), NZU64!(1))
+                .await;
+            assert!(
+                matches!(result, Err(Error::OperationPruned(_))),
+                "expected OperationPruned, got {result:?}"
+            );
 
             db.destroy().await.unwrap();
         });
@@ -749,61 +793,6 @@ pub mod test {
                 &proof,
                 &empty_root, // wrong root
             ));
-        });
-    }
-
-    /// Regression test: exclusion_proof should not panic when all keys have been deleted
-    /// but not yet committed. The delete appends to the log past the CommitFloor, so the
-    /// CommitFloor doesn't represent a genuinely empty DB and the proof can't be generated.
-    #[test_traced("DEBUG")]
-    pub fn test_exclusion_proof_after_uncommitted_delete() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion-uncommitted-delete".into();
-            let db = open_db(context, partition).await;
-
-            // Commit a key.
-            let key = Sha256::fill(0x10);
-            let value = Sha256::fill(0xA1);
-            let mut db = db.into_mutable();
-            db.write_batch([(key, Some(value))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-
-            // Delete the key without committing. This appends a Delete
-            // operation past the CommitFloor and sets active_keys to 0.
-            let mut db = db.into_merkleized().await.unwrap().into_mutable();
-            db.write_batch([(key, None)]).await.unwrap();
-            assert!(db.is_empty());
-
-            // exclusion_proof should return an error because the last
-            // CommitFloor was written for a non-empty DB. Previously this
-            // panicked with unreachable!().
-            let db = db.into_merkleized().await.unwrap();
-            let result = db
-                .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
-                .await;
-            assert!(
-                matches!(result, Err(Error::NotEmpty)),
-                "expected NotEmpty error, got {result:?}"
-            );
-
-            let (db, _) = db.into_mutable().commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
-
-            // After committing, the DB should be empty and we should be able to generate a proof.
-            let proof = db
-                .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
-                .await
-                .unwrap();
-            assert!(CleanCurrentTest::verify_exclusion_proof(
-                hasher.inner(),
-                &Sha256::fill(0x00),
-                &proof,
-                &db.root(),
-            ));
-
-            db.destroy().await.unwrap();
         });
     }
 

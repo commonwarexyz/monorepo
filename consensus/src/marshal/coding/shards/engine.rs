@@ -176,7 +176,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
+    Blocker, PeerSetSubscription, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -258,15 +258,15 @@ where
     /// The size of the mailbox buffer.
     pub mailbox_size: usize,
 
-    /// Number of pre-leader shards to buffer per peer.
+    /// Number of shards to buffer per peer.
     ///
     /// Shards for commitments without a reconstruction state are buffered per
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
     /// [`Discovered`](super::Message::Discovered).
     ///
-    /// The worst-case total memory usage for pre-leader buffers is
-    /// `num_participants * pre_leader_buffer_size * max_shard_size`.
+    /// The worst-case total memory usage for the set of shard buffers is
+    /// `num_participants * peer_buffer_size * max_shard_size`.
     pub peer_buffer_size: NonZeroUsize,
 
     /// Capacity of the channel between the background receiver and the engine.
@@ -275,6 +275,10 @@ where
     /// task and forwards them to the engine over an `mpsc` channel with this
     /// capacity.
     pub background_channel_capacity: usize,
+
+    /// Subscription to peer set changes. Per-peer shard buffers
+    /// are freed when a peer leaves all tracked peer sets.
+    pub peer_set_subscription: PeerSetSubscription<P>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -322,6 +326,9 @@ where
 
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
+
+    /// Subscription to peer set changes.
+    peer_set_subscription: PeerSetSubscription<P>,
 
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
@@ -374,6 +381,7 @@ where
                 state: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
+                peer_set_subscription: config.peer_set_subscription,
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
@@ -525,6 +533,12 @@ where
                 } else {
                     self.buffer_peer_shard(peer, shard);
                 }
+            },
+            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                return;
+            } => {
+                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
             },
         }
     }
@@ -1096,8 +1110,7 @@ where
         let Ok((checking_data, checked, weak_shard_data)) =
             C::weaken(&commitment.config(), &commitment.root(), index, data)
         else {
-            warn!(?sender, "invalid strong shard received, blocking peer");
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "invalid strong shard received");
             return false;
         };
 
@@ -1146,8 +1159,7 @@ where
             });
 
         for peer in to_block {
-            warn!(?peer, "invalid shard received, blocking peer");
-            blocker.block(peer).await;
+            commonware_p2p::block!(blocker, peer, "invalid shard received");
         }
         self.common.checked_shards.extend(new_checked);
 
@@ -1315,8 +1327,7 @@ where
         X: Blocker<PublicKey = P>,
     {
         let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
-            warn!(?sender, "shard sent by non-participant, blocking peer");
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "shard sent by non-participant");
             return false;
         };
         let commitment = shard.commitment();
@@ -1364,11 +1375,7 @@ where
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let Some(me) = me else {
-            warn!(
-                ?sender,
-                "strong shard sent to non-participant, blocking peer"
-            );
-            blocker.block(sender).await;
+            commonware_p2p::block!(blocker, sender, "strong shard sent to non-participant");
             return false;
         };
 
@@ -1377,33 +1384,29 @@ where
             .try_into()
             .expect("participant index impossibly out of bounds");
         if shard.index != expected_index {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 shard_index = shard.index,
                 expected_index = me.get() as usize,
-                "strong shard index does not match self index, blocking peer"
+                "strong shard index does not match self index"
             );
-            blocker.block(sender).await;
             return false;
         }
 
         let common = self.common();
         if sender != common.leader {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 leader = ?common.leader,
-                "strong shard from non-leader, blocking peer"
+                "strong shard from non-leader"
             );
-            blocker.block(sender).await;
             return false;
         }
         if let Some(received_strong) = common.received_strong.as_ref() {
             if received_strong != &shard.data {
-                warn!(
-                    ?sender,
-                    "strong shard equivocation from leader, blocking peer"
-                );
-                blocker.block(sender).await;
+                commonware_p2p::block!(blocker, sender, "strong shard equivocation from leader");
             }
             return false;
         }
@@ -1429,13 +1432,13 @@ where
             .try_into()
             .expect("participant index impossibly out of bounds");
         if shard.index != expected_index {
-            warn!(
-                ?sender,
+            commonware_p2p::block!(
+                blocker,
+                sender,
                 shard_index = shard.index,
                 expected_index = sender_index.get() as usize,
-                "weak shard index does not match participant index, blocking peer"
+                "weak shard index does not match participant index"
             );
-            blocker.block(sender).await;
             return false;
         }
 
@@ -1446,11 +1449,7 @@ where
                     if state.pending_weak_shards.get(&sender).is_some_and(|existing| existing.data != shard.data)
             );
             if equivocated {
-                warn!(
-                    ?sender,
-                    "duplicate weak shard with different data, blocking peer"
-                );
-                blocker.block(sender).await;
+                commonware_p2p::block!(blocker, sender, "duplicate weak shard with different data");
             }
             return false;
         }
@@ -1488,7 +1487,10 @@ mod tests {
         Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{self, Control, Link, Oracle};
+    use commonware_p2p::{
+        simulated::{self, Control, Link, Oracle},
+        Provider as _,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::{
@@ -1693,6 +1695,7 @@ mod tests {
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
+                        peer_set_subscription: oracle.manager().subscribe().await,
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2873,7 +2876,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_pre_leader_shards_buffered_until_external_proposed() {
+    fn test_peer_shards_buffered_until_external_proposed() {
         // Test that shards received before leader announcement do not progress
         // reconstruction until Discovered is delivered.
         let fixture: Fixture<C> = Fixture {
@@ -3601,6 +3604,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
+                peer_set_subscription: oracle.manager().subscribe().await,
             };
 
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
@@ -4121,5 +4125,135 @@ mod tests {
                 assert_blocked(&oracle, &peers[receiver_idx].public_key, &leader_pk).await;
             },
         );
+    }
+
+    #[test_traced]
+    fn test_peer_set_update_evicts_peer_buffers() {
+        // Shards buffered before leader announcement should be evicted when
+        // the sender leaves the tracked peer set. After eviction, announcing
+        // the leader should NOT reconstruct the block (the buffered shard is
+        // gone), but sending the shard again post-leader should succeed.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let num_peers = 10usize;
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let mut private_keys = (0..num_peers)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+
+            // Test from the perspective of a single receiver (peer 3).
+            let receiver_idx = 3usize;
+            let receiver_pk = peer_keys[receiver_idx].clone();
+            let leader_pk = peer_keys[0].clone();
+
+            let receiver_control = oracle.control(receiver_pk.clone());
+            let (sender_handle, receiver_handle) = receiver_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            // Register the leader so it can send shards.
+            let leader_control = oracle.control(leader_pk.clone());
+            let (mut leader_sender, _leader_receiver) = leader_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            oracle
+                .add_link(leader_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+
+            // Create a peer set subscription for the receiver's engine.
+            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
+
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[receiver_idx].clone(),
+            )
+            .expect("signer scheme should be created");
+
+            let config: Config<_, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: receiver_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_set_subscription: peer_set_rx,
+            };
+
+            let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
+            engine.start((sender_handle, receiver_handle));
+
+            // Build a coded block and extract the strong shard destined for the receiver.
+            let coding_config = coding_config_for_participants(num_peers as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            let receiver_participant = participants
+                .index(&receiver_pk)
+                .expect("receiver must be a participant");
+            let strong_shard = coded_block
+                .shard(receiver_participant.get() as u16)
+                .expect("missing shard");
+            let strong_bytes = strong_shard.encode();
+
+            // Send the strong shard BEFORE leader announcement (it gets buffered).
+            leader_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    strong_bytes.clone(),
+                    true,
+                )
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // Now send a peer set update that excludes the leader.
+            let remaining: Set<P> =
+                Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
+            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Announce the leader. Buffered shards from the leader should have been
+            // evicted, so the strong shard will NOT be ingested.
+            let mut shard_sub = mailbox.subscribe_shard(commitment).await;
+            mailbox
+                .discovered(
+                    commitment,
+                    leader_pk.clone(),
+                    Round::new(Epoch::zero(), View::new(1)),
+                )
+                .await;
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // The shard subscription should still be pending (no shard was ingested).
+            assert!(
+                matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                "shard subscription should not resolve after evicted leader's buffer"
+            );
+            assert!(
+                mailbox.get(commitment).await.is_none(),
+                "block should not reconstruct from evicted buffers"
+            );
+        });
     }
 }

@@ -217,6 +217,9 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
+    /// Alias for the subscription type returned by [`Provider::subscribe`].
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
+
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
@@ -237,9 +240,7 @@ stability_scope!(BETA {
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
-        ) -> impl Future<
-            Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
-        > + Send;
+        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are not known).
@@ -292,3 +293,42 @@ stability_scope!(BETA {
         fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
     }
 });
+
+/// Logs a warning and blocks a peer in a single call.
+///
+/// This macro combines a [`tracing::warn!`] with a [`Blocker::block`] call
+/// to ensure consistent logging at every block site. The peer is always
+/// included as a `peer` field in the log output.
+///
+/// # Examples
+///
+/// ```ignore
+/// block!(self.blocker, sender, "invalid message");
+/// block!(self.blocker, sender, ?err, "invalid ack signature");
+/// block!(self.blocker, sender, %view, "blocking peer for epoch mismatch");
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! block {
+    ($blocker:expr, $peer:expr, $($arg:tt)+) => {
+        let peer = $peer;
+        tracing::warn!(peer = ?peer, $($arg)+);
+        #[allow(clippy::disallowed_methods)]
+        $blocker.block(peer).await;
+    };
+}
+
+/// Block a peer without logging.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test helper that bypasses the block! macro"
+)]
+#[cfg(test)]
+pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
+    blocker.block(peer).await;
+}

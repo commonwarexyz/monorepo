@@ -329,8 +329,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
-    for Keyless<E, V, H, Merkleized<H>, D>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
+    for Keyless<E, V, H, Merkleized<H>, Durable>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;

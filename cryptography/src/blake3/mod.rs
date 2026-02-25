@@ -40,7 +40,7 @@ const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
 /// BLAKE3 hasher.
 #[cfg_attr(
-    feature = "parallel",
+    feature = "blake3-parallel",
     doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
 )]
 #[derive(Debug, Default)]
@@ -59,10 +59,10 @@ impl Hasher for Blake3 {
     type Digest = Digest;
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "parallel"))]
+        #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
 
-        #[cfg(feature = "parallel")]
+        #[cfg(feature = "blake3-parallel")]
         {
             // 128 KiB
             const PARALLEL_THRESHOLD: usize = 2usize.pow(17);

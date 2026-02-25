@@ -21,7 +21,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
-        operation::Committable,
+        operation::{Committable, Key},
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -188,7 +188,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,
@@ -276,7 +276,7 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ()> {
+    ) -> VariableConfig<T, ((), ())> {
         VariableConfig {
             mmr_journal_partition: format!("journal-{suffix}"),
             mmr_metadata_partition: format!("metadata-{suffix}"),
@@ -286,7 +286,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: (),
+            log_codec_config: ((), ()),
             translator: T::default(),
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -483,6 +483,89 @@ pub(crate) mod test {
         let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.size().await > 1);
         assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that a large mixed workload can be authenticated and replayed correctly.
+    pub(crate) async fn test_any_db_build_and_authenticate<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
+        <D as MerkleizedStore>::Operation: Codec,
+    {
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+
+        const ELEMENTS: u64 = 1000;
+
+        let mut db = db.into_mutable();
+        let mut map = HashMap::<Digest, V>::default();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+            map.insert(k, v);
+        }
+
+        // Update every 3rd key.
+        for i in 0u64..ELEMENTS {
+            if i % 3 != 0 {
+                continue;
+            }
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+            map.insert(k, v);
+        }
+
+        // Delete every 7th key.
+        for i in 0u64..ELEMENTS {
+            if i % 7 != 1 {
+                continue;
+            }
+            let k = Sha256::hash(&i.to_be_bytes());
+            db.write_batch([(k, None)]).await.unwrap();
+            map.remove(&k);
+        }
+
+        // Commit + sync with pruning raises inactivity floor.
+        let (db, _) = db.commit(None).await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
+        db.sync().await.unwrap();
+        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+
+        // Drop & reopen and ensure state matches.
+        let root = db.root();
+        db.sync().await.unwrap();
+        drop(db);
+        let db = reopen_db(context.with_label("reopened")).await;
+        assert_eq!(root, db.root());
+
+        // State matches reference map.
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            if let Some(map_value) = map.get(&k) {
+                let Some(db_value) = db.get(&k).await.unwrap() else {
+                    panic!("key not found in db: {k}");
+                };
+                assert_eq!(*map_value, db_value);
+            } else {
+                assert!(db.get(&k).await.unwrap().is_none());
+            }
+        }
+
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let bounds = db.bounds().await;
+        let inactivity_floor = db.inactivity_floor_loc().await;
+        for loc in *inactivity_floor..*bounds.end {
+            let loc = Location::new_unchecked(loc);
+            let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
+            assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
+        }
 
         db.destroy().await.unwrap();
     }
@@ -970,6 +1053,14 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             for_all_variants!(context, "lr", with_reopen: test_any_db_log_replay);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_build_and_authenticate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
         });
     }
 

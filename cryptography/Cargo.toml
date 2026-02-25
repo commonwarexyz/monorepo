@@ -25,7 +25,7 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
-crc-fast = { workspace = true, features = ["panic-handler"] }
+crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
@@ -67,11 +67,11 @@ rstest.workspace = true
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-parallel = [ "blake3/rayon", "commonware-parallel/std", "std" ]
+blake3-parallel = [ "blake3/rayon", "std" ]
+sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -92,7 +92,8 @@ std = [
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
-	"crc-fast/std",
+	"crc-fast",
+	"crc-fast?/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",

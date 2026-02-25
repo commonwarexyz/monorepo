@@ -183,9 +183,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Address, AddressableManager, Blocker, Ingress, Provider, Receiver, Recipients, Sender,
-    };
+    use crate::{Address, AddressableManager, Ingress, Provider, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -1906,7 +1904,7 @@ mod tests {
             oracle.track(1, peers.clone()).await;
             let _ = oracle.peer_set(0).await;
             let _ = oracle.subscribe().await;
-            oracle.block(address.clone()).await;
+            crate::block_peer(&mut oracle, address.clone()).await;
 
             // Sender operations should not panic even after shutdown
             let sent = sender

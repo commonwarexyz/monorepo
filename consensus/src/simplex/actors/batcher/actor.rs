@@ -31,7 +31,7 @@ use prometheus_client::metrics::{
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 /// Tracks the current view together with its elected leader so they update atomically.
 type CurrentState = (View, Option<Participant>);
@@ -287,8 +287,7 @@ impl<
             Ok((sender, message)) = certificate_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
-                    warn!(?sender, "blocking peer for decoding error");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "decoding error");
                     continue;
                 };
 
@@ -302,8 +301,7 @@ impl<
 
                 // If the epoch is not the current epoch, block
                 if message.epoch() != self.epoch {
-                    warn!(?sender, "blocking peer for epoch mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch");
                     continue;
                 }
 
@@ -329,8 +327,7 @@ impl<
 
                         // Verify the certificate
                         if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
-                            warn!(?sender, %view, "blocking peer for invalid notarization");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
 
@@ -355,8 +352,7 @@ impl<
                             &self.scheme,
                             &self.strategy,
                         ) {
-                            warn!(?sender, %view, "blocking peer for invalid nullification");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
                             continue;
                         }
 
@@ -377,8 +373,7 @@ impl<
 
                         // Verify the certificate
                         if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
-                            warn!(?sender, %view, "blocking peer for invalid finalization");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
 
@@ -399,8 +394,7 @@ impl<
             Ok((sender, message)) = vote_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
-                    warn!(?sender, "blocking peer for decoding error");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "decoding error");
                     continue;
                 };
 
@@ -414,8 +408,7 @@ impl<
 
                 // If the epoch is not the current epoch, block
                 if message.epoch() != self.epoch {
-                    warn!(?sender, "blocking peer for epoch mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch");
                     continue;
                 }
 
@@ -507,8 +500,7 @@ impl<
                     // Block invalid signers
                     for invalid in failed {
                         if let Some(signer) = self.participants.key(invalid) {
-                            warn!(?signer, "blocking peer for invalid signature");
-                            self.blocker.block(signer.clone()).await;
+                            commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                         }
                     }
 

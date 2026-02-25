@@ -237,7 +237,7 @@ mod tests {
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Blocker, Ingress, Manager, Provider, Receiver, Recipients, Sender,
+        Ingress, Manager, Provider, Receiver, Recipients, Sender,
     };
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
@@ -2200,7 +2200,7 @@ mod tests {
             oracle.track(1, peers.clone()).await;
             let _ = oracle.peer_set(0).await;
             let _ = oracle.subscribe().await;
-            oracle.block(address.clone()).await;
+            crate::block_peer(&mut oracle, address.clone()).await;
 
             // Sender operations should not panic even after shutdown
             let sent = sender

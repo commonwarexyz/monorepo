@@ -294,8 +294,7 @@ impl<
         let Some(equivocator) = equivocator else {
             return;
         };
-        warn!(?equivocator, "blocking equivocator");
-        self.blocker.block(equivocator).await;
+        commonware_p2p::block!(self.blocker, equivocator, "blocking equivocator");
     }
 
     /// Attempt to propose a new block.
@@ -323,6 +322,35 @@ impl<
         Some(Request(context, receiver))
     }
 
+    /// Records a locally verified nullify vote and ensures the round exists.
+    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
+        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
+            .await;
+    }
+
+    /// Emits a nullify vote (and persists it if it is a first attempt).
+    async fn broadcast_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        retry: bool,
+        nullify: Nullify<S>,
+    ) {
+        // Process nullify (and persist it if it is a first attempt)
+        if !retry {
+            batcher.constructed(Vote::Nullify(nullify.clone())).await;
+            self.handle_nullify(nullify.clone()).await;
+
+            // Sync the journal so first-attempt nullify votes survive restarts.
+            self.sync_journal(nullify.view()).await;
+        }
+
+        // Broadcast nullify vote (regardless)
+        debug!(round=?nullify.round(), "broadcasting nullify");
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
+            .await;
+    }
+
     /// Handle a timeout.
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -330,37 +358,30 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
-        // Process nullify (and persist it if it is a first attempt)
-        let (retry, nullify, entry) = self.state.handle_timeout();
-        if let Some(nullify) = nullify {
-            if !retry {
-                batcher.constructed(Vote::Nullify(nullify.clone())).await;
-                self.handle_nullify(nullify.clone()).await;
+        // Attempt to broadcast a nullify vote for the current view (as many times as required
+        // until we exit the view)
+        let view = self.state.current_view();
+        let Some(retry) = self
+            .try_broadcast_nullify(batcher, vote_sender, view, true)
+            .await
+        else {
+            return;
+        };
 
-                // Sync the journal
-                self.sync_journal(nullify.view()).await;
-            }
-
-            // Broadcast nullify
-            debug!(round=?nullify.round(), "broadcasting nullify");
-            self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
-                .await;
-        }
-
-        // Broadcast entry to help others enter the view
+        // Broadcast entry to help others enter the view.
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
-        if let Some(certificate) = entry {
+        if !retry {
+            return;
+        }
+        let past_view = view
+            .previous()
+            .expect("we should never be in the genesis view");
+        if let Some(certificate) = self.state.get_best_certificate(past_view) {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
-    }
-
-    /// Records a locally verified nullify vote and ensures the round exists.
-    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
-            .await;
     }
 
     /// Tracks a verified nullification certificate if it is new.
@@ -512,6 +533,23 @@ impl<
             .await;
     }
 
+    /// Broadcast a nullify vote for `view` if the state machine allows it.
+    ///
+    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
+    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
+    async fn try_broadcast_nullify<Sp: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        view: View,
+        timeout: bool,
+    ) -> Option<bool> {
+        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
+            .await;
+        Some(was_retry)
+    }
+
     /// Broadcast a nullification certificate if the round provides a candidate.
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
@@ -639,7 +677,8 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
+        self.try_broadcast_nullify(batcher, vote_sender, view, false)
+            .await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -923,6 +962,10 @@ impl<
                         else {
                             continue;
                         };
+                        // Always forward certification outcomes to resolver.
+                        // This can happen after a nullification for the same view because
+                        // certification is asynchronous; finalization is the boundary that
+                        // cancels in-flight certification and suppresses late reporting.
                         resolver.certified(view, certified).await;
                         if certified {
                             self.reporter
