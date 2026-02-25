@@ -237,7 +237,7 @@ mod tests {
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Blocker, Ingress, Manager, Provider, Receiver, Recipients, Sender,
+        Ingress, Manager, Provider, Receiver, Recipients, Sender,
     };
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};

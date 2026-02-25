@@ -286,7 +286,7 @@ mod tests {
             },
             Mailbox,
         },
-        Blocker, Ingress, Manager,
+        Ingress, Manager,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{

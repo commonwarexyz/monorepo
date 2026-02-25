@@ -324,7 +324,10 @@ macro_rules! block {
 }
 
 /// Block a peer without logging.
-#[allow(clippy::disallowed_methods, reason = "test helper that bypasses the block! macro")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test helper that bypasses the block! macro"
+)]
 #[cfg(test)]
 pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
     blocker.block(peer).await;
