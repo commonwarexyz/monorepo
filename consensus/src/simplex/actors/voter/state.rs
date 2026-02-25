@@ -244,7 +244,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
 
-        // Prefer finalizations over nullifications over notarizations.
+        // Prefer finalizations since they are the strongest proof available.
+        // Prefer nullifications over notarizations because a nullification
+        // overwrites an uncertified notarization (if we only heard notarizations,
+        // we may never exit a view with an uncertifiable notarization).
         #[allow(clippy::option_if_let_else)]
         if let Some(finalization) = self.finalization(view).cloned() {
             Some(Certificate::Finalization(finalization))
