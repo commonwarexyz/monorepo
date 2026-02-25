@@ -251,6 +251,37 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_read_oversized_request_does_not_consume_buffered_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"abcdefghij";
+            let (blob, size) = context
+                .open("partition", b"double-count-regression")
+                .await
+                .unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, data).await.unwrap();
+
+            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(8));
+
+            // Fill the internal buffer and consume most of it (2 bytes remain buffered).
+            let first = reader.read(6).await.unwrap().coalesce();
+            assert_eq!(first.as_ref(), b"abcdef");
+            assert_eq!(reader.position(), 6);
+
+            // Only 4 bytes remain total, so this must fail without consuming anything.
+            let err = reader.read(5).await.unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+            assert_eq!(reader.position(), 6);
+
+            // Remaining bytes should still be readable in full.
+            let tail = reader.read(4).await.unwrap().coalesce();
+            assert_eq!(tail.as_ref(), b"ghij");
+            assert_eq!(reader.position(), 10);
+        });
+    }
+
+    #[test_traced]
     fn test_read_large_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

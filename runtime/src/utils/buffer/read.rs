@@ -153,8 +153,8 @@ impl<B: Blob> Read<B> {
             return Ok(IoBufs::default());
         }
 
-        // Quick check if we have enough bytes total before attempting reads
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < len {
+        // Quick check against total remaining bytes at current position.
+        if self.blob_remaining() < len as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
