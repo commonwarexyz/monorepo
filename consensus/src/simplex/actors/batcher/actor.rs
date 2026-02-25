@@ -174,15 +174,6 @@ impl<
             return false;
         }
 
-        // Skip local-leader expiry
-        if self
-            .scheme
-            .me()
-            .is_some_and(|me| current_leader == Some(me))
-        {
-            return false;
-        }
-
         current_leader
             .and_then(|leader| self.participants.key(leader))
             .is_some_and(|leader_key| leader_key == sender)
