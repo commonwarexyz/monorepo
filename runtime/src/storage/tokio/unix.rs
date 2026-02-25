@@ -1,8 +1,17 @@
 use super::Header;
-use crate::{BufferPool, Error, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
-use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
+use std::{
+    fs::File,
+    io::IoSlice,
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    sync::Arc,
+};
 use tokio::task;
+
+// Cap iovec batch size: larger iovecs reduce syscall count but increase
+// per-write kernel setup overhead.
+const IOVEC_BATCH_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub struct Blob {
@@ -20,6 +29,47 @@ impl Blob {
             file: Arc::new(file),
             pool,
         }
+    }
+
+    fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
+        file.write_all_at(buf, offset)?;
+        Ok(())
+    }
+
+    fn write_vectored_at(file: &File, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
+        while bufs.has_remaining() {
+            let mut slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
+            let iovecs = bufs.chunks_vectored(&mut slices);
+            if iovecs == 0 {
+                return Err(Error::WriteFailed);
+            }
+
+            // std::os::unix::fs::FileExt::write_vectored_at is unstable:
+            // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
+            // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+            // `slices` points to valid readable buffers held alive for this syscall.
+            let ret = unsafe {
+                libc::pwritev(
+                    file.as_raw_fd(),
+                    slices.as_ptr().cast::<libc::iovec>(),
+                    iovecs as i32,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                )
+            };
+
+            if ret < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+
+            let bytes_written = ret as usize;
+            if bytes_written == 0 {
+                return Err(Error::WriteFailed);
+            }
+            bufs.advance(bytes_written);
+            offset += bytes_written as u64;
+        }
+
+        Ok(())
     }
 }
 
@@ -66,8 +116,12 @@ impl crate::Blob for Blob {
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || {
-            file.write_all_at(bufs.coalesce().as_ref(), offset)?;
-            Ok(())
+            #[allow(clippy::option_if_let_else)]
+            if let Some(buf) = bufs.as_single() {
+                Self::write_single_at(&file, offset, buf.as_ref())
+            } else {
+                Self::write_vectored_at(&file, offset, bufs)
+            }
         })
         .await
         .map_err(|_| Error::WriteFailed)?
