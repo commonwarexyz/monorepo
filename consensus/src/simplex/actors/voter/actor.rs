@@ -374,10 +374,10 @@ impl<
         if !retry {
             return;
         }
-        let Some(entry_view) = view.previous() else {
+        let Some(past_view) = view.previous() else {
             return;
         };
-        if let Some(certificate) = self.state.get_entry_certificate(entry_view) {
+        if let Some(certificate) = self.state.get_best_certificate(past_view) {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }

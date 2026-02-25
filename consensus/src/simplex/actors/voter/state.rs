@@ -236,10 +236,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some((is_retry, nullify))
     }
 
-    /// Returns the best entry certificate for `view` to help peers enter it.
+    /// Returns the best certificate for `view` to help peers enter it.
     ///
     /// Finalization is strongest, then nullification, then notarization.
-    pub fn get_entry_certificate(&self, view: View) -> Option<Certificate<S, D>> {
+    pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
         if view == GENESIS_VIEW {
             return None;
         }
