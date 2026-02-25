@@ -44,8 +44,12 @@
 //! _grafted leaf_ digest that incorporates both the bitmap chunk and the ops subtree root:
 //!
 //! ```text
-//! grafted_leaf = hash(bitmap_chunk || ops_subtree_root)
+//! grafted_leaf = hash(bitmap_chunk || ops_subtree_root)   // non-zero chunk
+//! grafted_leaf = ops_subtree_root                         // all-zero chunk (identity)
 //! ```
+//!
+//! The all-zero identity means that for pruned regions (where every operation is inactive), the
+//! grafted MMR is structurally identical to the ops MMR at and above the grafting height.
 //!
 //! Above the grafting height, internal nodes use standard MMR hashing over the grafted leaves.
 //! Below the grafting height, the ops MMR is unchanged.
@@ -94,9 +98,11 @@
 //!
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard MMR hashing. At the grafting height, it detects the boundary and
-//! reconstructs the grafted leaf by hashing `chunk || ops_subtree_root`. Above the grafting
-//! height, it resumes standard MMR hashing. If the reconstructed root matches the expected root
-//! and bit _i_ is set in the chunk, the operation is proven active.
+//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks
+//! the grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf
+//! is the ops subtree root itself (identity optimization -- see `grafting::Verifier::node`).
+//! Above the grafting height, it resumes standard MMR hashing. If the reconstructed root
+//! matches the expected root and bit _i_ is set in the chunk, the operation is proven active.
 //!
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
@@ -105,16 +111,16 @@
 //!
 //! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
 //! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the root is
-//! computed as:
+//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the partial
+//! chunk's digest and bit count are folded into the canonical root hash:
 //!
 //! ```text
-//! root = hash(mmr_root || next_bit || hash(partial_chunk))
+//! root = hash(ops_root || grafted_mmr_root || next_bit || hash(partial_chunk))
 //! ```
 //!
-//! where `next_bit` is the index of the next unset position in the partial chunk and `mmr_root`
-//! is the root over the grafted MMR (which covers only complete chunks). When all chunks are
-//! complete, `root = mmr_root` with no additional hashing.
+//! where `next_bit` is the index of the next unset position in the partial chunk and
+//! `grafted_mmr_root` is the root of the grafted MMR (which covers only complete chunks).
+//! When all chunks are complete, the partial chunk components are omitted.
 //!
 //! ## Incremental updates
 //!
@@ -129,6 +135,42 @@
 //! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
 //! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
 //! allowing the grafted tree to be rebuilt without the pruned chunks.
+//!
+//! # Root structure
+//!
+//! The canonical root of a `current` database is:
+//!
+//! ```text
+//! root = hash(ops_root || grafted_mmr_root [|| next_bit || hash(partial_chunk)])
+//! ```
+//!
+//! where `grafted_mmr_root` is the root of the grafted MMR (covering only complete
+//! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
+//! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
+//! components are only present when the last bitmap chunk is incomplete.
+//!
+//! This combines two (or three) components into a single hash:
+//!
+//! - **Ops root**: The root of the raw operations MMR (the inner [crate::qmdb::any] database's
+//!   root). Used for state sync, where a client downloads operations and verifies each batch
+//!   against this root using standard MMR range proofs.
+//!
+//! - **Grafted MMR root**: The root of the grafted MMR (overlaying bitmap chunks
+//!   with ops subtree roots). Used for proofs about operation values and their activity status.
+//!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//!
+//! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
+//!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
+//!
+//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root) and
+//! [MerkleizedStore](crate::qmdb::store::MerkleizedStore)`::`[root()](crate::qmdb::store::MerkleizedStore::root).
+//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
+//! verifies batches against the ops root, not the canonical root.
+//!
+//! For state sync, the sync engine targets the ops root and verifies each batch against it.
+//! After sync, the bitmap and grafted MMR are reconstructed deterministically from the
+//! operations, and the canonical root is computed. Validating that the ops root is part of the
+//! canonical root is the caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -156,6 +198,7 @@ pub mod db;
 mod grafting;
 pub mod ordered;
 pub mod proof;
+pub(crate) mod sync;
 pub mod unordered;
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
@@ -348,7 +391,8 @@ where
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
-    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
+    let ops_root = any.log.root();
+    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -435,7 +479,8 @@ where
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
-    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
+    let ops_root = any.log.root();
+    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -519,7 +564,7 @@ pub mod tests {
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ()> {
+    ) -> VariableConfig<T, ((), ())> {
         VariableConfig {
             mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
             mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -529,7 +574,7 @@ pub mod tests {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: (),
+            log_codec_config: ((), ()),
             grafted_mmr_metadata_partition: format!(
                 "{partition_prefix}-grafted-mmr-metadata-partition"
             ),

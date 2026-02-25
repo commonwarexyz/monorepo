@@ -93,12 +93,12 @@ const PAGE_CACHE_SIZE: usize = 8;
 fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
+        log_codec_config: ((), ((0..=10000).into(), ())),
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),

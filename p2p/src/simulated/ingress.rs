@@ -1,5 +1,5 @@
 use super::{Error, Receiver, Sender};
-use crate::{authenticated::UnboundedMailbox, Address, Channel};
+use crate::{authenticated::UnboundedMailbox, Address, Channel, PeerSetSubscription};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
@@ -257,7 +257,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
+    fn subscribe(&self) -> PeerSetSubscription<P> {
         let (sender, receiver) = mpsc::unbounded_channel();
         self.sender.0.send_lossy(Message::Subscribe { sender });
         receiver
@@ -293,9 +293,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.oracle.subscribe()
     }
 }
@@ -341,9 +339,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
+    async fn subscribe(&mut self) -> PeerSetSubscription<P> {
         self.oracle.subscribe()
     }
 }

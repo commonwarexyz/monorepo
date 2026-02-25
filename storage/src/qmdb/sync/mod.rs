@@ -15,9 +15,10 @@ mod journal;
 pub(crate) use journal::Journal;
 
 mod database;
-pub(crate) use database::Database;
+pub(crate) use database::{Config as DatabaseConfig, Database};
 
 pub mod resolver;
+pub(crate) use resolver::{FetchResult, Resolver};
 
 mod target;
 pub use target::Target;

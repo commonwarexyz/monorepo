@@ -4,9 +4,17 @@ use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
+use commonware_utils::Cached;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
+
+// Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
+// instances across calls. Constructing these objects is expensive because
+// the underlying engine initializes GF lookup tables. The `reset()` method
+// reconfigures the work buffers without rebuilding those tables.
+commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
+commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -25,8 +33,6 @@ pub enum Error {
     InvalidDataLength(usize),
     #[error("invalid index: {0}")]
     InvalidIndex(u16),
-    #[error("wrong index: {0}")]
-    WrongIndex(u16),
     #[error("too many total shards: {0}")]
     TooManyTotalShards(u32),
 }
@@ -62,10 +68,10 @@ impl<D: Digest> Chunk<D> {
     }
 
     /// Verify a [Chunk] against the given root.
-    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> bool {
+    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
         // Ensure the index matches
         if index != self.index {
-            return false;
+            return None;
         }
 
         // Compute shard digest
@@ -76,7 +82,34 @@ impl<D: Digest> Chunk<D> {
         // Verify proof
         self.proof
             .verify_element_inclusion(&mut hasher, &shard_digest, self.index as u32, root)
-            .is_ok()
+            .ok()?;
+
+        Some(CheckedChunk::new(
+            self.shard.clone(),
+            self.index,
+            shard_digest,
+        ))
+    }
+}
+
+/// A shard that has been checked against a commitment.
+///
+/// This stores the shard digest computed during [Chunk::verify], so decode
+/// can reuse it without hashing the same shard again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedChunk<D: Digest> {
+    shard: Bytes,
+    index: u16,
+    digest: D,
+}
+
+impl<D: Digest> CheckedChunk<D> {
+    const fn new(shard: Bytes, index: u16, digest: D) -> Self {
+        Self {
+            shard,
+            index,
+            digest,
+        }
     }
 }
 
@@ -133,7 +166,11 @@ where
 }
 
 /// Prepare data for encoding.
-fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
+///
+/// Returns a contiguous buffer of `k` padded shards and the shard length.
+/// The buffer layout is `[length_prefix | data | zero_padding]` split into
+/// `k` equal-sized shards of `shard_len` bytes each.
+fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
     let data_len = data.len();
     let prefixed_len = u32::SIZE + data_len;
@@ -148,38 +185,95 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     let length_bytes = (data_len as u32).to_be_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
-    padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(&data);
+    padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(data);
 
-    let mut shards = Vec::with_capacity(k + m); // assume recovery shards will be added later
-    for chunk in padded.chunks(shard_len) {
-        shards.push(chunk.to_vec());
-    }
-    shards
+    (padded, shard_len)
 }
 
 /// Extract data from encoded shards.
-fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
-    // Concatenate shards
-    let mut data = shards.into_iter().take(k).flatten();
+///
+/// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
+/// This function bulk-copies shard slices while skipping the 4-byte prefix.
+fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
+    let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
+    let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
+    let mut payload = copy_payload_after_prefix(shards, payload_len);
+    validate_zero_padding(&payload, data_len)?;
+    payload.truncate(data_len);
+    Ok(payload)
+}
 
-    // Extract length prefix
-    let data_len = (&mut data)
-        .take(u32::SIZE)
-        .copied()
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("insufficient data");
-    let data_len = u32::from_be_bytes(data_len) as usize;
+/// Read the 4-byte big-endian length prefix from `shards` and validate that
+/// the decoded length fits in the post-prefix payload region.
+fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error> {
+    let total_len: usize = shards.iter().map(|s| s.len()).sum();
+    if total_len < u32::SIZE {
+        return Err(Error::Inconsistent);
+    }
 
-    // Extract data
-    data.take(data_len).copied().collect()
+    // Read the length prefix, which may span multiple shards.
+    let mut prefix = [0u8; u32::SIZE];
+    let mut prefix_len = 0usize;
+    for shard in shards {
+        if prefix_len == u32::SIZE {
+            break;
+        }
+        let read = (u32::SIZE - prefix_len).min(shard.len());
+        prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
+        prefix_len += read;
+    }
+
+    let data_len = u32::from_be_bytes(prefix) as usize;
+    let payload_len = total_len - u32::SIZE;
+    if data_len > payload_len {
+        return Err(Error::Inconsistent);
+    }
+    Ok((data_len, payload_len))
+}
+
+/// Bulk-copy bytes after the 4-byte prefix from `shards` into a contiguous
+/// payload buffer.
+fn copy_payload_after_prefix(shards: &[&[u8]], payload_len: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(payload_len);
+    let mut prefix_bytes_left = u32::SIZE;
+    for shard in shards {
+        if prefix_bytes_left >= shard.len() {
+            prefix_bytes_left -= shard.len();
+            continue;
+        }
+        payload.extend_from_slice(&shard[prefix_bytes_left..]);
+        prefix_bytes_left = 0;
+    }
+    payload
+}
+
+/// Validate canonical encoding by requiring trailing bytes after `data_len`
+/// to be zero.
+fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
+    // Canonical encoding requires all trailing bytes to be zero.
+    if !payload[data_len..].iter().all(|byte| *byte == 0) {
+        return Err(Error::Inconsistent);
+    }
+    Ok(())
 }
 
 /// Type alias for the internal encoding result.
-type Encoding<D> = (bmt::Tree<D>, Vec<Vec<u8>>);
+type Encoding<D> = (D, Vec<Chunk<D>>);
 
-/// Inner logic for [encode()]
-fn encode_inner<H: Hasher, S: Strategy>(
+/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+/// - `strategy`: The parallelism strategy to use.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -195,29 +289,43 @@ fn encode_inner<H: Hasher, S: Strategy>(
         return Err(Error::InvalidDataLength(data.len()));
     }
 
-    // Prepare data
-    let mut shards = prepare_data(data, k, m);
-    let shard_len = shards[0].len();
+    // Prepare data as a contiguous buffer of k shards
+    let (padded, shard_len) = prepare_data(&data, k);
 
-    // Create encoder
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in &shards {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
+    // Create or reuse encoder
+    let recovery_buf = {
+        let mut encoder = Cached::take(
+            &CACHED_ENCODER,
+            || ReedSolomonEncoder::new(k, m, shard_len),
+            |enc| enc.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+        for shard in padded.chunks(shard_len) {
+            encoder
+                .add_original_shard(shard)
+                .map_err(Error::ReedSolomon)?;
+        }
 
-    // Compute recovery shards
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
-    shards.extend(recovery_shards);
+        // Compute recovery shards and collect into a contiguous buffer
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        let mut buf = Vec::with_capacity(m * shard_len);
+        for shard in encoding.recovery_iter() {
+            buf.extend_from_slice(shard);
+        }
+        buf
+    };
+
+    // Create zero-copy Bytes views into the original and recovery buffers
+    let originals: Bytes = padded.into();
+    let recoveries: Bytes = recovery_buf.into();
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+    let shard_slices: Vec<Bytes> = (0..k)
+        .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
+        .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
+        .collect();
+    let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
         hasher.update(shard);
         hasher.finalize()
     });
@@ -225,56 +333,28 @@ fn encode_inner<H: Hasher, S: Strategy>(
         builder.add(hash);
     }
     let tree = builder.build();
-
-    Ok((tree, shards))
-}
-
-/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-/// - `concurrency`: The level of concurrency to use.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-#[allow(clippy::type_complexity)]
-fn encode<H: Hasher, S: Strategy>(
-    total: u16,
-    min: u16,
-    data: Vec<u8>,
-    strategy: &S,
-) -> Result<(H::Digest, Vec<Chunk<H::Digest>>), Error> {
-    // Encode data
-    let (tree, shards) = encode_inner::<H, _>(total, min, data, strategy)?;
     let root = tree.root();
-    let n = total as usize;
 
-    // Generate chunks
+    // Generate chunks with zero-copy shard views
     let mut chunks = Vec::with_capacity(n);
-    for (i, shard) in shards.into_iter().enumerate() {
+    for (i, shard) in shard_slices.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard.into(), i as u16, proof));
+        chunks.push(Chunk::new(shard, i as u16, proof));
     }
 
     Ok((root, chunks))
 }
 
-/// Decode data from a set of [Chunk]s.
+/// Decode data from a set of [CheckedChunk]s.
 ///
-/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
+/// It is assumed that all chunks have already been verified against the given root using [Chunk::verify].
 ///
 /// # Parameters
 ///
 /// - `total`: The total number of chunks to generate.
 /// - `min`: The minimum number of chunks required to decode the data.
 /// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-/// - `concurrency`: The level of concurrency to use.
+/// - `chunks`: [CheckedChunk]s of encoded data (that can be proven against `root`)
 ///
 /// # Returns
 ///
@@ -283,7 +363,7 @@ fn decode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: &[Chunk<H::Digest>],
+    chunks: &[CheckedChunk<H::Digest>],
     strategy: &S,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
@@ -296,9 +376,10 @@ fn decode<H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    // Verify chunks
+    // Process checked chunks
     let shard_len = chunks[0].shard.len();
     let mut seen = HashSet::new();
+    let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     for chunk in chunks {
@@ -307,12 +388,12 @@ fn decode<H: Hasher, S: Strategy>(
         if index >= total {
             return Err(Error::InvalidIndex(index));
         }
-        if seen.contains(&index) {
+        if !seen.insert(index) {
             return Err(Error::DuplicateIndex(index));
         }
-        seen.insert(index);
 
-        // Add to provided shards
+        // Add to provided shards and retain the checked digest for this index.
+        shard_digests[index as usize] = Some(chunk.digest);
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
@@ -321,7 +402,12 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Decode original data
-    let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
     for (idx, ref shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
@@ -335,35 +421,51 @@ fn decode<H: Hasher, S: Strategy>(
     let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
     // Reconstruct all original shards
-    let mut shards = Vec::with_capacity(n);
-    shards.resize(k, Default::default());
-    for (idx, shard) in provided_originals {
-        shards[idx] = shard;
-    }
-    for (idx, shard) in decoding.restored_original_iter() {
+    let mut shards = vec![Default::default(); k];
+    for (idx, shard) in provided_originals
+        .into_iter()
+        .chain(decoding.restored_original_iter())
+    {
         shards[idx] = shard;
     }
 
-    // Encode recovered data to get recovery shards
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
+    // Re-encode recovered data to get recovery shards
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || ReedSolomonEncoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
     for shard in shards.iter().take(k) {
         encoder
             .add_original_shard(shard)
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<&[u8]> = encoding.recovery_iter().collect();
-    shards.extend(recovery_shards);
+    shards.extend(encoding.recovery_iter());
 
     // Build Merkle tree
-    let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
-        hasher.update(shard);
-        hasher.finalize()
-    });
-    for hash in &shard_hashes {
-        builder.add(hash);
+    for (i, digest) in strategy.map_init_collect_vec(
+        shard_digests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        H::new,
+        |hasher, i| {
+            hasher.update(shards[i]);
+            (i, hasher.finalize())
+        },
+    ) {
+        shard_digests[i] = Some(digest);
     }
+
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
+        .into_iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
     let tree = builder.build();
 
     // Confirm root is consistent
@@ -372,7 +474,7 @@ fn decode<H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    Ok(extract_data(shards, k))
+    extract_data(&shards, k)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
@@ -473,7 +575,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     type StrongShard = Chunk<H::Digest>;
     type WeakShard = Chunk<H::Digest>;
-    type CheckedShard = Chunk<H::Digest>;
+    type CheckedShard = CheckedChunk<H::Digest>;
     type CheckingData = ();
 
     type Error = Error;
@@ -493,35 +595,47 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn weaken(
-        _config: &Config,
+        config: &Config,
         commitment: &Self::Commitment,
         index: u16,
         shard: Self::StrongShard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
+        let total = total_shards(config)?;
+        if index >= total {
+            return Err(Error::InvalidIndex(index));
+        }
+        if shard.proof.leaf_count != u32::from(total) {
+            return Err(Error::InvalidProof);
+        }
         if shard.index != index {
-            return Err(Error::WrongIndex(index));
+            return Err(Error::InvalidIndex(index));
         }
-        if shard.verify::<H>(shard.index, commitment) {
-            Ok(((), shard.clone(), shard))
-        } else {
-            Err(Error::InvalidProof)
-        }
+        let checked_shard = shard
+            .verify::<H>(shard.index, commitment)
+            .ok_or(Error::InvalidProof)?;
+        Ok(((), checked_shard, shard))
     }
 
     fn check(
-        _config: &Config,
+        config: &Config,
         commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
         index: u16,
         weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        if weak_shard.index != index {
-            return Err(Error::WrongIndex(weak_shard.index));
+        let total = total_shards(config)?;
+        if index >= total {
+            return Err(Error::InvalidIndex(index));
         }
-        if !weak_shard.verify::<H>(weak_shard.index, commitment) {
+        if weak_shard.proof.leaf_count != u32::from(total) {
             return Err(Error::InvalidProof);
         }
-        Ok(weak_shard)
+        if weak_shard.index != index {
+            return Err(Error::InvalidIndex(weak_shard.index));
+        }
+        weak_shard
+            .verify::<H>(weak_shard.index, commitment)
+            .ok_or(Error::InvalidProof)
     }
 
     fn decode(
@@ -548,7 +662,16 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
+    type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
+
+    fn checked(
+        chunk: Chunk<<Sha256 as Hasher>::Digest>,
+    ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
+        let Chunk { shard, index, .. } = chunk;
+        let digest = Sha256::hash(&shard);
+        CheckedChunk::new(shard, index, digest)
+    }
 
     #[test]
     fn test_recovery() {
@@ -561,9 +684,9 @@ mod tests {
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[4].clone(), // recovery
-            chunks[6].clone(), // recovery
+            checked(chunks[0].clone()), // original
+            checked(chunks[4].clone()), // recovery
+            checked(chunks[6].clone()), // recovery
         ];
 
         // Try to decode with a mix of original and recovery pieces
@@ -581,7 +704,7 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Try with fewer than min
-        let pieces: Vec<_> = chunks.into_iter().take(2).collect();
+        let pieces: Vec<_> = chunks.into_iter().take(2).map(checked).collect();
 
         // Fail to decode
         let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
@@ -598,7 +721,11 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Include duplicate index by cloning the first chunk
-        let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
+        let pieces = vec![
+            checked(chunks[0].clone()),
+            checked(chunks[0].clone()),
+            checked(chunks[1].clone()),
+        ];
 
         // Fail to decode
         let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
@@ -616,7 +743,7 @@ mod tests {
 
         // Verify all proofs at invalid index
         for i in 0..total {
-            assert!(!chunks[i as usize].verify::<Sha256>(i + 1, &root));
+            assert!(chunks[i as usize].verify::<Sha256>(i + 1, &root).is_none());
         }
     }
 
@@ -648,7 +775,11 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let minimal = chunks
+            .into_iter()
+            .take(min as usize)
+            .map(checked)
+            .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
@@ -663,7 +794,11 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let minimal = chunks
+            .into_iter()
+            .take(min as usize)
+            .map(checked)
+            .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
@@ -685,15 +820,50 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(!chunks[i as usize].verify::<Sha256>(i, &malicious_root));
+            assert!(chunks[i as usize]
+                .clone()
+                .verify::<Sha256>(i, &malicious_root)
+                .is_none());
         }
 
         // Collect valid pieces (these are legitimate fragments)
-        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let minimal = chunks
+            .into_iter()
+            .take(min as usize)
+            .map(checked)
+            .collect::<Vec<_>>();
 
         // Attempt to decode with malicious root
         let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_mismatched_config_rejected_during_weaken_and_check() {
+        let config_expected = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+        let config_actual = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(3),
+        };
+
+        let data = b"leaf_count mismatch proof";
+        let (commitment, shards) = RS::encode(&config_actual, data.as_slice(), &STRATEGY).unwrap();
+
+        // Previously this passed because weaken() ignored config and only verified
+        // against commitment root. It must now fail immediately.
+        let strong = shards[0].clone();
+        let weaken_result = RS::weaken(&config_expected, &commitment, 0, strong);
+        assert!(matches!(weaken_result, Err(Error::InvalidProof)));
+
+        // Produce a valid weak shard under the actual config, then ensure check()
+        // also rejects it when validated under the wrong config.
+        let (checking_data, _, weak) =
+            RS::weaken(&config_actual, &commitment, 1, shards[1].clone()).unwrap();
+        let check_result = RS::check(&config_expected, &commitment, &checking_data, 1, weak);
+        assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 
     #[test]
@@ -703,17 +873,19 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let mut pieces: Vec<_> = chunks.into_iter().map(checked).collect();
 
-        // Tamper with one of the chunks by modifying the shard data
-        if !chunks[1].shard.is_empty() {
-            let mut shard = chunks[1].shard.to_vec();
+        // Tamper with one of the checked chunks by modifying the shard data.
+        if !pieces[1].shard.is_empty() {
+            let mut shard = pieces[1].shard.to_vec();
             shard[0] ^= 0xFF; // Flip bits in first byte
-            chunks[1].shard = shard.into();
+            pieces[1].shard = shard.into();
+            pieces[1].digest = Sha256::hash(&pieces[1].shard);
         }
 
         // Try to decode with the tampered chunk
-        let result = decode::<Sha256, _>(total, min, &root, &chunks, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -725,12 +897,11 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let shards = prepare_data(data.to_vec(), min as usize, total as usize - min as usize);
-        let shard_size = shards[0].len();
+        let (padded, shard_size) = prepare_data(data, min as usize);
 
         // Re-encode the data
         let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
-        for shard in &shards {
+        for shard in padded.chunks(shard_size) {
             encoder.add_original_shard(shard).unwrap();
         }
         let recovery_result = encoder.encode().unwrap();
@@ -745,7 +916,8 @@ mod tests {
         }
 
         // Build malicious shards
-        let mut malicious_shards = shards.clone();
+        let mut malicious_shards: Vec<Vec<u8>> =
+            padded.chunks(shard_size).map(|s| s.to_vec()).collect();
         malicious_shards.extend(recovery_shards);
 
         // Build malicious tree
@@ -767,9 +939,58 @@ mod tests {
             let chunk = Chunk::new(shard.into(), i as u16, merkle_proof);
             pieces.push(chunk);
         }
+        let pieces: Vec<_> = pieces.into_iter().map(checked).collect();
 
         // Fail to decode
         let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    // Regression: a commitment built from shards with non-zero trailing padding
+    // used to pass decode(), even though canonical re-encoding (zero padding)
+    // produces a different root. decode() must reject such non-canonical shards.
+    #[test]
+    fn test_non_canonical_padding_rejected() {
+        let data = b"X";
+        let total = 6u16;
+        let min = 3u16;
+        let k = min as usize;
+        let m = total as usize - k;
+
+        let (mut padded, shard_len) = prepare_data(data, k);
+        let payload_end = u32::SIZE + data.len();
+        let total_original_len = k * shard_len;
+        assert!(payload_end < total_original_len, "test requires padding");
+
+        // Corrupt one canonical padding byte while keeping payload unchanged.
+        let pad_shard = payload_end / shard_len;
+        let pad_offset = payload_end % shard_len;
+        padded[pad_shard * shard_len + pad_offset] = 0xAA;
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        for shard in padded.chunks(shard_len) {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+        let mut shards: Vec<Vec<u8>> = padded.chunks(shard_len).map(|s| s.to_vec()).collect();
+        shards.extend(recovery.recovery_iter().map(|s| s.to_vec()));
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let non_canonical_root = tree.root();
+
+        let mut pieces = Vec::with_capacity(k);
+        for (i, shard) in shards.iter().take(k).enumerate() {
+            let proof = tree.proof(i as u32).unwrap();
+            pieces.push(checked(Chunk::new(shard.clone().into(), i as u16, proof)));
+        }
+
+        let result = decode::<Sha256, _>(total, min, &non_canonical_root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -780,14 +1001,15 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
-        chunks[1].index = 8;
+        let mut invalid = checked(chunks[1].clone());
+        invalid.index = 8;
         let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[1].clone(), // recovery with invalid index
-            chunks[6].clone(), // recovery
+            checked(chunks[0].clone()), // original
+            invalid,                    // recovery with invalid index
+            checked(chunks[6].clone()), // recovery
         ];
 
         // Fail to decode
@@ -805,7 +1027,11 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let minimal = chunks
+            .into_iter()
+            .take(min as usize)
+            .map(checked)
+            .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
@@ -831,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_too_many_total_shards() {
-        assert!(ReedSolomon::<Sha256>::encode(
+        assert!(RS::encode(
             &Config {
                 minimum_shards: NZU16!(u16::MAX / 2 + 1),
                 extra_shards: NZU16!(u16::MAX),

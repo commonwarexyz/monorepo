@@ -1,5 +1,5 @@
-//! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::qmdb::any::unordered::fixed::Db] database.
+//! Server that serves operations and proofs to clients attempting to sync an
+//! `any`, `current`, or `immutable` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -11,10 +11,9 @@ use commonware_runtime::{
 use commonware_storage::qmdb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any::{self},
-    crate_version,
+    any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable::{self},
+    immutable,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
@@ -505,6 +504,17 @@ where
     run_helper(context, config, database).await
 }
 
+/// Run the Current database server.
+async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = current::create_config(&context);
+    let database = current::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -526,8 +536,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|immutable")
-                .help("Database type to use. Must be `any` or `immutable`.")
+                .value_name("any|current|immutable")
+                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
                 .default_value("any"),
         )
         .arg(
@@ -658,6 +668,7 @@ fn main() {
         // Run the appropriate server based on database type
         let result = match config.database_type {
             DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
         };
 

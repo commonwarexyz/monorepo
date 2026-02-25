@@ -21,7 +21,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
-        operation::Committable,
+        operation::{Committable, Key},
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -188,7 +188,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,
@@ -276,7 +276,7 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ()> {
+    ) -> VariableConfig<T, ((), ())> {
         VariableConfig {
             mmr_journal_partition: format!("journal-{suffix}"),
             mmr_metadata_partition: format!("metadata-{suffix}"),
@@ -286,7 +286,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: (),
+            log_codec_config: ((), ()),
             translator: T::default(),
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),

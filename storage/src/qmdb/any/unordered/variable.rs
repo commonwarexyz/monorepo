@@ -10,14 +10,14 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
+        operation::Key,
         Durable, Error, Merkleized,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
@@ -27,8 +27,10 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -71,14 +73,14 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
+            operation::Key,
             Durable, Error, Merkleized,
         },
         translator::Translator,
     };
-    use commonware_codec::Read;
+    use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
-    use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -102,14 +104,14 @@ pub mod partitioned {
 
     impl<
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: Key,
             V: VariableValue,
             H: Hasher,
             T: Translator,
             const P: usize,
         > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
     where
-        Operation<K, V>: Read,
+        Operation<K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -201,14 +203,15 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: ((), ((0..=10000).into(), ())),
             translator: TwoCap,
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
-    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+    pub(crate) type VarConfig =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
@@ -579,7 +582,8 @@ pub(crate) mod test {
 
     // Partitioned variant tests
 
-    type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+    type PartitionedVarConfig =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
     fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
         VariableConfig {
@@ -591,7 +595,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: ((), ((0..=10000).into(), ())),
             translator: TwoCap,
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(77), NZUsize!(9)),

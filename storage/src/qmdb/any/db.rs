@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
-        operation::{Committable, Operation as OperationTrait},
+        operation::{Committable, Key, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use commonware_utils::bitmap::Prunable as BitMap;
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
@@ -85,7 +85,7 @@ pub struct Db<
 impl<E, K, V, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Contiguous<Item = Operation<K, V, U>>,
@@ -120,7 +120,7 @@ where
 impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>>,
@@ -179,7 +179,7 @@ where
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
@@ -267,7 +267,7 @@ where
 impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Contiguous<Item = Operation<K, V, U>>,
@@ -293,7 +293,7 @@ where
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Contiguous<Item = Operation<K, V, U>>,
@@ -319,7 +319,7 @@ where
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Contiguous<Item = Operation<K, V, U>>,
@@ -345,7 +345,7 @@ where
 impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
@@ -491,7 +491,7 @@ where
 impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
@@ -518,7 +518,7 @@ where
 impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>>,
@@ -548,7 +548,7 @@ where
 impl<E, K, V, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Contiguous<Item = Operation<K, V, U>>,
@@ -573,7 +573,7 @@ where
 impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V>,
     C: Mutable<Item = Operation<K, V, U>>,

@@ -217,6 +217,9 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
+    /// Alias for the subscription type returned by [`Provider::subscribe`].
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
+
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
@@ -237,9 +240,7 @@ stability_scope!(BETA {
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
-        ) -> impl Future<
-            Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
-        > + Send;
+        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are not known).
