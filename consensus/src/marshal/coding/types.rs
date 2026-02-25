@@ -642,7 +642,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
         "Need at least 4 participants to maintain fault tolerance"
     );
     let max_faults = u16::try_from(max_faults).expect("max_faults must fit in u16");
-    let minimum_shards = NZU16!(max_faults + 1);
+    let minimum_shards = NZU16!(max_faults * 2 + 1);
     CodingConfig {
         minimum_shards,
         extra_shards: NZU16!(n_participants - minimum_shards.get()),
