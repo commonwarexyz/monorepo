@@ -678,8 +678,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        let _ = self
-            .try_broadcast_nullify(batcher, vote_sender, view, false)
+        self.try_broadcast_nullify(batcher, vote_sender, view, false)
             .await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
