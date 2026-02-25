@@ -360,11 +360,12 @@ impl<
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
         let view = self.state.current_view();
-        let Some((retry, nullify)) = self.state.construct_nullify(view, true) else {
+        let Some(retry) = self
+            .try_broadcast_nullify(batcher, vote_sender, view, true)
+            .await
+        else {
             return;
         };
-        self.broadcast_nullify(batcher, vote_sender, retry, nullify)
-            .await;
 
         // Broadcast entry to help others enter the view
         //
@@ -531,18 +532,23 @@ impl<
             .await;
     }
 
-    /// Broadcast a nullify vote for `view` after we observe a nullification certificate.
+    /// Broadcast a nullify vote for `view` if the state machine allows it.
+    ///
+    /// When `retry` is true, this uses timeout semantics (current view only, retries allowed).
+    /// When `retry` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-    ) {
-        let Some((retry, nullify)) = self.state.construct_nullify(view, false) else {
-            return;
+        retry: bool,
+    ) -> Option<bool> {
+        let Some((was_retry, nullify)) = self.state.construct_nullify(view, retry) else {
+            return None;
         };
-        self.broadcast_nullify(batcher, vote_sender, retry, nullify)
+        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
+        Some(was_retry)
     }
 
     /// Broadcast a nullification certificate if the round provides a candidate.
@@ -672,7 +678,9 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view).await;
+        let _ = self
+            .try_broadcast_nullify(batcher, vote_sender, view, false)
+            .await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
