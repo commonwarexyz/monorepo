@@ -670,48 +670,32 @@ impl<B: Blob> Append<B> {
         old_crc_record: Option<&Checksum>,
     ) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.logical_page_size() as usize;
+        let logical_page_size_u16 =
+            u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
         let physical_page_size = self.cache_ref.physical_page_size() as usize;
         let pages_to_write = buffer.len() / logical_page_size;
         let mut write_buffer = IoBufs::default();
         let buffer_data = buffer.as_ref();
 
-        if pages_to_write > 0 {
-            let logical_page_size_u16 =
-                u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
+        // Materialize each full physical page contiguously as [logical_page_bytes, crc_record].
+        for page in 0..pages_to_write {
+            let start_read_idx = page * logical_page_size;
+            let end_read_idx = start_read_idx + logical_page_size;
+            let logical_page = &buffer_data[start_read_idx..end_read_idx];
+            let crc = Crc32::checksum(logical_page);
 
-            // Build CRC bytes for full pages once. Full-page payload bytes are appended below as
-            // slices from tip, so we avoid copying logical payload here.
-            let mut crcs = self
-                .cache_ref
-                .pool()
-                .alloc(CHECKSUM_SIZE as usize * pages_to_write);
+            // For the first page, if there's an old partial page CRC, construct the record
+            // to preserve the old CRC in its original slot.
+            let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
+                Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
+            } else {
+                Checksum::new(logical_page_size_u16, crc)
+            };
 
-            for page in 0..pages_to_write {
-                let start_read_idx = page * logical_page_size;
-                let end_read_idx = start_read_idx + logical_page_size;
-                let logical_page = &buffer_data[start_read_idx..end_read_idx];
-                let crc = Crc32::checksum(logical_page);
-
-                // For the first page, if there's an old partial page CRC, construct the record
-                // to preserve the old CRC in its original slot.
-                let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
-                    Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
-                } else {
-                    Checksum::new(logical_page_size_u16, crc)
-                };
-                crcs.put_slice(&crc_record.to_bytes());
-            }
-            let crc_blob = crcs.freeze();
-
-            // Physical full-page layout is [logical_page_bytes, crc_record_bytes].
-            for page in 0..pages_to_write {
-                let start_read_idx = page * logical_page_size;
-                let end_read_idx = start_read_idx + logical_page_size;
-                write_buffer.append(buffer.slice(start_read_idx..end_read_idx));
-
-                let crc_start = page * CHECKSUM_SIZE as usize;
-                write_buffer.append(crc_blob.slice(crc_start..crc_start + CHECKSUM_SIZE as usize));
-            }
+            let mut physical_page = self.cache_ref.pool().alloc(physical_page_size);
+            physical_page.put_slice(logical_page);
+            physical_page.put_slice(&crc_record.to_bytes());
+            write_buffer.append(physical_page.freeze());
         }
 
         if !include_partial_page {
