@@ -165,24 +165,6 @@
 //! participants eventually certify and broadcast `finalize(c,v)`, the finalization
 //! certificate will form.
 //!
-//! ### Activity Tracking
-//!
-//! Honest participants opportunistically broadcast votes whenever they can do so safely for a view
-//! they are actively processing. This includes views that are no longer current.
-//!
-//! In particular:
-//! * `notarize(c,v)` and `finalize(c,v)` are still attempted when the local round for `v` has an
-//!   eligible candidate and we have not already broadcast an incompatible vote for that view.
-//! * `finalize(c,v)` may be emitted while the node is already in a later view because certification
-//!   completes asynchronously.
-//! * `nullify(v)` has two paths:
-//!   * timeout path: current view only (first attempt plus retries)
-//!   * certificate path: when a nullification certificate for `v` is known, we may emit our
-//!     first `nullify(v)` even if `v` is now a past view
-//!
-//! This behavior improves liveness and observability by surfacing local participation whenever it
-//! can still help peers aggregate quorums or track activity.
-//!
 //! ## Architecture
 //!
 //! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
@@ -222,6 +204,16 @@
 //!                            |            |<---------+             +
 //!                            +------------+          +++++++++++++++
 //! ```
+//!
+//! ### Vote Broadcast
+//!
+//! Honest participants opportunistically broadcast votes for all views they are actively tracking. This
+//! includes views that are no longer current (i.e. sending a `notarize(c,v)` for view `v-1` while in view `v`).
+//!
+//! This is particularly useful for applications that wish to reward participants for actively participating in consensus
+//! (by including their votes onchain) and want to ensure their reward mechanism doesn't penalize decentralized participants
+//! that may not be able to issue a vote within the latest view consistently in a timely manner (say that there is a quorum
+//! in one data center and one participant is in another data center).
 //!
 //! ### Batched Verification
 //!
