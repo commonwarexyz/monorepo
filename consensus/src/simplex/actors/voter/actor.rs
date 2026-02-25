@@ -1006,13 +1006,19 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
+
+                                // Construct a nullify vote before updating the current view (if we have not already emitted one)
                                 let nullify = self.try_construct_nullify(view);
+
+                                // Handle the nullification certificate
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;
                                 }
+
+                                // Broadcast the nullify vote
                                 if let Some(nullify) = nullify {
                                     self.broadcast_nullify(
                                         &mut batcher,
