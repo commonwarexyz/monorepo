@@ -1018,8 +1018,6 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-
-                                // Handle the nullification certificate
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
