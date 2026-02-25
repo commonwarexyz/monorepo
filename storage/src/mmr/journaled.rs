@@ -14,12 +14,13 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        diff,
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
         mem::{
-            Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr,
-            State as MemState,
+            Clean, CleanMmr as CleanMemMmr, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr,
+            Mmr as MemMmr, State as MemState,
         },
         position::Position,
         storage::Storage,
@@ -34,7 +35,7 @@ use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
     sequence::prefixed_u64::U64,
-    sync::{AsyncMutex, RwLock},
+    sync::{AsyncMutex, MappedRwLockReadGuard, RwLock, RwLockReadGuard},
 };
 use core::ops::Range;
 use std::{
@@ -790,6 +791,29 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // Don't actually prune the journal to simulate failure
         Ok(())
     }
+
+    /// Apply a changeset produced by the diff/batch API.
+    pub fn apply(&mut self, changeset: diff::Changeset<D>) {
+        self.inner.get_mut().mem_mmr.apply(changeset);
+    }
+
+    /// Create a new batch for adding elements via the diff/batch API.
+    pub const fn new_batch(&self) -> Batch<'_, E, D> {
+        Batch {
+            mmr: self,
+            leaves: Vec::new(),
+        }
+    }
+
+    /// Return a read guard to the inner memory-resident MMR.
+    pub fn inner_mmr(&self) -> MappedRwLockReadGuard<'_, CleanMemMmr<D>> {
+        RwLockReadGuard::map(self.inner.read(), |inner| &inner.mem_mmr)
+    }
+
+    /// Return the thread pool, if any.
+    pub fn pool(&self) -> Option<ThreadPool> {
+        self.pool.clone()
+    }
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
@@ -1055,6 +1079,70 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for DirtyMmr<E,
             Err(Error::MissingNode(_)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// A leaf to be added to the journaled MMR via the batch API.
+enum Leaf<D: Digest> {
+    /// A raw element to be hashed into a leaf digest.
+    Raw(Vec<u8>),
+    /// A pre-computed leaf digest.
+    Digest(D),
+}
+
+/// A builder for batching leaf additions to a journaled MMR.
+///
+/// The batch buffers leaf additions and then creates a `diff::Changeset` that can be applied
+/// to the underlying clean MMR.
+pub struct Batch<'a, E: RStorage + Clock + Metrics, D: Digest> {
+    mmr: &'a CleanMmr<E, D>,
+    leaves: Vec<Leaf<D>>,
+}
+
+impl<'a, E: RStorage + Clock + Metrics, D: Digest> Batch<'a, E, D> {
+    /// Add a raw element to the batch.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, element: &[u8]) -> Self {
+        self.leaves.push(Leaf::Raw(element.to_vec()));
+        self
+    }
+
+    /// Add a pre-computed leaf digest to the batch.
+    pub fn add_leaf_digest(mut self, leaf: D) -> Self {
+        self.leaves.push(Leaf::Digest(leaf));
+        self
+    }
+
+    /// Finalize the batch, returning a changeset that can be applied to the MMR.
+    pub fn finalize(self, hasher: &mut impl Hasher<Digest = D>) -> diff::Changeset<D> {
+        let guard = self.mmr.inner_mmr();
+        let mut d = diff::UnmerkleizedBatch::new(&*guard);
+        for leaf in self.leaves {
+            match leaf {
+                Leaf::Raw(element) => {
+                    d.add(hasher, &element);
+                }
+                Leaf::Digest(digest) => {
+                    d.add_leaf_digest(digest);
+                }
+            }
+        }
+        d.finalize(hasher)
+    }
+
+    /// Return the root digest of the MMR.
+    pub fn root(&self) -> D {
+        self.mmr.root()
+    }
+
+    /// Return the size of the MMR.
+    pub fn size(&self) -> Position {
+        self.mmr.size()
+    }
+
+    /// Return the number of leaves in the MMR.
+    pub fn leaves(&self) -> Location {
+        self.mmr.leaves()
     }
 }
 
