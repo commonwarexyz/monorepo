@@ -16,12 +16,13 @@ use crate::{
             db::{Merkleized, Unmerkleized},
             BitmapPrunedBits,
         },
+        operation::Key,
         store::LogStore as _,
         Durable, Error, NonDurable,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -119,14 +120,14 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > CleanAny for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Mutable = variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
@@ -137,14 +138,14 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > UnmerkleizedDurableAny for variable::Db<E, K, V, H, T, N, Unmerkleized, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
@@ -162,7 +163,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -170,7 +171,7 @@ impl<
     > MerkleizedNonDurableAny
     for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Mutable = variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
@@ -181,14 +182,14 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > MutableAny for variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
@@ -236,14 +237,14 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -381,7 +382,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -389,7 +390,7 @@ impl<
         const N: usize,
     > CleanAny for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Mutable = variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
 
@@ -400,7 +401,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -409,7 +410,7 @@ impl<
     > UnmerkleizedDurableAny
     for variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
@@ -428,7 +429,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -437,7 +438,7 @@ impl<
     > MerkleizedNonDurableAny
     for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, NonDurable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Mutable = variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
 
@@ -448,7 +449,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -456,7 +457,7 @@ impl<
         const N: usize,
     > MutableAny for variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
@@ -479,7 +480,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -488,7 +489,7 @@ impl<
     > BitmapPrunedBits
     for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<K, V>: Codec,
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()

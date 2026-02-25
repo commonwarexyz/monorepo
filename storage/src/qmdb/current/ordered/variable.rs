@@ -14,14 +14,14 @@ use crate::{
     qmdb::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::{db::Merkleized, VariableConfig as Config},
+        operation::Key,
         Durable, Error,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::db::Db<
@@ -39,14 +39,14 @@ pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Dura
 // Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
-    Operation<K, V>: Read,
+    Operation<K, V>: Codec,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
@@ -71,14 +71,14 @@ pub mod partitioned {
                 ordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
             current::{db::Merkleized, VariableConfig as Config},
+            operation::Key,
             Durable, Error,
         },
         translator::Translator,
     };
-    use commonware_codec::Read;
+    use commonware_codec::{Codec, Read};
     use commonware_cryptography::{DigestOf, Hasher};
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-    use commonware_utils::Array;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -110,7 +110,7 @@ pub mod partitioned {
 
     impl<
             E: RStorage + Clock + Metrics,
-            K: Array,
+            K: Key,
             V: VariableValue,
             H: Hasher,
             T: Translator,
@@ -118,7 +118,7 @@ pub mod partitioned {
             const N: usize,
         > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
     where
-        Operation<K, V>: Read,
+        Operation<K, V>: Codec,
     {
         /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
         /// the bitmap MMR if a thread pool is provided.
