@@ -414,10 +414,8 @@ impl<
         if self.state.current_view() != view {
             return None;
         }
-        let (false, nullify, _) = self.state.handle_timeout() else {
-            return None;
-        };
-        nullify
+        let (_, nullify) = self.state.try_nullify(false)?;
+        Some(nullify)
     }
 
     /// Persists our notarize vote to the journal for crash recovery.

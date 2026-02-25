@@ -213,20 +213,33 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.next_timeout_deadline(now, nullify_retry)
     }
 
+    /// Constructs a nullify vote for the current view, if eligible.
+    ///
+    /// When `retry` is false, only returns a vote on the first attempt.
+    /// When `retry` is true, returns a vote on both first attempts and retries.
+    ///
+    /// Returns `None` if we have already broadcast a finalize vote for this view.
+    pub fn try_nullify(&mut self, retry: bool) -> Option<(bool, Nullify<S>)> {
+        let view = self.view;
+        let is_retry = self.create_round(view).construct_nullify()?;
+        if !retry && is_retry {
+            return None;
+        }
+        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
+        Some((is_retry, nullify))
+    }
+
     /// Handle a timeout event for the current view.
     /// Returns the nullify vote and optionally an entry certificate for the previous view
     /// (if this is a retry timeout and we can construct one).
     pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
-        let view = self.view;
-        let Some(retry) = self.create_round(view).construct_nullify() else {
+        let Some((retry, nullify)) = self.try_nullify(true) else {
             return (false, None, None);
         };
-        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view));
 
-        // If was retry, we need to get entry certificates for the previous view
-        let entry_view = view.previous().unwrap_or(GENESIS_VIEW);
+        let entry_view = self.view.previous().unwrap_or(GENESIS_VIEW);
         if !retry || entry_view == GENESIS_VIEW {
-            return (retry, nullify, None);
+            return (retry, Some(nullify), None);
         }
 
         // Get the certificate for the previous view. Prefer finalizations since they are the
@@ -244,7 +257,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             warn!(%entry_view, "entry certificate not found during timeout");
             None
         };
-        (retry, nullify, cert)
+        (retry, Some(nullify), cert)
     }
 
     /// Inserts a notarization certificate and prepares the next view's leader.
