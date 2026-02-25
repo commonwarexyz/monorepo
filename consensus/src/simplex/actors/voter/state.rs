@@ -213,14 +213,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.next_timeout_deadline(now, nullify_retry)
     }
 
-    /// Constructs a nullify vote for the current view, if eligible.
+    /// Constructs a nullify vote for `view`, if eligible.
+    ///
+    /// Returns `None` when `view` is not the current view.
     ///
     /// When `retry` is false, only returns a vote on the first attempt.
     /// When `retry` is true, returns a vote on both first attempts and retries.
     ///
     /// Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn try_nullify(&mut self, retry: bool) -> Option<(bool, Nullify<S>)> {
-        let view = self.view;
+    pub fn try_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
+        if view != self.view {
+            return None;
+        }
         let is_retry = self.create_round(view).construct_nullify()?;
         if !retry && is_retry {
             return None;
@@ -233,7 +237,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the nullify vote and optionally an entry certificate for the previous view
     /// (if this is a retry timeout and we can construct one).
     pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
-        let Some((retry, nullify)) = self.try_nullify(true) else {
+        let Some((retry, nullify)) = self.try_nullify(self.view, true) else {
             return (false, None, None);
         };
 
@@ -823,6 +827,40 @@ mod tests {
             let sixth = state.next_timeout_deadline();
             let later = context.current();
             assert_eq!(sixth, later + retry, "retry deadline should be set");
+        });
+    }
+
+    #[test]
+    fn try_nullify_requires_current_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[0].clone();
+            let cfg = Config {
+                scheme: local_scheme,
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(4),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+            let current = state.current_view();
+
+            // Guard non-current views from mutating nullify state.
+            assert!(state.try_nullify(current.next(), false).is_none());
+
+            // First attempt for current view succeeds.
+            let (retry, _) = state
+                .try_nullify(current, false)
+                .expect("first nullify should be emitted");
+            assert!(!retry);
+
+            // A non-retry request for the same view should not emit again.
+            assert!(state.try_nullify(current, false).is_none());
         });
     }
 

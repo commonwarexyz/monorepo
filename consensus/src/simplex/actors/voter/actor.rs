@@ -401,20 +401,6 @@ impl<
             .and_then(|_| self.state.parent_certificate(view))
     }
 
-    /// If a nullification certificate arrives for our current view, we should emit
-    /// a nullify vote (just like we would for a notarization or finalization).
-    ///
-    /// Returns `Some(nullify)` only when:
-    /// 1. The view is the current view.
-    /// 2. We have not already emitted nullify for that view.
-    fn try_construct_nullify(&mut self, view: View) -> Option<Nullify<S>> {
-        if self.state.current_view() != view {
-            return None;
-        }
-        let (_, nullify) = self.state.try_nullify(false)?;
-        Some(nullify)
-    }
-
     /// Persists our notarize vote to the journal for crash recovery.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
         self.append_journal(notarize.view(), Artifact::Notarize(notarize))
@@ -1007,8 +993,9 @@ impl<
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
 
-                                // Construct a nullify vote before updating the current view (if we have not already emitted one)
-                                let nullify = self.try_construct_nullify(view);
+                                // Construct a nullify vote before updating current view.
+                                let nullify =
+                                    self.state.try_nullify(view, false).map(|(_, nullify)| nullify);
 
                                 // Handle the nullification certificate
                                 if let Some(floor) = self.handle_nullification(nullification).await
