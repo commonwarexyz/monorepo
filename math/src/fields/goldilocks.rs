@@ -29,7 +29,11 @@ impl Read for F {
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        u64::read_cfg(buf, cfg).map(F)
+        let x = u64::read_cfg(buf, cfg)?;
+        if x >= P {
+            return Err(commonware_codec::Error::Invalid("F", "out of range"));
+        }
+        Ok(Self(x))
     }
 }
 
@@ -428,12 +432,23 @@ pub mod fuzz {
     use super::*;
     use crate::algebra::{test_suites, Ring};
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::{Encode as _, ReadExt as _};
+
+    #[derive(Debug)]
+    pub struct NonCanonicalU64(pub u64);
+
+    impl Arbitrary<'_> for NonCanonicalU64 {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            Ok(Self(u.int_in_range(P..=u64::MAX)?))
+        }
+    }
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
         Exp(F, u8),
         Div2(F),
         StreamRoundtrip(Vec<u64>),
+        ReadRejectsOutOfRange(NonCanonicalU64),
         FuzzField,
     }
 
@@ -457,6 +472,13 @@ pub mod fuzz {
                     roundtrip.truncate(data.len());
                     assert_eq!(data, roundtrip);
                 }
+                Self::ReadRejectsOutOfRange(NonCanonicalU64(x)) => {
+                    let result = F::read(&mut x.encode());
+                    assert!(matches!(
+                        result,
+                        Err(commonware_codec::Error::Invalid("F", "out of range"))
+                    ));
+                }
                 Self::FuzzField => {
                     test_suites::fuzz_field::<F>(u)?;
                 }
@@ -468,6 +490,14 @@ pub mod fuzz {
     #[test]
     fn test_fuzz() {
         commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+    }
+
+    #[test]
+    fn test_read_cfg_rejects_modulus_regression_case() {
+        let mut u = Unstructured::new(&[]);
+        Plan::ReadRejectsOutOfRange(NonCanonicalU64(P))
+            .run(&mut u)
+            .expect("regression plan should succeed");
     }
 }
 

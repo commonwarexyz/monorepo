@@ -116,7 +116,7 @@ pub mod test {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
@@ -313,6 +313,7 @@ pub mod test {
             let proof = RangeProof {
                 proof: crate::mmr::Proof::default(),
                 partial_chunk_digest: None,
+                ops_root: Digest::EMPTY,
             };
             assert!(!TestDb::verify_range_proof(
                 hasher.inner(),
@@ -359,6 +360,49 @@ pub mod test {
                     &root,
                 ));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression test: requesting a range proof for a location in a pruned bitmap chunk
+    /// must return `Error::OperationPruned`, not panic in the bitmap accessor.
+    #[test_traced("DEBUG")]
+    pub fn test_range_proof_returns_error_on_pruned_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "range-proofs-pruned".to_string();
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut db = open_db(context.with_label("db"), partition)
+                .await
+                .into_mutable();
+
+            let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
+
+            // Repeatedly update the same key to generate many inactive operations,
+            // pushing the inactivity floor past at least one full bitmap chunk.
+            let key = Sha256::fill(0x11);
+            for i in 0..chunk_bits + 10 {
+                let value = Sha256::hash(&i.to_be_bytes());
+                db.write_batch([(key, Some(value))]).await.unwrap();
+            }
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
+
+            assert!(
+                db.status.pruned_chunks() > 0,
+                "expected at least one pruned chunk"
+            );
+
+            // Requesting a range proof at location 0 (in the pruned range) should return
+            // OperationPruned, not panic.
+            let result = db
+                .range_proof(hasher.inner(), Location::new_unchecked(0), NZU64!(1))
+                .await;
+            assert!(
+                matches!(result, Err(Error::OperationPruned(_))),
+                "expected OperationPruned, got {result:?}"
+            );
 
             db.destroy().await.unwrap();
         });

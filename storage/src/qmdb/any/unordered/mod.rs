@@ -11,7 +11,7 @@ use crate::{
             ValueEncoding,
         },
         build_snapshot_from_log, delete_known_loc,
-        operation::{Committable, Operation as OperationTrait},
+        operation::{Committable, Key, Operation as OperationTrait},
         update_known_loc, Error,
     },
 };
@@ -30,7 +30,7 @@ pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as 
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -73,7 +73,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -330,7 +330,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,

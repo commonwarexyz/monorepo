@@ -5,12 +5,12 @@ use crate::{
     kv::Gettable,
     mmr::Location,
     qmdb::{
+        operation::Key,
         store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
     Persistable,
 };
-use commonware_utils::Array;
 use std::{future::Future, ops::Range};
 
 /// Test trait unifying all Any database variants.
@@ -23,7 +23,7 @@ pub trait CleanAny:
     MerkleizedStore
     + PrunableStore
     + Persistable<Error = Error>
-    + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
     + Sized
 {
     /// Identity transition (was consuming type-state transition to mutable).

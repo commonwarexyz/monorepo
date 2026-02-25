@@ -130,7 +130,7 @@ mod test {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
@@ -327,6 +327,7 @@ mod test {
             let proof = RangeProof {
                 proof: crate::mmr::Proof::default(),
                 partial_chunk_digest: None,
+                ops_root: Digest::EMPTY,
             };
             assert!(!TestDb::verify_range_proof(
                 hasher.inner(),

@@ -285,10 +285,16 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
                     return ops_subtree_root;
                 };
 
-                // grafted_leaf = hash(chunk || ops_subtree_root)
-                self.hasher.inner().update(self.chunks[local]);
-                self.hasher.inner().update(&ops_subtree_root);
-                self.hasher.inner().finalize()
+                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
+                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
+                let chunk = self.chunks[local];
+                if chunk.iter().all(|&b| b == 0) {
+                    ops_subtree_root
+                } else {
+                    self.hasher.inner().update(chunk);
+                    self.hasher.inner().update(&ops_subtree_root);
+                    self.hasher.inner().finalize()
+                }
             }
         }
     }
@@ -621,8 +627,8 @@ mod tests {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
                 assert_eq!(combined.size().await, ops_mmr.size());
 
-                // Compute the combined root by iterating ops peaks.
-                let combined_root = {
+                // Compute the grafted root by iterating ops peaks.
+                let grafted_root = {
                     let ops_size = ops_mmr.size();
                     let ops_leaves = Location::try_from(ops_size).unwrap();
                     let mut peaks = Vec::new();
@@ -636,7 +642,7 @@ mod tests {
                     }
                     standard.root(ops_leaves, peaks.iter())
                 };
-                assert_ne!(combined_root, ops_root);
+                assert_ne!(grafted_root, ops_root);
 
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
@@ -646,46 +652,26 @@ mod tests {
                         .unwrap();
 
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b1,
-                        loc,
-                        &combined_root
-                    ));
+                    assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
 
                     let loc = Location::new_unchecked(1);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b2,
-                        loc,
-                        &combined_root
-                    ));
+                    assert!(proof.verify_element_inclusion(&mut verifier, &b2, loc, &grafted_root));
 
                     let loc = Location::new_unchecked(2);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b3,
-                        loc,
-                        &combined_root
-                    ));
+                    assert!(proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
 
                     let loc = Location::new_unchecked(3);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b4,
-                        loc,
-                        &combined_root
-                    ));
+                    assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
@@ -695,19 +681,14 @@ mod tests {
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b4,
-                        loc,
-                        &combined_root
-                    ));
+                    assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
 
                     // Wrong leaf element.
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b3,
                         loc,
-                        &combined_root
+                        &grafted_root
                     ));
 
                     // Wrong root.
@@ -718,7 +699,7 @@ mod tests {
                         &mut verifier,
                         &b4,
                         loc + 1,
-                        &combined_root
+                        &grafted_root
                     ));
 
                     // Wrong chunk element in the verifier.
@@ -727,7 +708,7 @@ mod tests {
                         &mut verifier,
                         &b4,
                         loc,
-                        &combined_root
+                        &grafted_root
                     ));
 
                     // Wrong chunk index in the verifier.
@@ -736,7 +717,7 @@ mod tests {
                         &mut verifier,
                         &b4,
                         loc,
-                        &combined_root
+                        &grafted_root
                     ));
                 }
 
@@ -754,7 +735,7 @@ mod tests {
                         &mut verifier,
                         &range,
                         Location::new_unchecked(0),
-                        &combined_root
+                        &grafted_root
                     ));
 
                     // Fails with incomplete chunk elements.
@@ -763,7 +744,7 @@ mod tests {
                         &mut verifier,
                         &range,
                         Location::new_unchecked(0),
-                        &combined_root
+                        &grafted_root
                     ));
                 }
             }
@@ -781,8 +762,8 @@ mod tests {
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());
 
-            // Compute the combined root.
-            let combined_root = {
+            // Compute the grafted root.
+            let grafted_root = {
                 let ops_size = ops_mmr.size();
                 let ops_leaves = Location::try_from(ops_size).unwrap();
                 let mut peaks = Vec::new();
@@ -804,14 +785,14 @@ mod tests {
                 .unwrap();
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-            assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &combined_root));
+            assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new_unchecked(4);
             let proof = verification::range_proof(&combined, loc..loc + 1)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &combined_root));
+            assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &grafted_root));
         });
     }
 

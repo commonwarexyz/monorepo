@@ -187,7 +187,8 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+    pub(crate) type VarConfig =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
     /// Type aliases for concrete [Db] types used in these unit tests.
     pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
@@ -203,7 +204,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: ((), ((0..=10000).into(), ())),
             translator: TwoCap,
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),

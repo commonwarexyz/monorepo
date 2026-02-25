@@ -27,7 +27,7 @@ commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-runtime.workspace = true
-commonware-storage = { workspace = true, features = ["std"] }
+commonware-storage = { workspace = true, features = ["std", "test-traits"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
