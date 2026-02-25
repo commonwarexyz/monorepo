@@ -794,7 +794,7 @@ mod tests {
             let second = state.next_timeout_deadline();
             assert_eq!(first, second, "cached deadline should be reused");
 
-            // Construct nullify for timeout should return false (not a retry).
+            // Timeout-mode nullify: first emission should not be marked as retry.
             let (was_retry, _) = state
                 .construct_nullify(state.current_view(), true)
                 .expect("first timeout nullify should exist");
@@ -817,7 +817,7 @@ mod tests {
             let fifth = state.next_timeout_deadline();
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
-            // Subsequent timeout nullify should be a retry.
+            // Timeout-mode nullify: second emission should be marked as retry.
             let (was_retry, _) = state
                 .construct_nullify(state.current_view(), true)
                 .expect("retry timeout nullify should exist");
@@ -855,7 +855,7 @@ mod tests {
 
             // Without a nullification certificate, non-current views are not eligible.
             assert!(state.construct_nullify(next, false).is_none());
-            // Retry path is reserved for current view timeout handling.
+            // Timeout mode is reserved for current-view timeout handling.
             assert!(state.construct_nullify(next, true).is_none());
 
             // Observe a nullification for current view, which advances us to the next view.
@@ -873,26 +873,26 @@ mod tests {
             assert_eq!(state.current_view(), next);
 
             // We can emit a first-attempt nullify vote for the now-past nullified view.
-            let (retry, _) = state
+            let (was_retry, _) = state
                 .construct_nullify(current, false)
                 .expect("first nullify for nullified past view should be emitted");
-            assert!(!retry);
+            assert!(!was_retry);
 
             // A second certificate-path request for the same view does not emit again.
             assert!(state.construct_nullify(current, false).is_none());
 
-            // Retry path remains current-view only.
+            // Timeout mode remains current-view only.
             assert!(state.construct_nullify(current, true).is_none());
 
             // Timeout path on current view: first attempt then retry.
-            let (retry, _) = state
+            let (was_retry, _) = state
                 .construct_nullify(next, true)
                 .expect("first timeout nullify for current view should be emitted");
-            assert!(!retry);
-            let (retry, _) = state
+            assert!(!was_retry);
+            let (was_retry, _) = state
                 .construct_nullify(next, true)
                 .expect("retry timeout nullify for current view should be emitted");
-            assert!(retry);
+            assert!(was_retry);
         });
     }
 
