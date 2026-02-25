@@ -708,7 +708,6 @@ impl<
                 self.state.replay(&artifact);
                 match artifact {
                     Artifact::Notarize(notarize) => {
-                        self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
                     }
                     Artifact::Notarization(notarization) => {
@@ -734,7 +733,6 @@ impl<
                         }
                     }
                     Artifact::Nullify(nullify) => {
-                        self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
                     }
                     Artifact::Nullification(nullification) => {
@@ -747,7 +745,6 @@ impl<
                             .await;
                     }
                     Artifact::Finalize(finalize) => {
-                        self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
                     }
                     Artifact::Finalization(finalization) => {
