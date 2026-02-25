@@ -161,22 +161,14 @@ impl<
         )
     }
 
-    /// Returns true if this vote should trigger expiry for the current view.
-    fn should_expire(
-        &self,
-        current: CurrentState,
-        sender: &S::PublicKey,
-        vote: &Vote<S, D>,
-    ) -> bool {
+    /// Returns true if the leader has nullified the current view.
+    fn leader_abandoned(current: CurrentState, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
         let (current_view, current_leader) = current;
-        let view = vote.view();
-        if view != current_view || !matches!(vote, Vote::Nullify(_)) {
+        let Some(leader) = current_leader else {
             return false;
-        }
-
-        current_leader
-            .and_then(|leader| self.participants.key(leader))
-            .is_some_and(|leader_key| leader_key == sender)
+        };
+        work.get(&current_view)
+            .is_some_and(|round| round.has_nullify(leader))
     }
 
     pub fn start(
@@ -232,9 +224,7 @@ impl<
                     // If we already buffered a leader nullify for this now-current view
                     // (allowed because we accept votes up to `current+1`), we can skip
                     // the leader timeout immediately via the `is_active` response below.
-                    let abandoned = work
-                        .get(&current.0)
-                        .is_some_and(|round| round.has_nullify(leader));
+                    let abandoned = Self::leader_abandoned(current, &work);
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
@@ -412,11 +402,6 @@ impl<
                     continue;
                 }
 
-                // If the current leader explicitly nullifies the current view, signal the voter so
-                // it can fast-path timeout without waiting for its local timer. We do this because
-                // `nullify` still counts as "activity" for skip-timeout heuristics.
-                let should_expire = self.should_expire(current, &sender, &message);
-
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
                 let added = work
@@ -433,9 +418,11 @@ impl<
                         .get_or_create(&peer)
                         .try_set_max(view.get());
 
-                    // Only fast-path once for the first accepted leader nullify vote.
-                    if should_expire {
-                        voter.expire(view).await;
+                    // If the current leader explicitly nullifies the current view, signal
+                    // the voter so it can fast-path timeout without waiting for its local
+                    // timer. We check after adding because duplicate votes are rejected.
+                    if Self::leader_abandoned(current, &work) {
+                        voter.expire(current.0).await;
                     }
                 }
                 updated_view = view;
