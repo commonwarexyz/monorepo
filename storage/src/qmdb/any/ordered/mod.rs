@@ -14,14 +14,13 @@ use crate::{
     qmdb::{
         any::{db::Db, ValueEncoding},
         delete_known_loc,
-        operation::Operation as OperationTrait,
+        operation::{Key, Operation as OperationTrait},
         update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
     },
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 #[cfg(any(test, feature = "test-traits"))]
 use core::ops::Range;
 use futures::{
@@ -43,7 +42,7 @@ type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -231,7 +230,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -468,7 +467,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
@@ -532,7 +531,7 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
 impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -553,7 +552,7 @@ where
 impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -573,7 +572,7 @@ impl<E, K, V, C, I, H> UnmerkleizedDurableAny
     for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -600,7 +599,7 @@ impl<E, K, V, C, I, H> MerkleizedNonDurableAny
     for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -619,7 +618,7 @@ where
 impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,

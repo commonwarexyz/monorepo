@@ -11,9 +11,9 @@
 use crate::qmdb::{
     any::{ordered::Update, ValueEncoding},
     current::proof::OperationProof,
+    operation::Key,
 };
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
 
 pub mod db;
 pub mod fixed;
@@ -146,7 +146,7 @@ pub mod tests {
 ///
 /// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProof<K: Array, V: ValueEncoding, D: Digest, const N: usize> {
+pub enum ExclusionProof<K: Key, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
     KeyValue(OperationProof<D, N>, Update<K, V>),

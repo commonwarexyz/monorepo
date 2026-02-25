@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use commonware_codec::{Codec, Encode as _};
-use commonware_utils::{hex, Array};
+use commonware_utils::hex;
 use std::fmt;
 
 pub(crate) mod fixed;
@@ -93,13 +93,13 @@ where
 
 impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
 where
-    K: Array + fmt::Display,
+    K: Key,
     V: ValueEncoding,
     V::Value: Codec,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
             Self::Update(payload) => payload.fmt(f),
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {

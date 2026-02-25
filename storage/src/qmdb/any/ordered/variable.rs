@@ -11,14 +11,14 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_variable, ordered, value::VariableEncoding, VariableConfig, VariableValue},
+        operation::Key,
         Durable, Error, Merkleized,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
@@ -28,8 +28,10 @@ pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -72,14 +74,14 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
+            operation::Key,
             Durable, Error, Merkleized,
         },
         translator::Translator,
     };
-    use commonware_codec::Read;
+    use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
-    use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -103,14 +105,14 @@ pub mod partitioned {
 
     impl<
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: Key,
             V: VariableValue,
             H: Hasher,
             T: Translator,
             const P: usize,
         > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
     where
-        Operation<K, V>: Read,
+        Operation<K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.

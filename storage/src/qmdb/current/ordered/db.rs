@@ -17,18 +17,19 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
+        operation::Key,
         store, DurabilityState, Durable, Error, NonDurable,
     },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use commonware_utils::bitmap::Prunable as BitMap;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
+pub struct KeyValueProof<K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<D, N>,
     pub next_key: K,
 }
@@ -44,7 +45,7 @@ pub type Db<E, C, K, V, I, H, const N: usize, S = Merkleized<DigestOf<H>>, D = D
 impl<
         E: Storage + Clock + Metrics,
         C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -143,7 +144,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -228,7 +229,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -269,7 +270,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -296,7 +297,7 @@ impl<E, C, K, V, I, H, const N: usize> Batchable
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item = Operation<K, V>>,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     I: OrderedIndex<Value = Location> + 'static,
     H: Hasher,
