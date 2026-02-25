@@ -376,9 +376,9 @@ impl<
         if !retry {
             return;
         }
-        let Some(past_view) = view.previous() else {
-            return;
-        };
+        let past_view = view
+            .previous()
+            .expect("we should never be in the genesis view");
         if let Some(certificate) = self.state.get_best_certificate(past_view) {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
