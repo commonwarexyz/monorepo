@@ -221,30 +221,29 @@ impl<
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
-                    // If we already buffered a leader nullify for this now-current view
-                    // (allowed because we accept votes up to `current+1`), we can skip
-                    // the leader timeout immediately via the `is_active` response below.
-                    let abandoned = Self::leader_abandoned(current, &work);
-
-                    // Check if the leader has been active recently
-                    let skip_timeout = self.skip_timeout.get() as usize;
-                    let abandon_reason = if abandoned {
+                    // Check if the round should be abandoned
+                    let abandon_reason = if Self::leader_abandoned(current, &work) {
+                        // Leader already buffered a nullify for this now-current view
+                        // (allowed because we accept votes up to `current+1`).
                         Some(SkipReason::Abandoned)
-                    } else if
-                        // Ensure we have enough data to judge activity (none of this
-                        // data may be in the last skip_timeout views if we jumped ahead
-                        // to a new view)
-                        work.len() >= skip_timeout
-                        // Leader not active in any recent round
-                        && !work
-                            .iter()
-                            .rev()
-                            .take(skip_timeout)
-                            .any(|(_, round)| round.is_active(leader))
-                    {
-                        Some(SkipReason::Inactivity)
                     } else {
-                        None
+                        let skip_timeout = self.skip_timeout.get() as usize;
+                        if
+                            // Ensure we have enough data to judge activity (none of this
+                            // data may be in the last skip_timeout views if we jumped ahead
+                            // to a new view)
+                            work.len() >= skip_timeout
+                            // Leader not active in any recent round
+                            && !work
+                                .iter()
+                                .rev()
+                                .take(skip_timeout)
+                                .any(|(_, round)| round.is_active(leader))
+                        {
+                            Some(SkipReason::Inactivity)
+                        } else {
+                            None
+                        }
                     };
                     active.send_lossy(abandon_reason);
 
