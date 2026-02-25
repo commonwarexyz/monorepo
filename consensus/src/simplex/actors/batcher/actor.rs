@@ -245,7 +245,7 @@ impl<
                     let should_expire = !is_local_leader
                         && work
                             .get(&current.0)
-                            .is_some_and(|round| round.has_pending_nullify(leader));
+                            .is_some_and(|round| round.has_nullify(leader));
 
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
