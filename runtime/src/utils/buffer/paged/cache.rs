@@ -716,7 +716,8 @@ impl Cache {
     /// Pass 1 prefers vacant (no key) or unreferenced ready pages while clearing reference bits.
     /// Pass 2 force-selects the first non-fetching slot if needed.
     ///
-    /// Returns `None` only when all slots are currently fetching.
+    /// Orphaned reserved entries (no active waiters) are reclaimed opportunistically.
+    /// Returns `None` only when all slots are currently fetching with active waiters.
     fn reserve_slot(&mut self) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
@@ -726,6 +727,7 @@ impl Cache {
         for _ in 0..self.capacity {
             let slot = self.clock;
             self.clock = (self.clock + 1) % self.capacity;
+            self.reclaim_reserved_slot(slot);
             let slot_ref = &self.slots[slot];
             match &slot_ref.state {
                 // Empty slot: immediately usable.
@@ -750,6 +752,7 @@ impl Cache {
             for _ in 0..self.capacity {
                 let slot = self.clock;
                 self.clock = (self.clock + 1) % self.capacity;
+                self.reclaim_reserved_slot(slot);
                 let slot_ref = &self.slots[slot];
                 match &slot_ref.state {
                     // Force progress on pass 2 by accepting any non-fetching slot.
@@ -765,6 +768,53 @@ impl Cache {
         let slot = chosen?;
         self.evict_slot(slot);
         Some(slot)
+    }
+
+    /// Reclaim a reserved slot if its fetch is already resolved or orphaned.
+    ///
+    /// A slot is considered orphaned when the cache holds the only `Arc<PageFetchState>`,
+    /// which means no task can still await/finish that fetch.
+    fn reclaim_reserved_slot(&mut self, slot: usize) {
+        enum Reclaim {
+            Finalize {
+                key: (u64, u64),
+                state: Arc<PageFetchState>,
+                result: Result<IoBuf, Arc<Error>>,
+            },
+            Evict,
+        }
+
+        let action = match &self.slots[slot].state {
+            SlotState::Reserved { key, fetch } => fetch.future.peek().cloned().map_or_else(
+                || {
+                    if Arc::strong_count(fetch) == 1 {
+                        Some(Reclaim::Evict)
+                    } else {
+                        None
+                    }
+                },
+                |result| {
+                    if fetch.try_claim_cleanup() {
+                        Some(Reclaim::Finalize {
+                            key: *key,
+                            state: fetch.clone(),
+                            result,
+                        })
+                    } else {
+                        None
+                    }
+                },
+            ),
+            SlotState::Vacant | SlotState::Filled { .. } => None,
+        };
+
+        match action {
+            Some(Reclaim::Finalize { key, state, result }) => {
+                self.finish_fetch_if_current(slot, key, &state, result);
+            }
+            Some(Reclaim::Evict) => self.evict_slot(slot),
+            None => {}
+        }
     }
 
     /// Convert a slot to fetching state.
@@ -1370,7 +1420,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_stale_fetch_entry_for_other_key_does_not_block_progress() {
+    fn test_stale_fetch_entry_for_other_key_is_reclaimed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
@@ -1398,7 +1448,8 @@ mod tests {
             assert_eq!(read.as_ref(), vec![4u8; 64].as_slice());
 
             let cache = cache_ref.cache.read();
-            assert!(is_fetching(&cache, (7, 7)));
+            assert!(!is_fetching(&cache, (7, 7)));
+            assert!(!cache.index.contains_key(&(7, 7)));
         });
     }
 
@@ -1610,10 +1661,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_stranded_unresolved_fetch_entry_is_not_scavenged_by_other_keys() {
+    fn test_stranded_unresolved_fetch_entry_is_reclaimed_for_other_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
 
             let stranded: PageFetchFut = async {
                 pending::<()>().await;
@@ -1631,7 +1682,38 @@ mod tests {
             );
 
             let cache = cache_ref.cache.read();
+            assert!(!is_fetching(&cache, (42, 7)));
+            assert!(cache.index.contains_key(&(0, 0)));
+        });
+    }
+
+    #[test_traced]
+    fn test_reserved_fetch_with_live_waiter_is_not_reclaimed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+
+            let pending_fut: PageFetchFut = async {
+                pending::<()>().await;
+                unreachable!("pending future never resolves")
+            }
+            .boxed()
+            .shared();
+            let state = Arc::new(PageFetchState::new(pending_fut));
+            let waiter_ref = state.clone();
+            install_fetch_state(&cache_ref, (42, 7), state);
+
+            cache_pages(
+                &cache_ref,
+                0,
+                vec![vec![0xAAu8; PAGE_SIZE.get() as usize].into()],
+                0,
+            );
+
+            let cache = cache_ref.cache.read();
             assert!(is_fetching(&cache, (42, 7)));
+            assert!(!cache.index.contains_key(&(0, 0)));
+            drop(waiter_ref);
         });
     }
 
