@@ -1009,14 +1009,14 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-                                let late_timeout_nullify = self.try_construct_nullify(view);
+                                let nullify = self.try_construct_nullify(view);
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;
                                 }
-                                if let Some(nullify) = late_timeout_nullify {
+                                if let Some(nullify) = nullify {
                                     self.broadcast_nullify(
                                         &mut batcher,
                                         &mut vote_sender,
