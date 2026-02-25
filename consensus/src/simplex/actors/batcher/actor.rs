@@ -33,8 +33,6 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace};
 
-/// Tracks the current view together with its elected leader so they update atomically.
-type CurrentState = (View, Option<Participant>);
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + CryptoRngCore,
@@ -162,7 +160,7 @@ impl<
     }
 
     /// Returns true if the leader has nullified the current view.
-    fn leader_abandoned(current: CurrentState, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
+    fn leader_abandoned(current: (View, Option<Participant>), work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
         let (current_view, current_leader) = current;
         let Some(leader) = current_leader else {
             return false;
@@ -196,7 +194,7 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
-        let mut current: CurrentState = (View::zero(), None);
+        let mut current = (View::zero(), None);
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
         select_loop! {
