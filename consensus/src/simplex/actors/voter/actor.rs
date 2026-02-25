@@ -993,7 +993,8 @@ impl<
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
 
-                                // Construct a nullify vote before updating current view.
+                                // Construct a nullify vote before updating current view (occurs during
+                                // `handle_nullification`), if we haven't timed out already
                                 let nullify =
                                     self.state.try_nullify(view, false).map(|(_, nullify)| nullify);
 
