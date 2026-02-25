@@ -316,9 +316,10 @@ stability_scope!(BETA {
 #[macro_export]
 macro_rules! block {
     ($blocker:expr, $peer:expr, $($arg:tt)+) => {
-        tracing::warn!(peer = ?$peer, $($arg)+);
+        let peer = $peer;
+        tracing::warn!(peer = ?peer, $($arg)+);
         #[allow(clippy::disallowed_methods)]
-        $blocker.block($peer).await;
+        $blocker.block(peer).await;
     };
 }
 
