@@ -67,12 +67,14 @@
 //! )
 //! ```
 
+pub mod diff;
 pub mod hasher;
 pub mod iterator;
 pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
+pub mod read;
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -85,10 +87,12 @@ cfg_if::cfg_if! {
     }
 }
 
+pub use diff::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
+pub use read::{ChainInfo, MmrRead};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.

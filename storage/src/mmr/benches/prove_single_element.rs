@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{mem::DirtyMmr, Location, StandardHasher};
+use commonware_storage::mmr::{diff::UnmerkleizedBatch, mem::CleanMmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -16,17 +16,21 @@ fn bench_prove_single_element(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = DirtyMmr::new();
+        let mut mmr = CleanMmr::new::<Sha256>();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
-            for i in 0..n {
-                let element = sha256::Digest::random(&mut sampler);
-                mmr.add(&mut hasher, &element);
-                elements.push((i, element));
-            }
+            let changeset = {
+                let mut diff = UnmerkleizedBatch::new(&mmr);
+                for i in 0..n {
+                    let element = sha256::Digest::random(&mut sampler);
+                    diff.add(&mut hasher, &element);
+                    elements.push((i, element));
+                }
+                diff.merkleize(&mut hasher).into_changeset()
+            };
+            mmr.apply(changeset);
         });
-        let mmr = mmr.merkleize(&mut hasher, None);
         let root = *mmr.root();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs

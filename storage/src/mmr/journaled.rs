@@ -1101,7 +1101,7 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
             let mut hasher: Standard<Sha256> = Standard::new();
-            let test_mmr = mem::CleanMmr::new(&mut hasher);
+            let test_mmr = mem::CleanMmr::new::<Sha256>();
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
@@ -1265,7 +1265,7 @@ mod tests {
                 assert!(mmr.pop(2).await.is_ok(), "at position {i:?}");
                 let clean_mmr = mmr.merkleize(&mut hasher);
                 let root = clean_mmr.root();
-                let reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let reference_mmr = mem::CleanMmr::new::<Sha256>();
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,

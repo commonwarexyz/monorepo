@@ -706,7 +706,7 @@ mod tests {
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = CleanMmr::new(&mut hasher);
+        let mmr = CleanMmr::new::<Sha256>();
         let root = mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
@@ -1495,7 +1495,7 @@ mod tests {
 
         // Empty multi-proof
         let mut hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = CleanMmr::new(&mut hasher);
+        let empty_mmr = CleanMmr::new::<Sha256>();
         let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(

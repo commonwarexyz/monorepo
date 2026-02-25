@@ -582,7 +582,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let empty_mmr = CleanMmr::new(&mut hasher);
+            let empty_mmr = CleanMmr::new::<Sha256>();
             let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.

@@ -6,6 +6,7 @@ use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof,
+    read::{ChainInfo, MmrRead},
     Error::{self, *},
     Location, Position, Proof,
 };
@@ -65,6 +66,26 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {}
+
+impl Dirty {
+    /// Insert a dirty node. Returns true if newly inserted.
+    pub(crate) fn insert(&mut self, pos: Position, height: u32) -> bool {
+        self.dirty_nodes.insert((pos, height))
+    }
+
+    /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
+    pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
+        let mut v: Vec<_> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        v.sort_by_key(|a| a.1);
+        v
+    }
+
+    /// Remove all dirty nodes at positions >= cutoff.
+    pub(crate) fn remove_above(&mut self, cutoff: Position) {
+        let _ = self.dirty_nodes.split_off(&(cutoff, 0));
+    }
+}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -267,9 +288,15 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Create a new, empty MMR in the Clean state.
-    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
-        let mmr: DirtyMmr<D> = Default::default();
-        mmr.merkleize(hasher, None)
+    pub fn new<H: commonware_cryptography::Hasher<Digest = D>>() -> Self {
+        Self {
+            nodes: VecDeque::new(),
+            pruned_to_pos: Position::new(0),
+            pinned_nodes: BTreeMap::new(),
+            state: Clean {
+                root: Self::empty_mmr_root::<H>(),
+            },
+        }
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
@@ -337,7 +364,13 @@ impl<D: Digest> CleanMmr<D> {
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
+        let placeholder = Self {
+            nodes: VecDeque::new(),
+            pruned_to_pos: Position::new(0),
+            pinned_nodes: BTreeMap::new(),
+            state: Clean { root: D::EMPTY },
+        };
+        let mut dirty_mmr = mem::replace(self, placeholder).into_dirty();
         let result = dirty_mmr.update_leaf(hasher, loc, element);
         *self = dirty_mmr.merkleize(hasher, None);
         result
@@ -354,9 +387,10 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
-    pub fn empty_mmr_root(hasher: &mut impl commonware_cryptography::Hasher<Digest = D>) -> D {
-        hasher.update(&0u64.to_be_bytes());
-        hasher.finalize()
+    pub fn empty_mmr_root<H: commonware_cryptography::Hasher<Digest = D>>() -> D {
+        let mut h = H::new();
+        h.update(&0u64.to_be_bytes());
+        h.finalize()
     }
 
     /// Return an inclusion proof for the element at location `loc`.
@@ -411,6 +445,78 @@ impl<D: Digest> CleanMmr<D> {
     pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.pinned_nodes.clone()
     }
+
+    /// Create a new [`super::diff::UnmerkleizedBatch`] that borrows this MMR.
+    pub fn new_batch(&self) -> super::diff::UnmerkleizedBatch<'_, D, Self> {
+        super::diff::UnmerkleizedBatch::new(self)
+    }
+
+    /// Apply a changeset produced by [`super::diff::MerkleizedBatch::into_changeset`].
+    ///
+    /// This is the only way to transfer diff changes into the base MMR.
+    /// After apply, the base's root matches the diff's root.
+    pub fn apply(&mut self, changeset: super::diff::Changeset<D>) {
+        // 1. Truncate: if diff popped into base range, remove tail nodes.
+        if changeset.parent_end < self.size() {
+            let keep = (*changeset.parent_end - *self.pruned_to_pos) as usize;
+            self.nodes.truncate(keep);
+        }
+
+        // 2. Overwrite: write modified digests into surviving base nodes.
+        for (pos, digest) in changeset.overwrites {
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+        }
+
+        // 3. Append: push new nodes onto the end.
+        for digest in changeset.appended {
+            self.nodes.push_back(digest);
+        }
+
+        // 4. Root: set the pre-computed root from the diff.
+        self.state = Clean {
+            root: changeset.root,
+        };
+
+        // 5. Prune: if pruning advanced, physically prune and pin.
+        //    Must be last because prune_to_pos needs all nodes present.
+        if changeset.pruned_to_pos > self.pruned_to_pos {
+            self.prune_to_pos(changeset.pruned_to_pos);
+        }
+    }
+}
+
+impl<D: Digest> MmrRead<D> for CleanMmr<D> {
+    fn size(&self) -> Position {
+        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        if pos < self.pruned_to_pos {
+            return self.pinned_nodes.get(&pos).copied();
+        }
+        self.nodes.get(self.pos_to_index(pos)).copied()
+    }
+
+    fn root(&self) -> &D {
+        &self.state.root
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.pruned_to_pos
+    }
+}
+
+impl<D: Digest> ChainInfo<D> for CleanMmr<D> {
+    fn base_size(&self) -> Position {
+        self.size()
+    }
+
+    fn base_visible(&self) -> Position {
+        self.size()
+    }
+
+    fn collect_chain_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 /// Implementation for Dirty MMR state.
@@ -778,7 +884,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -789,7 +895,7 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root::<Sha256>());
             let mut mmr = mmr.into_dirty();
             assert!(matches!(mmr.pop(), Err(Empty)));
             let mut mmr = mmr.merkleize(&mut hasher, None);
@@ -951,7 +1057,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = CleanMmr::new::<Sha256>();
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
@@ -996,11 +1102,11 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let mut test_mmr = CleanMmr::new(&mut hasher);
+            let mut test_mmr = CleanMmr::new::<Sha256>();
             test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let batched_mmr = CleanMmr::new(&mut hasher);
+            let batched_mmr = CleanMmr::new::<Sha256>();
 
             // First element transitions Clean -> Dirty explicitly
             let mut dirty_mmr = batched_mmr.into_dirty();
@@ -1033,7 +1139,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let test_mmr = CleanMmr::new(&mut hasher);
+            let test_mmr = CleanMmr::new::<Sha256>();
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
@@ -1099,7 +1205,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 100;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
 
             // Pop off one node at a time until empty, confirming the root matches reference.
@@ -1108,7 +1214,7 @@ mod tests {
                 assert!(dirty_mmr.pop().is_ok());
                 mmr = dirty_mmr.merkleize(&mut hasher, None);
                 let root = *mmr.root();
-                let reference_mmr = CleanMmr::new(&mut hasher);
+                let reference_mmr = CleanMmr::new::<Sha256>();
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
@@ -1137,7 +1243,7 @@ mod tests {
                 mmr.pop().unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let reference_mmr = CleanMmr::new(&mut hasher);
+            let reference_mmr = CleanMmr::new::<Sha256>();
             let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
             assert_eq!(*mmr.root(), *reference_mmr.root());
             let mut mmr = mmr.into_dirty();
@@ -1154,7 +1260,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1192,7 +1298,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mut mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
             let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
@@ -1207,7 +1313,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
             let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
@@ -1220,7 +1326,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
             do_batch_update(&mut hasher, mmr, None);
         });
@@ -1254,7 +1360,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1296,7 +1402,7 @@ mod tests {
         executor.start(|_| async move {
             {
                 // Out of bounds: location >= leaf count.
-                let mmr = CleanMmr::new(&mut hasher);
+                let mmr = CleanMmr::new::<Sha256>();
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100).into_dirty();
                 let result = mmr.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::InvalidPosition(_))));
@@ -1304,7 +1410,7 @@ mod tests {
 
             {
                 // Pruned leaf.
-                let mmr = CleanMmr::new(&mut hasher);
+                let mmr = CleanMmr::new::<Sha256>();
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
                 mmr.prune_to_pos(Position::new(50));
                 let mut dirty = mmr.into_dirty();
@@ -1516,7 +1622,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Range end > leaves errors on empty MMR
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             let result = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
@@ -1540,7 +1646,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
-            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new::<Sha256>();
             let result = mmr.proof(Location::new_unchecked(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),

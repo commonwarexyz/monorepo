@@ -1,7 +1,8 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::mmr::{
-    location::LocationRangeExt as _, mem::DirtyMmr, Location, StandardHasher,
+    diff::UnmerkleizedBatch, location::LocationRangeExt as _, mem::CleanMmr, Location,
+    StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -18,18 +19,22 @@ fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = DirtyMmr::new();
+        let mut mmr = CleanMmr::new::<Sha256>();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 
         block_on(async {
-            for _ in 0..n {
-                let element = sha256::Digest::random(&mut sampler);
-                mmr.add(&mut hasher, &element);
-                elements.push(element);
-            }
+            let changeset = {
+                let mut diff = UnmerkleizedBatch::new(&mmr);
+                for _ in 0..n {
+                    let element = sha256::Digest::random(&mut sampler);
+                    diff.add(&mut hasher, &element);
+                    elements.push(element);
+                }
+                diff.merkleize(&mut hasher).into_changeset()
+            };
+            mmr.apply(changeset);
         });
-        let mmr = mmr.merkleize(&mut hasher, None);
         let root = *mmr.root();
 
         // Generate SAMPLE_SIZE random starts without replacement and create/verify range proofs
