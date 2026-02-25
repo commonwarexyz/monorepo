@@ -9,16 +9,14 @@ use commonware_storage::{
         self,
         immutable::{self, Config},
         store::LogStore,
-        Durable, Merkleized,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
-/// Database type alias for the clean (merkleized, durable) state.
-pub type Database<E> =
-    immutable::Immutable<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
+/// Database type alias.
+pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = immutable::Operation<Key, Value>;
@@ -87,7 +85,7 @@ where
     }
 
     async fn add_operations(
-        self,
+        mut self,
         operations: Vec<Self::Operation>,
     ) -> Result<Self, commonware_storage::qmdb::Error> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
@@ -95,26 +93,21 @@ where
             error!("operations must end with a commit");
             return Ok(self);
         }
-        let mut db = self.into_mutable();
-        let num_ops = operations.len();
 
-        for (i, operation) in operations.into_iter().enumerate() {
+        let mut batch = self.new_batch();
+        for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    db.set(key, value).await?;
+                    batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    let (durable_db, _) = db.commit(metadata).await?;
-                    if i == num_ops - 1 {
-                        // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
-                    }
-                    // Not the last operation - continue in mutable state
-                    db = durable_db.into_mutable();
+                    let cs = batch.finalize(metadata);
+                    self.commit_changeset(cs).await?;
+                    batch = self.new_batch();
                 }
             }
         }
-        unreachable!("operations must end with a commit");
+        Ok(self)
     }
 
     fn root(&self) -> Key {

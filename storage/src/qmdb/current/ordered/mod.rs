@@ -26,10 +26,10 @@ pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.
 
     use crate::{
-        kv::{Batchable as _, Gettable as _},
+        kv::Batchable,
         mmr::Location,
         qmdb::{
-            any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
+            any::states::CleanAny,
             current::BitmapPrunedBits,
             store::{
                 batch_tests::{TestKey, TestValue},
@@ -47,9 +47,9 @@ pub mod tests {
     ///
     /// This test builds a small database, performs basic operations (create, delete, commit),
     /// and verifies state is preserved across close/reopen cycles.
-    pub fn test_build_small_close_reopen<C, F, Fut>(mut open_db: F)
+    pub(crate) fn test_build_small_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + BitmapPrunedBits,
+        C: CleanAny + Batchable + BitmapPrunedBits,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,

@@ -19,7 +19,7 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted MMR** (`CleanMmr<Digest>`): An in-memory MMR of digests at and above the
+//! - **Grafted MMR** (`Mmr<Digest>`): An in-memory MMR of digests at and above the
 //!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
 //!   into a single authenticated structure (see below).
 //!
@@ -126,7 +126,7 @@
 //!
 //! When operations are added or bits change (e.g. an operation becomes inactive during floor
 //! raising), only the affected chunks are marked "dirty". During merkleization
-//! (`into_merkleized`), only dirty grafted leaves are recomputed and their ancestors are
+//! (`merkleize`), only dirty grafted leaves are recomputed and their ancestors are
 //! propagated upward through the cache. This avoids recomputing the entire grafted tree.
 //!
 //! ## Pruning
@@ -183,16 +183,19 @@ use crate::{
             FixedConfig as AnyFixedConfig, ValueEncoding, VariableConfig as AnyVariableConfig,
         },
         operation::Committable,
-        Durable, Error,
+        Error,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    collections::HashSet,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 pub mod db;
 mod grafting;
@@ -321,10 +324,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
     context: E,
     config: FixedConfig<T>,
     new_index: NewIndex,
-) -> Result<
-    db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
-    Error,
->
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -400,7 +400,8 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        state: db::Merkleized { root },
+        root: Some(root),
+        dirty_chunks: HashSet::new(),
     })
 }
 
@@ -409,10 +410,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>
     context: E,
     config: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
     new_index: NewIndex,
-) -> Result<
-    db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
-    Error,
->
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -488,7 +486,8 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool: pool,
-        state: db::Merkleized { root },
+        root: Some(root),
+        dirty_chunks: HashSet::new(),
     })
 }
 
@@ -512,9 +511,9 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FixedConfig, VariableConfig};
     use crate::{
-        kv::Batchable as _,
+        kv::Batchable,
         qmdb::{
-            any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
+            any::states::CleanAny,
             store::{
                 batch_tests::{TestKey, TestValue},
                 LogStore,
@@ -592,10 +591,10 @@ pub mod tests {
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        mut db: C::Mutable,
-    ) -> Result<C::Mutable, Error>
+        mut db: C,
+    ) -> Result<C, Error>
     where
-        C: CleanAny,
+        C: CleanAny + Batchable,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
     {
@@ -634,14 +633,14 @@ pub mod tests {
         Ok(db)
     }
 
-    pub fn apply_random_ops<C>(
+    pub(crate) fn apply_random_ops<C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        db: C::Mutable,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C::Mutable, Error>>>>
+        db: C,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error>>>>
     where
-        C: CleanAny + 'static,
+        C: CleanAny + Batchable + 'static,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
     {
@@ -657,11 +656,10 @@ pub mod tests {
     ///
     /// The factory should return a clean (Merkleized, Durable) database when given a context and
     /// partition name. The factory will be called multiple times to test reopening.
-    pub fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
+    pub(crate) fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + 'static,
+        C: CleanAny + Batchable + 'static,
         C::Key: TestKey,
-        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -722,11 +720,10 @@ pub mod tests {
     ///
     /// This test builds a random database and simulates recovery from different types of
     /// failure scenarios.
-    pub fn test_simulate_write_failures<C, F, Fut>(mut open_db: F)
+    pub(crate) fn test_simulate_write_failures<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + 'static,
+        C: CleanAny + Batchable + 'static,
         C::Key: TestKey,
-        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -807,11 +804,10 @@ pub mod tests {
     ///
     /// This test verifies that pruning operations do not affect the root hash - two databases
     /// with identical operations but different pruning schedules should have the same root.
-    pub fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
+    pub(crate) fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny,
+        C: CleanAny + Batchable,
         C::Key: TestKey,
-        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -886,11 +882,10 @@ pub mod tests {
     /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
     /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
+    pub(crate) fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + BitmapPrunedBits + 'static,
+        C: CleanAny + Batchable + BitmapPrunedBits + 'static,
         C::Key: TestKey,
-        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -962,12 +957,12 @@ pub mod tests {
     ///
     /// The `expected_op_count` and `expected_inactivity_floor` parameters specify the expected
     /// values after commit + merkleize + prune. These differ between ordered and unordered variants.
-    pub fn test_current_db_build_big<C, F, Fut>(
+    pub(crate) fn test_current_db_build_big<C, F, Fut>(
         mut open_db: F,
         expected_op_count: u64,
         expected_inactivity_floor: u64,
     ) where
-        C: CleanAny,
+        C: CleanAny + Batchable,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
@@ -1183,7 +1178,7 @@ pub mod tests {
     // Wrapper functions for build_big tests with ordered/unordered expected values.
     fn test_ordered_build_big<C, F, Fut>(open_db: F)
     where
-        C: CleanAny,
+        C: CleanAny + Batchable,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
@@ -1194,7 +1189,7 @@ pub mod tests {
 
     fn test_unordered_build_big<C, F, Fut>(open_db: F)
     where
-        C: CleanAny,
+        C: CleanAny + Batchable,
         C::Key: TestKey,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,

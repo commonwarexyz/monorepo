@@ -112,30 +112,30 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_config("store-fuzz-test", &context);
         let mut db = StoreDb::init(context.clone(), cfg)
             .await
-            .expect("Failed to init db")
-            .into_dirty();
+            .expect("Failed to init db");
         let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.write_batch([(Digest(*key), Some(value_bytes.clone()))])
-                        .await
-                        .expect("Update should not fail");
+                    let cs = db
+                        .new_batch()
+                        .write_batch([(Digest(*key), Some(value_bytes.clone()))])
+                        .finalize(None);
+                    db.commit(cs).await.expect("Update should not fail");
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Digest(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    let cs = db
+                        .new_batch()
+                        .write_batch([(Digest(*key), None)])
+                        .finalize(None);
+                    db.commit(cs).await.expect("Delete should not fail");
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (clean_db, _) = db
-                        .commit(metadata_bytes.clone())
-                        .await
-                        .expect("Commit should not fail");
-                    db = clean_db.into_dirty();
+                    let cs = db.new_batch().finalize(metadata_bytes.clone());
+                    db.commit(cs).await.expect("Commit should not fail");
                 }
 
                 Operation::Get { key } => {
@@ -147,9 +147,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    clean_db.sync().await.expect("Sync should not fail");
-                    db = clean_db.into_dirty();
+                    let cs = db.new_batch().finalize(None);
+                    db.commit(cs).await.expect("Commit should not fail");
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::Prune => {
@@ -177,15 +177,15 @@ fn fuzz(input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init db")
-                    .into_dirty();
+                    .expect("Failed to init db");
                     restarts += 1;
                 }
             }
         }
 
-        let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-        clean_db.destroy().await.expect("Destroy should not fail");
+        let cs = db.new_batch().finalize(None);
+        db.commit(cs).await.expect("Commit should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

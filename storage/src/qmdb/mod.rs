@@ -13,34 +13,19 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
-//! # Database States
+//! # Mutation
 //!
-//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
-//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//! All mutations go through `write_batch`:
 //!
-//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//! ```ignore
+//! db.write_batch([(key, Some(value))]).await?;
+//! let range = db.commit(metadata).await?;
+//! db.merkleize().await?;  // recompute root (current dbs only)
+//! ```
 //!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
-//!
-//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
-//! - `init()`                                      → `Clean`
-//! - `Clean.into_mutable()`                        → `Mutable`
-//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
-//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
-//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
-//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
-//!
-//! An authenticated database implements [store::LogStore] in every state, and keyed databases
-//! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
-//!
-//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
-//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
-//!
-//! Keyed databases additionally implement:
-//! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
+//! An authenticated database implements [store::LogStore] and keyed databases additionally
+//! implement [crate::kv::Gettable] and [crate::kv::Batchable]. After committing,
+//! [store::MerkleizedStore], [store::PrunableStore], and [crate::Persistable] are available.
 //!
 //! # Acknowledgments
 //!
@@ -53,10 +38,9 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{journaled::State as MerkleizationState, Location},
-    qmdb::{operation::Operation, store::State as DurabilityState},
+    mmr::Location,
+    qmdb::operation::Operation,
 };
-use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -127,15 +111,6 @@ impl From<crate::journal::authenticated::Error> for Error {
         }
     }
 }
-
-/// Type alias for merkleized state of a QMDB.
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state of a QMDB.
-pub type Unmerkleized = crate::mmr::mem::Dirty;
-/// Type alias for durable state of a QMDB.
-pub type Durable = store::Durable;
-/// Type alias for non-durable state of a QMDB.
-pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

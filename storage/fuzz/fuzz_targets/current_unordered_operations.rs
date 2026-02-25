@@ -179,7 +179,7 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Root => {
                     let clean_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let _root = clean_db.root();
+                    let _root = clean_db.root().expect("merkleized");
                     db = clean_db.into_mutable();
                 }
 
@@ -190,7 +190,7 @@ fn fuzz(data: FuzzInput) {
                     }
 
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let current_root = merkleized_db.root();
+                    let current_root = merkleized_db.root().expect("merkleized");
 
                     // Adjust start_loc and max_ops to be within the valid range
                     let start_loc = Location::new(start_loc % *current_op_count).unwrap();
@@ -224,7 +224,7 @@ fn fuzz(data: FuzzInput) {
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = merkleized_db.root();
+                    let root = merkleized_db.root().expect("merkleized");
 
                     if let Ok((range_proof, ops, chunks)) = merkleized_db
                         .range_proof(&mut hasher, start_loc, *max_ops)
@@ -263,7 +263,7 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
 
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    let current_root = merkleized_db.root();
+                    let current_root = merkleized_db.root().expect("merkleized");
 
                     match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {

@@ -190,16 +190,13 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
+                    db = durable_db.into_mutable();
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
-                    merkleized_db
-                        .prune(merkleized_db.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
@@ -213,14 +210,13 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
-                        root: clean_db.root(),
-                        range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
+                        root: durable_db.root(),
+                        range: durable_db.inactivity_floor_loc()..durable_db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(clean_db);
+                    let wrapped_src = Arc::new(durable_db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -256,7 +252,6 @@ fn fuzz(mut input: FuzzInput) {
         }
 
         let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
         db.destroy().await.expect("Destroy should not fail");
     });
 }

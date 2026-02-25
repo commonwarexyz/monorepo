@@ -11,7 +11,7 @@ use crate::{
     qmdb::{
         any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Durable, Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -24,11 +24,11 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Merkleized<H>, Durable>
+    Db<E, K, V, H, T>
 where
     Operation<K, V>: Codec,
 {
@@ -74,7 +74,7 @@ pub mod partitioned {
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
             operation::Key,
-            Durable, Error, Merkleized,
+            Error,
         },
         translator::Translator,
     };
@@ -91,16 +91,13 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, S = Merkleized<H>, D = Durable> =
-        crate::qmdb::any::unordered::Db<
-            E,
-            Journal<E, Operation<K, V>>,
-            Index<T, Location, P>,
-            H,
-            Update<K, V>,
-            S,
-            D,
-        >;
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        Index<T, Location, P>,
+        H,
+        Update<K, V>,
+    >;
 
     impl<
             E: Storage + Clock + Metrics,
@@ -109,7 +106,7 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
+        > Db<E, K, V, H, T, P>
     where
         Operation<K, V>: Codec,
     {
@@ -144,15 +141,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 1, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 2, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -174,7 +169,6 @@ pub(crate) mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            NonDurable, Unmerkleized,
         },
         translator::TwoCap,
     };
@@ -214,14 +208,11 @@ pub(crate) mod test {
         VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    type MutableAnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type MutableAnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Type alias for Digest-valued variable DB (used for generic tests that require Digest values).
-    type DigestAnyTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type DigestAnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
@@ -344,7 +335,14 @@ pub(crate) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
+                .await
+                .unwrap();
             let root = db.root();
 
             // Update every 3rd key
@@ -373,7 +371,14 @@ pub(crate) mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
+                .await
+                .unwrap();
             let root = db.root();
 
             // Delete every 7th key
@@ -400,7 +405,14 @@ pub(crate) mod test {
                 let k = Sha256::hash(&i.to_be_bytes());
                 db.write_batch([(k, None)]).await.unwrap();
             }
-            let mut db = db.commit(None).await.unwrap().0.into_merkleized();
+            let mut db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
+                .await
+                .unwrap();
 
             let root = db.root();
             assert_eq!(db.bounds().await.end, 1961);
@@ -483,7 +495,7 @@ pub(crate) mod test {
             let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
-            let mut db = db.into_merkleized();
+            let mut db = db.into_merkleized().await.unwrap();
             let result = db.prune(beyond_floor).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
@@ -507,12 +519,12 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, Position},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+        type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Mmr = TestMmr;
@@ -553,8 +565,7 @@ pub(crate) mod test {
         }
     }
 
-    type MutableDb =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    type MutableDb = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {

@@ -1,11 +1,9 @@
 #[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::any::states::{
-    CleanAny, MerkleizedNonDurableAny, MutableAny, PersistableMutableLog, UnmerkleizedDurableAny,
-};
+use crate::qmdb::any::states::CleanAny;
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    kv::{self, Batchable},
+    kv,
     mmr::Location,
     qmdb::{
         any::{
@@ -14,13 +12,14 @@ use crate::{
         },
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Key, Operation as OperationTrait},
-        update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
-        NonDurable, Unmerkleized,
+        update_known_loc, Error,
     },
 };
-use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_codec::Codec;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
+use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
@@ -36,9 +35,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > Db<E, C, I, H, Update<K, V>, M, D>
+    > Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -81,22 +78,25 @@ impl<
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+    > Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    /// Performs a batch update, invoking the callback for each resulting operation. The first
-    /// argument of the callback is the activity status of the operation, and the second argument is
-    /// the location of the operation it inactivates (if any).
+    /// Performs a batch update, invoking the callback for each resulting operation. Returns the
+    /// number of floor-raising steps performed. The first argument of the callback is the activity
+    /// status of the operation, and the second argument is the location of the operation it
+    /// inactivates (if any).
     pub(crate) async fn write_batch_with_callback<F>(
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
         mut callback: F,
-    ) -> Result<(), Error>
+    ) -> Result<u64, Error>
     where
         F: FnMut(bool, Option<Location>),
     {
+        let mut steps: u64 = 0;
+
         // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
         let mut updates = BTreeMap::new();
         let iter = iter.into_iter();
@@ -136,7 +136,7 @@ where
                 callback(false, Some(old_loc));
                 self.active_keys -= 1;
             }
-            self.durable_state.steps += 1;
+            steps += 1;
         }
 
         // Process the creates.
@@ -152,7 +152,8 @@ where
             self.active_keys += 1;
         }
 
-        Ok(())
+        self.pending_steps += steps;
+        Ok(steps)
     }
 
     /// Writes a batch of key-value pairs to the database.
@@ -164,7 +165,121 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
-        self.write_batch_with_callback(iter, |_, _| {}).await
+        self.write_batch_with_callback(iter, |_, _| {}).await?;
+        Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Db<E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: Codec,
+    V::Value: Send + Sync,
+    super::db::AuthenticatedLog<E, C, H>: Mutable<Item = Operation<K, V>>,
+{
+    /// Create a batch for buffering mutations.
+    pub const fn new_batch(&self) -> super::db::Batch<'_, Self, K, V::Value> {
+        super::db::Batch {
+            _db: self,
+            writes: Vec::new(),
+        }
+    }
+
+    /// Commit a changeset, persisting all changes to disk.
+    pub async fn commit_changeset(
+        &mut self,
+        changeset: super::db::Changeset<K, V::Value>,
+    ) -> Result<Range<Location>, Error> {
+        self.write_batch_with_callback(changeset.writes, |_, _| {})
+            .await?;
+        let steps = self.pending_steps;
+        self.pending_steps = 0;
+        self.commit_inner(steps, changeset.metadata).await
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Db<E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: Codec,
+    V::Value: Send + Sync,
+    super::db::AuthenticatedLog<E, C, H>: Mutable<Item = Operation<K, V>>,
+{
+    /// Test-only: identity transition (was consuming type-state transition).
+    pub const fn into_mutable(self) -> Self {
+        self
+    }
+
+    /// Test-only: identity transition (was consuming type-state transition).
+    #[allow(clippy::unused_async)]
+    pub async fn into_merkleized(self) -> Result<Self, Error> {
+        Ok(self)
+    }
+
+    /// Test-only: backward-compat consuming commit.
+    pub async fn commit(
+        mut self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self, Range<Location>), Error> {
+        let steps = self.pending_steps;
+        self.pending_steps = 0;
+        let range = self.commit_inner(steps, metadata).await?;
+        Ok((self, range))
+    }
+
+    /// Test-only: returns accumulated steps.
+    pub const fn steps(&self) -> u64 {
+        self.pending_steps
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+    > CleanAny for Db<E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: Codec,
+    V::Value: Send + Sync,
+    super::db::AuthenticatedLog<E, C, H>: Mutable<Item = Operation<K, V>>,
+{
+    fn into_mutable(self) -> Self {
+        self
+    }
+
+    async fn into_merkleized(self) -> Result<Self, Error> {
+        Ok(self)
+    }
+
+    async fn commit(
+        mut self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self, Range<Location>), Error> {
+        let steps = self.pending_steps;
+        self.pending_steps = 0;
+        let range = self.commit_inner(steps, metadata).await?;
+        Ok((self, range))
+    }
+
+    fn steps(&self) -> u64 {
+        self.pending_steps
     }
 }
 
@@ -175,9 +290,9 @@ impl<
         I: Index<Value = Location>,
         H: Hasher,
         U: Send + Sync,
-    > Db<E, C, I, H, U, Merkleized<H>, Durable>
+    > Db<E, C, I, H, U>
 {
-    /// Returns an [Db] initialized directly from the given components. The log is
+    /// Returns a [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     pub(crate) async fn from_components(
@@ -206,8 +321,8 @@ impl<
             inactivity_floor_loc,
             snapshot,
             last_commit_loc,
-            durable_state: Durable {},
             active_keys,
+            pending_steps: 0,
             _update: core::marker::PhantomData,
         })
     }
@@ -220,9 +335,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -236,120 +349,26 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+    > kv::Batchable for Db<E, C, I, H, Update<K, V>>
 where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: CodecShared,
+    Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
+        Self: Send,
         Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
         Iter::IntoIter: Send,
     {
-        self.write_batch(iter).await
-    }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: CodecShared,
-{
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-
-    fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
-    }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> UnmerkleizedDurableAny
-    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
-    }
-
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
-    }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-
-    fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
-    }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
-        self.commit(metadata).await
-    }
-
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
-    }
-
-    fn steps(&self) -> u64 {
-        self.durable_state.steps
+        self.write_batch_with_callback(iter, |_, _| {}).await?;
+        Ok(())
     }
 }
 
@@ -358,13 +377,11 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        kv::Gettable as _,
+        kv::Batchable,
         mmr::StandardHasher,
-        qmdb::{
-            store::{LogStore, MerkleizedStore},
-            verify_proof,
-        },
+        qmdb::{store::MerkleizedStore, verify_proof},
     };
+    use commonware_codec::CodecShared;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::deterministic::Context;
     use commonware_utils::NZU64;
@@ -373,12 +390,12 @@ pub(super) mod test {
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
-        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable
     {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
-        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable
     {
     }
 

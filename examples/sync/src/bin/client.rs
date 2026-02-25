@@ -218,7 +218,7 @@ where
         let database: current::Database<_> = sync::sync(engine_config).await?;
         info!(
             sync_iteration = iteration,
-            canonical_root = %database.root(),
+            canonical_root = ?database.root(),
             ops_root = %database.ops_root(),
             sync_interval = ?config.sync_interval,
             "✅ Current sync completed successfully"

@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
-    journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
+    diff::Batch,
+    journaled::{Config, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
     mem, Error, Position, StandardHasher as Standard,
 };
@@ -44,7 +45,6 @@ enum MmrJournaledOperation {
         end_loc: u8,
     },
     Sync,
-    Merkleize,
     PruneAll,
     PruneToPos {
         pos: u64,
@@ -93,24 +93,21 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
     }
 }
 
-enum MmrState<
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    D: commonware_cryptography::Digest,
-> {
-    Clean(CleanMmr<E, D>),
-    Dirty(DirtyMmr<E, D>),
-}
-
 fn historical_root(
     leaves: &[Vec<u8>],
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let mut hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::DirtyMmr::new();
-    for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-        mmr.add(&mut hasher, element);
-    }
-    *mmr.merkleize(&mut hasher, None).root()
+    let mut mmr = mem::Mmr::new(&mut hasher);
+    let changeset = {
+        let mut diff = Batch::new(&mmr);
+        for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
+            diff.add(&mut hasher, element);
+        }
+        diff.merkleize(&mut hasher).into_changeset()
+    };
+    mmr.apply(changeset);
+    *mmr.root()
 }
 
 fn fuzz(input: FuzzInput) {
@@ -119,7 +116,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut leaves = Vec::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mmr = Mmr::init(
+        let mut mmr = Mmr::init(
             context.clone(),
             &mut hasher,
             test_config("fuzz-test-mmr-journaled", &context),
@@ -129,11 +126,10 @@ fn fuzz(input: FuzzInput) {
 
         // Historical leaf counts that are valid for proofs against the current MMR lineage.
         let mut historical_sizes: Vec<Location> = Vec::new();
-        let mut mmr = MmrState::Clean(mmr);
         let mut restarts = 0usize;
 
         for op in input.operations {
-            mmr = match op {
+            match op {
                 MmrJournaledOperation::Add { data } => {
                     let limited_data = if data.len() > MAX_DATA_SIZE {
                         &data[0..MAX_DATA_SIZE]
@@ -145,20 +141,19 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    // Add only works on Dirty MMR, so make it dirty if clean
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m.into_dirty(),
-                        MmrState::Dirty(m) => m,
-                    };
-
                     let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
+                    let changeset = {
+                        let inner = mmr.inner_mmr();
+                        let mut diff = Batch::new(&*inner);
+                        diff.add(&mut hasher, limited_data);
+                        diff.merkleize(&mut hasher).into_changeset()
+                    };
+                    mmr.apply(changeset);
+                    let pos = mmr.last_leaf_pos().unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
-
-                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::AddBatched { data } => {
@@ -172,54 +167,36 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m.into_dirty(),
-                        MmrState::Dirty(m) => m,
-                    };
-
                     let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
+                    let changeset = {
+                        let inner = mmr.inner_mmr();
+                        let mut diff = Batch::new(&*inner);
+                        diff.add(&mut hasher, limited_data);
+                        diff.merkleize(&mut hasher).into_changeset()
+                    };
+                    mmr.apply(changeset);
+                    let pos = mmr.last_leaf_pos().unwrap();
                     assert!(mmr.size() > size_before);
 
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
-
-                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::Pop { count } => {
-                    // Pop requires Dirty MMR
-                    let mut mmr = match mmr {
-                        MmrState::Clean(m) => m.into_dirty(),
-                        MmrState::Dirty(m) => m,
-                    };
-
                     if count as u64 <= mmr.leaves() {
-                        let _ = mmr.pop(count as usize).await;
+                        let _ = mmr.pop(count as usize, &mut hasher).await;
                         let new_len = mmr.leaves();
                         leaves.truncate(new_len.as_u64() as usize);
                         historical_sizes.truncate(new_len.as_u64() as usize);
                     }
-                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
                     let _ = mmr.get_node(Position::new(pos)).await;
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::Proof { location } => {
-                    // Proof requires Clean MMR
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
-
                     if mmr.leaves() > 0 {
                         let location = location % mmr.leaves().as_u64();
                         let location = Location::new(location).unwrap();
@@ -239,20 +216,12 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                     }
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::RangeProof { start_loc, end_loc } => {
                     let start_loc = start_loc.clamp(0, u8::MAX - 1);
                     let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
                     let start_loc = start_loc as u64;
-
-                    // RangeProof requires Clean MMR
-                    let state = mmr;
-                    let mmr = match state {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
 
                     if mmr.leaves() > 0 {
                         let range =
@@ -274,19 +243,14 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                     }
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::HistoricalRangeProof { start_loc, end_loc } => {
                     let start_loc = start_loc as u64;
                     let end_loc = (end_loc as u64).clamp(start_loc, u8::MAX as u64);
-                    let range =
-                        Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+                    let range = Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
                     let requested_leaves = if historical_sizes.is_empty() {
-                        match &mmr {
-                            MmrState::Clean(m) => m.leaves(),
-                            MmrState::Dirty(m) => m.leaves(),
-                        }
+                        mmr.leaves()
                     } else {
                         let seed = (start_loc + end_loc) as usize;
                         let idx = seed % historical_sizes.len();
@@ -294,213 +258,80 @@ fn fuzz(input: FuzzInput) {
                     };
                     let expected_root = historical_root(&leaves, requested_leaves);
 
-                    match mmr {
-                        MmrState::Clean(mmr) => {
-                            let result = mmr
-                                .historical_range_proof(requested_leaves, range.clone())
-                                .await;
-                            match result {
-                                Ok(historical_proof) => {
-                                    let mut verify_hasher = Standard::<Sha256>::new();
-                                    assert!(historical_proof.verify_range_inclusion(
-                                        &mut verify_hasher,
-                                        &leaves[range.to_usize_range()],
-                                        range.start,
-                                        &expected_root
-                                    ));
-                                }
-                                Err(Error::RangeOutOfBounds(_)) => {
-                                    assert!(range.end > requested_leaves);
-                                }
-                                Err(Error::Empty) => {
-                                    assert!(range.is_empty());
-                                }
-                                Err(Error::ElementPruned(_)) =>
-                                    assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap())),
-                                Err(err) => panic!(
-                                    "unexpected clean historical_range_proof error: {err:?}"
-                                ),
-                            }
-                            MmrState::Clean(mmr)
+                    let result = mmr
+                        .historical_range_proof(requested_leaves, range.clone())
+                        .await;
+                    match result {
+                        Ok(historical_proof) => {
+                            let mut verify_hasher = Standard::<Sha256>::new();
+                            assert!(historical_proof.verify_range_inclusion(
+                                &mut verify_hasher,
+                                &leaves[range.to_usize_range()],
+                                range.start,
+                                &expected_root
+                            ));
                         }
-                        MmrState::Dirty(mmr) => {
-                            let result = mmr
-                                .historical_range_proof(requested_leaves, range.clone())
-                                .await;
-                            match result {
-                                Err(Error::Unmerkleized) => {
-                                    let clean = mmr.merkleize(&mut hasher);
-                                    match clean
-                                        .historical_range_proof(requested_leaves, range.clone())
-                                        .await
-                                    {
-                                        Ok(historical_proof) => {
-                                            let mut verify_hasher = Standard::<Sha256>::new();
-                                            assert!(historical_proof.verify_range_inclusion(
-                                                &mut verify_hasher,
-                                                &leaves[range.to_usize_range()],
-                                                range.start,
-                                                &expected_root
-                                            ));
-                                        }
-                                        Err(err) => panic!(
-                                            "unexpected dirty retry historical_range_proof error: {err:?}"
-                                        ),
-                                    }
-                                    MmrState::Clean(clean)
-                                }
-                                Ok(historical_proof) => {
-                                    let clean = mmr.merkleize(&mut hasher);
-                                    let mut verify_hasher = Standard::<Sha256>::new();
-                                    assert!(historical_proof.verify_range_inclusion(
-                                        &mut verify_hasher,
-                                        &leaves[range.to_usize_range()],
-                                        range.start,
-                                        &expected_root
-                                    ));
-                                    MmrState::Clean(clean)
-                                }
-                                Err(Error::RangeOutOfBounds(_)) => {
-                                    assert!(range.end > requested_leaves);
-                                    MmrState::Dirty(mmr)
-                                }
-                                Err(Error::Empty) => {
-                                    assert!(range.is_empty());
-                                    MmrState::Dirty(mmr)
-                                }
-                                Err(Error::ElementPruned(_)) => {
-                                    assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap()));
-                                    MmrState::Dirty(mmr)
-                                }
-                                Err(err) => panic!(
-                                    "unexpected dirty historical_range_proof error: {err:?}"
-                                ),
-                            }
+                        Err(Error::RangeOutOfBounds(_)) => {
+                            assert!(range.end > requested_leaves);
                         }
+                        Err(Error::Empty) => {
+                            assert!(range.is_empty());
+                        }
+                        Err(Error::ElementPruned(_)) => {
+                            assert!(!mmr
+                                .bounds()
+                                .contains(&Position::try_from(range.start).unwrap()));
+                        }
+                        Err(err) => panic!("unexpected historical_range_proof error: {err:?}"),
                     }
                 }
 
                 MmrJournaledOperation::Sync => {
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
                     mmr.sync().await.unwrap();
-                    MmrState::Clean(mmr)
-                }
-
-                MmrJournaledOperation::Merkleize => {
-                    let state = mmr;
-                    let mmr = match state {
-                        MmrState::Clean(m) => m, // No-op for Clean
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::PruneAll => {
-                    // PruneAll requires Clean MMR
-                    let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
                     mmr.prune_all().await.unwrap();
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::PruneToPos { pos } => {
-                    // PruneToPos requires Clean MMR
-                    let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
                     if mmr.size() > 0 {
                         let safe_pos = pos % (mmr.size() + 1).as_u64();
                         mmr.prune_to_pos(safe_pos.into()).await.unwrap();
                         assert!(mmr.bounds().start <= mmr.size());
                     }
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::GetRoot => {
-                    // GetRoot requires Clean MMR
-                    let mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
                     let _ = mmr.root();
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::GetSize => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let _ = m.size();
-                        }
-                        MmrState::Dirty(m) => {
-                            let _ = m.size();
-                        }
-                    }
-                    mmr
+                    let _ = mmr.size();
                 }
 
                 MmrJournaledOperation::GetLeaves => {
-                    let (leaves, size) = match &mmr {
-                        MmrState::Clean(m) => (m.leaves().as_u64(), m.size().as_u64()),
-                        MmrState::Dirty(m) => (m.leaves().as_u64(), m.size().as_u64()),
-                    };
-                    assert!(leaves <= size);
-                    mmr
+                    let (leaves_count, size) = (mmr.leaves().as_u64(), mmr.size().as_u64());
+                    assert!(leaves_count <= size);
                 }
 
                 MmrJournaledOperation::GetLastLeafPos => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let last_pos = m.last_leaf_pos();
-                            if m.size() > 0 && m.leaves() > 0 {
-                                assert!(last_pos.is_some());
-                            }
-                        }
-                        MmrState::Dirty(m) => {
-                            let last_pos = m.last_leaf_pos();
-                            if m.size() > 0 && m.leaves() > 0 {
-                                assert!(last_pos.is_some());
-                            }
-                        }
+                    let last_pos = mmr.last_leaf_pos();
+                    if mmr.size() > 0 && mmr.leaves() > 0 {
+                        assert!(last_pos.is_some());
                     }
-                    mmr
                 }
 
                 MmrJournaledOperation::GetPrunedToPos => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let pruned_pos = m.bounds().start;
-                            assert!(pruned_pos <= m.size());
-                        }
-                        MmrState::Dirty(m) => {
-                            let pruned_pos = m.bounds().start;
-                            assert!(pruned_pos <= m.size());
-                        }
-                    }
-                    mmr
+                    let pruned_pos = mmr.bounds().start;
+                    assert!(pruned_pos <= mmr.size());
                 }
 
                 MmrJournaledOperation::GetOldestRetainedPos => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let bounds = m.bounds();
-                            if !bounds.is_empty() {
-                                assert!(bounds.start < m.size());
-                            }
-                        }
-                        MmrState::Dirty(m) => {
-                            let bounds = m.bounds();
-                            if !bounds.is_empty() {
-                                assert!(bounds.start < m.size());
-                            }
-                        }
+                    let bounds = mmr.bounds();
+                    if !bounds.is_empty() {
+                        assert!(bounds.start < mmr.size());
                     }
-                    mmr
                 }
 
                 MmrJournaledOperation::Reinit => {
@@ -521,7 +352,8 @@ fn fuzz(input: FuzzInput) {
                     let recovered_leaves = new_mmr.leaves().as_u64() as usize;
                     leaves.truncate(recovered_leaves);
                     historical_sizes.truncate(recovered_leaves);
-                    MmrState::Clean(new_mmr)
+                    mmr = new_mmr;
+                    continue;
                 }
 
                 MmrJournaledOperation::InitSync {
@@ -542,7 +374,7 @@ fn fuzz(input: FuzzInput) {
                         pinned_nodes: None,
                     };
 
-                    if let Ok(sync_mmr) = CleanMmr::init_sync(
+                    if let Ok(sync_mmr) = Mmr::init_sync(
                         context
                             .with_label("sync")
                             .with_attribute("instance", restarts),
@@ -556,7 +388,6 @@ fn fuzz(input: FuzzInput) {
                         sync_mmr.destroy().await.unwrap();
                     }
                     restarts += 1;
-                    mmr
                 }
             };
         }

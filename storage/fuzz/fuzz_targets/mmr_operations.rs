@@ -3,7 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::CleanMmr, Location, Position, StandardHasher as Standard};
+use commonware_storage::mmr::{
+    diff::Batch, mem::Mmr, Location, Position, StandardHasher as Standard,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -137,7 +139,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -157,21 +159,19 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_pos = dirty_mmr.add(&mut hasher, limited_data);
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
+                    let changeset = {
+                        let mut diff = Batch::new(&mmr);
+                        let _ = diff.add(&mut hasher, limited_data);
+                        diff.merkleize(&mut hasher).into_changeset()
+                    };
+                    mmr.apply(changeset);
+                    let mmr_pos = mmr.last_leaf_pos().unwrap();
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
                     assert!(
                         mmr.size() > size_before,
                         "Operation {op_idx}: Size should increase after add"
-                    );
-
-                    assert_eq!(
-                        mmr.last_leaf_pos(),
-                        Some(mmr_pos),
-                        "Operation {op_idx}: Last leaf position should be the added position"
                     );
 
                     assert!(
@@ -182,9 +182,8 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::Pop => {
                     let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_result = dirty_mmr.pop();
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
+                    let mut diff = Batch::new(&mmr);
+                    let mmr_result = diff.pop();
                     let ref_result = reference.pop();
 
                     assert_eq!(
@@ -193,6 +192,9 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     if mmr_result.is_ok() {
+                        let changeset = diff.merkleize(&mut hasher).into_changeset();
+                        mmr.apply(changeset);
+
                         assert!(
                             mmr.size() < size_before,
                             "Operation {op_idx}: Size should decrease after successful pop"

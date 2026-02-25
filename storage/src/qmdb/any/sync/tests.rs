@@ -48,9 +48,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible
-    for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
-{
+impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }
@@ -1376,7 +1374,7 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>).await.unwrap().0
         }
     }
 
@@ -1431,11 +1429,7 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
-                .await
-                .unwrap()
-                .0
-                .into_merkleized()
+            db.commit(None::<Vec<u8>>).await.unwrap().0
         }
     }
 
@@ -1487,7 +1481,7 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>).await.unwrap().0
         }
     }
 
@@ -1540,11 +1534,7 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
-                .await
-                .unwrap()
-                .0
-                .into_merkleized()
+            db.commit(None::<Vec<u8>>).await.unwrap().0
         }
     }
 }

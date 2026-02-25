@@ -22,7 +22,7 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         operation::{Committable, Key},
-        Durable, Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -125,7 +125,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -154,7 +154,7 @@ where
         page_cache: cfg.page_cache,
     };
 
-    let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -166,10 +166,8 @@ where
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -185,7 +183,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -216,7 +214,7 @@ where
         write_buffer: cfg.log_write_buffer,
     };
 
-    let log = authenticated::Journal::<_, VJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -228,10 +226,8 @@ where
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -294,13 +290,9 @@ pub(crate) mod test {
     }
 
     use crate::{
-        kv::{Batchable as _, Gettable as _},
+        kv::Batchable,
         mmr::Location,
-        qmdb::{
-            any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-            store::{LogStore, MerkleizedStore},
-        },
-        Persistable,
+        qmdb::{any::states::CleanAny, store::MerkleizedStore},
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -311,7 +303,7 @@ pub(crate) mod test {
     /// Test that merkleization state changes don't reset `steps`.
     pub(crate) async fn test_any_db_steps_not_reset<D>(db: D)
     where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest> + Batchable,
     {
         // Create a db with a couple keys.
         let mut db = db.into_mutable();
@@ -352,7 +344,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -429,7 +421,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
     {
         let root = db.root();
 
@@ -497,7 +489,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
     {
         let mut db = db.into_mutable();
 
@@ -529,7 +521,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -605,7 +597,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -738,7 +730,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
@@ -799,7 +791,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest> + Batchable,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();

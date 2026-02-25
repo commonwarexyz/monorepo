@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{mem::DirtyMmr, Location, StandardHasher};
+use commonware_storage::mmr::{diff::Batch, mem::Mmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -63,15 +63,19 @@ fn bench_update(c: &mut Criterion) {
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = DirtyMmr::new();
-                            for _ in 0..leaves {
-                                let digest = sha256::Digest::random(&mut sampler);
-                                elements.push(digest);
-                                let pos = mmr.add(&mut h, &digest);
-                                let loc = Location::try_from(pos).expect("leaf position");
-                                leaf_locations.push(loc);
-                            }
-                            let mut mmr = mmr.merkleize(&mut h, None);
+                            let mut mmr = Mmr::new(&mut h);
+                            let changeset = {
+                                let mut diff = Batch::new(&mmr);
+                                for _ in 0..leaves {
+                                    let digest = sha256::Digest::random(&mut sampler);
+                                    elements.push(digest);
+                                    let pos = diff.add(&mut h, &digest);
+                                    let loc = Location::try_from(pos).expect("leaf position");
+                                    leaf_locations.push(loc);
+                                }
+                                diff.merkleize(&mut h).into_changeset()
+                            };
+                            mmr.apply(changeset);
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -93,15 +97,19 @@ fn bench_update(c: &mut Criterion) {
                                     }
                                 }
                                 _ => {
-                                    // Collect the map into a Vec of (position, element) pairs for batched updates
                                     let updates: Vec<(
                                         Location,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaf_batched(&mut h, pool.clone(), &updates)
-                                        .unwrap();
-                                    mmr.merkleize(&mut h, pool);
+                                    let changeset = {
+                                        let mut diff = Batch::new(&mmr);
+                                        if let Some(ref p) = pool {
+                                            diff = diff.with_pool(Some(p.clone()));
+                                        }
+                                        diff.update_leaf_batched(&updates).unwrap();
+                                        diff.merkleize(&mut h).into_changeset()
+                                    };
+                                    mmr.apply(changeset);
                                 }
                             }
 

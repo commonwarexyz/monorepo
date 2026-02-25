@@ -14,13 +14,13 @@ use crate::{
         any::VariableValue,
         operation::Committable,
         store::{LogStore, MerkleizedStore},
-        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
+        Error,
     },
 };
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use core::{marker::PhantomData, ops::Range};
+use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -65,35 +65,86 @@ pub struct Config<C> {
 }
 
 /// A keyless QMDB for variable length data.
-type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
+type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
-pub struct Keyless<
-    E: Storage + Clock + Metrics,
-    V: VariableValue,
-    H: Hasher,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
-    D: DurabilityState = Durable,
-> {
+pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     /// Authenticated journal of operations.
-    journal: Journal<E, V, H, M>,
+    journal: Journal<E, V, H>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Location,
-
-    /// Marker for durability state.
-    _durability: PhantomData<D>,
 }
 
-// Impl block for functionality available in all states.
-impl<
-        E: Storage + Clock + Metrics,
-        V: VariableValue,
-        H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > Keyless<E, V, H, M, D>
-{
+/// The result of [`Batch::finalize`], ready to be committed via [`Keyless::commit_changeset`].
+pub struct Changeset<V> {
+    items: Vec<V>,
+    metadata: Option<V>,
+}
+
+/// A buffered batch of mutations against a [`Keyless`] database.
+pub struct Batch<'a, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
+    _db: &'a Keyless<E, V, H>,
+    items: Vec<V>,
+}
+
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Batch<'_, E, V, H> {
+    /// Buffer an append into this batch.
+    pub fn append(mut self, value: V) -> Self {
+        self.items.push(value);
+        self
+    }
+
+    /// Finalize this batch into a [`Changeset`].
+    pub fn finalize(self, metadata: Option<V>) -> Changeset<V> {
+        Changeset {
+            items: self.items,
+            metadata,
+        }
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+    /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
+    /// and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        let mmr_cfg = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            page_cache: cfg.page_cache.clone(),
+        };
+
+        let journal_cfg = JournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_section,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            page_cache: cfg.page_cache,
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let mut journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
+        if journal.size().await == 0 {
+            warn!("no operations found in log, creating initial commit");
+            journal.append(Operation::Commit(None)).await?;
+            journal.sync().await?;
+        }
+
+        let last_commit_loc = journal
+            .size()
+            .await
+            .checked_sub(1)
+            .expect("at least one commit should exist");
+
+        Ok(Self {
+            journal,
+            last_commit_loc,
+        })
+    }
+
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -131,54 +182,6 @@ impl<
         };
 
         Ok(metadata)
-    }
-}
-
-// Implementation for the Clean state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Merkleized<H>, Durable>
-{
-    /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
-    /// and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let mut journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
-        if journal.size().await == 0 {
-            warn!("no operations found in log, creating initial commit");
-            let mut dirty_journal = journal.into_dirty();
-            dirty_journal.append(Operation::Commit(None)).await?;
-            journal = dirty_journal.merkleize();
-            journal.sync().await?;
-        }
-
-        let last_commit_loc = journal
-            .size()
-            .await
-            .checked_sub(1)
-            .expect("at least one commit should exist");
-
-        Ok(Self {
-            journal,
-            last_commit_loc,
-            _durability: PhantomData,
-        })
     }
 
     /// Return the root of the db.
@@ -249,20 +252,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         Ok(self.journal.destroy().await?)
     }
 
-    /// Convert this database into the Mutable state for accepting new operations.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
-        Keyless {
-            journal: self.journal.into_dirty(),
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        }
-    }
-}
-
-// Implementation for the Mutable state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Unmerkleized, NonDurable>
-{
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
         self.journal
@@ -271,66 +260,57 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             .map_err(Into::into)
     }
 
-    /// Commits any pending operations and transitions the database to the Durable state.
+    /// Commits any pending operations, persisting them to disk.
     ///
     /// The caller can associate an arbitrary `metadata` value with the commit. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned
+    /// `[start_loc, end_loc)` location range of committed operations. The end of the returned
     /// range includes the commit operation itself, and hence will always be equal to `op_count`.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V>,
-    ) -> Result<(Keyless<E, V, H, Unmerkleized, Durable>, Range<Location>), Error> {
+    async fn commit_inner(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = self.last_commit_loc + 1;
         self.last_commit_loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         let op_count = self.last_commit_loc + 1;
         debug!(size = ?op_count, "committed db");
-
-        let durable = Keyless {
-            journal: self.journal,
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        };
-
-        Ok((durable, start_loc..op_count))
+        Ok(start_loc..op_count)
     }
 
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
-        Keyless {
-            journal: self.journal.merkleize(),
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
+    /// Create a batch for buffering mutations.
+    pub const fn new_batch(&self) -> Batch<'_, E, V, H> {
+        Batch {
+            _db: self,
+            items: Vec::new(),
         }
+    }
+
+    /// Commit a changeset, persisting all changes to disk.
+    pub async fn commit_changeset(
+        &mut self,
+        changeset: Changeset<V>,
+    ) -> Result<Range<Location>, Error> {
+        for item in changeset.items {
+            self.journal.append(Operation::Append(item)).await?;
+        }
+        self.commit_inner(changeset.metadata).await
     }
 }
 
-// Implementation for the (Unmerkleized, Durable) state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Unmerkleized, Durable>
-{
-    /// Convert this database into the Mutable state for accepting more operations without
-    /// re-merkleizing.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
-        Keyless {
-            journal: self.journal,
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        }
+#[cfg(any(test, feature = "test-traits"))]
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+    /// Test-only: identity transition (was consuming type-state transition).
+    pub const fn into_mutable(self) -> Self {
+        self
     }
 
-    /// Compute the merkle root and transition to the Merkleized, Durable state.
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
-        Keyless {
-            journal: self.journal.merkleize(),
-            last_commit_loc: self.last_commit_loc,
-            _durability: PhantomData,
-        }
+    /// Test-only: backward-compat consuming commit.
+    pub async fn commit(mut self, metadata: Option<V>) -> Result<(Self, Range<Location>), Error> {
+        let range = self.commit_inner(metadata).await?;
+        Ok((self, range))
     }
 }
 
-// Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
-    for Keyless<E, V, H, Merkleized<H>, D>
+// Implementation of MerkleizedStore.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
+    for Keyless<E, V, H>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
@@ -352,15 +332,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
     }
 }
 
-// Implementation of LogStore for all states.
-impl<
-        E: Storage + Clock + Metrics,
-        V: VariableValue,
-        H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > LogStore for Keyless<E, V, H, M, D>
-{
+// Implementation of LogStore.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> LogStore for Keyless<E, V, H> {
     type Value = V;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
@@ -410,11 +383,11 @@ mod test {
         }
     }
 
-    /// Type alias for the Merkleized, Durable state.
-    type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Merkleized<Sha256>, Durable>;
+    /// Type alias for the Durable state.
+    type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
-    /// Type alias for the Mutable (Unmerkleized, NonDurable) state.
-    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
+    /// Type alias for the Mutable (NonDurable) state.
+    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
@@ -448,8 +421,7 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![3u8; 10];
             let db = db.into_mutable();
-            let (durable, _) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -487,8 +459,7 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             // Make sure closing/reopening gets us back to the same state.
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
@@ -550,8 +521,7 @@ mod test {
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             // Append more values.
@@ -567,8 +537,7 @@ mod test {
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
@@ -593,8 +562,7 @@ mod test {
             const ELEMENTS: usize = 200;
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
 
@@ -726,8 +694,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
@@ -835,8 +802,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
@@ -955,8 +921,7 @@ mod test {
                 let v = vec![i as u8; 10];
                 db.append(v).await.unwrap();
             }
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let committed_root = db.root();
             let committed_size = db.bounds().await.end;
 
@@ -998,8 +963,7 @@ mod test {
             assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
 
             // Test with multiple trailing appends to ensure robustness
-            let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let (db, _) = db.commit(None).await.unwrap();
             let new_committed_root = db.root();
             let new_committed_size = db.bounds().await.end;
 
@@ -1066,9 +1030,7 @@ mod test {
             assert!(
                 matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(4) && size == Location::new_unchecked(4))
             );
-
-            let db = durable.into_merkleized();
-            db.destroy().await.unwrap();
+            durable.destroy().await.unwrap();
         });
     }
 
@@ -1101,8 +1063,7 @@ mod test {
             assert_eq!(last_commit, Location::new_unchecked(3));
 
             // Test valid prune (at last commit) - need Clean state for prune
-            let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let (mut db, _) = db.commit(None).await.unwrap();
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit
