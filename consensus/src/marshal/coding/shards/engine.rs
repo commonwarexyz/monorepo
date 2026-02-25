@@ -451,6 +451,13 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
+            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                return;
+            } => {
+                self.tracked_peers = tracked_peers.clone();
+                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
+            },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
@@ -538,14 +545,7 @@ where
                 } else {
                     self.buffer_peer_shard(peer, shard);
                 }
-            },
-            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
-                debug!("peer set subscription closed");
-                return;
-            } => {
-                self.tracked_peers = tracked_peers.clone();
-                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
-            },
+            }
         }
     }
 
