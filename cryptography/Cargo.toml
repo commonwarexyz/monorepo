@@ -67,7 +67,6 @@ rstest.workspace = true
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]

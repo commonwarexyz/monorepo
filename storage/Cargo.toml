@@ -73,7 +73,6 @@ test-traits = []
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "qmdb_generate"
