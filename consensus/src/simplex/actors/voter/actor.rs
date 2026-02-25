@@ -534,16 +534,16 @@ impl<
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
     ///
-    /// When `retry` is true, this uses timeout semantics (current view only, retries allowed).
-    /// When `retry` is false, this uses certificate semantics (requires nullification for `view`).
+    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
+    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-        retry: bool,
+        timeout: bool,
     ) -> Option<bool> {
-        let Some((was_retry, nullify)) = self.state.construct_nullify(view, retry) else {
+        let Some((was_retry, nullify)) = self.state.construct_nullify(view, timeout) else {
             return None;
         };
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)

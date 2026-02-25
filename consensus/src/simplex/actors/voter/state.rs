@@ -215,13 +215,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Constructs a nullify vote for `view`, if eligible.
     ///
-    /// When `retry` is true, this is the timeout path and `view` must be the current view.
-    /// When `retry` is false, this is the certificate path and `view` must already have a
+    /// When `timeout` is true, this is the timeout path and `view` must be the current view.
+    /// When `timeout` is false, this is the certificate path and `view` must already have a
     /// nullification certificate.
     ///
     /// Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn construct_nullify(&mut self, view: View, retry: bool) -> Option<(bool, Nullify<S>)> {
-        if retry {
+    pub fn construct_nullify(&mut self, view: View, timeout: bool) -> Option<(bool, Nullify<S>)> {
+        if timeout {
             if view != self.view {
                 return None;
             }
@@ -229,7 +229,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
-        if !retry && is_retry {
+        if !timeout && is_retry {
             return None;
         }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
