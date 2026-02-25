@@ -12,7 +12,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
 use pool::{PooledBuf, PooledBufMut};
-use std::{collections::VecDeque, ops::RangeBounds};
+use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
@@ -953,6 +953,30 @@ impl Buf for IoBufs {
         }
     }
 
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        if dst.is_empty() {
+            return 0;
+        }
+
+        match &self.inner {
+            IoBufsInner::Single(buf) => {
+                let chunk = buf.chunk();
+                if !chunk.is_empty() {
+                    dst[0] = IoSlice::new(chunk);
+                    return 1;
+                }
+                0
+            }
+            IoBufsInner::Pair([a, b]) => fill_vectored_from_chunks(dst, [a.chunk(), b.chunk()]),
+            IoBufsInner::Triple([a, b, c]) => {
+                fill_vectored_from_chunks(dst, [a.chunk(), b.chunk(), c.chunk()])
+            }
+            IoBufsInner::Chunked(bufs) => {
+                fill_vectored_from_chunks(dst, bufs.iter().map(|buf| buf.chunk()))
+            }
+        }
+    }
+
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsInner::Single(buf) => {
@@ -1426,6 +1450,30 @@ impl Buf for IoBufsMut {
         }
     }
 
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        if dst.is_empty() {
+            return 0;
+        }
+
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => {
+                let chunk = buf.chunk();
+                if !chunk.is_empty() {
+                    dst[0] = IoSlice::new(chunk);
+                    return 1;
+                }
+                0
+            }
+            IoBufsMutInner::Pair([a, b]) => fill_vectored_from_chunks(dst, [a.chunk(), b.chunk()]),
+            IoBufsMutInner::Triple([a, b, c]) => {
+                fill_vectored_from_chunks(dst, [a.chunk(), b.chunk(), c.chunk()])
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                fill_vectored_from_chunks(dst, bufs.iter().map(|buf| buf.chunk()))
+            }
+        }
+    }
+
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsMutInner::Single(buf) => {
@@ -1759,6 +1807,27 @@ unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usi
         *remaining -= avail;
     }
     false
+}
+
+/// Fill `dst` with `IoSlice`s built from `chunks`.
+///
+/// Empty chunks are skipped. At most `dst.len()` slices are written.
+/// Returns the number of slices written.
+#[inline]
+fn fill_vectored_from_chunks<'a, I>(dst: &mut [IoSlice<'a>], chunks: I) -> usize
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut written = 0;
+    for chunk in chunks
+        .into_iter()
+        .filter(|chunk| !chunk.is_empty())
+        .take(dst.len())
+    {
+        dst[written] = IoSlice::new(chunk);
+        written += 1;
+    }
+    written
 }
 
 /// Extension trait for encoding values into pooled I/O buffers.
@@ -2167,6 +2236,45 @@ mod tests {
         );
         assert_eq!(chain.remaining(), 0);
         assert_eq!(iobufs.remaining(), 0);
+    }
+
+    #[test]
+    fn test_iobufs_chunks_vectored_multiple_slices() {
+        let bufs = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::from(b"gh"),
+        ]);
+
+        // Destination capacity should cap how many chunks we export.
+        let mut small = [IoSlice::new(&[]); 2];
+        let count = bufs.chunks_vectored(&mut small);
+        assert_eq!(count, 2);
+        assert_eq!(&small[0][..], b"ab");
+        assert_eq!(&small[1][..], b"cd");
+
+        // Larger destination should include every readable chunk.
+        let mut large = [IoSlice::new(&[]); 8];
+        let count = bufs.chunks_vectored(&mut large);
+        assert_eq!(count, 4);
+        assert_eq!(&large[0][..], b"ab");
+        assert_eq!(&large[1][..], b"cd");
+        assert_eq!(&large[2][..], b"ef");
+        assert_eq!(&large[3][..], b"gh");
+
+        // Empty destination cannot accept any slices.
+        let mut empty_dst: [IoSlice<'_>; 0] = [];
+        assert_eq!(bufs.chunks_vectored(&mut empty_dst), 0);
+
+        // Non-canonical shapes should skip empty leading chunks.
+        let sparse = IoBufs {
+            inner: IoBufsInner::Pair([IoBuf::default(), IoBuf::from(b"x")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        let count = sparse.chunks_vectored(&mut dst);
+        assert_eq!(count, 1);
+        assert_eq!(&dst[0][..], b"x");
     }
 
     #[test]
@@ -2710,6 +2818,45 @@ mod tests {
         let iobufs_bytes = iobufs.copy_to_bytes(8);
         assert_eq!(chain_bytes, iobufs_bytes);
         assert_eq!(chain_bytes.as_ref(), b"hello wo");
+    }
+
+    #[test]
+    fn test_iobufsmut_chunks_vectored_multiple_slices() {
+        let bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"ab"),
+            IoBufMut::from(b"cd"),
+            IoBufMut::from(b"ef"),
+            IoBufMut::from(b"gh"),
+        ]);
+
+        // Destination capacity should cap how many chunks we export.
+        let mut small = [IoSlice::new(&[]); 2];
+        let count = bufs.chunks_vectored(&mut small);
+        assert_eq!(count, 2);
+        assert_eq!(&small[0][..], b"ab");
+        assert_eq!(&small[1][..], b"cd");
+
+        // Larger destination should include every readable chunk.
+        let mut large = [IoSlice::new(&[]); 8];
+        let count = bufs.chunks_vectored(&mut large);
+        assert_eq!(count, 4);
+        assert_eq!(&large[0][..], b"ab");
+        assert_eq!(&large[1][..], b"cd");
+        assert_eq!(&large[2][..], b"ef");
+        assert_eq!(&large[3][..], b"gh");
+
+        // Empty destination cannot accept any slices.
+        let mut empty_dst: [IoSlice<'_>; 0] = [];
+        assert_eq!(bufs.chunks_vectored(&mut empty_dst), 0);
+
+        // Non-canonical shapes should skip empty leading chunks.
+        let sparse = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::from(b"y")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        let count = sparse.chunks_vectored(&mut dst);
+        assert_eq!(count, 1);
+        assert_eq!(&dst[0][..], b"y");
     }
 
     #[test]
