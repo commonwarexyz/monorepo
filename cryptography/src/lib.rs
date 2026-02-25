@@ -63,7 +63,9 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::sha256::{CoreSha256, Sha256};
     pub mod blake3;
     pub use crate::blake3::{Blake3, CoreBlake3};
+    #[cfg(feature = "std")]
     pub mod crc32;
+    #[cfg(feature = "std")]
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]

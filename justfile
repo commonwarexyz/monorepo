@@ -81,7 +81,7 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
 
 # Run cargo-hack with feature powerset
 hack *args='':
-    cargo hack --feature-powerset --no-dev-deps --exclude-no-default-features $@
+    cargo hack --feature-powerset --no-dev-deps $@
 
 # Check for unused dependencies
 udeps:

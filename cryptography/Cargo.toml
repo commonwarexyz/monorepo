@@ -25,7 +25,7 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
-crc-fast = { workspace = true, features = ["panic-handler"] }
+crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
@@ -91,7 +91,8 @@ std = [
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
-	"crc-fast/std",
+	"crc-fast",
+	"crc-fast?/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",
