@@ -57,7 +57,6 @@ development = ["commonware-consensus"]
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [features]
 mocks = [ "commonware-cryptography/mocks" ]
