@@ -359,18 +359,24 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
-        // If we can emit a nullify vote, do so.
-        let (retry, nullify, entry) = self.state.handle_timeout();
-        if let Some(nullify) = nullify {
-            self.broadcast_nullify(batcher, vote_sender, retry, nullify)
-                .await;
-        }
+        let view = self.state.current_view();
+        let Some((retry, nullify)) = self.state.construct_nullify(view, true) else {
+            return;
+        };
+        self.broadcast_nullify(batcher, vote_sender, retry, nullify)
+            .await;
 
         // Broadcast entry to help others enter the view
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
-        if let Some(certificate) = entry {
+        if !retry {
+            return;
+        }
+        let Some(entry_view) = view.previous() else {
+            return;
+        };
+        if let Some(certificate) = self.state.get_entry_certificate(entry_view) {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }

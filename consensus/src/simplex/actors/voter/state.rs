@@ -236,36 +236,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some((is_retry, nullify))
     }
 
-    /// Handle a timeout event for the current view.
-    /// Returns the nullify vote and optionally an entry certificate for the previous view
-    /// (if this is a retry timeout and we can construct one).
-    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Certificate<S, D>>) {
-        let Some((retry, nullify)) = self.construct_nullify(self.view, true) else {
-            return (false, None, None);
-        };
-
-        // If was retry, we need to get entry certificates for the previous view
-        let entry_view = self.view.previous().unwrap_or(GENESIS_VIEW);
-        if !retry || entry_view == GENESIS_VIEW {
-            return (retry, Some(nullify), None);
+    /// Returns the best entry certificate for `view` to help peers enter it.
+    ///
+    /// Finalization is strongest, then nullification, then notarization.
+    pub fn get_entry_certificate(&self, view: View) -> Option<Certificate<S, D>> {
+        if view == GENESIS_VIEW {
+            return None;
         }
 
-        // Get the certificate for the previous view. Prefer finalizations since they are the
-        // strongest proof available. Prefer nullifications over notarizations because a
-        // nullification overwrites an uncertified notarization (if we only heard of notarizations,
-        // we may never exit a view with an uncertifiable notarization).
+        // Prefer finalizations over nullifications over notarizations.
         #[allow(clippy::option_if_let_else)]
-        let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
+        if let Some(finalization) = self.finalization(view).cloned() {
             Some(Certificate::Finalization(finalization))
-        } else if let Some(nullification) = self.nullification(entry_view).cloned() {
+        } else if let Some(nullification) = self.nullification(view).cloned() {
             Some(Certificate::Nullification(nullification))
-        } else if let Some(notarization) = self.notarization(entry_view).cloned() {
+        } else if let Some(notarization) = self.notarization(view).cloned() {
             Some(Certificate::Notarization(notarization))
         } else {
-            warn!(%entry_view, "entry certificate not found during timeout");
+            warn!(%view, "entry certificate not found");
             None
-        };
-        (retry, Some(nullify), cert)
+        }
     }
 
     /// Inserts a notarization certificate and prepares the next view's leader.
@@ -801,8 +791,10 @@ mod tests {
             let second = state.next_timeout_deadline();
             assert_eq!(first, second, "cached deadline should be reused");
 
-            // Handle timeout should return false (not a retry)
-            let (was_retry, _, _) = state.handle_timeout();
+            // Construct nullify for timeout should return false (not a retry).
+            let (was_retry, _) = state
+                .construct_nullify(state.current_view(), true)
+                .expect("first timeout nullify should exist");
             assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
@@ -822,8 +814,10 @@ mod tests {
             let fifth = state.next_timeout_deadline();
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
-            // Handle timeout should return true whenever called (can be before registered deadline)
-            let (was_retry, _, _) = state.handle_timeout();
+            // Subsequent timeout nullify should be a retry.
+            let (was_retry, _) = state
+                .construct_nullify(state.current_view(), true)
+                .expect("retry timeout nullify should exist");
             assert!(was_retry, "subsequent timeout should be treated as retry");
 
             // Confirm retry deadline is set
@@ -1693,8 +1687,11 @@ mod tests {
             assert!(state.try_verify().is_some());
             assert!(state.verified(view));
 
-            // Handle timeout
-            assert!(!state.handle_timeout().0);
+            // Timeout path emits a first-attempt nullify.
+            let (retry, _) = state
+                .construct_nullify(view, true)
+                .expect("timeout nullify should exist");
+            assert!(!retry);
 
             // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());
