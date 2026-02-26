@@ -81,9 +81,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("nullifies", "nullified views", nullifies.clone());
         context.register("nullifications", "nullifications", nullifications.clone());
-        for participant in cfg.scheme.participants().iter() {
-            let _ = nullifications.get_or_create(&Peer::new(participant));
-        }
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
