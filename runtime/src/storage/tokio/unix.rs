@@ -38,11 +38,12 @@ impl Blob {
 
     fn write_vectored_at(file: &File, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
         while bufs.has_remaining() {
-            let mut slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
-            let iovecs = bufs.chunks_vectored(&mut slices);
-            if iovecs == 0 {
-                return Err(Error::WriteFailed);
-            }
+            let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
+            let io_slices_len = bufs.chunks_vectored(&mut io_slices);
+            assert!(
+                io_slices_len > 0,
+                "chunks_vectored should produce at least one slice when bufs has remaining"
+            );
 
             // std::os::unix::fs::FileExt::write_vectored_at is unstable:
             // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
@@ -51,8 +52,8 @@ impl Blob {
             let ret = unsafe {
                 libc::pwritev(
                     file.as_raw_fd(),
-                    slices.as_ptr().cast::<libc::iovec>(),
-                    iovecs as i32,
+                    io_slices.as_ptr().cast::<libc::iovec>(),
+                    io_slices_len as i32,
                     offset.try_into().map_err(|_| Error::OffsetOverflow)?,
                 )
             };

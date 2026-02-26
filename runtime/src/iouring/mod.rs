@@ -218,22 +218,18 @@ pub enum OpFd {
 ///
 /// The field is never read directly, since this only exists to keep the iovecs
 /// alive until operation completion.
-pub struct OpIovecs(#[allow(dead_code)] Vec<libc::iovec>);
+pub struct OpIovecs(#[allow(dead_code)] Box<[libc::iovec]>);
 
 /// NOTE: this is currently only used by the storage backend, hence the allow
 /// dead code.
 #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
 impl OpIovecs {
-    pub const fn new(iovecs: Vec<libc::iovec>) -> Self {
+    pub const fn new(iovecs: Box<[libc::iovec]>) -> Self {
         Self(iovecs)
     }
 
-    pub const fn as_ptr(&self) -> *const libc::iovec {
+    pub fn as_ptr(&self) -> *const libc::iovec {
         self.0.as_ptr()
-    }
-
-    pub const fn len(&self) -> usize {
-        self.0.len()
     }
 }
 

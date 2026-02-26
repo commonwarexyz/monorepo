@@ -796,6 +796,24 @@ impl IoBufs {
         self.remaining()
     }
 
+    /// Number of non-empty readable chunks.
+    #[inline]
+    pub fn chunk_count(&self) -> usize {
+        // This assumes canonical form.
+        match &self.inner {
+            IoBufsInner::Single(buf) => {
+                if buf.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            IoBufsInner::Pair(_) => 2,
+            IoBufsInner::Triple(_) => 3,
+            IoBufsInner::Chunked(bufs) => bufs.len(),
+        }
+    }
+
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -2056,6 +2074,35 @@ mod tests {
         joined.prepend(IoBuf::from(b"start "));
         joined.append(IoBuf::from(b" end"));
         assert_eq!(joined.coalesce(), b"start middle end");
+    }
+
+    #[test]
+    fn test_iobufs_chunk_count() {
+        assert_eq!(IoBufs::default().chunk_count(), 0);
+        assert_eq!(IoBufs::from(IoBuf::from(b"a")).chunk_count(), 1);
+        assert_eq!(
+            IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]).chunk_count(),
+            2
+        );
+        assert_eq!(
+            IoBufs::from(vec![
+                IoBuf::from(b"a"),
+                IoBuf::from(b"b"),
+                IoBuf::from(b"c")
+            ])
+            .chunk_count(),
+            3
+        );
+        assert_eq!(
+            IoBufs::from(vec![
+                IoBuf::from(b"a"),
+                IoBuf::from(b"b"),
+                IoBuf::from(b"c"),
+                IoBuf::from(b"d")
+            ])
+            .chunk_count(),
+            4
+        );
     }
 
     #[test]

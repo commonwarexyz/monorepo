@@ -335,31 +335,46 @@ impl Blob {
         mut bufs: IoBufs,
     ) -> Result<(), Error> {
         while bufs.has_remaining() {
-            // Figure out how much is left to write and where to write from.
-            let mut slices = [std::io::IoSlice::new(&[]); IOVEC_BATCH_SIZE];
-            let iov_count = bufs.chunks_vectored(&mut slices);
-            if iov_count == 0 {
-                return Err(Error::WriteFailed);
-            }
+            let (iovecs, iovecs_len) = {
+                // Figure out how much is left to write and where to write from.
+                //
+                // Use one pre-initialized `libc::iovec` array as scratch space and
+                // view it as `IoSlice` to fill via `chunks_vectored`, since
+                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
+                assert!(
+                    max_iovecs > 0,
+                    "chunk_count should be > 0 if bufs.has_remaining() is true"
+                );
+                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
+                    libc::iovec {
+                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+                        iov_len: 0,
+                    },
+                    max_iovecs,
+                )
+                .collect();
 
-            let iovecs = {
-                // We must materialize owned `libc::iovec` entries because io_uring may
-                // access the iovec array after submission returns.
-                let mut iovecs = Vec::with_capacity(iov_count);
-                for slice in &slices[..iov_count] {
-                    iovecs.push(libc::iovec {
-                        // SAFETY: `iov_base` is used as a read-only pointer by Writev.
-                        // `slice` points to valid readable bytes while `bufs` is retained
-                        // in `OpBuffer::WriteVectored` until completion.
-                        iov_base: slice.as_ptr() as *mut libc::c_void,
-                        iov_len: slice.len(),
-                    });
-                }
-                OpIovecs::new(iovecs)
+                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                // `raw_iovecs` is initialized with valid empty entries, so `slices`
+                // starts in a valid state for `chunks_vectored` to overwrite.
+                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                        iovecs.len(),
+                    )
+                };
+                let io_slices_len = bufs.chunks_vectored(io_slices);
+                assert!(
+                    io_slices_len > 0,
+                    "chunks_vectored should produce at least one slice when bufs has remaining"
+                );
+
+                (OpIovecs::new(iovecs), io_slices_len)
             };
 
             // Create an operation to do the write
-            let op = opcode::Writev::new(fd, iovecs.as_ptr(), iovecs.len() as _)
+            let op = opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len as _)
                 .offset(offset as _)
                 .build();
 
