@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
         leader: Participant,
         finalized: View,
 
-        active: oneshot::Sender<Option<TimeoutReason>>,
+        response: oneshot::Sender<Option<TimeoutReason>>,
     },
     /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
@@ -42,11 +42,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     ) -> Option<TimeoutReason> {
         self.sender
             .request_or(
-                |active| Message::Update {
+                |response| Message::Update {
                     current,
                     leader,
                     finalized,
-                    active,
+                    response,
                 },
                 None,
             )

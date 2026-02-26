@@ -225,7 +225,7 @@ impl<
                     current: new_current,
                     leader,
                     finalized: new_finalized,
-                    active,
+                    response,
                 } => {
                     let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
@@ -272,7 +272,7 @@ impl<
                     if timeout_reason.is_some() {
                         current.timed_out = true;
                     }
-                    active.send_lossy(timeout_reason);
+                    response.send_lossy(timeout_reason);
 
                     // Setting leader may enable batch verification
                     updated_view = current.view;
@@ -430,6 +430,9 @@ impl<
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
+                let is_leader = current.leader.is_some_and(|leader| {
+                    self.scheme.participants().index(&sender) == Some(leader)
+                });
                 if work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
@@ -447,7 +450,7 @@ impl<
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
-                    if Self::leader_nullified(&current, &work) {
+                    if is_leader && Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
                         voter.timeout(current.view, TimeoutReason::LeaderNullify).await;
                     }
