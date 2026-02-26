@@ -38,7 +38,7 @@ use tracing::{debug, trace};
 struct Current {
     view: View,
     leader: Option<Participant>,
-    notified_abandon: bool,
+    abandoned: bool,
 }
 
 pub struct Actor<
@@ -169,7 +169,7 @@ impl<
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
     fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
-        if current.notified_abandon {
+        if current.abandoned {
             return false;
         }
         let Some(leader) = current.leader else {
@@ -207,7 +207,7 @@ impl<
         let mut current = Current {
             view: View::zero(),
             leader: None,
-            notified_abandon: false,
+            abandoned: false,
         };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
@@ -230,7 +230,7 @@ impl<
                     current = Current {
                         view: new_current,
                         leader: Some(leader),
-                        notified_abandon: false,
+                        abandoned: false,
                     };
                     finalized = new_finalized;
                     work.entry(current.view)
@@ -438,7 +438,7 @@ impl<
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
-                        current.notified_abandon = true;
+                        current.abandoned = true;
                         voter.abandon(current.view, AbandonReason::LeaderNullify).await;
                     }
                 }
