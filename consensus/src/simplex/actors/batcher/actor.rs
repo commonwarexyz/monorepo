@@ -168,10 +168,7 @@ impl<
 
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
-    fn leader_nullified(
-        current: &Current,
-        work: &BTreeMap<View, Round<S, B, D, R>>,
-    ) -> bool {
+    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
         if current.notified_abandon {
             return false;
         }

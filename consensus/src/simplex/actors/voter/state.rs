@@ -938,7 +938,10 @@ mod tests {
             // Third abandon (same view, different reason) should also NOT increment
             let other_label = Abandon::new(leader_key, AbandonReason::LeaderTimeout);
             state.abandon(view, AbandonReason::LeaderTimeout);
-            assert_eq!(state.abandons_per_leader.get_or_create(&other_label).get(), 0);
+            assert_eq!(
+                state.abandons_per_leader.get_or_create(&other_label).get(),
+                0
+            );
         });
     }
 
