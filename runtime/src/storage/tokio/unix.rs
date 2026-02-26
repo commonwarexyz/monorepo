@@ -120,13 +120,9 @@ impl crate::Blob for Blob {
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        task::spawn_blocking(move || {
-            #[allow(clippy::option_if_let_else)]
-            if let Some(buf) = bufs.as_single() {
-                Self::write_single_at(&file, offset, buf.as_ref())
-            } else {
-                Self::write_vectored_at(&file, offset, bufs)
-            }
+        task::spawn_blocking(move || match bufs.try_into_single() {
+            Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
+            Err(bufs) => Self::write_vectored_at(&file, offset, bufs),
         })
         .await
         .map_err(|_| Error::WriteFailed)?
