@@ -55,7 +55,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     notarization_timeout: Duration,
     nullify_retry: Duration,
     view: View,
-    nullified: bool,
+    expired: bool,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
@@ -95,7 +95,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             notarization_timeout: cfg.notarization_timeout,
             nullify_retry: cfg.nullify_retry,
             view: GENESIS_VIEW,
-            nullified: false,
+            expired: false,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
@@ -168,7 +168,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
         self.view = view;
-        self.nullified = false;
+        self.expired = false;
 
         // Update metrics
         let _ = self.current_view.try_set(view.get());
@@ -412,10 +412,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .is_some_and(|round| round.proposal().is_some())
     }
 
-    /// Immediately nullifies `view`, forcing its timeouts to trigger on the next tick.
+    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     ///
     /// Only records the nullify metric on the first call per view.
-    pub fn nullify(&mut self, view: View, reason: NullifyReason) {
+    pub fn expire_round(&mut self, view: View, reason: NullifyReason) {
         if view != self.view {
             return;
         }
@@ -426,8 +426,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let leader = round.leader();
 
         // Track nullified view per leader if we know who the leader was
-        if !self.nullified {
-            self.nullified = true;
+        if !self.expired {
+            self.expired = true;
             if let Some(leader) = leader {
                 self.nullifies
                     .get_or_create(&NullifyLabel::new(&leader.key, reason))
@@ -560,7 +560,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.nullify(view, NullifyReason::FailedCertification);
+            self.expire_round(view, NullifyReason::FailedCertification);
         }
 
         Some(notarization)
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn nullify_old_round_is_noop() {
+    fn expire_old_round_is_noop() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -862,12 +862,12 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.nullify(View::zero(), NullifyReason::Inactivity);
+            state.expire_round(View::zero(), NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
                 !state.views.contains_key(&View::zero()),
-                "old round should not be created when nullify is ignored"
+                "old round should not be created when expire is ignored"
             );
 
             // Move to view 2 so view 1 becomes stale.
@@ -885,14 +885,14 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.nullify(view_1, NullifyReason::Inactivity);
+            state.expire_round(view_1, NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
     }
 
     #[test]
-    fn nullify_only_records_metric_once() {
+    fn expire_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -919,16 +919,16 @@ mod tests {
             let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
 
             // First nullify should record the metric
-            state.nullify(view, NullifyReason::Abandon);
+            state.expire_round(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Second nullify (same view, same reason) should NOT increment
-            state.nullify(view, NullifyReason::Abandon);
+            state.expire_round(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Third nullify (same view, different reason) should also NOT increment
             let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
-            state.nullify(view, NullifyReason::LeaderTimeout);
+            state.expire_round(view, NullifyReason::LeaderTimeout);
             assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
         });
     }
