@@ -223,10 +223,9 @@ impl<
             );
         }
         if let Some(journal) = self.journal.as_mut() {
-            journal
-                .prune(self.state.min_active().get())
-                .await
-                .expect("unable to prune journal");
+            if let Err(e) = journal.prune(self.state.min_active().get()).await {
+                warn!(%e, "unable to prune journal");
+            }
         }
     }
 

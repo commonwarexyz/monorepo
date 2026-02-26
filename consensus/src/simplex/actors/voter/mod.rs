@@ -4472,4 +4472,202 @@ mod tests {
         pending_certification_nullifies_on_timeout::<_, _>(ed25519::fixture);
         pending_certification_nullifies_on_timeout::<_, _>(secp256r1::fixture);
     }
+
+    /// Verifies that `prune_views` survives storage failures when removing journal blobs.
+    ///
+    /// Before the fix, `prune_views` called `.expect()` on `journal.prune()`, which caused
+    /// the voter actor to panic whenever the underlying blob `remove` returned an error.
+    /// This was observed in production when finalized view numbers grew beyond the
+    /// `activity_timeout` window and the OS returned an error deleting a journal section
+    /// (e.g. `BlobMissing` for an already-absent file, or an `Io` error under heavy load).
+    ///
+    /// The test injects a 100% storage-remove failure rate at the point where the voter
+    /// is guaranteed to call `prune_views()`, then verifies the voter keeps running and
+    /// can still process messages, proving the prune failure is non-fatal.
+    fn prune_journal_failure_is_nonfatal<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"prune_journal_failure_is_nonfatal".to_vec();
+        // activity_timeout=10: once last_finalized >= 10, min_active > 0 and
+        // prune_views() will try to delete journal section blobs.
+        let activity_timeout = ViewDelta::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let elector = L::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_prune_failure_test".to_string(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(128);
+
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Consume the initial batcher notification (view 1, finalized 0).
+            let message = batcher_receiver.recv().await.unwrap();
+            match message {
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Advance to view 20 (last_finalized=19 > activity_timeout=10), so
+            // the next prune_views() call will attempt to delete journal sections.
+            let finalized_view = View::new(20);
+            let payload = Sha256::hash(b"advance");
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), finalized_view),
+                finalized_view.previous().unwrap(),
+                payload,
+            );
+            let (_, first_finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(first_finalization))
+                .await;
+
+            // Drain batcher messages until the voter acknowledges view 20.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        finalized, active, ..
+                    } => {
+                        active.send(true).unwrap();
+                        if finalized == finalized_view {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Inject storage remove failures: any subsequent call to
+            // context.remove() will return an Io error, reproducing the
+            // class of failures (BlobMissing, Io) that previously caused
+            // the voter to panic in prune_views().
+            context.storage_fault_config().write().remove_rate = Some(1.0);
+
+            // Send another finalization further into the future. This
+            // triggers a second prune_views() call with remove failures
+            // injected. Without the fix the voter panics here; with the
+            // fix it logs a warning and keeps running.
+            let second_view = View::new(50);
+            let payload2 = Sha256::hash(b"trigger-prune-with-fault");
+            let proposal2 = Proposal::new(
+                Round::new(Epoch::new(333), second_view),
+                finalized_view,
+                payload2,
+            );
+            let (_, second_finalization) = build_finalization(&schemes, &proposal2, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(second_finalization))
+                .await;
+
+            // The voter must still be alive and processing messages.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        finalized, active, ..
+                    } => {
+                        active.send(true).unwrap();
+                        if finalized == second_view {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_journal_failure_is_nonfatal() {
+        prune_journal_failure_is_nonfatal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        prune_journal_failure_is_nonfatal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        prune_journal_failure_is_nonfatal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        prune_journal_failure_is_nonfatal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        prune_journal_failure_is_nonfatal::<_, _, RoundRobin>(ed25519::fixture);
+        prune_journal_failure_is_nonfatal::<_, _, RoundRobin>(secp256r1::fixture);
+    }
 }
