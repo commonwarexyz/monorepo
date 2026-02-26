@@ -351,7 +351,7 @@ impl<
             .await;
     }
 
-    /// Handle timeout-driven nullify flow.
+    /// Handle a timeout.
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -891,7 +891,7 @@ impl<
                     .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
-                // Trigger timeout-driven nullify flow
+                // Process the timeout
                 self.timeout(
                     &mut batcher,
                     &mut vote_sender,
