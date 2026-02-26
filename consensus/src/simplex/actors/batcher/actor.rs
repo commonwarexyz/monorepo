@@ -33,12 +33,12 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace};
 
-/// Tracks the current view, its leader, and whether the voter has been
-/// notified that the view should be nullified.
+/// Tracks the current view, its leader, and whether the voter has
+/// already been told to timeout this view.
 struct Current {
     view: View,
     leader: Option<Participant>,
-    nullified: bool,
+    timed_out: bool,
 }
 
 pub struct Actor<
@@ -169,7 +169,7 @@ impl<
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
     fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
-        if current.nullified {
+        if current.timed_out {
             return false;
         }
         let Some(leader) = current.leader else {
@@ -207,7 +207,7 @@ impl<
         let mut current = Current {
             view: View::zero(),
             leader: None,
-            nullified: false,
+            timed_out: false,
         };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
@@ -230,7 +230,7 @@ impl<
                     current = Current {
                         view: new_current,
                         leader: Some(leader),
-                        nullified: false,
+                        timed_out: false,
                     };
                     finalized = new_finalized;
                     work.entry(current.view)
@@ -239,7 +239,7 @@ impl<
 
                     // If the leader nullified this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
-                    let nullify_reason = if Self::leader_nullified(&current, &work) {
+                    let timeout_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
@@ -262,7 +262,10 @@ impl<
                             None
                         }
                     };
-                    active.send_lossy(nullify_reason);
+                    if timeout_reason.is_some() {
+                        current.timed_out = true;
+                    }
+                    active.send_lossy(timeout_reason);
 
                     // Setting leader may enable batch verification
                     updated_view = current.view;
@@ -438,7 +441,7 @@ impl<
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
-                        current.nullified = true;
+                        current.timed_out = true;
                         voter.timeout(current.view, TimeoutReason::LeaderNullify).await;
                     }
                 }
