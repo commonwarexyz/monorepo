@@ -143,8 +143,8 @@ impl<B: Blob> Read<B> {
             "provided buffer is too small for requested size"
         );
 
-        // Quick check if we have enough bytes total before attempting reads
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
+        // Quick check against total remaining bytes at current position.
+        if self.blob_remaining() < size as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
