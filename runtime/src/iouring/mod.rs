@@ -166,7 +166,9 @@ pub enum OpBuffer {
     /// Buffer for write operations - kernel reads from this.
     Write(IoBuf),
     /// Buffers for vectored write operations - kernel reads from these.
-    WriteVectored(IoBufs),
+    ///
+    /// NOTE: currently this is only used by the storage backend, hence the allow dead code.
+    WriteVectored(#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))] IoBufs),
 }
 
 impl From<IoBufMut> for OpBuffer {
@@ -192,20 +194,35 @@ impl From<IoBufs> for OpBuffer {
 /// The variant must match the descriptor type:
 /// - `Fd`: For network sockets and other OS file descriptors
 /// - `File`: For file-backed descriptors
-#[allow(dead_code)]
 pub enum OpFd {
     /// A socket or other OS file descriptor.
-    Fd(Arc<OwnedFd>),
+    ///
+    /// NOTE: this is only used by the network backend, hence the allow dead
+    /// code. The field itself is never read regardless, since this only exists
+    /// to keep the FD alive until operation completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    Fd(#[allow(dead_code)] Arc<OwnedFd>),
     /// A file-backed descriptor.
-    File(Arc<File>),
+    ///
+    /// NOTE: this is only used by the storage backend, hence the allow dead
+    /// code. The field itself is never read regardless, since this only exists
+    /// to keep the FD alive until operation completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    File(#[allow(dead_code)] Arc<File>),
 }
 
 /// Owned iovecs that back a vectored io_uring operation.
 ///
 /// This wrapper allows transferring iovec arrays through channels while keeping
 /// the pointed-to buffer memory alive through [`OpBuffer`].
+///
+/// The field is never read directly, since this only exists to keep the iovecs
+/// alive until operation completion.
 pub struct OpIovecs(#[allow(dead_code)] Vec<libc::iovec>);
 
+/// NOTE: this is currently only used by the storage backend, hence the allow
+/// dead code.
+#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
 impl OpIovecs {
     pub const fn new(iovecs: Vec<libc::iovec>) -> Self {
         Self(iovecs)
