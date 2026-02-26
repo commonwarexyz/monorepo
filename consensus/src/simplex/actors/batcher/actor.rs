@@ -227,6 +227,7 @@ impl<
                     finalized: new_finalized,
                     active,
                 } => {
+                    let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
                         view: new_current,
                         leader: Some(leader),
@@ -257,7 +258,13 @@ impl<
                                 .take(skip_timeout)
                                 .any(|(_, round)| round.is_active(leader))
                         {
-                            Some(TimeoutReason::Inactivity)
+                            // If we are the leader, we should attempt to build even if we haven't
+                            // been active recently
+                            if am_leader {
+                                None
+                            } else {
+                                Some(TimeoutReason::Inactivity)
+                            }
                         } else {
                             None
                         }

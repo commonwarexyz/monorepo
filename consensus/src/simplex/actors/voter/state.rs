@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{Peer, Timeout, TimeoutReason},
+        metrics::{Leader, Timeout, TimeoutReason},
         min_active,
         scheme::Scheme,
         types::{
@@ -65,7 +65,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     current_view: Gauge,
     tracked_views: Gauge,
     timeouts: Family<Timeout, Counter>,
-    nullifications: Family<Peer, Counter>,
+    nullifications: Family<Leader, Counter>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -75,7 +75,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let timeouts = Family::<Timeout, Counter>::default();
-        let nullifications = Family::<Peer, Counter>::default();
+        let nullifications = Family::<Leader, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("timeouts", "timed out views", timeouts.clone());
@@ -303,7 +303,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
             self.nullifications
-                .get_or_create(&Peer::new(&leader.key))
+                .get_or_create(&Leader::new(&leader.key))
                 .inc();
         }
 

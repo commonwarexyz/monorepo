@@ -42,6 +42,19 @@ impl Timeout {
     }
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Leader {
+    pub leader: String,
+}
+
+impl Leader {
+    pub fn new(leader: &impl Array) -> Self {
+        Self {
+            leader: leader.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageType {
     Notarize,

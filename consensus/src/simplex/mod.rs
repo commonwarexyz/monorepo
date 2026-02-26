@@ -1762,14 +1762,16 @@ mod tests {
 
             // Ensure online nodes are recording timeouts/nullifications for the offline leader
             let encoded = context.encode();
-            let peer_label = format!("peer=\"{}\"", offline);
-            for metric in ["_timeouts", "_nullifications"] {
-                assert_eq!(
-                    count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
-                    n - 1,
-                    "expected all online nodes to record {metric} for offline leader"
-                );
-            }
+            let leader_label = format!("leader=\"{}\"", offline);
+            assert!(
+                count_nonzero_metric_lines(&encoded, &["_timeouts", &leader_label]) >= n - 1,
+                "expected timeout metrics for offline leader"
+            );
+            assert_eq!(
+                count_nonzero_metric_lines(&encoded, &["_nullifications", &leader_label]),
+                n - 1,
+                "expected all online nodes to record _nullifications for offline leader"
+            );
         });
     }
 

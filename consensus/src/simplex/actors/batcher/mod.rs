@@ -1386,6 +1386,17 @@ mod tests {
                 nullify.is_none(),
                 "view 100 should be active (leader voted in view 5, still in last {skip_timeout} rounds)"
             );
+
+            // Test 6: local leader inactivity should not trigger a fast-timeout hint.
+            let self_leader = Participant::new(0);
+            let view = View::new(101);
+            let nullify = batcher_mailbox
+                .update(view, self_leader, View::zero())
+                .await;
+            assert!(
+                nullify.is_none(),
+                "local leader inactivity should be suppressed"
+            );
         });
     }
 
