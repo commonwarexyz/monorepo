@@ -29,14 +29,14 @@ pub enum TimeoutReason {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Timeout {
-    pub peer: String,
+    pub leader: String,
     pub reason: TimeoutReason,
 }
 
 impl Timeout {
-    pub fn new(peer: &impl Array, reason: TimeoutReason) -> Self {
+    pub fn new(leader: &impl Array, reason: TimeoutReason) -> Self {
         Self {
-            peer: peer.to_string(),
+            leader: leader.to_string(),
             reason,
         }
     }
