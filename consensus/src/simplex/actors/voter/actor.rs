@@ -952,7 +952,6 @@ impl<
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
                         self.state.trigger_nullify(context.view(), NullifyReason::InvalidProposal);
-                        continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
@@ -1046,7 +1045,6 @@ impl<
                     Message::Nullify(view, reason) => {
                         debug!(%view, ?reason, "nullifying view");
                         self.state.trigger_nullify(view, reason);
-                        continue;
                     }
                 }
             },
