@@ -367,6 +367,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
                 debug!(?proposal, "setting verified proposal from certificate");
+                self.leader_deadline = None;
                 None
             }
             ProposalChange::Unchanged => None,
@@ -400,9 +401,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.notarization.is_some() {
             return (false, None);
         }
-        // Leader timeout is no longer relevant once we have a notarization, but the
-        // advance deadline must remain to bound certification latency.
-        self.leader_deadline = None;
 
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
