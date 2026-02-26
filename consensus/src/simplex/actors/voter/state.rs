@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{NullifyLabel, NullifyReason, Peer},
+        metrics::{Timeout, TimeoutReason, Peer},
         min_active,
         scheme::Scheme,
         types::{
@@ -64,7 +64,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    nullifies: Family<NullifyLabel, Counter>,
+    timeouts: Family<Timeout, Counter>,
     nullifications: Family<Peer, Counter>,
 }
 
@@ -74,11 +74,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let nullifies = Family::<NullifyLabel, Counter>::default();
+        let timeouts = Family::<Timeout, Counter>::default();
         let nullifications = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("nullifies", "nullified views", nullifies.clone());
+        context.register("timeouts", "timed out views", timeouts.clone());
         context.register("nullifications", "nullifications", nullifications.clone());
 
         // Build elector with participants
@@ -101,7 +101,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            nullifies,
+            timeouts,
             nullifications,
         }
     }
@@ -226,16 +226,16 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let (reason, leader) = {
                 let round = self.create_round(view);
                 let reason = round.set_nullify_reason(if round.proposal().is_some() {
-                    NullifyReason::RoundTimeout
+                    TimeoutReason::RoundTimeout
                 } else {
-                    NullifyReason::LeaderTimeout
+                    TimeoutReason::LeaderTimeout
                 });
                 (reason, round.leader())
             };
 
             if let Some(leader) = leader {
-                self.nullifies
-                    .get_or_create(&NullifyLabel::new(&leader.key, reason))
+                self.timeouts
+                    .get_or_create(&Timeout::new(&leader.key, reason))
                     .inc();
             }
         }
@@ -423,7 +423,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// This only records the first nullify reason for the view. Metrics are emitted
     /// when the first timeout nullify vote is constructed.
-    pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
+    pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
             return;
         }
@@ -558,7 +558,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.trigger_nullify(view, NullifyReason::FailedCertification);
+            self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
 
         Some(notarization)
@@ -869,9 +869,9 @@ mod tests {
 
             let leader = state.leader_index(view).expect("leader must be set");
             let leader_key = &participants[leader.get() as usize];
-            let label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
+            let label = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
             assert_eq!(
-                state.nullifies.get_or_create(&label).get(),
+                state.timeouts.get_or_create(&label).get(),
                 1,
                 "first timeout nullify should record a leader-timeout metric"
             );
@@ -909,7 +909,7 @@ mod tests {
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
-            state.trigger_nullify(view, NullifyReason::MissingProposal);
+            state.trigger_timeout(view, TimeoutReason::MissingProposal);
             let (was_retry, _) = state
                 .construct_nullify(view, true)
                 .expect("first timeout nullify should exist");
@@ -917,16 +917,16 @@ mod tests {
 
             let leader = state.leader_index(view).expect("leader must be set");
             let leader_key = &participants[leader.get() as usize];
-            let missing = NullifyLabel::new(leader_key, NullifyReason::MissingProposal);
-            let leader_timeout = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
-            assert_eq!(state.nullifies.get_or_create(&missing).get(), 1);
-            assert_eq!(state.nullifies.get_or_create(&leader_timeout).get(), 0);
+            let missing = Timeout::new(leader_key, TimeoutReason::MissingProposal);
+            let leader_timeout = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
+            assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&leader_timeout).get(), 0);
 
             let (was_retry, _) = state
                 .construct_nullify(view, true)
                 .expect("retry timeout nullify should exist");
             assert!(was_retry);
-            assert_eq!(state.nullifies.get_or_create(&missing).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
         });
     }
 
@@ -952,7 +952,7 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.trigger_nullify(View::zero(), NullifyReason::Inactivity);
+            state.trigger_timeout(View::zero(), TimeoutReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
@@ -975,7 +975,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.trigger_nullify(view_1, NullifyReason::Inactivity);
+            state.trigger_timeout(view_1, TimeoutReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
@@ -1006,30 +1006,30 @@ mod tests {
             let view = state.current_view();
             let leader = state.leader_index(view).unwrap();
             let leader_key = &participants[leader.get() as usize];
-            let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
+            let label = Timeout::new(leader_key, TimeoutReason::LeaderNullify);
 
             // Fast-path trigger should not record metrics until we emit nullify.
-            state.trigger_nullify(view, NullifyReason::Abandon);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 0);
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 0);
 
             // First emitted nullify should record the metric.
             let (was_retry, _) = state
                 .construct_nullify(view, true)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
             // Re-triggering with a different reason should preserve the first reason.
-            state.trigger_nullify(view, NullifyReason::LeaderTimeout);
+            state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
                 .construct_nullify(view, true)
                 .expect("retry timeout nullify should exist");
             assert!(was_retry);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
             // No metric should be emitted for the later reason.
-            let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
-            assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
+            let other_label = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
+            assert_eq!(state.timeouts.get_or_create(&other_label).get(), 0);
         });
     }
 

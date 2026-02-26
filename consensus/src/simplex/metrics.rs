@@ -15,10 +15,10 @@ impl Peer {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum NullifyReason {
+pub enum TimeoutReason {
     Initialization,
     Inactivity,
-    Abandon,
+    LeaderNullify,
     LeaderTimeout,
     RoundTimeout,
     MissingProposal,
@@ -27,13 +27,13 @@ pub enum NullifyReason {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct NullifyLabel {
+pub struct Timeout {
     pub peer: String,
-    pub reason: NullifyReason,
+    pub reason: TimeoutReason,
 }
 
-impl NullifyLabel {
-    pub fn new(peer: &impl Array, reason: NullifyReason) -> Self {
+impl Timeout {
+    pub fn new(peer: &impl Array, reason: TimeoutReason) -> Self {
         Self {
             peer: peer.to_string(),
             reason,

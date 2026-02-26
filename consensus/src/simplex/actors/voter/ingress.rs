@@ -1,6 +1,6 @@
 use crate::{
     simplex::{
-        metrics::NullifyReason,
+        metrics::TimeoutReason,
         types::{Certificate, Proposal},
     },
     types::View,
@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
     /// Signal that the current view should be nullified (if not already).
-    Nullify(View, NullifyReason),
+    Nullify(View, TimeoutReason),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -37,8 +37,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
-    /// Signal that the current view should be nullified (if not already).
-    pub async fn nullify(&mut self, view: View, reason: NullifyReason) {
+    /// Signal that the current view should timeout (if not already).
+    pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
         self.sender.send_lossy(Message::Nullify(view, reason)).await;
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    simplex::{metrics::NullifyReason, types::Vote},
+    simplex::{metrics::TimeoutReason, types::Vote},
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
         leader: Participant,
         finalized: View,
 
-        active: oneshot::Sender<Option<NullifyReason>>,
+        active: oneshot::Sender<Option<TimeoutReason>>,
     },
     /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
@@ -39,7 +39,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         current: View,
         leader: Participant,
         finalized: View,
-    ) -> Option<NullifyReason> {
+    ) -> Option<TimeoutReason> {
         self.sender
             .request_or(
                 |active| Message::Update {

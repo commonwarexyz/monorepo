@@ -1,7 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
-        metrics::NullifyReason,
+        metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::{Participant, Round as Rnd},
@@ -47,7 +47,7 @@ pub struct Round<S: Scheme, D: Digest> {
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
-    nullify_reason: Option<NullifyReason>,
+    nullify_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
@@ -308,7 +308,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Records the first nullify reason observed for this round.
     ///
     /// Returns the canonical reason for the round (first write wins).
-    pub fn set_nullify_reason(&mut self, reason: NullifyReason) -> NullifyReason {
+    pub fn set_nullify_reason(&mut self, reason: TimeoutReason) -> TimeoutReason {
         let canonical = self.nullify_reason.get_or_insert(reason);
         *canonical
     }
