@@ -46,7 +46,7 @@ pub struct Round<S: Scheme, D: Digest> {
     proposal: ProposalSlot<D>,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
-    nullify_retry: Option<SystemTime>,
+    timeout_retry: Option<SystemTime>,
     timeout_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
@@ -72,7 +72,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             proposal: ProposalSlot::new(),
             leader_deadline: None,
             advance_deadline: None,
-            nullify_retry: None,
+            timeout_retry: None,
             timeout_reason: None,
             notarization: None,
             broadcast_notarize: false,
@@ -300,9 +300,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.advance_deadline = Some(advance_deadline);
     }
 
-    /// Overrides the nullify retry deadline, allowing callers to reschedule retries deterministically.
-    pub const fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
-        self.nullify_retry = when;
+    /// Overrides the timeout retry deadline, allowing callers to reschedule retries deterministically.
+    pub const fn set_timeout_retry(&mut self, when: Option<SystemTime>) {
+        self.timeout_retry = when;
     }
 
     /// Records the first timeout reason observed for this round.
@@ -331,7 +331,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
-        self.set_nullify_retry(None);
+        self.set_timeout_retry(None);
         Some(retry)
     }
 
@@ -343,11 +343,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if let Some(deadline) = self.advance_deadline {
             return deadline;
         }
-        if let Some(deadline) = self.nullify_retry {
+        if let Some(deadline) = self.timeout_retry {
             return deadline;
         }
         let next = now + retry;
-        self.nullify_retry = Some(next);
+        self.timeout_retry = Some(next);
         next
     }
 

@@ -92,7 +92,7 @@ pub struct Config<
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
-    pub nullify_retry: Duration,
+    pub timeout_retry: Duration,
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
@@ -142,8 +142,8 @@ impl<
             "leader timeout must be less than or equal to certification timeout"
         );
         assert!(
-            self.nullify_retry > Duration::default(),
-            "nullify retry broadcast must be greater than zero"
+            self.timeout_retry > Duration::default(),
+            "timeout retry broadcast must be greater than zero"
         );
         assert!(
             !self.activity_timeout.is_zero(),

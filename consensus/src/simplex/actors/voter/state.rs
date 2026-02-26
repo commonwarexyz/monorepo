@@ -38,7 +38,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub activity_timeout: ViewDelta,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
-    pub nullify_retry: Duration,
+    pub timeout_retry: Duration,
 }
 
 /// Per-[Epoch] state machine.
@@ -53,7 +53,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     activity_timeout: ViewDelta,
     leader_timeout: Duration,
     certification_timeout: Duration,
-    nullify_retry: Duration,
+    timeout_retry: Duration,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -92,7 +92,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             activity_timeout: cfg.activity_timeout,
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
-            nullify_retry: cfg.nullify_retry,
+            timeout_retry: cfg.timeout_retry,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
@@ -196,9 +196,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the deadline for the next timeout (leader, certification, or retry).
     pub fn next_timeout_deadline(&mut self) -> SystemTime {
         let now = self.context.current();
-        let nullify_retry = self.nullify_retry;
+        let timeout_retry = self.timeout_retry;
         let round = self.create_round(self.view);
-        round.next_timeout_deadline(now, nullify_retry)
+        round.next_timeout_deadline(now, timeout_retry)
     }
 
     /// Constructs a nullify vote for `view`, if eligible.
@@ -718,7 +718,7 @@ mod tests {
                     activity_timeout: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             state.set_genesis(test_genesis());
@@ -797,7 +797,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: retry,
+                timeout_retry: retry,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -861,7 +861,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: retry,
+                timeout_retry: retry,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -917,7 +917,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -959,7 +959,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1016,7 +1016,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1069,7 +1069,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1130,7 +1130,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1195,7 +1195,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1252,7 +1252,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1313,7 +1313,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1373,7 +1373,7 @@ mod tests {
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
             let mut state = State::new(context, cfg);
@@ -1420,7 +1420,7 @@ mod tests {
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
             let mut state = State::new(context, cfg);
@@ -1465,7 +1465,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1516,7 +1516,7 @@ mod tests {
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             state.set_genesis(test_genesis());
@@ -1553,7 +1553,7 @@ mod tests {
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -1581,7 +1581,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1703,7 +1703,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1758,7 +1758,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1823,7 +1823,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1893,7 +1893,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1966,7 +1966,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

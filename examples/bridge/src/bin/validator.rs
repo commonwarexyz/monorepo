@@ -253,7 +253,7 @@ fn main() {
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),

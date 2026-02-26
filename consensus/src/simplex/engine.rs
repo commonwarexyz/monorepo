@@ -86,7 +86,7 @@ impl<
                 epoch: cfg.epoch,
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
-                nullify_retry: cfg.nullify_retry,
+                timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

@@ -170,7 +170,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
-                nullify_retry: cfg.nullify_retry,
+                timeout_retry: cfg.timeout_retry,
             },
         );
         (
