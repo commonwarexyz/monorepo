@@ -2469,6 +2469,7 @@ mod tests {
                     },
                 }
             }
+
         });
     }
 
@@ -2657,6 +2658,7 @@ mod tests {
                     },
                 }
             }
+
         });
     }
 
@@ -2853,6 +2855,17 @@ mod tests {
                     },
                 }
             }
+
+            // Ensure dropped verify maps to the expected timeout reason metric.
+            let encoded = context.encode();
+            assert!(
+                encoded.lines().any(|line| {
+                    line.contains("_timeouts")
+                        && line.contains("reason=\"IgnoredProposal\"")
+                        && !line.ends_with(" 0")
+                }),
+                "expected non-zero timeout metric with reason=IgnoredProposal"
+            );
         });
     }
 

@@ -22,6 +22,7 @@ pub enum TimeoutReason {
     LeaderTimeout,
     RoundTimeout,
     MissingProposal,
+    IgnoredProposal,
     InvalidProposal,
     FailedCertification,
 }

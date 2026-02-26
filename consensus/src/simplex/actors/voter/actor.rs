@@ -952,6 +952,8 @@ impl<
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
+                        self.state
+                            .trigger_timeout(context.view(), TimeoutReason::IgnoredProposal);
                     }
                 };
             },
