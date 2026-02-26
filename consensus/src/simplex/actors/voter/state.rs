@@ -294,18 +294,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
-        let has_proposal = round.proposal().is_some();
         if let Some(leader) = leader {
             self.nullifications_per_leader
                 .get_or_create(&Peer::new(&leader.key))
-                .inc();
-            let reason = if has_proposal {
-                AbandonReason::RoundTimeout
-            } else {
-                AbandonReason::LeaderTimeout
-            };
-            self.abandons_per_leader
-                .get_or_create(&Abandon::new(&leader.key, reason))
                 .inc();
         }
 
@@ -419,6 +410,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views
             .get(&view)
             .map(|round| round.elapsed_since_start(now))
+    }
+
+    /// Returns whether a proposal exists for the given view.
+    pub fn has_proposal(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.proposal().is_some())
     }
 
     /// Immediately abandons `view`, forcing its timeouts to trigger on the next tick.

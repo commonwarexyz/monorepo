@@ -368,13 +368,22 @@ impl<
             return;
         };
 
+        // Record abandon on first nullify (not retries)
+        if !retry {
+            let reason = if self.state.has_proposal(view) {
+                AbandonReason::RoundTimeout
+            } else {
+                AbandonReason::LeaderTimeout
+            };
+            debug!(%view, ?reason, "abandoning round");
+            self.state.abandon(view, reason);
+            return;
+        }
+
         // Broadcast entry to help others enter the view.
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
-        if !retry {
-            return;
-        }
         let past_view = view
             .previous()
             .expect("we should never be in the genesis view");
@@ -1078,10 +1087,8 @@ impl<
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
                     if let Some(reason) = abandon_reason {
-                        if reason == AbandonReason::LeaderNullify || !self.state.is_me(leader) {
-                            debug!(%view, %leader, ?reason, "abandoning round");
-                            self.state.abandon(current_view, reason);
-                        }
+                        debug!(%view, %leader, ?reason, "abandoning round");
+                        self.state.abandon(current_view, reason);
                     }
                 }
             },
