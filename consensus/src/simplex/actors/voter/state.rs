@@ -225,7 +225,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if timeout && !is_retry {
             let (reason, leader) = {
                 let round = self.create_round(view);
-                let reason = round.set_nullify_reason(if round.proposal().is_some() {
+                let (reason, _) = round.set_timeout_reason(if round.proposal().is_some() {
                     TimeoutReason::AdvanceTimeout
                 } else {
                     TimeoutReason::LeaderTimeout
@@ -421,10 +421,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Immediately expires `view` on first timeout, forcing deadlines to trigger on the next tick.
     ///
-    /// If the round has already emitted a timeout nullify, this preserves the existing
+    /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
     ///
-    /// This only records the first nullify reason for the view. Metrics are emitted
+    /// This only records the first timeout reason for the view. Metrics are emitted
     /// when the first timeout nullify vote is constructed.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
@@ -433,10 +433,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let round = self.create_round(view);
-        if !round.has_broadcast_nullify() {
+        let (_, is_first_timeout) = round.set_timeout_reason(reason);
+        if is_first_timeout {
             round.set_deadlines(now, now);
         }
-        let _ = round.set_nullify_reason(reason);
     }
 
     /// Attempt to propose a new block.
@@ -961,7 +961,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context, cfg);
+            let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
 
             // Expiring a non-current view should do nothing.
@@ -1014,7 +1014,7 @@ mod tests {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
             };
-            let mut state = State::new(context, cfg);
+            let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
 
             let view = state.current_view();
@@ -1024,6 +1024,16 @@ mod tests {
 
             // Fast-path trigger should not record metrics until we emit nullify.
             state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            let expired_at = state.next_timeout_deadline();
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Repeated timeout hints before emitting nullify should preserve the first timeout.
+            state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
+            assert_eq!(
+                state.next_timeout_deadline(),
+                expired_at,
+                "repeated timeout hints should not reset the expired deadline"
+            );
             assert_eq!(state.timeouts.get_or_create(&label).get(), 0);
 
             // First emitted nullify should record the metric.

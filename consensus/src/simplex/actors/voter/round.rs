@@ -47,7 +47,7 @@ pub struct Round<S: Scheme, D: Digest> {
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
-    nullify_reason: Option<TimeoutReason>,
+    timeout_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
@@ -73,7 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
-            nullify_reason: None,
+            timeout_reason: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -305,12 +305,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullify_retry = when;
     }
 
-    /// Records the first nullify reason observed for this round.
+    /// Records the first timeout reason observed for this round.
     ///
-    /// Returns the canonical reason for the round (first write wins).
-    pub fn set_nullify_reason(&mut self, reason: TimeoutReason) -> TimeoutReason {
-        let canonical = self.nullify_reason.get_or_insert(reason);
-        *canonical
+    /// Returns `(canonical_reason, is_first_timeout)` where `is_first_timeout` is true
+    /// only when this call records the first timeout reason for the round.
+    pub fn set_timeout_reason(&mut self, reason: TimeoutReason) -> (TimeoutReason, bool) {
+        match self.timeout_reason {
+            Some(canonical) => (canonical, false),
+            None => {
+                self.timeout_reason = Some(reason);
+                (reason, true)
+            }
+        }
     }
 
     /// Returns a nullify vote if we should timeout/retry.
@@ -327,11 +333,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.clear_deadlines();
         self.set_nullify_retry(None);
         Some(retry)
-    }
-
-    /// Returns true once a nullify vote has been broadcast for this round.
-    pub const fn has_broadcast_nullify(&self) -> bool {
-        self.broadcast_nullify
     }
 
     /// Returns the next timeout deadline for the round.
