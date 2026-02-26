@@ -16,12 +16,12 @@ impl Peer {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum SkipReason {
+    Initialization,
     Inactivity,
     Abandoned,
     LeaderTimeout,
     RoundTimeout,
     FailedProposal,
-    Initialization,
     CertificationFailure,
 }
 
