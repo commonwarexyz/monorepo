@@ -242,7 +242,7 @@ impl<
                     let nullify_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
-                        Some(NullifyReason::LeaderNullify)
+                        Some(NullifyReason::Abandon)
                     } else {
                         let skip_timeout = self.skip_timeout.get() as usize;
                         if
@@ -439,7 +439,7 @@ impl<
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
                         current.nullified = true;
-                        voter.nullify(current.view, NullifyReason::LeaderNullify).await;
+                        voter.nullify(current.view, NullifyReason::Abandon).await;
                     }
                 }
                 updated_view = view;

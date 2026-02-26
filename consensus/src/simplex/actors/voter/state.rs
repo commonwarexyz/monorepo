@@ -916,14 +916,14 @@ mod tests {
             let view = state.current_view();
             let leader = state.leader_index(view).unwrap();
             let leader_key = &participants[leader.get() as usize];
-            let label = NullifyLabel::new(leader_key, NullifyReason::LeaderNullify);
+            let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
 
             // First nullify should record the metric
-            state.nullify(view, NullifyReason::LeaderNullify);
+            state.nullify(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Second nullify (same view, same reason) should NOT increment
-            state.nullify(view, NullifyReason::LeaderNullify);
+            state.nullify(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Third nullify (same view, different reason) should also NOT increment

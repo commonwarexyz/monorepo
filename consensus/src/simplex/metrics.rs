@@ -18,7 +18,7 @@ impl Peer {
 pub enum NullifyReason {
     Initialization,
     Inactivity,
-    LeaderNullify,
+    Abandon,
     LeaderTimeout,
     RoundTimeout,
     MissingProposal,
