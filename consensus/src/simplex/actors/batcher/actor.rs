@@ -430,9 +430,6 @@ impl<
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
-                let is_leader = current.leader.is_some_and(|leader| {
-                    self.scheme.participants().index(&sender) == Some(leader)
-                });
                 if work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
@@ -450,7 +447,7 @@ impl<
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
-                    if is_leader && Self::leader_nullified(&current, &work) {
+                    if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
                         voter.timeout(current.view, TimeoutReason::LeaderNullify).await;
                     }
