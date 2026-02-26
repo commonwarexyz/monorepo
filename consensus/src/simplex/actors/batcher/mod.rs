@@ -202,8 +202,8 @@ mod tests {
 
             // Initialize batcher
             let view = View::new(1);
-            let skip = batcher_mailbox.update(view, Participant::new(0), View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, Participant::new(0), View::zero()).await;
+            assert!(nullify.is_none());
 
             // Build certificates
             let round = Round::new(epoch, view);
@@ -367,10 +367,10 @@ mod tests {
 
             // Initialize batcher at target view.
             let target_view = View::new(1);
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(target_view, Participant::new(0), View::zero())
                 .await;
-            assert!(skip.is_none());
+            assert!(nullify.is_none());
 
             // Build certificates for the same target view.
             let round = Round::new(epoch, target_view);
@@ -395,10 +395,10 @@ mod tests {
             );
 
             // Simulate voter-driven view advance after nullification to V+1.
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(target_view.next(), Participant::new(1), View::zero())
                 .await;
-            assert!(skip.is_none());
+            assert!(nullify.is_none());
 
             // Send old notarization for V after moving current view forward.
             injector_sender
@@ -529,8 +529,8 @@ mod tests {
             // (so we can test leader proposal forwarding when vote arrives from network)
             let view = View::new(1);
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
@@ -687,8 +687,8 @@ mod tests {
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
@@ -869,8 +869,8 @@ mod tests {
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
@@ -1075,8 +1075,8 @@ mod tests {
             // We (participant 0) are NOT the leader
             let view = View::new(1);
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Give time for update to process
             context.sleep(Duration::from_millis(10)).await;
@@ -1221,8 +1221,8 @@ mod tests {
 
             // Now set the leader - this should cause the proposal to be forwarded
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Give time for batcher to process
             context.sleep(Duration::from_millis(50)).await;
@@ -1336,16 +1336,16 @@ mod tests {
             let leader = Participant::new(1);
             for v in 1..skip_timeout {
                 let view = View::new(v);
-                let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-                assert!(skip.is_none(), "view {v} should be active (before skip_timeout)");
+                let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+                assert!(nullify.is_none(), "view {v} should be active (before skip_timeout)");
             }
 
             // Test 2: At view skip_timeout, we now have skip_timeout entries (views 1-5)
             // and the leader hasn't voted, so they should be marked inactive
             let view = View::new(skip_timeout);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                skip.is_some(),
+                nullify.is_some(),
                 "view {skip_timeout} should be inactive (leader hasn't voted in {skip_timeout} views)"
             );
 
@@ -1368,9 +1368,9 @@ mod tests {
             // Test 4: Advance to view skip_timeout + 1 (view 6)
             // Leader voted in view 5, which is in the recent window, so should be active
             let view = View::new(skip_timeout + 1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                skip.is_none(),
+                nullify.is_none(),
                 "view {} should be active (leader voted in view {})",
                 skip_timeout + 1,
                 skip_timeout
@@ -1381,9 +1381,9 @@ mod tests {
             // data for views 7-99). The activity check looks at the last skip_timeout
             // rounds we have data for, so the leader's vote in view 5 is still visible.
             let view = View::new(100);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                skip.is_none(),
+                nullify.is_none(),
                 "view 100 should be active (leader voted in view 5, still in last {skip_timeout} rounds)"
             );
         });
@@ -1506,11 +1506,11 @@ mod tests {
 
             // Nullify-only activity should still count as activity for skip-timeout.
             let next_view = View::new(skip_timeout + 1);
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(next_view, leader, View::zero())
                 .await;
             assert!(
-                skip.is_none(),
+                nullify.is_none(),
                 "leader should remain active with nullify activity"
             );
         });
@@ -1640,11 +1640,11 @@ mod tests {
 
             // Move current view to 2 with that same leader; this should fast-path timeout by
             // reporting the leader as inactive in the update response.
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(buffered_view, leader_idx, View::zero())
                 .await;
             assert!(
-                skip.is_some(),
+                nullify.is_some(),
                 "buffered leader nullify should skip timeout on view entry"
             );
         });
@@ -1895,8 +1895,8 @@ mod tests {
             let view2 = View::new(2);
             let leader = Participant::new(1);
 
-            let skip = batcher_mailbox.update(view1, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view1, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             let round1 = Round::new(epoch, view1);
@@ -1941,8 +1941,8 @@ mod tests {
             // Part 2: Advance finalized to view 2
             // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=2)
             let view3 = View::new(3);
-            let skip = batcher_mailbox.update(view3, leader, view2).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view3, leader, view2).await;
+            assert!(nullify.is_none());
 
             // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
             let round2 = Round::new(epoch, view2);
@@ -2104,8 +2104,8 @@ mod tests {
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
             let leader = Participant::new(1);
-            let skip = batcher_mailbox.update(view, leader, View::zero()).await;
-            assert!(skip.is_none());
+            let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(nullify.is_none());
 
             // Build proposal and send enough votes to reach quorum
             let round = Round::new(epoch, view);
@@ -2313,10 +2313,10 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let view = View::new(1);
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(view, Participant::new(1), View::zero())
                 .await;
-            assert!(skip.is_none());
+            assert!(nullify.is_none());
 
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -2530,10 +2530,10 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let view = View::new(1);
-            let skip = batcher_mailbox
+            let nullify = batcher_mailbox
                 .update(view, Participant::new(1), View::zero())
                 .await;
-            assert!(skip.is_none());
+            assert!(nullify.is_none());
 
             let round = Round::new(epoch, view);
             let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));
