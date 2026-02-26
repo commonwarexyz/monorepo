@@ -4,14 +4,15 @@ use crate::{
             shards,
             types::{CodedBlock, StoredCodedBlock},
         },
-        core::{Buffer, Variant},
+        core::{Buffer, SimplexConsensus, Variant},
     },
+    simplex::scheme,
     simplex::types::Context,
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{certificate::Scheme as CertificateScheme, Committable, Digestible, Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 
@@ -20,20 +21,23 @@ use std::sync::Arc;
 /// This variant distributes blocks as erasure-coded shards, allowing reconstruction
 /// from a subset of shards. This reduces bandwidth requirements for block propagation.
 #[derive(Default, Clone, Copy)]
-pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
-where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey;
-
-impl<B, C, H, P> Variant for Coding<B, C, H, P>
+pub struct Coding<B, C, H, P, S>(std::marker::PhantomData<(B, C, H, P, S)>)
 where
     B: CertifiableBlock<Context = Context<Commitment, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
+    S: CertificateScheme<PublicKey = P> + scheme::Scheme<Commitment>;
+
+impl<B, C, H, P, S> Variant for Coding<B, C, H, P, S>
+where
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+    S: CertificateScheme<PublicKey = P> + scheme::Scheme<Commitment>,
 {
+    type Consensus = SimplexConsensus<S, Commitment>;
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C, H>;
     type StoredBlock = StoredCodedBlock<B, C, H>;
@@ -59,12 +63,13 @@ where
     }
 }
 
-impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
+impl<B, C, H, P, S> Buffer<Coding<B, C, H, P, S>> for shards::Mailbox<B, C, H, P>
 where
     B: CertifiableBlock<Context = Context<Commitment, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
+    S: CertificateScheme<PublicKey = P> + scheme::Scheme<Commitment>,
 {
     type CachedBlock = Arc<CodedBlock<B, C, H>>;
 

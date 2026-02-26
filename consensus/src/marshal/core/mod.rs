@@ -22,7 +22,7 @@
 //!
 //! ```rust,ignore
 //! // Initialize with storage
-//! let (actor, mailbox, last_height) = Actor::<S, Standard<B>>::init(
+//! let (actor, mailbox, last_height) = Actor::<StandardSimplex<B, S>>::init(
 //!     context,
 //!     finalizations_archive,
 //!     blocks_archive,
@@ -42,6 +42,11 @@ mod actor;
 pub use actor::Actor;
 
 pub(crate) mod cache;
+
+mod consensus;
+pub use consensus::{
+    ConsensusCertificate, ConsensusEngine, MinimmitConsensus, SimplexConsensus,
+};
 
 mod mailbox;
 pub use mailbox::Mailbox;

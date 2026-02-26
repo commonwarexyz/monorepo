@@ -8,6 +8,8 @@
 //! # Components
 //!
 //! - [`Standard`]: The variant marker type that configures marshal for full-block broadcast.
+//! - [`StandardSimplex`]: Standard mode wired to simplex certificates.
+//! - [`StandardMinimmit`]: Standard mode wired to minimmit certificates.
 //! - [`Deferred`]: Deferred-verification wrapper that enforces epoch boundaries and
 //!   coordinates with the marshal actor.
 //! - [`Inline`]: Inline-verification wrapper for applications whose blocks do not
@@ -36,14 +38,14 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 mod variant;
-pub use variant::Standard;
+pub use variant::{Standard, StandardMinimmit, StandardSimplex};
 
 #[cfg(test)]
 mod tests {
-    use super::{Deferred, Inline, Standard};
+    use super::{Deferred, Inline, StandardSimplex};
     use crate::{
         marshal::{
-            core::Mailbox,
+            core::{Mailbox, SimplexConsensus},
             mocks::{
                 harness::{
                     self, default_leader, make_raw_block, setup_network, Ctx, DeferredHarness,
@@ -241,7 +243,7 @@ mod tests {
 
     type Runtime = deterministic::Context;
     type App = MockVerifyingApp<B, S>;
-    type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher>;
+    type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher, SimplexConsensus<S, D>>;
     type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher>;
 
     enum Wrapper {
@@ -254,7 +256,7 @@ mod tests {
             kind: WrapperKind,
             context: Runtime,
             app: App,
-            marshal: Mailbox<S, Standard<B>>,
+            marshal: Mailbox<StandardSimplex<B, S>>,
         ) -> Self {
             match kind {
                 WrapperKind::Inline => Self::Inline(Inline::new(

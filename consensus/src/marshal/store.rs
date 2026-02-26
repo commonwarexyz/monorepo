@@ -1,7 +1,8 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
-use crate::{simplex::types::Finalization, types::Height, Block};
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use crate::{types::Height, Block};
+use commonware_codec::CodecShared;
+use commonware_cryptography::{Digest, Digestible};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
@@ -14,11 +15,8 @@ pub trait Certificates: Send + Sync + 'static {
     /// The type of [Digest] used for block digests.
     type BlockDigest: Digest;
 
-    /// The type of [Digest] included in consensus certificates.
-    type Commitment: Digest;
-
-    /// The type of signing [Scheme] used by consensus.
-    type Scheme: Scheme;
+    /// The type of finalized certificate stored by this backend.
+    type Finalization: CodecShared + Clone + Send + Sync + 'static;
 
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
@@ -43,7 +41,7 @@ pub trait Certificates: Send + Sync + 'static {
         &mut self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<Self::Scheme, Self::Commitment>,
+        finalization: Self::Finalization,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
@@ -65,9 +63,7 @@ pub trait Certificates: Send + Sync + 'static {
     fn get(
         &self,
         id: Identifier<'_, Self::BlockDigest>,
-    ) -> impl Future<
-        Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
-    > + Send;
+    ) -> impl Future<Output = Result<Option<Self::Finalization>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
@@ -179,23 +175,21 @@ pub trait Blocks: Send + Sync + 'static {
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
 }
 
-impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
+impl<E, B, F> Certificates for immutable::Archive<E, B, F>
 where
     E: BufferPooler + Storage + Metrics + Clock,
     B: Digest,
-    C: Digest,
-    S: Scheme,
+    F: CodecShared + Clone + Send + Sync + 'static,
 {
     type BlockDigest = B;
-    type Commitment = C;
-    type Scheme = S;
+    type Finalization = F;
     type Error = archive::Error;
 
     async fn put(
         &mut self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<S, Self::Commitment>,
+        finalization: Self::Finalization,
     ) -> Result<(), Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
@@ -207,7 +201,7 @@ where
     async fn get(
         &self,
         id: Identifier<'_, Self::BlockDigest>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+    ) -> Result<Option<Self::Finalization>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
 
@@ -262,24 +256,22 @@ where
     }
 }
 
-impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
+impl<T, E, B, F> Certificates for prunable::Archive<T, E, B, F>
 where
     T: Translator,
     E: BufferPooler + Storage + Metrics + Clock,
     B: Digest,
-    C: Digest,
-    S: Scheme,
+    F: CodecShared + Clone + Send + Sync + 'static,
 {
     type BlockDigest = B;
-    type Commitment = C;
-    type Scheme = S;
+    type Finalization = F;
     type Error = archive::Error;
 
     async fn put(
         &mut self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<S, Self::Commitment>,
+        finalization: Self::Finalization,
     ) -> Result<(), Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
@@ -291,7 +283,7 @@ where
     async fn get(
         &self,
         id: Identifier<'_, Self::BlockDigest>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+    ) -> Result<Option<Self::Finalization>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
 
