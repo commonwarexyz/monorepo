@@ -14,14 +14,13 @@ use crate::{
     qmdb::{
         any::{db::Db, ValueEncoding},
         delete_known_loc,
-        operation::Operation as OperationTrait,
+        operation::{Key, Operation as OperationTrait},
         update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
     },
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 #[cfg(any(test, feature = "test-traits"))]
 use core::ops::Range;
 use futures::{
@@ -43,7 +42,7 @@ type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -231,7 +230,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
@@ -468,7 +467,7 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
@@ -532,7 +531,7 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
 impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -553,7 +552,7 @@ where
 impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -573,7 +572,7 @@ impl<E, K, V, C, I, H> UnmerkleizedDurableAny
     for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -600,7 +599,7 @@ impl<E, K, V, C, I, H> MerkleizedNonDurableAny
     for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -619,7 +618,7 @@ where
 impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
@@ -673,214 +672,6 @@ mod test {
             + MerkleizedStore<Value = Digest, Digest = Digest>
             + PrunableStore
     {
-    }
-
-    /// Helper trait for testing Any databases with Digest keys.
-    /// Used for generic tests that can be shared with partitioned variants.
-    pub(crate) trait DigestDb:
-        CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest> + PrunableStore
-    {
-    }
-    impl<T> DigestDb for T where
-        T: CleanAny<Key = Digest>
-            + MerkleizedStore<Value = Digest, Digest = Digest>
-            + PrunableStore
-    {
-    }
-
-    /// Test an empty database with Digest keys.
-    ///
-    /// This function is pub(crate) so partitioned variants can call it.
-    pub(crate) async fn test_digest_ordered_any_db_empty<D: DigestDb>(
-        context: Context,
-        mut db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-    ) {
-        assert_eq!(db.size().await, 1);
-        assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
-
-        // Make sure closing/reopening gets us back to the same state, even after adding an
-        // uncommitted op, and even without a clean shutdown.
-        let d1 = Sha256::fill(1u8);
-        let d2 = Sha256::fill(2u8);
-        let root = db.root();
-        let mut db = db.into_mutable();
-        db.write_batch([(d1, Some(d2))]).await.unwrap();
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.root(), root);
-        assert_eq!(db.size().await, 1);
-
-        // Test calling commit on an empty db.
-        let metadata = Sha256::fill(3u8);
-        let db = db.into_mutable();
-        let (db, range) = db.commit(Some(metadata)).await.unwrap();
-        let mut db = db.into_merkleized().await.unwrap();
-        assert_eq!(range.start, Location::new_unchecked(1));
-        assert_eq!(range.end, Location::new_unchecked(2));
-        assert_eq!(db.size().await, 2); // floor op added
-        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        let root = db.root();
-        assert!(matches!(
-            db.prune(db.inactivity_floor_loc().await).await,
-            Ok(())
-        ));
-
-        // Re-opening the DB without a clean shutdown should still recover the correct state.
-        let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.size().await, 2);
-        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        assert_eq!(db.root(), root);
-
-        // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
-        let mut mutable_db = db.into_mutable();
-        for _ in 1..100 {
-            let (durable_db, _) = mutable_db.commit(None).await.unwrap();
-            let merkleized_db = durable_db.into_merkleized().await.unwrap();
-            assert_eq!(
-                merkleized_db.size().await - 1,
-                merkleized_db.inactivity_floor_loc().await
-            );
-            mutable_db = merkleized_db.into_mutable();
-        }
-        let db = mutable_db.commit(None).await.unwrap().0;
-        db.into_merkleized().await.unwrap().destroy().await.unwrap();
-    }
-
-    /// Test basic CRUD and commit behavior with Digest keys.
-    ///
-    /// This function is pub(crate) so partitioned variants can call it.
-    pub(crate) async fn test_digest_ordered_any_db_basic<D: DigestDb>(
-        context: Context,
-        db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-    ) {
-        // Build a db with 2 keys and make sure updates and deletions of those keys work as
-        // expected.
-        let key1 = Sha256::fill(1u8);
-        let key2 = Sha256::fill(2u8);
-        let val1 = Sha256::fill(3u8);
-        let val2 = Sha256::fill(4u8);
-
-        assert!(db.get(&key1).await.unwrap().is_none());
-        assert!(db.get(&key2).await.unwrap().is_none());
-
-        let mut db = db.into_mutable();
-        assert!(db.get(&key1).await.unwrap().is_none());
-        db.write_batch([(key1, Some(val1))]).await.unwrap();
-        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
-        assert!(db.get(&key2).await.unwrap().is_none());
-
-        assert!(db.get(&key2).await.unwrap().is_none());
-        db.write_batch([(key2, Some(val2))]).await.unwrap();
-        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
-        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
-
-        db.write_batch([(key1, None)]).await.unwrap();
-        assert!(db.get(&key1).await.unwrap().is_none());
-        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
-
-        let new_val = Sha256::fill(5u8);
-        db.write_batch([(key1, Some(new_val))]).await.unwrap();
-        assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
-
-        db.write_batch([(key2, Some(new_val))]).await.unwrap();
-        assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
-
-        // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
-        assert_eq!(db.size().await, 9);
-        let (durable_db, _) = db.commit(None).await.unwrap();
-        let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
-
-        // Make sure key1 is already active.
-        assert!(db.get(&key1).await.unwrap().is_some());
-
-        // Delete all keys.
-        assert!(db.get(&key1).await.unwrap().is_some());
-        db.write_batch([(key1, None)]).await.unwrap();
-        assert!(db.get(&key2).await.unwrap().is_some());
-        db.write_batch([(key2, None)]).await.unwrap();
-        assert!(db.get(&key1).await.unwrap().is_none());
-        assert!(db.get(&key2).await.unwrap().is_none());
-
-        let db = db
-            .commit(None)
-            .await
-            .unwrap()
-            .0
-            .into_merkleized()
-            .await
-            .unwrap();
-
-        // Multiple deletions of the same key should be a no-op.
-        let prev_op_count = db.size().await;
-        let db = db.into_mutable();
-        // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
-        assert!(db.get(&key1).await.unwrap().is_none());
-        assert_eq!(db.size().await, prev_op_count);
-
-        // Deletions of non-existent keys should be a no-op.
-        let key3 = Sha256::fill(6u8);
-        assert!(db.get(&key3).await.unwrap().is_none());
-        assert_eq!(db.size().await, prev_op_count);
-
-        // Make sure closing/reopening gets us back to the same state.
-        let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
-        let op_count = db.size().await;
-        let root = db.root();
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.size().await, op_count);
-        assert_eq!(db.root(), root);
-        let mut db = db.into_mutable();
-
-        // Re-activate the keys by updating them.
-        db.write_batch([(key1, Some(val1))]).await.unwrap();
-        db.write_batch([(key2, Some(val2))]).await.unwrap();
-        db.write_batch([(key1, None)]).await.unwrap();
-        db.write_batch([(key2, Some(val1))]).await.unwrap();
-        db.write_batch([(key1, Some(val2))]).await.unwrap();
-
-        let db = db
-            .commit(None)
-            .await
-            .unwrap()
-            .0
-            .into_merkleized()
-            .await
-            .unwrap();
-
-        // Confirm close/reopen gets us back to the same state.
-        let op_count = db.size().await;
-        let root = db.root();
-        let db = reopen_db(context.with_label("reopen2")).await;
-
-        assert_eq!(db.root(), root);
-        assert_eq!(db.size().await, op_count);
-
-        // Commit will raise the inactivity floor, which won't affect state but will affect the
-        // root.
-        let db = db.into_mutable();
-        let mut db = db
-            .commit(None)
-            .await
-            .unwrap()
-            .0
-            .into_merkleized()
-            .await
-            .unwrap();
-
-        assert!(db.root() != root);
-
-        // Pruning inactive ops should not affect current state or root.
-        let root = db.root();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
-        assert_eq!(db.root(), root);
-
-        db.destroy().await.unwrap();
     }
 
     pub(crate) async fn test_ordered_any_db_empty<D: FixedBytesDb>(

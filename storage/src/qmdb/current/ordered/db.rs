@@ -17,18 +17,19 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
-        store, DurabilityState, Durable, Error, NonDurable,
+        operation::Key,
+        DurabilityState, Durable, Error, NonDurable,
     },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use commonware_utils::bitmap::Prunable as BitMap;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
+pub struct KeyValueProof<K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<D, N>,
     pub next_key: K,
 }
@@ -44,7 +45,7 @@ pub type Db<E, C, K, V, I, H, const N: usize, S = Merkleized<DigestOf<H>>, D = D
 impl<
         E: Storage + Clock + Metrics,
         C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -139,17 +140,16 @@ where
     }
 }
 
-// Functionality for any Merkleized state (both Durable and NonDurable).
+// Functionality for Clean state.
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: store::State,
-    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, D>
+    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, Durable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -200,8 +200,7 @@ where
             None => {
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
                 // variant requires the CommitFloor's floor to equal its own location (genuinely
-                // empty at commit time). If this doesn't hold (e.g. uncommitted deleted emptied
-                // the DB), we can't generate a valid proof until the next commit.
+                // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
                 let op = self
                     .any
                     .log
@@ -212,9 +211,11 @@ where
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
-                if floor != self.any.last_commit_loc {
-                    return Err(Error::NotEmpty);
-                }
+                assert_eq!(
+                    floor, self.any.last_commit_loc,
+                    "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
+                    self.any.last_commit_loc, floor
+                );
                 let op_proof = self
                     .operation_proof(hasher, self.any.last_commit_loc)
                     .await?;
@@ -228,7 +229,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -269,7 +270,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
+        K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
         H: Hasher,
@@ -296,7 +297,7 @@ impl<E, C, K, V, I, H, const N: usize> Batchable
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item = Operation<K, V>>,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     I: OrderedIndex<Value = Location> + 'static,
     H: Hasher,

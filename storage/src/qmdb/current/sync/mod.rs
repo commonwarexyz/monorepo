@@ -425,10 +425,11 @@ impl<E, K, V, H, T, const N: usize> Database
     for CurrentOrderedVariableDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
+    OrderedVariableOp<K, V>: CodecShared,
 {
     type Context = E;
     type Op = OrderedVariableOp<K, V>;
@@ -476,16 +477,17 @@ where
 // the inner `any` db. The sync engine verifies each batch against the ops root.
 
 macro_rules! impl_current_resolver {
-    ($db:ident, $op:ident, $val_bound:ident) => {
+    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<$db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>>
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            $($($where_extra)+)?
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
@@ -516,11 +518,12 @@ macro_rules! impl_current_resolver {
             >
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            $($($where_extra)+)?
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
@@ -552,11 +555,12 @@ macro_rules! impl_current_resolver {
             >
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            $($($where_extra)+)?
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
@@ -584,17 +588,19 @@ macro_rules! impl_current_resolver {
 }
 
 // Unordered Fixed
-impl_current_resolver!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue);
+impl_current_resolver!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue, Array);
 
 // Unordered Variable
 impl_current_resolver!(
-    CurrentUnorderedVariableDb,
-    UnorderedVariableOp,
-    VariableValue
+    CurrentUnorderedVariableDb, UnorderedVariableOp, VariableValue, Key;
+    UnorderedVariableOp<K, V>: CodecShared,
 );
 
 // Ordered Fixed
-impl_current_resolver!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue);
+impl_current_resolver!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue, Array);
 
 // Ordered Variable
-impl_current_resolver!(CurrentOrderedVariableDb, OrderedVariableOp, VariableValue);
+impl_current_resolver!(
+    CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
+    OrderedVariableOp<K, V>: CodecShared,
+);

@@ -115,8 +115,8 @@ where
     }
 }
 
-// Functionality shared across Merkleized states, such as the ability to prune the log, retrieve the
-// state root, and compute proofs.
+// Functionality shared across Merkleized states, such as the ability to prune the log and compute
+// historical proofs.
 impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
@@ -129,19 +129,6 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    pub fn root(&self) -> H::Digest {
-        self.log.root()
-    }
-
-    pub async fn proof(
-        &self,
-        loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
-    }
-
     pub async fn historical_proof(
         &self,
         historical_size: Location,
@@ -175,7 +162,33 @@ where
     }
 }
 
-// Functionality specific to (Merkleized,Durable) state, such as ability to initialize and persist.
+// Functionality specific to Clean state: root, proof.
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Mutable<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+{
+    pub fn root(&self) -> H::Digest {
+        self.log.root()
+    }
+
+    pub async fn proof(
+        &self,
+        loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.historical_proof(self.log.size().await, loc, max_ops)
+            .await
+    }
+}
+
+// Functionality specific to Clean state with persistable jounral: initialization and persistence.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
@@ -289,7 +302,7 @@ where
     }
 }
 
-// Functionality specific to (Unmerkleized,Durable) state.
+// Functionality specific to Clean state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
@@ -515,7 +528,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -524,7 +537,6 @@ where
     C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;

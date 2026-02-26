@@ -182,7 +182,7 @@ use crate::{
             operation::{Operation, Update},
             FixedConfig as AnyFixedConfig, ValueEncoding, VariableConfig as AnyVariableConfig,
         },
-        operation::Committable,
+        operation::{Committable, Key},
         Durable, Error,
     },
     translator::Translator,
@@ -415,7 +415,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>
 >
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
     H: Hasher,

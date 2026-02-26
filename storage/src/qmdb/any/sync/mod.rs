@@ -247,10 +247,11 @@ impl<E, K, V, H, T> qmdb::sync::Database
     for OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
+    OrderedVariableOp<K, V>: CodecShared,
 {
     type Context = E;
     type Op = OrderedVariableOp<K, V>;

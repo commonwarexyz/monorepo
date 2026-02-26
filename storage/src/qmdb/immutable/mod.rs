@@ -197,26 +197,6 @@ impl<
         D: DurabilityState,
     > Immutable<E, K, V, H, T, Merkleized<H>, D>
 {
-    /// Return the root of the db.
-    pub fn root(&self) -> H::Digest {
-        self.journal.root()
-    }
-
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    pub async fn proof(
-        &self,
-        start_index: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.bounds().await.end;
-        self.historical_proof(op_count, start_index, max_ops).await
-    }
-
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
     ///
@@ -256,10 +236,30 @@ impl<
     }
 }
 
-// Functionality specific to (Merkleized, Durable) state.
+// Functionality specific to Clean state.
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
+    /// Return the root of the db.
+    pub fn root(&self) -> H::Digest {
+        self.journal.root()
+    }
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    pub async fn proof(
+        &self,
+        start_index: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let op_count = self.bounds().await.end;
+        self.historical_proof(op_count, start_index, max_ops).await
+    }
+
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -497,14 +497,8 @@ impl<
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

@@ -11,14 +11,14 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_variable, ordered, value::VariableEncoding, VariableConfig, VariableValue},
+        operation::Key,
         Durable, Error, Merkleized,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
@@ -28,8 +28,10 @@ pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -72,14 +74,14 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
+            operation::Key,
             Durable, Error, Merkleized,
         },
         translator::Translator,
     };
-    use commonware_codec::Read;
+    use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
-    use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -103,14 +105,14 @@ pub mod partitioned {
 
     impl<
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: Key,
             V: VariableValue,
             H: Hasher,
             T: Translator,
             const P: usize,
         > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
     where
-        Operation<K, V>: Read,
+        Operation<K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -167,7 +169,6 @@ pub(crate) mod test {
         qmdb::{
             any::{
                 ordered::test::{
-                    test_digest_ordered_any_db_basic, test_digest_ordered_any_db_empty,
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
                     test_ordered_any_update_collision_edge_case,
                 },
@@ -282,41 +283,6 @@ pub(crate) mod test {
                 }
             }
         }
-    }
-
-    // Tests calling generic helpers with Digest-key and Digest-value DB (non-partitioned variant)
-
-    /// Type alias for a variable db with Digest keys AND Digest values (for generic tests).
-    type DigestVariableDb = Db<Context, Digest, Digest, Sha256, TwoCap>;
-
-    /// Return a variable db with Digest keys and values for generic tests.
-    async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        let cfg = variable_db_config("digest-partition", &context);
-        DigestVariableDb::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_variable_db_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_variable_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_empty(context, db, |ctx| {
-                Box::pin(open_digest_variable_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_variable_db_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_variable_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_basic(context, db, |ctx| {
-                Box::pin(open_digest_variable_db(ctx))
-            })
-            .await;
-        });
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
@@ -461,42 +427,6 @@ pub(crate) mod test {
             assert_eq!(span2.1.next_key, key1);
             let db = db.commit(None).await.unwrap().0;
             db.into_merkleized().destroy().await.unwrap();
-        });
-    }
-
-    // Partitioned variant tests
-
-    type PartitionedAnyTest =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
-
-    async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let cfg = variable_db_config("ordered-partitioned-var-p1", &context);
-        PartitionedAnyTest::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_empty(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_basic(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
         });
     }
 
