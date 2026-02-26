@@ -368,11 +368,8 @@ impl<
             return;
         };
 
-        // Record nullify on first attempt (not retries) without resetting retry backoff.
+        // First timeout emission is handled inside try_broadcast_nullify.
         if !retry {
-            if let Some(reason) = self.state.nullify(view) {
-                debug!(%view, ?reason, "nullifying round");
-            }
             return;
         }
 

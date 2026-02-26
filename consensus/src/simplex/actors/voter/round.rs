@@ -308,14 +308,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Records the first nullify reason observed for this round.
     ///
     /// Returns the canonical reason for the round (first write wins).
-    pub fn note_nullify_reason(&mut self, reason: NullifyReason) -> NullifyReason {
+    pub fn set_nullify_reason(&mut self, reason: NullifyReason) -> NullifyReason {
         let canonical = self.nullify_reason.get_or_insert(reason);
         *canonical
-    }
-
-    /// Returns the first nullify reason observed for this round, if any.
-    pub const fn nullify_reason(&self) -> Option<NullifyReason> {
-        self.nullify_reason
     }
 
     /// Returns a nullify vote if we should timeout/retry.
