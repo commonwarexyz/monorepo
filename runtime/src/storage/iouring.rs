@@ -285,7 +285,6 @@ impl Blob {
             // correctly represents the remaining valid bytes.
             let ptr = unsafe { buf.as_ptr().add(bytes_written) };
             let remaining_len = buf_len - bytes_written;
-            offset += bytes_written as u64;
 
             // Create an operation to do the write
             let op = opcode::Write::new(fd, ptr, remaining_len as _)
@@ -323,6 +322,7 @@ impl Blob {
             }
 
             bytes_written += op_bytes_written;
+            offset += op_bytes_written as u64;
         }
 
         Ok(())
