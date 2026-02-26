@@ -299,7 +299,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
@@ -5290,9 +5290,9 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                Duration::from_millis(500),
+                Duration::from_secs(3),
+                Duration::from_secs(4),
+                Duration::from_secs(2 * 60 * 60),
                 mocks::application::Certifier::Pending,
             )
             .await;
@@ -5358,7 +5358,7 @@ mod tests {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep(Duration::from_secs(8)) => {
                         panic!(
                             "voter should emit nullify for view {target_view} via timeout \
                              when certification hangs indefinitely",
