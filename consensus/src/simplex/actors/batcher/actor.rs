@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::{Inbound, TimeoutReason, Peer},
+        metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
