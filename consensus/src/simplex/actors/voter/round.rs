@@ -309,7 +309,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns `(canonical_reason, is_first_timeout)` where `is_first_timeout` is true
     /// only when this call records the first timeout reason for the round.
-    pub fn set_timeout_reason(&mut self, reason: TimeoutReason) -> (TimeoutReason, bool) {
+    pub const fn set_timeout_reason(&mut self, reason: TimeoutReason) -> (TimeoutReason, bool) {
         match self.timeout_reason {
             Some(canonical) => (canonical, false),
             None => {
