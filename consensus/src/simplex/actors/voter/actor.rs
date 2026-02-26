@@ -368,15 +368,13 @@ impl<
             return;
         };
 
-        // First timeout emission is handled inside try_broadcast_nullify.
-        if !retry {
-            return;
-        }
-
-        // Broadcast entry to help others enter the view.
+        // Broadcast entry to help others enter the view (if on retry).
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
+        if !retry {
+            return;
+        }
         let past_view = view
             .previous()
             .expect("we should never be in the genesis view");
