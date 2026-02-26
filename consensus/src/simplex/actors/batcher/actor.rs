@@ -403,12 +403,12 @@ impl<
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
-                let added = work
+                if work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender, message)
-                    .await;
-                if added {
+                    .await
+                {
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
