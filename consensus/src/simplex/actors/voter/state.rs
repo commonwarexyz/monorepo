@@ -562,7 +562,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.abandon(view, AbandonReason::CertificationFailure);
+            self.abandon(view, AbandonReason::FailedCertification);
         }
 
         Some(notarization)

@@ -23,7 +23,7 @@ pub enum AbandonReason {
     RoundTimeout,
     MissingProposal,
     InvalidProposal,
-    CertificationFailure,
+    FailedCertification,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
