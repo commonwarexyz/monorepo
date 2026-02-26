@@ -55,6 +55,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     notarization_timeout: Duration,
     nullify_retry: Duration,
     view: View,
+    abandoned: bool,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
@@ -105,6 +106,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             notarization_timeout: cfg.notarization_timeout,
             nullify_retry: cfg.nullify_retry,
             view: GENESIS_VIEW,
+            abandoned: false,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
@@ -177,6 +179,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
         self.view = view;
+        self.abandoned = false;
 
         // Update metrics
         let _ = self.current_view.try_set(view.get());
@@ -420,6 +423,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Immediately abandons `view`, forcing its timeouts to trigger on the next tick.
+    ///
+    /// Only records the abandon metric on the first call per view.
     pub fn abandon(&mut self, view: View, reason: AbandonReason) {
         if view != self.view {
             return;
@@ -428,11 +433,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let now = self.context.current();
         let round = self.create_round(view);
         round.set_deadlines(now, now);
+        let leader = round.leader();
 
-        if let Some(leader) = round.leader() {
-            self.abandons_per_leader
-                .get_or_create(&Abandon::new(&leader.key, reason))
-                .inc();
+        if !self.abandoned {
+            self.abandoned = true;
+            if let Some(leader) = leader {
+                self.abandons_per_leader
+                    .get_or_create(&Abandon::new(&leader.key, reason))
+                    .inc();
+            }
         }
     }
 
@@ -888,6 +897,48 @@ mod tests {
             state.abandon(view_1, AbandonReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
+        });
+    }
+
+    #[test]
+    fn abandon_only_records_metric_once() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(12),
+                activity_timeout: ViewDelta::new(3),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            let leader = state.leader_index(view).unwrap();
+            let leader_key = &participants[leader.get() as usize];
+            let label = Abandon::new(leader_key, AbandonReason::LeaderNullify);
+
+            // First abandon should record the metric
+            state.abandon(view, AbandonReason::LeaderNullify);
+            assert_eq!(state.abandons_per_leader.get_or_create(&label).get(), 1);
+
+            // Second abandon (same view, same reason) should NOT increment
+            state.abandon(view, AbandonReason::LeaderNullify);
+            assert_eq!(state.abandons_per_leader.get_or_create(&label).get(), 1);
+
+            // Third abandon (same view, different reason) should also NOT increment
+            let other_label = Abandon::new(leader_key, AbandonReason::LeaderTimeout);
+            state.abandon(view, AbandonReason::LeaderTimeout);
+            assert_eq!(state.abandons_per_leader.get_or_create(&other_label).get(), 0);
         });
     }
 

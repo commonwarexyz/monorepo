@@ -198,6 +198,7 @@ impl<
         // Initialize view data structures
         let mut current = (View::zero(), None);
         let mut finalized = View::zero();
+        let mut notified_abandon = false;
         let mut work = BTreeMap::new();
         select_loop! {
             self.context,
@@ -217,6 +218,7 @@ impl<
                 } => {
                     current = (new_current, Some(leader));
                     finalized = new_finalized;
+                    notified_abandon = false;
                     work.entry(current.0)
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
@@ -421,7 +423,8 @@ impl<
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
-                    if Self::leader_nullified(current, &work) {
+                    if !notified_abandon && Self::leader_nullified(current, &work) {
+                        notified_abandon = true;
                         voter.abandon(current.0, AbandonReason::LeaderNullify).await;
                     }
                 }
