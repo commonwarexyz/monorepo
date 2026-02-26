@@ -38,8 +38,8 @@ pub struct Config<
     pub epoch: Epoch,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
-    pub notarization_timeout: Duration,
-    pub nullify_retry: Duration,
+    pub certification_timeout: Duration,
+    pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -157,8 +157,8 @@ mod tests {
         schemes: &[S],
         elector: L,
         leader_timeout: Duration,
-        notarization_timeout: Duration,
-        nullify_retry: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
         should_certify: mocks::application::Certifier<Sha256Digest>,
     ) -> (
         Mailbox<S, Sha256Digest>,
@@ -205,8 +205,8 @@ mod tests {
             epoch: Epoch::new(333),
             mailbox_size: 128,
             leader_timeout,
-            notarization_timeout,
-            nullify_retry,
+            certification_timeout,
+            timeout_retry,
             activity_timeout: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -299,7 +299,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, oracle) = Network::new(
@@ -355,8 +355,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
-                notarization_timeout: Duration::from_secs(5),
-                nullify_retry: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -591,8 +591,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_millis(1000),
-                nullify_retry: Duration::from_millis(1000),
+                certification_timeout: Duration::from_millis(1000),
+                timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -1265,8 +1265,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1460,8 +1460,8 @@ mod tests {
                 epoch,
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1665,8 +1665,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1755,8 +1755,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2127,8 +2127,8 @@ mod tests {
                 mailbox_size: 128,
                 // Use long timeouts to prove nullify comes immediately, not from timeout
                 leader_timeout: Duration::from_secs(10),
-                notarization_timeout: Duration::from_secs(10),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2348,8 +2348,8 @@ mod tests {
                 mailbox_size: 128,
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
-                notarization_timeout: Duration::from_secs(10),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2560,8 +2560,8 @@ mod tests {
                 mailbox_size: 128,
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
-                notarization_timeout: Duration::from_secs(10),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2740,8 +2740,8 @@ mod tests {
                 mailbox_size: 128,
                 // Use long timeouts so a fast nullify proves we did not wait for timeout.
                 leader_timeout: Duration::from_secs(10),
-                notarization_timeout: Duration::from_secs(10),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2954,8 +2954,8 @@ mod tests {
                 epoch,
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(250),
-                notarization_timeout: Duration::from_millis(250),
-                nullify_retry: Duration::from_millis(250),
+                certification_timeout: Duration::from_millis(250),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3255,8 +3255,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3391,8 +3391,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3525,8 +3525,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
-                notarization_timeout: Duration::from_secs(5),
-                nullify_retry: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3725,8 +3725,8 @@ mod tests {
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
-                notarization_timeout: Duration::from_secs(5),
-                nullify_retry: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4533,7 +4533,7 @@ mod tests {
                 elector,
                 Duration::from_millis(500),
                 Duration::from_millis(500),
-                Duration::from_millis(500),
+                Duration::from_mins(60),
                 mocks::application::Certifier::Cancel,
             )
             .await;
@@ -4702,8 +4702,8 @@ mod tests {
                 epoch,
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
-                notarization_timeout: Duration::from_secs(5),
-                nullify_retry: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4813,8 +4813,8 @@ mod tests {
                 epoch,
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
-                notarization_timeout: Duration::from_secs(5),
-                nullify_retry: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5290,9 +5290,9 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                Duration::from_millis(500),
+                Duration::from_secs(3),
+                Duration::from_secs(4),
+                Duration::from_mins(60),
                 mocks::application::Certifier::Pending,
             )
             .await;
@@ -5358,7 +5358,7 @@ mod tests {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep(Duration::from_secs(8)) => {
                         panic!(
                             "voter should emit nullify for view {target_view} via timeout \
                              when certification hangs indefinitely",
@@ -5381,5 +5381,301 @@ mod tests {
         pending_certification_nullifies_on_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         pending_certification_nullifies_on_timeout::<_, _>(ed25519::fixture);
         pending_certification_nullifies_on_timeout::<_, _>(secp256r1::fixture);
+    }
+
+    /// Regression: once a proposal is received, leader timeout must no longer fire for that view.
+    ///
+    /// We require:
+    /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
+    /// 2. Nullify eventually arrives only after `certification_timeout` when no
+    ///    certificate progress occurs.
+    fn proposal_clears_leader_timeout_before_certification_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"proposal_clears_leader_timeout".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Advance to a follower view.
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Submit proposal quickly so leader timeout is cleared.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"proposal_clears_leader_timeout"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // Ensure proposal verification path ran.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize vote for view {target_view}");
+                    },
+                }
+            }
+
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // see nullify in this 2s window after proposal handling, even though
+            // leader timeout has elapsed.
+            let no_nullify_deadline = context.current() + Duration::from_secs(2);
+            while context.current() < no_nullify_deadline {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!(
+                                "received nullify for view {target_view} before certification timeout"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_millis(10)) => {}
+                }
+            }
+
+            // After certification timeout elapses, timeout recovery must emit nullify.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(6)) => {
+                        panic!(
+                            "expected nullify for view {target_view} after certification timeout"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_proposal_clears_leader_timeout_before_certification_timeout() {
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(ed25519::fixture);
+        proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
+    }
+
+    /// Regression: when a proposal is first observed through a notarization certificate,
+    /// leader timeout must still be cleared for the current view.
+    ///
+    /// We require:
+    /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
+    /// 2. Nullify eventually arrives only after `certification_timeout` when certification
+    ///    remains pending.
+    fn recovered_proposal_clears_leader_timeout_before_certification_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"recovered_proposal_clears_leader_timeout".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Pending,
+            )
+            .await;
+
+            // Advance to a follower view.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Recover a notarization that carries the proposal for this view.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"recovered_proposal_clears_leader_timeout"),
+            );
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            // Ensure certificate processing happened and proposal from certificate
+            // is treated as verified by checking that we notarize.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize vote for view {target_view} from recovered certificate");
+                    },
+                }
+            }
+
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // see nullify in this 2s window after certificate handling, even though
+            // leader timeout has elapsed.
+            let no_nullify_deadline = context.current() + Duration::from_secs(2);
+            while context.current() < no_nullify_deadline {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!(
+                                "received nullify for view {target_view} before certification timeout after recovered certificate"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_millis(10)) => {}
+                }
+            }
+
+            // After certification timeout elapses, timeout recovery must emit nullify.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(6)) => {
+                        panic!(
+                            "expected nullify for view {target_view} after certification timeout with recovered certificate"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_recovered_proposal_clears_leader_timeout_before_certification_timeout() {
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            ed25519::fixture,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            secp256r1::fixture,
+        );
     }
 }

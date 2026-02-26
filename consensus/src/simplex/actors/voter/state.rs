@@ -37,8 +37,8 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub epoch: Epoch,
     pub activity_timeout: ViewDelta,
     pub leader_timeout: Duration,
-    pub notarization_timeout: Duration,
-    pub nullify_retry: Duration,
+    pub certification_timeout: Duration,
+    pub timeout_retry: Duration,
 }
 
 /// Per-[Epoch] state machine.
@@ -52,8 +52,8 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     epoch: Epoch,
     activity_timeout: ViewDelta,
     leader_timeout: Duration,
-    notarization_timeout: Duration,
-    nullify_retry: Duration,
+    certification_timeout: Duration,
+    timeout_retry: Duration,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -91,8 +91,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
             leader_timeout: cfg.leader_timeout,
-            notarization_timeout: cfg.notarization_timeout,
-            nullify_retry: cfg.nullify_retry,
+            certification_timeout: cfg.certification_timeout,
+            timeout_retry: cfg.timeout_retry,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
@@ -161,10 +161,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
-        let advance_deadline = now + self.notarization_timeout;
+        let certification_deadline = now + self.certification_timeout;
 
         let round = self.create_round(view);
-        round.set_deadlines(leader_deadline, advance_deadline);
+        round.set_deadlines(leader_deadline, certification_deadline);
         self.view = view;
 
         // Update metrics
@@ -193,12 +193,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         })
     }
 
-    /// Returns the deadline for the next timeout (leader, notarization, or retry).
+    /// Returns the deadline for the next timeout (leader, certification, or retry).
     pub fn next_timeout_deadline(&mut self) -> SystemTime {
         let now = self.context.current();
-        let nullify_retry = self.nullify_retry;
+        let timeout_retry = self.timeout_retry;
         let round = self.create_round(self.view);
-        round.next_timeout_deadline(now, nullify_retry)
+        round.next_timeout_deadline(now, timeout_retry)
     }
 
     /// Constructs a nullify vote for `view`, if eligible.
@@ -430,7 +430,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let round = self.create_round(view);
-        if round.set_timeout_reason(reason).1 {
+        let (_, is_first_timeout) = round.set_timeout_reason(reason);
+        if is_first_timeout {
             round.set_deadlines(now, now);
         }
     }
@@ -546,6 +547,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
+        if is_success {
+            // Clear deadlines if the certification was successful
+            round.clear_deadlines();
+        }
 
         // Remove from outstanding since certification is complete
         self.outstanding_certifications.remove(&view);
@@ -713,8 +718,8 @@ mod tests {
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             state.set_genesis(test_genesis());
@@ -792,8 +797,8 @@ mod tests {
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: retry,
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: retry,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -856,8 +861,8 @@ mod tests {
                 epoch: Epoch::new(30),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: retry,
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: retry,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -912,8 +917,8 @@ mod tests {
                 epoch: Epoch::new(31),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -941,6 +946,63 @@ mod tests {
     }
 
     #[test]
+    fn notarization_keeps_advance_timeout_for_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(32),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([52u8; 32]),
+            );
+
+            // Proposal arrival clears leader timeout and leaves only the advance timeout.
+            assert!(state.set_proposal(view, proposal.clone()));
+            let advance_deadline = state.next_timeout_deadline();
+            assert_eq!(advance_deadline, context.current() + Duration::from_secs(2));
+
+            // Receiving a notarization should not clear the advance timeout while certification is pending.
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+                .collect();
+            let notarization = Notarization::from_notarizes(&verifier, votes.iter(), &Sequential)
+                .expect("notarization");
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_none());
+            assert_eq!(
+                state.next_timeout_deadline(),
+                advance_deadline,
+                "advance timeout must continue to bound certification latency"
+            );
+
+            // If certification stalls beyond the advance timeout, timeout handling should fire immediately.
+            context.sleep(Duration::from_secs(3)).await;
+            assert!(
+                state.next_timeout_deadline() <= context.current(),
+                "stalled certification should leave the view timed out"
+            );
+        });
+    }
+
+    #[test]
     fn expire_old_round_is_noop() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -954,8 +1016,8 @@ mod tests {
                 epoch: Epoch::new(12),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1007,8 +1069,8 @@ mod tests {
                 epoch: Epoch::new(12),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1068,8 +1130,8 @@ mod tests {
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1133,8 +1195,8 @@ mod tests {
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1190,8 +1252,8 @@ mod tests {
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1251,8 +1313,8 @@ mod tests {
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1311,8 +1373,8 @@ mod tests {
                 elector: <RoundRobin>::default(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
             let mut state = State::new(context, cfg);
@@ -1358,8 +1420,8 @@ mod tests {
                 elector: <RoundRobin>::default(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
                 activity_timeout: ViewDelta::new(5),
             };
             let mut state = State::new(context, cfg);
@@ -1403,8 +1465,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1454,8 +1516,8 @@ mod tests {
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             state.set_genesis(test_genesis());
@@ -1491,8 +1553,8 @@ mod tests {
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -1519,8 +1581,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1641,8 +1703,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1696,8 +1758,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1761,8 +1823,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1831,8 +1893,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1904,8 +1966,8 @@ mod tests {
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

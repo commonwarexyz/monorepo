@@ -45,8 +45,8 @@ pub struct Round<S: Scheme, D: Digest> {
 
     proposal: ProposalSlot<D>,
     leader_deadline: Option<SystemTime>,
-    advance_deadline: Option<SystemTime>,
-    nullify_retry: Option<SystemTime>,
+    certification_deadline: Option<SystemTime>,
+    timeout_retry: Option<SystemTime>,
     timeout_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
@@ -71,8 +71,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
-            advance_deadline: None,
-            nullify_retry: None,
+            certification_deadline: None,
+            timeout_retry: None,
             timeout_reason: None,
             notarization: None,
             broadcast_notarize: false,
@@ -181,10 +181,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
-    /// Removes the leader and advance deadlines so timeouts stop firing.
+    /// Removes the leader and certification deadlines so timeouts stop firing.
     pub const fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.certification_deadline = None;
     }
 
     /// Sets the leader for this round using the pre-computed leader index.
@@ -294,15 +294,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub const fn set_deadlines(
         &mut self,
         leader_deadline: SystemTime,
-        advance_deadline: SystemTime,
+        certification_deadline: SystemTime,
     ) {
         self.leader_deadline = Some(leader_deadline);
-        self.advance_deadline = Some(advance_deadline);
+        self.certification_deadline = Some(certification_deadline);
     }
 
-    /// Overrides the nullify retry deadline, allowing callers to reschedule retries deterministically.
-    pub const fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
-        self.nullify_retry = when;
+    /// Overrides the timeout retry deadline, allowing callers to reschedule retries deterministically.
+    pub const fn set_timeout_retry(&mut self, when: Option<SystemTime>) {
+        self.timeout_retry = when;
     }
 
     /// Records the first timeout reason observed for this round.
@@ -331,7 +331,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
-        self.set_nullify_retry(None);
+        self.set_timeout_retry(None);
         Some(retry)
     }
 
@@ -340,14 +340,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if let Some(deadline) = self.leader_deadline {
             return deadline;
         }
-        if let Some(deadline) = self.advance_deadline {
+        if let Some(deadline) = self.certification_deadline {
             return deadline;
         }
-        if let Some(deadline) = self.nullify_retry {
+        if let Some(deadline) = self.timeout_retry {
             return deadline;
         }
         let next = now + retry;
-        self.nullify_retry = Some(next);
+        self.timeout_retry = Some(next);
         next
     }
 
@@ -358,6 +358,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
                 debug!(?proposal, "setting verified proposal from certificate");
+                self.leader_deadline = None;
                 None
             }
             ProposalChange::Unchanged => None,
@@ -391,7 +392,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.notarization.is_some() {
             return (false, None);
         }
-        self.clear_deadlines();
+
+        // Unlike nullification and finalization, we do not clear deadlines when adding a notarization (and
+        // instead wait for certification to successfully complete).
 
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
