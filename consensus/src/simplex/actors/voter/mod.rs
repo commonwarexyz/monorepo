@@ -4875,7 +4875,7 @@ mod tests {
     ///
     /// Once the f+1 honest validators certify view 3 and advance to view 4,
     /// they can only vote to nullify view 4 (their current view) without equivocating.
-    /// The `handle_timeout` function only votes to nullify `self.view` (current view).
+    /// The `timeout` function only votes to nullify `self.view` (current view).
     fn only_finalization_rescues_validator<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
