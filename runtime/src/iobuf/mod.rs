@@ -778,6 +778,18 @@ impl IoBufs {
         }
     }
 
+    /// Consume this container and return the single buffer if present.
+    ///
+    /// Returns `Ok(IoBuf)` only when all remaining data is already contained in
+    /// a single chunk. Returns `Err(Self)` with the original container
+    /// otherwise.
+    pub fn try_into_single(self) -> Result<IoBuf, Self> {
+        match self.inner {
+            IoBufsInner::Single(buf) => Ok(buf),
+            inner => Err(Self { inner }),
+        }
+    }
+
     /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
@@ -1216,6 +1228,18 @@ impl IoBufsMut {
         match &mut self.inner {
             IoBufsMutInner::Single(buf) => Some(buf),
             _ => None,
+        }
+    }
+
+    /// Consume this container and return the single buffer if present.
+    ///
+    /// Returns `Ok(IoBufMut)` only when readable data is represented as one
+    /// chunk. Returns `Err(Self)` with the original container otherwise.
+    #[allow(clippy::result_large_err)]
+    pub fn try_into_single(self) -> Result<IoBufMut, Self> {
+        match self.inner {
+            IoBufsMutInner::Single(buf) => Ok(buf),
+            inner => Err(Self { inner }),
         }
     }
 
@@ -2239,6 +2263,17 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufs_try_into_single() {
+        let single = IoBufs::from(IoBuf::from(b"hello"));
+        let single = single.try_into_single().expect("single expected");
+        assert_eq!(single, b"hello");
+
+        let multi = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let multi = multi.try_into_single().expect_err("multi expected");
+        assert_eq!(multi.coalesce(), b"abcd");
+    }
+
+    #[test]
     fn test_iobufs_chunks_vectored_multiple_slices() {
         let bufs = IoBufs::from(vec![
             IoBuf::from(b"ab"),
@@ -2857,6 +2892,17 @@ mod tests {
         let count = sparse.chunks_vectored(&mut dst);
         assert_eq!(count, 1);
         assert_eq!(&dst[0][..], b"y");
+    }
+
+    #[test]
+    fn test_iobufsmut_try_into_single() {
+        let single = IoBufsMut::from(IoBufMut::from(b"hello"));
+        let single = single.try_into_single().expect("single expected");
+        assert_eq!(single, b"hello");
+
+        let multi = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
+        let multi = multi.try_into_single().expect_err("multi expected");
+        assert_eq!(multi.coalesce(), b"abcd");
     }
 
     #[test]
