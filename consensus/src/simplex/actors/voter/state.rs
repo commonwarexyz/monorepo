@@ -552,14 +552,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             round.clear_deadlines();
         }
 
+        // Remove from outstanding since certification is complete
+        self.outstanding_certifications.remove(&view);
+
         // Get notarization before advancing state
         let notarization = round
             .notarization()
             .cloned()
             .expect("notarization must exist for certified view");
-
-        // Remove from outstanding since certification is complete
-        self.outstanding_certifications.remove(&view);
 
         if is_success {
             self.enter_view(view.next());
