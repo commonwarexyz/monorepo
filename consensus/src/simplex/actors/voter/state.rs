@@ -161,10 +161,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let leader_deadline = now + self.leader_timeout;
-        let advance_deadline = now + self.certification_timeout;
+        let certification_deadline = now + self.certification_timeout;
 
         let round = self.create_round(view);
-        round.set_deadlines(leader_deadline, advance_deadline);
+        round.set_deadlines(leader_deadline, certification_deadline);
         self.view = view;
 
         // Update metrics
