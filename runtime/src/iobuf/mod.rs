@@ -2322,6 +2322,18 @@ mod tests {
 
     #[test]
     fn test_iobufs_chunks_vectored_multiple_slices() {
+        // Single non-empty buffers should export exactly one slice.
+        let single = IoBufs::from(IoBuf::from(b"xy"));
+        let mut single_dst = [IoSlice::new(&[]); 2];
+        let count = single.chunks_vectored(&mut single_dst);
+        assert_eq!(count, 1);
+        assert_eq!(&single_dst[0][..], b"xy");
+
+        // Single empty buffers should export no slices.
+        let empty_single = IoBufs::default();
+        let mut empty_single_dst = [IoSlice::new(&[]); 1];
+        assert_eq!(empty_single.chunks_vectored(&mut empty_single_dst), 0);
+
         let bufs = IoBufs::from(vec![
             IoBuf::from(b"ab"),
             IoBuf::from(b"cd"),
@@ -2357,6 +2369,23 @@ mod tests {
         let count = sparse.chunks_vectored(&mut dst);
         assert_eq!(count, 1);
         assert_eq!(&dst[0][..], b"x");
+
+        // Triple should skip empty chunks and preserve readable order.
+        let sparse_triple = IoBufs {
+            inner: IoBufsInner::Triple([IoBuf::default(), IoBuf::from(b"y"), IoBuf::from(b"z")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 3];
+        let count = sparse_triple.chunks_vectored(&mut dst);
+        assert_eq!(count, 2);
+        assert_eq!(&dst[0][..], b"y");
+        assert_eq!(&dst[1][..], b"z");
+
+        // Chunked shapes with only empty buffers should export no slices.
+        let empty_chunked = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([IoBuf::default(), IoBuf::default()])),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        assert_eq!(empty_chunked.chunks_vectored(&mut dst), 0);
     }
 
     #[test]
@@ -2904,6 +2933,18 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_chunks_vectored_multiple_slices() {
+        // Single non-empty buffers should export exactly one slice.
+        let single = IoBufsMut::from(IoBufMut::from(b"xy"));
+        let mut single_dst = [IoSlice::new(&[]); 2];
+        let count = single.chunks_vectored(&mut single_dst);
+        assert_eq!(count, 1);
+        assert_eq!(&single_dst[0][..], b"xy");
+
+        // Single empty buffers should export no slices.
+        let empty_single = IoBufsMut::default();
+        let mut empty_single_dst = [IoSlice::new(&[]); 1];
+        assert_eq!(empty_single.chunks_vectored(&mut empty_single_dst), 0);
+
         let bufs = IoBufsMut::from(vec![
             IoBufMut::from(b"ab"),
             IoBufMut::from(b"cd"),
@@ -2939,6 +2980,30 @@ mod tests {
         let count = sparse.chunks_vectored(&mut dst);
         assert_eq!(count, 1);
         assert_eq!(&dst[0][..], b"y");
+
+        // Triple should skip empty chunks and preserve readable order.
+        let sparse_triple = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::from(b"z"),
+                IoBufMut::from(b"w"),
+            ]),
+        };
+        let mut dst = [IoSlice::new(&[]); 3];
+        let count = sparse_triple.chunks_vectored(&mut dst);
+        assert_eq!(count, 2);
+        assert_eq!(&dst[0][..], b"z");
+        assert_eq!(&dst[1][..], b"w");
+
+        // Chunked shapes with only empty buffers should export no slices.
+        let empty_chunked = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([
+                IoBufMut::default(),
+                IoBufMut::default(),
+            ])),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        assert_eq!(empty_chunked.chunks_vectored(&mut dst), 0);
     }
 
     #[test]
