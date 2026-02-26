@@ -223,17 +223,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         if timeout && !is_retry {
-            let (reason, leader) = {
-                let round = self.create_round(view);
-                let (reason, _) = round.set_timeout_reason(if round.proposal().is_some() {
-                    TimeoutReason::AdvanceTimeout
-                } else {
-                    TimeoutReason::LeaderTimeout
-                });
-                (reason, round.leader())
+            let round = self.create_round(view);
+            let reason = if round.proposal().is_some() {
+                TimeoutReason::AdvanceTimeout
+            } else {
+                TimeoutReason::LeaderTimeout
             };
-
-            if let Some(leader) = leader {
+            let (reason, _) = round.set_timeout_reason(reason);
+            if let Some(leader) = round.leader() {
                 self.timeouts
                     .get_or_create(&Timeout::new(&leader.key, reason))
                     .inc();
@@ -433,8 +430,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let round = self.create_round(view);
-        let (_, is_first_timeout) = round.set_timeout_reason(reason);
-        if is_first_timeout {
+        if round.set_timeout_reason(reason).1 {
             round.set_deadlines(now, now);
         }
     }
