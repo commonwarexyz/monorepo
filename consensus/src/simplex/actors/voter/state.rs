@@ -419,7 +419,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .map(|round| round.elapsed_since_start(now))
     }
 
-    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
+    /// Immediately expires `view` on first timeout, forcing deadlines to trigger on the next tick.
+    ///
+    /// If the round has already emitted a timeout nullify, this preserves the existing
+    /// retry schedule.
     ///
     /// This only records the first nullify reason for the view. Metrics are emitted
     /// when the first timeout nullify vote is constructed.
@@ -430,7 +433,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let round = self.create_round(view);
-        round.set_deadlines(now, now);
+        if !round.has_broadcast_nullify() {
+            round.set_deadlines(now, now);
+        }
         let _ = round.set_nullify_reason(reason);
     }
 
@@ -878,10 +883,19 @@ mod tests {
 
             context.sleep(Duration::from_secs(2)).await;
             let now = context.current();
+            let retry_deadline = state.next_timeout_deadline();
             assert_eq!(
-                state.next_timeout_deadline(),
+                retry_deadline,
                 now + retry,
                 "first retry should honor configured nullify backoff"
+            );
+
+            // Repeated timeout hints for the same view should not reset retry backoff.
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(
+                state.next_timeout_deadline(),
+                retry_deadline,
+                "retry backoff should be preserved after repeated timeout hints"
             );
         });
     }

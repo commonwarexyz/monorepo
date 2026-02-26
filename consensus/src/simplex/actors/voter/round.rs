@@ -329,6 +329,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(retry)
     }
 
+    /// Returns true once a nullify vote has been broadcast for this round.
+    pub const fn has_broadcast_nullify(&self) -> bool {
+        self.broadcast_nullify
+    }
+
     /// Returns the next timeout deadline for the round.
     pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
         if let Some(deadline) = self.leader_deadline {
