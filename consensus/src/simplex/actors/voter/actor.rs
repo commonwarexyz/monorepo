@@ -376,7 +376,7 @@ impl<
                 NullifyReason::LeaderTimeout
             };
             debug!(%view, ?reason, "nullifying round");
-            self.state.expire_round(view, reason);
+            self.state.trigger_nullify(view, reason);
             return;
         }
 
@@ -823,7 +823,7 @@ impl<
             "consensus initialized"
         );
         self.state
-            .expire_round(observed_view, NullifyReason::Initialization);
+            .trigger_nullify(observed_view, NullifyReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -914,7 +914,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.expire_round(context.view(), NullifyReason::MissingProposal);
+                        self.state.trigger_nullify(context.view(), NullifyReason::MissingProposal);
                         continue;
                     }
                 };
@@ -951,7 +951,7 @@ impl<
                     }
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.expire_round(context.view(), NullifyReason::InvalidProposal);
+                        self.state.trigger_nullify(context.view(), NullifyReason::InvalidProposal);
                         continue;
                     }
                     Err(err) => {
@@ -1045,7 +1045,7 @@ impl<
                     }
                     Message::Nullify(view, reason) => {
                         debug!(%view, ?reason, "nullifying view");
-                        self.state.expire_round(view, reason);
+                        self.state.trigger_nullify(view, reason);
                         continue;
                     }
                 }
@@ -1087,7 +1087,7 @@ impl<
                         .await
                     {
                         debug!(%view, %leader, ?reason, "nullifying round");
-                        self.state.expire_round(current_view, reason);
+                        self.state.trigger_nullify(current_view, reason);
                     }
                 }
             },

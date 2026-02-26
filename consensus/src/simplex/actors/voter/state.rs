@@ -415,7 +415,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     ///
     /// Only records the nullify metric on the first call per view.
-    pub fn expire_round(&mut self, view: View, reason: NullifyReason) {
+    pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
         if view != self.view {
             return;
         }
@@ -560,7 +560,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.expire_round(view, NullifyReason::FailedCertification);
+            self.trigger_nullify(view, NullifyReason::FailedCertification);
         }
 
         Some(notarization)
@@ -862,7 +862,7 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.expire_round(View::zero(), NullifyReason::Inactivity);
+            state.trigger_nullify(View::zero(), NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
@@ -885,7 +885,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.expire_round(view_1, NullifyReason::Inactivity);
+            state.trigger_nullify(view_1, NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
@@ -919,16 +919,16 @@ mod tests {
             let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
 
             // First nullify should record the metric
-            state.expire_round(view, NullifyReason::Abandon);
+            state.trigger_nullify(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Second nullify (same view, same reason) should NOT increment
-            state.expire_round(view, NullifyReason::Abandon);
+            state.trigger_nullify(view, NullifyReason::Abandon);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Third nullify (same view, different reason) should also NOT increment
             let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
-            state.expire_round(view, NullifyReason::LeaderTimeout);
+            state.trigger_nullify(view, NullifyReason::LeaderTimeout);
             assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
         });
     }
