@@ -180,6 +180,30 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
+    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
+    /// For positions at or above the grafting height, returns grafted MMR node.
+    /// For positions below the grafting height, the ops MMR is used.
+    fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
+        grafting::Storage::new(
+            &self.grafted_mmr,
+            grafting::height::<N>(),
+            &self.any.log.mmr,
+        )
+    }
+}
+
+// Root and proof functionality for Clean state with non-mutable journal.
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Contiguous<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+{
     /// Returns the canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub const fn root(&self) -> H::Digest {
@@ -195,17 +219,6 @@ where
     /// See the [Root structure](super) section in the module documentation.
     pub fn ops_root(&self) -> H::Digest {
         self.any.log.root()
-    }
-
-    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
-    /// For positions at or above the grafting height, returns grafted MMR node.
-    /// For positions below the grafting height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
-        grafting::Storage::new(
-            &self.grafted_mmr,
-            grafting::height::<N>(),
-            &self.any.log.mmr,
-        )
     }
 
     /// Returns a proof for the operation at `loc`.
@@ -647,12 +660,12 @@ where
     }
 }
 
-// MerkleizedStore for Merkleized states (both Durable and NonDurable)
+// MerkleizedStore for Clean state.
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, D, const N: usize> MerkleizedStore
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore
+    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -661,7 +674,6 @@ where
     C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;

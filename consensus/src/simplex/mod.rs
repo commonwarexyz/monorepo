@@ -75,6 +75,19 @@
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
+//! ### Vote Broadcast
+//!
+//! Honest participants opportunistically broadcast votes for all views they are actively tracking. This
+//! includes views that are no longer current (i.e. sending a `notarize(c,v)` for view `v-1` while in view `v`).
+//!
+//! This is particularly useful for applications that wish to reward participants for actively participating in consensus
+//! (by including their votes onchain) and want to ensure their reward mechanism doesn't penalize decentralized participants
+//! that may not be able to issue a vote within the latest view consistently in a timely manner (say that there is a quorum
+//! in one data center and one participant is in another data center).
+//!
+//! _We only parse and verify votes necessary to drive consensus forward, so applications that do not require this functionality
+//! will incur negligible overhead._
+//!
 //! ### Certification
 //!
 //! After a payload is notarized, the application can optionally delay or prevent finalization via the
@@ -89,6 +102,12 @@
 //! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
 //! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
+//!
+//! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
+//! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
+//! attempting to complete certification. This increases the likelihood that we can vote on the next honest proposer's block (which
+//! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
+//! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._

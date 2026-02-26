@@ -104,11 +104,6 @@ pub enum Error {
     #[error("key exists")]
     KeyExists,
 
-    /// The db is not empty at the last commit, so an empty exclusion proof
-    /// cannot be generated.
-    #[error("db not empty at last commit")]
-    NotEmpty,
-
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
 
