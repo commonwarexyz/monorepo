@@ -1083,10 +1083,10 @@ impl<
 
                     // If the leader abandoned or is inactive, reduce leader
                     // timeout to now
-                    let abandon_reason = batcher
+                    if let Some(reason) = batcher
                         .update(current_view, leader, self.state.last_finalized())
-                        .await;
-                    if let Some(reason) = abandon_reason {
+                        .await
+                    {
                         debug!(%view, %leader, ?reason, "abandoning round");
                         self.state.abandon(current_view, reason);
                     }
