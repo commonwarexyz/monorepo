@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{Abandon, AbandonReason, Peer},
+        metrics::{NullifyLabel, NullifyReason, Peer},
         min_active,
         scheme::Scheme,
         types::{
@@ -55,7 +55,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     notarization_timeout: Duration,
     nullify_retry: Duration,
     view: View,
-    abandoned: bool,
+    nullified: bool,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
@@ -65,8 +65,8 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    abandons_per_leader: Family<Abandon, Counter>,
-    nullifications_per_leader: Family<Peer, Counter>,
+    nullifies: Family<NullifyLabel, Counter>,
+    nullifications: Family<Peer, Counter>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -75,22 +75,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let abandons_per_leader = Family::<Abandon, Counter>::default();
-        let nullifications_per_leader = Family::<Peer, Counter>::default();
+        let nullifies = Family::<NullifyLabel, Counter>::default();
+        let nullifications = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register(
-            "abandons_per_leader",
-            "abandoned views per leader",
-            abandons_per_leader.clone(),
-        );
-        context.register(
-            "nullifications_per_leader",
-            "nullifications per leader",
-            nullifications_per_leader.clone(),
-        );
+        context.register("nullifies", "nullified views", nullifies.clone());
+        context.register("nullifications", "nullifications", nullifications.clone());
         for participant in cfg.scheme.participants().iter() {
-            let _ = nullifications_per_leader.get_or_create(&Peer::new(participant));
+            let _ = nullifications.get_or_create(&Peer::new(participant));
         }
 
         // Build elector with participants
@@ -106,7 +98,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             notarization_timeout: cfg.notarization_timeout,
             nullify_retry: cfg.nullify_retry,
             view: GENESIS_VIEW,
-            abandoned: false,
+            nullified: false,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
@@ -114,8 +106,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            abandons_per_leader,
-            nullifications_per_leader,
+            nullifies,
+            nullifications,
         }
     }
 
@@ -179,7 +171,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
         self.view = view;
-        self.abandoned = false;
+        self.nullified = false;
 
         // Update metrics
         let _ = self.current_view.try_set(view.get());
@@ -298,7 +290,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
-            self.nullifications_per_leader
+            self.nullifications
                 .get_or_create(&Peer::new(&leader.key))
                 .inc();
         }
@@ -422,10 +414,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .is_some_and(|round| round.proposal().is_some())
     }
 
-    /// Immediately abandons `view`, forcing its timeouts to trigger on the next tick.
+    /// Immediately nullifies `view`, forcing its timeouts to trigger on the next tick.
     ///
-    /// Only records the abandon metric on the first call per view.
-    pub fn abandon(&mut self, view: View, reason: AbandonReason) {
+    /// Only records the nullify metric on the first call per view.
+    pub fn nullify(&mut self, view: View, reason: NullifyReason) {
         if view != self.view {
             return;
         }
@@ -435,11 +427,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.set_deadlines(now, now);
         let leader = round.leader();
 
-        if !self.abandoned {
-            self.abandoned = true;
+        if !self.nullified {
+            self.nullified = true;
             if let Some(leader) = leader {
-                self.abandons_per_leader
-                    .get_or_create(&Abandon::new(&leader.key, reason))
+                self.nullifies
+                    .get_or_create(&NullifyLabel::new(&leader.key, reason))
                     .inc();
             }
         }
@@ -569,7 +561,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.abandon(view, AbandonReason::FailedCertification);
+            self.nullify(view, NullifyReason::FailedCertification);
         }
 
         Some(notarization)
@@ -850,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn abandon_old_round_is_noop() {
+    fn nullify_old_round_is_noop() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -871,12 +863,12 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.abandon(View::zero(), AbandonReason::Inactivity);
+            state.nullify(View::zero(), NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
                 !state.views.contains_key(&View::zero()),
-                "old round should not be created when abandon is ignored"
+                "old round should not be created when nullify is ignored"
             );
 
             // Move to view 2 so view 1 becomes stale.
@@ -894,14 +886,14 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.abandon(view_1, AbandonReason::Inactivity);
+            state.nullify(view_1, NullifyReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
     }
 
     #[test]
-    fn abandon_only_records_metric_once() {
+    fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -925,23 +917,20 @@ mod tests {
             let view = state.current_view();
             let leader = state.leader_index(view).unwrap();
             let leader_key = &participants[leader.get() as usize];
-            let label = Abandon::new(leader_key, AbandonReason::LeaderNullify);
+            let label = NullifyLabel::new(leader_key, NullifyReason::LeaderNullify);
 
-            // First abandon should record the metric
-            state.abandon(view, AbandonReason::LeaderNullify);
-            assert_eq!(state.abandons_per_leader.get_or_create(&label).get(), 1);
+            // First nullify should record the metric
+            state.nullify(view, NullifyReason::LeaderNullify);
+            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Second abandon (same view, same reason) should NOT increment
-            state.abandon(view, AbandonReason::LeaderNullify);
-            assert_eq!(state.abandons_per_leader.get_or_create(&label).get(), 1);
+            state.nullify(view, NullifyReason::LeaderNullify);
+            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
             // Third abandon (same view, different reason) should also NOT increment
-            let other_label = Abandon::new(leader_key, AbandonReason::LeaderTimeout);
-            state.abandon(view, AbandonReason::LeaderTimeout);
-            assert_eq!(
-                state.abandons_per_leader.get_or_create(&other_label).get(),
-                0
-            );
+            let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
+            state.nullify(view, NullifyReason::LeaderTimeout);
+            assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
         });
     }
 

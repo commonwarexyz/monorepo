@@ -1763,7 +1763,7 @@ mod tests {
             // Ensure online nodes are recording skips/nullifications for the offline leader
             let encoded = context.encode();
             let peer_label = format!("peer=\"{}\"", offline);
-            for metric in ["_abandons_per_leader", "_nullifications_per_leader"] {
+            for metric in ["_abandons", "_nullifications"] {
                 assert_eq!(
                     count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
                     n - 1,

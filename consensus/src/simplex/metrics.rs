@@ -15,7 +15,7 @@ impl Peer {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum AbandonReason {
+pub enum NullifyReason {
     Initialization,
     Inactivity,
     LeaderNullify,
@@ -27,13 +27,13 @@ pub enum AbandonReason {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Abandon {
+pub struct NullifyLabel {
     pub peer: String,
-    pub reason: AbandonReason,
+    pub reason: NullifyReason,
 }
 
-impl Abandon {
-    pub fn new(peer: &impl Array, reason: AbandonReason) -> Self {
+impl NullifyLabel {
+    pub fn new(peer: &impl Array, reason: NullifyReason) -> Self {
         Self {
             peer: peer.to_string(),
             reason,
