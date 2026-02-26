@@ -1,6 +1,9 @@
 //! Primitive implementations of [Translator].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, DefaultHasher, Hash, Hasher},
+};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -188,6 +191,93 @@ impl<const N: usize> BuildHasher for Cap<N> {
     }
 }
 
+/// Collision-resistant wrapper for any [Translator].
+///
+/// Hashes the full key with a per-instance secret seed (SipHash via
+/// [DefaultHasher]) before delegating to the inner translator. This makes
+/// translated-key collisions unpredictable to an adversary who does not know
+/// the seed, similar to how [std::collections::HashMap] uses
+/// [std::collections::hash_map::RandomState] to prevent HashDoS attacks.
+///
+/// # Warning
+///
+/// Hashing destroys lexicographic key ordering. Do not use [Hashed] with
+/// ordered indices when callers rely on translated-key adjacency matching
+/// original-key adjacency (e.g., exclusion proofs in the ordered QMDB).
+/// [Hashed] is safe for unordered indices and partitioned unordered indices.
+///
+/// # Stability
+///
+/// [DefaultHasher] is provided by the standard library and its exact algorithm
+/// is intentionally unspecified. As a result, transformed outputs are not
+/// stable across Rust versions or platforms. Treat this translator as an
+/// in-memory collision-hardening mechanism, not as a stable/persisted encoding.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_storage::translator::{Hashed, TwoCap, Translator};
+///
+/// // Random seed (production use):
+/// let t = Hashed::new(TwoCap);
+/// let k = t.transform(b"hello");
+///
+/// // Deterministic seed (testing within the same toolchain/runtime):
+/// let t = Hashed::from_seed(42, TwoCap);
+/// assert_eq!(t.transform(b"hello"), t.transform(b"hello"));
+/// ```
+#[derive(Clone)]
+pub struct Hashed<T: Translator> {
+    base_hasher: DefaultHasher,
+    inner: T,
+}
+
+impl<T: Translator + Default> Default for Hashed<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Translator> Hashed<T> {
+    /// Create a new [Hashed] translator with a random seed.
+    pub fn new(inner: T) -> Self {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u8(0);
+        Self::from_seed(h.finish(), inner)
+    }
+
+    /// Create a new [Hashed] translator with a specific seed for deterministic behavior.
+    ///
+    /// Determinism is scoped to the current standard-library hasher
+    /// implementation. Outputs are not guaranteed to be stable across Rust
+    /// versions or platforms.
+    pub fn from_seed(seed: u64, inner: T) -> Self {
+        let mut base_hasher = DefaultHasher::new();
+        base_hasher.write_u64(seed);
+        Self { base_hasher, inner }
+    }
+}
+
+impl<T: Translator> Translator for Hashed<T> {
+    type Key = T::Key;
+
+    #[inline]
+    fn transform(&self, key: &[u8]) -> T::Key {
+        let mut h = self.base_hasher.clone();
+        h.write(key);
+        self.inner.transform(&h.finish().to_le_bytes())
+    }
+}
+
+impl<T: Translator> BuildHasher for Hashed<T> {
+    type Hasher = <T as BuildHasher>::Hasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        self.inner.build_hasher()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +368,63 @@ mod tests {
     fn identity_hasher_panics_on_large_write_slice() {
         let mut h = UintIdentity::default();
         h.write(b"too big for an int");
+    }
+
+    #[test]
+    fn test_hashed_consistency() {
+        let t = Hashed::from_seed(42, TwoCap);
+        assert_eq!(t.transform(b"hello"), t.transform(b"hello"));
+        assert_eq!(t.transform(b""), t.transform(b""));
+        assert_eq!(t.transform(b"abcdef"), t.transform(b"abcdef"));
+    }
+
+    #[test]
+    fn test_hashed_seed_determinism() {
+        let t1 = Hashed::from_seed(42, TwoCap);
+        let t2 = Hashed::from_seed(42, TwoCap);
+        assert_eq!(t1.transform(b"hello"), t2.transform(b"hello"));
+        assert_eq!(t1.transform(b"world"), t2.transform(b"world"));
+    }
+
+    #[test]
+    fn test_hashed_seed_independence() {
+        let t1 = Hashed::from_seed(1, EightCap);
+        let t2 = Hashed::from_seed(2, EightCap);
+        // Different seeds should (with overwhelming probability) produce different outputs.
+        assert_ne!(t1.transform(b"hello"), t2.transform(b"hello"));
+    }
+
+    #[test]
+    fn test_hashed_prefix_collisions_avoided() {
+        // Without hashing, keys sharing a prefix collide. With hashing, they should not.
+        let t = Hashed::from_seed(99, TwoCap);
+        let k1 = t.transform(b"abXXX");
+        let k2 = t.transform(b"abYYY");
+        // The unhashed TwoCap would map both to the same value (first 2 bytes "ab").
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_hashed_all_cap_sizes() {
+        let t1 = Hashed::from_seed(7, OneCap);
+        assert_eq!(t1.transform(b"test"), t1.transform(b"test"));
+
+        let t4 = Hashed::from_seed(7, FourCap);
+        assert_eq!(t4.transform(b"test"), t4.transform(b"test"));
+
+        let t8 = Hashed::from_seed(7, EightCap);
+        assert_eq!(t8.transform(b"test"), t8.transform(b"test"));
+
+        let tc = Hashed::from_seed(7, Cap::<3>::new());
+        assert_eq!(tc.transform(b"test"), tc.transform(b"test"));
+    }
+
+    #[test]
+    fn test_hashed_random_seed() {
+        // Two instances with random seeds should (with overwhelming probability)
+        // produce different outputs.
+        let t1 = Hashed::new(EightCap);
+        let t2 = Hashed::new(EightCap);
+        assert_ne!(t1.transform(b"hello"), t2.transform(b"hello"));
     }
 }
