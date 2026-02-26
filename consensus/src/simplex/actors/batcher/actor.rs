@@ -33,6 +33,14 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace};
 
+/// Tracks the current view, its leader, and whether the voter has been
+/// notified that the view should be abandoned.
+struct Current {
+    view: View,
+    leader: Option<Participant>,
+    notified_abandon: bool,
+}
+
 pub struct Actor<
     E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
@@ -158,16 +166,19 @@ impl<
         )
     }
 
-    /// Returns true if the leader has nullified the current view.
+    /// Returns true if the leader has nullified the current view
+    /// and we have not yet notified the voter.
     fn leader_nullified(
-        current: (View, Option<Participant>),
+        current: &Current,
         work: &BTreeMap<View, Round<S, B, D, R>>,
     ) -> bool {
-        let (current_view, current_leader) = current;
-        let Some(leader) = current_leader else {
+        if current.notified_abandon {
+            return false;
+        }
+        let Some(leader) = current.leader else {
             return false;
         };
-        work.get(&current_view)
+        work.get(&current.view)
             .is_some_and(|round| round.has_nullify(leader))
     }
 
@@ -196,9 +207,12 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
-        let mut current = (View::zero(), None);
+        let mut current = Current {
+            view: View::zero(),
+            leader: None,
+            notified_abandon: false,
+        };
         let mut finalized = View::zero();
-        let mut notified_abandon = false;
         let mut work = BTreeMap::new();
         select_loop! {
             self.context,
@@ -216,16 +230,19 @@ impl<
                     finalized: new_finalized,
                     active,
                 } => {
-                    current = (new_current, Some(leader));
+                    current = Current {
+                        view: new_current,
+                        leader: Some(leader),
+                        notified_abandon: false,
+                    };
                     finalized = new_finalized;
-                    notified_abandon = false;
-                    work.entry(current.0)
+                    work.entry(current.view)
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
                     // If the leader abandoned this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
-                    let abandon_reason = if Self::leader_nullified(current, &work) {
+                    let abandon_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
                         Some(AbandonReason::LeaderNullify)
@@ -251,12 +268,12 @@ impl<
                     active.send_lossy(abandon_reason);
 
                     // Setting leader may enable batch verification
-                    updated_view = current.0;
+                    updated_view = current.view;
                 }
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.0, view, false) {
+                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                         continue;
                     }
 
@@ -296,7 +313,7 @@ impl<
                 if !interesting(
                     self.activity_timeout,
                     finalized,
-                    current.0,
+                    current.view,
                     view,
                     true, // allow future
                 ) {
@@ -400,7 +417,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.0, view, false) {
+                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
 
@@ -423,9 +440,9 @@ impl<
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
-                    if !notified_abandon && Self::leader_nullified(current, &work) {
-                        notified_abandon = true;
-                        voter.abandon(current.0, AbandonReason::LeaderNullify).await;
+                    if Self::leader_nullified(&current, &work) {
+                        current.notified_abandon = true;
+                        voter.abandon(current.view, AbandonReason::LeaderNullify).await;
                     }
                 }
                 updated_view = view;
@@ -437,7 +454,7 @@ impl<
                 );
 
                 // Forward leader's proposal to voter (if we're not the leader and haven't already)
-                if let Some(round) = work.get_mut(&current.0) {
+                if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
                             voter.proposal(proposal).await;
@@ -495,7 +512,7 @@ impl<
                 } else {
                     timer.cancel();
                     trace!(
-                        current = %current.0,
+                        current = %current.view,
                         %finalized,
                         "no verifier ready"
                     );
@@ -532,7 +549,7 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.0, view, false)
+                    !interesting(self.activity_timeout, finalized, current.view, view, false)
                 }) {
                     work.pop_first();
                 }
