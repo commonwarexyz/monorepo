@@ -923,11 +923,11 @@ mod tests {
             state.nullify(view, NullifyReason::LeaderNullify);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
-            // Second abandon (same view, same reason) should NOT increment
+            // Second nullify (same view, same reason) should NOT increment
             state.nullify(view, NullifyReason::LeaderNullify);
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
-            // Third abandon (same view, different reason) should also NOT increment
+            // Third nullify (same view, different reason) should also NOT increment
             let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
             state.nullify(view, NullifyReason::LeaderTimeout);
             assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);

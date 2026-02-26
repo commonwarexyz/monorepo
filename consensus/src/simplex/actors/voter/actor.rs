@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, AbandonReason, Outbound},
+        metrics::{self, NullifyReason, Outbound},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
@@ -368,15 +368,15 @@ impl<
             return;
         };
 
-        // Record abandon on first nullify (not retries)
+        // Record nullify on first attempt (not retries)
         if !retry {
             let reason = if self.state.has_proposal(view) {
-                AbandonReason::RoundTimeout
+                NullifyReason::RoundTimeout
             } else {
-                AbandonReason::LeaderTimeout
+                NullifyReason::LeaderTimeout
             };
-            debug!(%view, ?reason, "abandoning round");
-            self.state.abandon(view, reason);
+            debug!(%view, ?reason, "nullifying round");
+            self.state.nullify(view, reason);
             return;
         }
 
@@ -823,7 +823,7 @@ impl<
             "consensus initialized"
         );
         self.state
-            .abandon(observed_view, AbandonReason::Initialization);
+            .nullify(observed_view, NullifyReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -914,7 +914,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.abandon(context.view(), AbandonReason::MissingProposal);
+                        self.state.nullify(context.view(), NullifyReason::MissingProposal);
                         continue;
                     }
                 };
@@ -951,7 +951,7 @@ impl<
                     }
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.abandon(context.view(), AbandonReason::InvalidProposal);
+                        self.state.nullify(context.view(), NullifyReason::InvalidProposal);
                         continue;
                     }
                     Err(err) => {
@@ -1044,9 +1044,9 @@ impl<
                             }
                         }
                     }
-                    Message::Abandon(view, reason) => {
-                        debug!(%view, ?reason, "abandoning view");
-                        self.state.abandon(view, reason);
+                    Message::Nullify(view, reason) => {
+                        debug!(%view, ?reason, "nullifying view");
+                        self.state.nullify(view, reason);
                         continue;
                     }
                 }
@@ -1081,14 +1081,14 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // If the leader abandoned or is inactive, reduce leader
+                    // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     if let Some(reason) = batcher
                         .update(current_view, leader, self.state.last_finalized())
                         .await
                     {
-                        debug!(%view, %leader, ?reason, "abandoning round");
-                        self.state.abandon(current_view, reason);
+                        debug!(%view, %leader, ?reason, "nullifying round");
+                        self.state.nullify(current_view, reason);
                     }
                 }
             },

@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::{AbandonReason, Inbound, Peer},
+        metrics::{Inbound, NullifyReason, Peer},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
@@ -34,11 +34,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace};
 
 /// Tracks the current view, its leader, and whether the voter has been
-/// notified that the view should be abandoned.
+/// notified that the view should be nullified.
 struct Current {
     view: View,
     leader: Option<Participant>,
-    abandoned: bool,
+    nullified: bool,
 }
 
 pub struct Actor<
@@ -169,7 +169,7 @@ impl<
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
     fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
-        if current.abandoned {
+        if current.nullified {
             return false;
         }
         let Some(leader) = current.leader else {
@@ -207,7 +207,7 @@ impl<
         let mut current = Current {
             view: View::zero(),
             leader: None,
-            abandoned: false,
+            nullified: false,
         };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
@@ -230,19 +230,19 @@ impl<
                     current = Current {
                         view: new_current,
                         leader: Some(leader),
-                        abandoned: false,
+                        nullified: false,
                     };
                     finalized = new_finalized;
                     work.entry(current.view)
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
-                    // If the leader abandoned this view or has not been active
+                    // If the leader nullified this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
-                    let abandon_reason = if Self::leader_nullified(&current, &work) {
+                    let nullify_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
-                        Some(AbandonReason::LeaderNullify)
+                        Some(NullifyReason::LeaderNullify)
                     } else {
                         let skip_timeout = self.skip_timeout.get() as usize;
                         if
@@ -257,12 +257,12 @@ impl<
                                 .take(skip_timeout)
                                 .any(|(_, round)| round.is_active(leader))
                         {
-                            Some(AbandonReason::Inactivity)
+                            Some(NullifyReason::Inactivity)
                         } else {
                             None
                         }
                     };
-                    active.send_lossy(abandon_reason);
+                    active.send_lossy(nullify_reason);
 
                     // Setting leader may enable batch verification
                     updated_view = current.view;
@@ -438,8 +438,8 @@ impl<
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
-                        current.abandoned = true;
-                        voter.abandon(current.view, AbandonReason::LeaderNullify).await;
+                        current.nullified = true;
+                        voter.nullify(current.view, NullifyReason::LeaderNullify).await;
                     }
                 }
                 updated_view = view;

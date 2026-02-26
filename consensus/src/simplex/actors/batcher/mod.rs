@@ -1770,7 +1770,7 @@ mod tests {
 
             let got_wrong_view_expire = select! {
                 message = voter_receiver.recv() => {
-                    matches!(message, Some(voter::Message::Abandon(view, _)) if view == wrong_view)
+                    matches!(message, Some(voter::Message::Nullify(view, _)) if view == wrong_view)
                 },
                 _ = context.sleep(Duration::from_millis(100)) => false,
             };
