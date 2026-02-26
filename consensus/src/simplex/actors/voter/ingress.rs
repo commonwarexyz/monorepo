@@ -9,8 +9,8 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
-    /// Signal that the current view should be expired (if not already).
-    Expire(View),
+    /// Signal that the current view should be abandoned (if not already).
+    Abandon(View),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -34,9 +34,9 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
-    /// Signal that the current view should be expired (if not already).
-    pub async fn expire(&mut self, view: View) {
-        self.sender.send_lossy(Message::Expire(view)).await;
+    /// Signal that the current view should be abandoned (if not already).
+    pub async fn abandon(&mut self, view: View) {
+        self.sender.send_lossy(Message::Abandon(view)).await;
     }
 
     /// Send a recovered certificate.

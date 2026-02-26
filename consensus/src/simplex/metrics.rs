@@ -21,7 +21,8 @@ pub enum SkipReason {
     Abandoned,
     LeaderTimeout,
     RoundTimeout,
-    FailedProposal,
+    MissingProposal,
+    InvalidProposal,
     CertificationFailure,
 }
 

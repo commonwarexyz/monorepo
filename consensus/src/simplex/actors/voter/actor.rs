@@ -905,7 +905,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.abandon(context.view(), SkipReason::FailedProposal);
+                        self.state.abandon(context.view(), SkipReason::MissingProposal);
                         continue;
                     }
                 };
@@ -941,14 +941,12 @@ impl<
                         self.state.verified(view);
                     }
                     Ok(false) => {
-                        // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.abandon(context.view(), SkipReason::FailedProposal);
+                        self.state.abandon(context.view(), SkipReason::InvalidProposal);
                         continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
-                        self.state.abandon(context.view(), SkipReason::FailedProposal);
                         continue;
                     }
                 };
@@ -1037,9 +1035,9 @@ impl<
                             }
                         }
                     }
-                    Message::Expire(nullified_view) => {
-                        debug!(%nullified_view, "leader abandoned view");
-                        self.state.abandon(nullified_view, SkipReason::Abandoned);
+                    Message::Abandon(view) => {
+                        debug!(%view, "leader abandoned view");
+                        self.state.abandon(view, SkipReason::Abandoned);
                         continue;
                     }
                 }

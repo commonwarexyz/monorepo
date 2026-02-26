@@ -422,7 +422,7 @@ impl<
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_abandoned(current, &work) {
-                        voter.expire(current.0).await;
+                        voter.abandon(current.0).await;
                     }
                 }
                 updated_view = view;
