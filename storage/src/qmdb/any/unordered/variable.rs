@@ -163,12 +163,6 @@ pub(crate) mod test {
         index::Unordered as _,
         kv::tests::{assert_batchable, assert_gettable, assert_send},
         qmdb::{
-            any::{
-                test::variable_db_config,
-                unordered::test::{
-                    test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
-                },
-            },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
@@ -219,21 +213,11 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    /// Type alias for Digest-valued variable DB (used for generic tests that require Digest values).
-    type DigestAnyTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed, &context);
         AnyTest::init(context, config).await.unwrap()
-    }
-
-    /// Return a Digest-valued variable database for generic tests.
-    async fn open_digest_db(context: Context) -> DigestAnyTest {
-        let cfg = variable_db_config("digest-partition", &context);
-        DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -304,7 +288,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_build_and_authenticate(
+            crate::qmdb::any::test::test_any_db_build_and_authenticate(
                 context,
                 db,
                 |ctx| Box::pin(open_db(ctx)),
@@ -433,34 +417,6 @@ pub(crate) mod test {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_any_variable_db_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_digest_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_variable_db_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_digest_db(ctx))
-            })
-            .await;
-        });
-    }
-
     #[test_traced]
     fn test_any_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
@@ -578,95 +534,5 @@ pub(crate) mod test {
     #[allow(dead_code)]
     fn assert_mutable_db_commit_is_send(db: MutableDb) {
         assert_send(db.commit(None));
-    }
-
-    // Partitioned variant tests
-
-    type PartitionedVarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
-
-    fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
-        VariableConfig {
-            mmr_journal_partition: format!("pv-journal-{suffix}"),
-            mmr_metadata_partition: format!("pv-metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(13),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("pv-log-journal-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((), ((0..=10000).into(), ())),
-            translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(77), NZUsize!(9)),
-        }
-    }
-
-    type PartitionedAnyTestP1 =
-        super::partitioned::Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, 1>;
-
-    type PartitionedAnyTestDigestP1 =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
-
-    fn partitioned_to_bytes(i: u64) -> Vec<u8> {
-        let len = ((i % 13) + 7) as usize;
-        vec![(i % 255) as u8; len]
-    }
-
-    #[inline]
-    async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        let cfg = partitioned_config("partition-p1", &context);
-        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
-    }
-
-    async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        let cfg = variable_db_config("unordered-partitioned-var-p1", &context);
-        PartitionedAnyTestDigestP1::init(context, cfg)
-            .await
-            .unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_variable_p1_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db_p1(db_context.clone()).await;
-            test_any_db_build_and_authenticate(
-                db_context,
-                db,
-                |ctx| Box::pin(open_partitioned_db_p1(ctx)),
-                partitioned_to_bytes,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_partitioned_variable_p1_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_partitioned_digest_db_p1(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_partitioned_digest_db_p1(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_partitioned_variable_p1_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_partitioned_digest_db_p1(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_partitioned_digest_db_p1(ctx))
-            })
-            .await;
-        });
     }
 }

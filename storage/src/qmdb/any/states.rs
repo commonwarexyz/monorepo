@@ -84,12 +84,10 @@ pub trait UnmerkleizedDurableAny:
 
 /// Trait for the (Merkleized,NonDurable) state.
 ///
-/// This state allows authentication (root, proofs) and pruning. Use `commit` to transition to the
-/// Merkleized, Durable state.
+/// This state allows historical proofs and pruning. Use `into_mutable` to transition back to the
+/// Mutable state.
 pub trait MerkleizedNonDurableAny:
-    MerkleizedStore
-    + PrunableStore
-    + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
+    PrunableStore + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The mutable state type (Unmerkleized,NonDurable).
     type Mutable: MutableAny<Key = Self::Key>;
@@ -118,11 +116,7 @@ pub trait MutableAny:
 
     /// The provable state type (Merkleized,NonDurable).
     type Merkleized: MerkleizedNonDurableAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = Self::Digest,
-            Operation = Self::Operation,
-        >;
+        + LogStore<Value = <Self as LogStore>::Value>;
 
     /// Commit any pending operations to the database, ensuring their durability. Returns the db in
     /// its durable state and the location range of committed operations. Note that even if no

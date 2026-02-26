@@ -18,7 +18,7 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
-        store, DurabilityState, Durable, Error, NonDurable,
+        DurabilityState, Durable, Error, NonDurable,
     },
 };
 use commonware_codec::Codec;
@@ -72,7 +72,7 @@ where
     }
 }
 
-// Functionality for any Merkleized state (both Durable and NonDurable).
+// Functionality for Clean state.
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
@@ -81,8 +81,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: store::State,
-    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, D>
+    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, Durable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,

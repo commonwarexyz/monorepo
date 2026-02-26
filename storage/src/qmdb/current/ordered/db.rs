@@ -18,7 +18,7 @@ use crate::{
             proof::OperationProof,
         },
         operation::Key,
-        store, DurabilityState, Durable, Error, NonDurable,
+        DurabilityState, Durable, Error, NonDurable,
     },
 };
 use commonware_codec::Codec;
@@ -140,7 +140,7 @@ where
     }
 }
 
-// Functionality for any Merkleized state (both Durable and NonDurable).
+// Functionality for Clean state.
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
@@ -149,8 +149,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: store::State,
-    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, D>
+    > Db<E, C, K, V, I, H, N, Merkleized<DigestOf<H>>, Durable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -201,8 +200,7 @@ where
             None => {
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
                 // variant requires the CommitFloor's floor to equal its own location (genuinely
-                // empty at commit time). If this doesn't hold (e.g. uncommitted deleted emptied
-                // the DB), we can't generate a valid proof until the next commit.
+                // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
                 let op = self
                     .any
                     .log
@@ -213,9 +211,11 @@ where
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
-                if floor != self.any.last_commit_loc {
-                    return Err(Error::NotEmpty);
-                }
+                assert_eq!(
+                    floor, self.any.last_commit_loc,
+                    "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
+                    self.any.last_commit_loc, floor
+                );
                 let op_proof = self
                     .operation_proof(hasher, self.any.last_commit_loc)
                     .await?;
