@@ -133,8 +133,8 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
-        if cfg.leader_timeout > cfg.notarization_timeout {
-            panic!("leader timeout must be less than or equal to notarization timeout");
+        if cfg.leader_timeout > cfg.certification_timeout {
+            panic!("leader timeout must be less than or equal to certification timeout");
         }
 
         // Initialize metrics
@@ -169,7 +169,7 @@ impl<
                 epoch: cfg.epoch,
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
+                certification_timeout: cfg.certification_timeout,
                 nullify_retry: cfg.nullify_retry,
             },
         );

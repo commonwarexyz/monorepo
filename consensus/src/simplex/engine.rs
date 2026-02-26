@@ -85,7 +85,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
+                certification_timeout: cfg.certification_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
                 replay_buffer: cfg.replay_buffer,
