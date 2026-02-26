@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, NullifyReason, Outbound},
+        metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
@@ -368,22 +368,13 @@ impl<
             return;
         };
 
-        // Record nullify on first attempt (not retries) without resetting retry backoff.
-        if !retry {
-            let reason = if self.state.has_proposal(view) {
-                NullifyReason::RoundTimeout
-            } else {
-                NullifyReason::LeaderTimeout
-            };
-            debug!(%view, ?reason, "nullifying round");
-            self.state.record_nullify(view, reason);
-            return;
-        }
-
-        // Broadcast entry to help others enter the view.
+        // Broadcast entry to help others enter the view (if on retry).
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
+        if !retry {
+            return;
+        }
         let past_view = view
             .previous()
             .expect("we should never be in the genesis view");
@@ -823,7 +814,7 @@ impl<
             "consensus initialized"
         );
         self.state
-            .trigger_nullify(observed_view, NullifyReason::Initialization);
+            .trigger_timeout(observed_view, TimeoutReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -900,8 +891,12 @@ impl<
                     .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
-                // Trigger the timeout
-                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                // Process the timeout
+                self.timeout(
+                    &mut batcher,
+                    &mut vote_sender,
+                    &mut certificate_sender,
+                )
                     .await;
                 view = self.state.current_view();
             },
@@ -914,7 +909,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.trigger_nullify(context.view(), NullifyReason::MissingProposal);
+                        self.state.trigger_timeout(context.view(), TimeoutReason::MissingProposal);
                         continue;
                     }
                 };
@@ -951,10 +946,12 @@ impl<
                     }
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.trigger_nullify(context.view(), NullifyReason::InvalidProposal);
+                        self.state.trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
+                        self.state
+                            .trigger_timeout(context.view(), TimeoutReason::IgnoredProposal);
                     }
                 };
             },
@@ -1042,9 +1039,10 @@ impl<
                             }
                         }
                     }
-                    Message::Nullify(view, reason) => {
-                        debug!(%view, ?reason, "nullifying view");
-                        self.state.trigger_nullify(view, reason);
+                    Message::Timeout(target_view, reason) => {
+                        view = target_view;
+                        debug!(%target_view, ?reason, "nullifying view");
+                        self.state.trigger_timeout(target_view, reason);
                     }
                 }
             },
@@ -1085,7 +1083,7 @@ impl<
                         .await
                     {
                         debug!(%view, %leader, ?reason, "nullifying round");
-                        self.state.trigger_nullify(current_view, reason);
+                        self.state.trigger_timeout(current_view, reason);
                     }
                 }
             },

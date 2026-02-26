@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{NullifyLabel, NullifyReason, Peer},
+        metrics::{Peer, Timeout, TimeoutReason},
         min_active,
         scheme::Scheme,
         types::{
@@ -55,7 +55,6 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     notarization_timeout: Duration,
     nullify_retry: Duration,
     view: View,
-    expired: bool,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
@@ -65,7 +64,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    nullifies: Family<NullifyLabel, Counter>,
+    timeouts: Family<Timeout, Counter>,
     nullifications: Family<Peer, Counter>,
 }
 
@@ -75,11 +74,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let nullifies = Family::<NullifyLabel, Counter>::default();
+        let timeouts = Family::<Timeout, Counter>::default();
         let nullifications = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("nullifies", "nullified views", nullifies.clone());
+        context.register("timeouts", "timed out views", timeouts.clone());
         context.register("nullifications", "nullifications", nullifications.clone());
 
         // Build elector with participants
@@ -95,7 +94,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             notarization_timeout: cfg.notarization_timeout,
             nullify_retry: cfg.nullify_retry,
             view: GENESIS_VIEW,
-            expired: false,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
@@ -103,7 +101,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            nullifies,
+            timeouts,
             nullifications,
         }
     }
@@ -168,7 +166,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
         self.view = view;
-        self.expired = false;
 
         // Update metrics
         let _ = self.current_view.try_set(view.get());
@@ -225,6 +222,23 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
+        if timeout && !is_retry {
+            let (reason, leader) = {
+                let round = self.create_round(view);
+                let reason = round.set_nullify_reason(if round.proposal().is_some() {
+                    TimeoutReason::AdvanceTimeout
+                } else {
+                    TimeoutReason::LeaderTimeout
+                });
+                (reason, round.leader())
+            };
+
+            if let Some(leader) = leader {
+                self.timeouts
+                    .get_or_create(&Timeout::new(&leader.key, reason))
+                    .inc();
+            }
+        }
         Some((is_retry, nullify))
     }
 
@@ -405,45 +419,19 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .map(|round| round.elapsed_since_start(now))
     }
 
-    /// Returns whether a proposal exists for the given view.
-    pub fn has_proposal(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.proposal().is_some())
-    }
-
-    /// Records that `view` was nullified.
-    ///
-    /// Only records the nullify metric on the first call per view.
-    ///
-    /// Unlike [`Self::trigger_nullify`], this does not alter timeout deadlines.
-    pub fn record_nullify(&mut self, view: View, reason: NullifyReason) {
-        if view != self.view {
-            return;
-        }
-
-        let leader = self.create_round(view).leader();
-
-        // Track nullified view per leader if we know who the leader was
-        if !self.expired {
-            self.expired = true;
-            if let Some(leader) = leader {
-                self.nullifies
-                    .get_or_create(&NullifyLabel::new(&leader.key, reason))
-                    .inc();
-            }
-        }
-    }
-
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
-    pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
+    ///
+    /// This only records the first nullify reason for the view. Metrics are emitted
+    /// when the first timeout nullify vote is constructed.
+    pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
             return;
         }
 
         let now = self.context.current();
-        self.create_round(view).set_deadlines(now, now);
-        self.record_nullify(view, reason);
+        let round = self.create_round(view);
+        round.set_deadlines(now, now);
+        let _ = round.set_nullify_reason(reason);
     }
 
     /// Attempt to propose a new block.
@@ -570,7 +558,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.trigger_nullify(view, NullifyReason::FailedCertification);
+            self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
 
         Some(notarization)
@@ -851,11 +839,15 @@ mod tests {
     }
 
     #[test]
-    fn record_nullify_preserves_retry_backoff_after_first_timeout_vote() {
+    fn nullify_preserves_retry_backoff_after_first_timeout_vote() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let Fixture {
+                schemes,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: schemes[0].clone(),
@@ -875,14 +867,66 @@ mod tests {
                 .expect("first timeout nullify should exist");
             assert!(!was_retry, "first timeout should not be marked as retry");
 
+            let leader = state.leader_index(view).expect("leader must be set");
+            let leader_key = &participants[leader.get() as usize];
+            let label = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
+            assert_eq!(
+                state.timeouts.get_or_create(&label).get(),
+                1,
+                "first timeout nullify should record a leader-timeout metric"
+            );
+
             context.sleep(Duration::from_secs(2)).await;
             let now = context.current();
-            state.record_nullify(view, NullifyReason::LeaderTimeout);
             assert_eq!(
                 state.next_timeout_deadline(),
                 now + retry,
                 "first retry should honor configured nullify backoff"
             );
+        });
+    }
+
+    #[test]
+    fn nullify_without_reason_reuses_first_recorded_reason() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(31),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            state.trigger_timeout(view, TimeoutReason::MissingProposal);
+            let (was_retry, _) = state
+                .construct_nullify(view, true)
+                .expect("first timeout nullify should exist");
+            assert!(!was_retry);
+
+            let leader = state.leader_index(view).expect("leader must be set");
+            let leader_key = &participants[leader.get() as usize];
+            let missing = Timeout::new(leader_key, TimeoutReason::MissingProposal);
+            let leader_timeout = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
+            assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&leader_timeout).get(), 0);
+
+            let (was_retry, _) = state
+                .construct_nullify(view, true)
+                .expect("retry timeout nullify should exist");
+            assert!(was_retry);
+            assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
         });
     }
 
@@ -908,7 +952,7 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.trigger_nullify(View::zero(), NullifyReason::Inactivity);
+            state.trigger_timeout(View::zero(), TimeoutReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
@@ -931,14 +975,14 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.trigger_nullify(view_1, NullifyReason::Inactivity);
+            state.trigger_timeout(view_1, TimeoutReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
     }
 
     #[test]
-    fn expire_only_records_metric_once() {
+    fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -962,20 +1006,30 @@ mod tests {
             let view = state.current_view();
             let leader = state.leader_index(view).unwrap();
             let leader_key = &participants[leader.get() as usize];
-            let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
+            let label = Timeout::new(leader_key, TimeoutReason::LeaderNullify);
 
-            // First nullify should record the metric
-            state.trigger_nullify(view, NullifyReason::Abandon);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
+            // Fast-path trigger should not record metrics until we emit nullify.
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 0);
 
-            // Second nullify (same view, same reason) should NOT increment
-            state.trigger_nullify(view, NullifyReason::Abandon);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
+            // First emitted nullify should record the metric.
+            let (was_retry, _) = state
+                .construct_nullify(view, true)
+                .expect("first timeout nullify should exist");
+            assert!(!was_retry);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
-            // Third nullify (same view, different reason) should also NOT increment
-            let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
-            state.trigger_nullify(view, NullifyReason::LeaderTimeout);
-            assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
+            // Re-triggering with a different reason should preserve the first reason.
+            state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
+            let (was_retry, _) = state
+                .construct_nullify(view, true)
+                .expect("retry timeout nullify should exist");
+            assert!(was_retry);
+            assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
+
+            // No metric should be emitted for the later reason.
+            let other_label = Timeout::new(leader_key, TimeoutReason::LeaderTimeout);
+            assert_eq!(state.timeouts.get_or_create(&other_label).get(), 0);
         });
     }
 
