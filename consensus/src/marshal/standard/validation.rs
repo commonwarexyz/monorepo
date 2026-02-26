@@ -4,7 +4,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
-        core::Mailbox,
+        core::{ConsensusEngine, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -66,9 +66,9 @@ pub(super) enum Decision<B> {
 ///
 /// Valid re-proposals are immediately marked verified in marshal and return `Complete(true)`.
 #[inline]
-pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
+pub(super) async fn precheck_epoch_and_reproposal<ES, S, B, C>(
     epocher: &ES,
-    marshal: &mut Mailbox<S, Standard<B>>,
+    marshal: &mut Mailbox<Standard<B, C>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,
@@ -77,6 +77,7 @@ where
     ES: Epocher,
     S: Scheme,
     B: Block + Clone,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     // Block heights must map to the expected epoch.
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
@@ -116,12 +117,12 @@ where
 /// - `Some(valid)` when a verification verdict is available.
 /// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn verify_with_parent<E, S, A, B>(
+pub(super) async fn verify_with_parent<E, S, A, B, C>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
     block: B,
     application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
+    marshal: &mut Mailbox<Standard<B, C>>,
     tx: &mut oneshot::Sender<bool>,
 ) -> Option<bool>
 where
@@ -134,6 +135,7 @@ where
         Context = Context<B::Digest, S::PublicKey>,
     >,
     B: Block + Clone,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
@@ -216,17 +218,18 @@ where
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
-pub(super) async fn fetch_parent<E, S, A, B>(
+pub(super) async fn fetch_parent<E, S, A, B, C>(
     parent_digest: B::Digest,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
+    marshal: &mut Mailbox<Standard<B, C>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     let genesis = application.genesis().await;
     if parent_digest == genesis.digest() {
