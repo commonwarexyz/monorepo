@@ -1760,7 +1760,7 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure online nodes are recording skips/nullifications for the offline leader
+            // Ensure online nodes are recording nullifies/nullifications for the offline leader
             let encoded = context.encode();
             let peer_label = format!("peer=\"{}\"", offline);
             for metric in ["_nullifies", "_nullifications"] {
