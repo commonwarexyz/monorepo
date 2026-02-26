@@ -4,6 +4,10 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
+    minimmit::types::{
+        Activity as MinActivity, Finalization as MinFinalization, MNotarization, Notarize as MNotarize,
+        Proposal as MinProposal,
+    },
     marshal::{
         coding::{
             shards,
@@ -11,10 +15,10 @@ use crate::{
             Coding,
         },
         config::Config,
-        core::{Actor, Mailbox},
+        core::{Actor, ConsensusEngine, Mailbox, MinimmitConsensus, SimplexConsensus},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
-        standard::Standard,
+        standard::{StandardMinimmit, StandardSimplex},
         Identifier,
     },
     simplex::{
@@ -145,14 +149,14 @@ pub async fn setup_network_links(
 /// Result of setting up a validator.
 pub struct ValidatorSetup<H: TestHarness> {
     pub application: Application<H::ApplicationBlock>,
-    pub mailbox: Mailbox<S, H::Variant>,
+    pub mailbox: Mailbox<H::Variant>,
     pub extra: H::ValidatorExtra,
     pub height: Height,
 }
 
 /// Per-validator handle for test operations.
 pub struct ValidatorHandle<H: TestHarness> {
-    pub mailbox: Mailbox<S, H::Variant>,
+    pub mailbox: Mailbox<H::Variant>,
     pub extra: H::ValidatorExtra,
 }
 
@@ -172,10 +176,19 @@ pub trait TestHarness: 'static + Sized {
     /// `subscribe_by_digest` which expects the block's digest type.
     type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
 
+    /// Consensus engine used by this harness.
+    type Consensus: ConsensusEngine<
+        Scheme = S,
+        Commitment = Self::Commitment,
+        Notarization = Self::Notarization,
+        Finalization = Self::Finalization,
+    >;
+
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
         ApplicationBlock = Self::ApplicationBlock,
         Commitment = Self::Commitment,
+        Consensus = Self::Consensus,
     >;
 
     /// The block type used in test operations.
@@ -186,6 +199,15 @@ pub trait TestHarness: 'static + Sized {
 
     /// The commitment type for consensus certificates.
     type Commitment: DigestTrait;
+
+    /// Notarization type used by this consensus harness.
+    type Notarization: Clone;
+
+    /// Finalization type used by this consensus harness.
+    type Finalization: Clone;
+
+    /// Proposal type used by this consensus harness.
+    type Proposal: Clone;
 
     /// Setup a single validator with all necessary infrastructure.
     fn setup_validator(
@@ -220,6 +242,9 @@ pub trait TestHarness: 'static + Sized {
     /// Get the commitment from a test block.
     fn commitment(block: &Self::TestBlock) -> Self::Commitment;
 
+    /// Get the parent commitment from a test block.
+    fn parent_commitment(block: &Self::TestBlock) -> Self::Commitment;
+
     /// Get the digest from a test block.
     fn digest(block: &Self::TestBlock) -> D;
 
@@ -243,28 +268,42 @@ pub trait TestHarness: 'static + Sized {
 
     /// Create a finalization certificate.
     fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Self::Commitment>;
+    ) -> Self::Finalization;
 
     /// Create a notarization certificate.
     fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Self::Commitment>;
+    ) -> Self::Notarization;
+
+    /// Create a consensus proposal from canonical fields.
+    fn make_proposal(
+        round: Round,
+        parent: View,
+        parent_commitment: Self::Commitment,
+        payload: Self::Commitment,
+    ) -> Self::Proposal;
+
+    /// Returns the committed payload from a finalization.
+    fn finalization_payload(finalization: &Self::Finalization) -> Self::Commitment;
+
+    /// Returns the round from a finalization.
+    fn finalization_round(finalization: &Self::Finalization) -> Round;
 
     /// Report a finalization to the mailbox.
     fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        finalization: Self::Finalization,
     ) -> impl Future<Output = ()> + Send;
 
     /// Report a notarization to the mailbox.
     fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        notarization: Self::Notarization,
     ) -> impl Future<Output = ()> + Send;
 
     /// Get the timeout duration for the finalize test.
@@ -281,7 +320,7 @@ pub trait TestHarness: 'static + Sized {
         page_cache: CacheRef,
     ) -> impl Future<
         Output = (
-            Mailbox<S, Self::Variant>,
+            Mailbox<Self::Variant>,
             Self::ValidatorExtra,
             Application<Self::ApplicationBlock>,
         ),
@@ -304,10 +343,14 @@ pub struct StandardHarness;
 
 impl TestHarness for StandardHarness {
     type ApplicationBlock = B;
-    type Variant = Standard<B>;
+    type Consensus = SimplexConsensus<S, D>;
+    type Variant = StandardSimplex<B, S>;
     type TestBlock = B;
     type ValidatorExtra = ();
     type Commitment = D;
+    type Proposal = Proposal<D>;
+    type Notarization = Notarization<S, D>;
+    type Finalization = Finalization<S, D>;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -498,6 +541,19 @@ impl TestHarness for StandardHarness {
         block.digest()
     }
 
+    fn make_proposal(
+        round: Round,
+        parent: View,
+        _parent_commitment: D,
+        commitment: D,
+    ) -> Self::Proposal {
+        Proposal {
+            round,
+            parent,
+            payload: commitment,
+        }
+    }
+
     fn height(block: &B) -> Height {
         block.height()
     }
@@ -515,7 +571,7 @@ impl TestHarness for StandardHarness {
         handle.mailbox.verified(round, block.clone()).await;
     }
 
-    fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
+    fn make_finalization(proposal: Self::Proposal, schemes: &[S], quorum: u32) -> Self::Finalization {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -524,7 +580,7 @@ impl TestHarness for StandardHarness {
         Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
-    fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
+    fn make_notarization(proposal: Self::Proposal, schemes: &[S], quorum: u32) -> Self::Notarization {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -533,16 +589,24 @@ impl TestHarness for StandardHarness {
         Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
+    fn finalization_payload(finalization: &Self::Finalization) -> Self::Commitment {
+        finalization.proposal.payload
+    }
+
+    fn finalization_round(finalization: &Self::Finalization) -> Round {
+        finalization.round()
+    }
+
     async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, D>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        finalization: Self::Finalization,
     ) {
         mailbox.report(Activity::Finalization(finalization)).await;
     }
 
     async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, D>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        notarization: Self::Notarization,
     ) {
         mailbox.report(Activity::Notarization(notarization)).await;
     }
@@ -559,7 +623,7 @@ impl TestHarness for StandardHarness {
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        Mailbox<S, Self::Variant>,
+        Mailbox<Self::Variant>,
         Self::ValidatorExtra,
         Application<B>,
     ) {
@@ -667,10 +731,14 @@ pub struct InlineHarness;
 
 impl TestHarness for InlineHarness {
     type ApplicationBlock = <StandardHarness as TestHarness>::ApplicationBlock;
+    type Consensus = <StandardHarness as TestHarness>::Consensus;
     type Variant = <StandardHarness as TestHarness>::Variant;
     type TestBlock = <StandardHarness as TestHarness>::TestBlock;
     type ValidatorExtra = <StandardHarness as TestHarness>::ValidatorExtra;
     type Commitment = <StandardHarness as TestHarness>::Commitment;
+    type Proposal = <StandardHarness as TestHarness>::Proposal;
+    type Notarization = <StandardHarness as TestHarness>::Notarization;
+    type Finalization = <StandardHarness as TestHarness>::Finalization;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -740,6 +808,15 @@ impl TestHarness for InlineHarness {
         StandardHarness::digest(block)
     }
 
+    fn make_proposal(
+        round: Round,
+        parent: View,
+        parent_commitment: Self::Commitment,
+        commitment: Self::Commitment,
+    ) -> Self::Proposal {
+        StandardHarness::make_proposal(round, parent, parent_commitment, commitment)
+    }
+
     fn height(block: &Self::TestBlock) -> Height {
         StandardHarness::height(block)
     }
@@ -775,31 +852,39 @@ impl TestHarness for InlineHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Self::Commitment> {
+    ) -> Self::Finalization {
         StandardHarness::make_finalization(proposal, schemes, quorum)
     }
 
     fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Self::Commitment> {
+    ) -> Self::Notarization {
         StandardHarness::make_notarization(proposal, schemes, quorum)
     }
 
+    fn finalization_payload(finalization: &Self::Finalization) -> Self::Commitment {
+        StandardHarness::finalization_payload(finalization)
+    }
+
+    fn finalization_round(finalization: &Self::Finalization) -> Round {
+        StandardHarness::finalization_round(finalization)
+    }
+
     async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        finalization: Self::Finalization,
     ) {
         StandardHarness::report_finalization(mailbox, finalization).await;
     }
 
     async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        notarization: Self::Notarization,
     ) {
         StandardHarness::report_notarization(mailbox, notarization).await;
     }
@@ -816,7 +901,7 @@ impl TestHarness for InlineHarness {
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        Mailbox<S, Self::Variant>,
+        Mailbox<Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
     ) {
@@ -853,10 +938,14 @@ pub struct DeferredHarness;
 
 impl TestHarness for DeferredHarness {
     type ApplicationBlock = <InlineHarness as TestHarness>::ApplicationBlock;
+    type Consensus = <InlineHarness as TestHarness>::Consensus;
     type Variant = <InlineHarness as TestHarness>::Variant;
     type TestBlock = <InlineHarness as TestHarness>::TestBlock;
     type ValidatorExtra = <InlineHarness as TestHarness>::ValidatorExtra;
     type Commitment = <InlineHarness as TestHarness>::Commitment;
+    type Proposal = <InlineHarness as TestHarness>::Proposal;
+    type Notarization = <InlineHarness as TestHarness>::Notarization;
+    type Finalization = <InlineHarness as TestHarness>::Finalization;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -926,6 +1015,15 @@ impl TestHarness for DeferredHarness {
         InlineHarness::digest(block)
     }
 
+    fn make_proposal(
+        round: Round,
+        parent: View,
+        parent_commitment: Self::Commitment,
+        commitment: Self::Commitment,
+    ) -> Self::Proposal {
+        InlineHarness::make_proposal(round, parent, parent_commitment, commitment)
+    }
+
     fn height(block: &Self::TestBlock) -> Height {
         InlineHarness::height(block)
     }
@@ -961,31 +1059,39 @@ impl TestHarness for DeferredHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Self::Commitment> {
+    ) -> Self::Finalization {
         InlineHarness::make_finalization(proposal, schemes, quorum)
     }
 
     fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Self::Commitment> {
+    ) -> Self::Notarization {
         InlineHarness::make_notarization(proposal, schemes, quorum)
     }
 
+    fn finalization_payload(finalization: &Self::Finalization) -> Self::Commitment {
+        InlineHarness::finalization_payload(finalization)
+    }
+
+    fn finalization_round(finalization: &Self::Finalization) -> Round {
+        InlineHarness::finalization_round(finalization)
+    }
+
     async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        finalization: Self::Finalization,
     ) {
         InlineHarness::report_finalization(mailbox, finalization).await;
     }
 
     async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        notarization: Self::Notarization,
     ) {
         InlineHarness::report_notarization(mailbox, notarization).await;
     }
@@ -1002,7 +1108,7 @@ impl TestHarness for DeferredHarness {
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        Mailbox<S, Self::Variant>,
+        Mailbox<Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
     ) {
@@ -1041,7 +1147,7 @@ impl TestHarness for DeferredHarness {
 /// Coding variant test harness.
 pub struct CodingHarness;
 
-type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
+type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K, S>;
 type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
@@ -1067,10 +1173,14 @@ pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestam
 
 impl TestHarness for CodingHarness {
     type ApplicationBlock = CodingB;
+    type Consensus = SimplexConsensus<S, Commitment>;
     type Variant = CodingVariant;
     type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type ValidatorExtra = ShardsMailbox;
     type Commitment = Commitment;
+    type Proposal = Proposal<Commitment>;
+    type Notarization = Notarization<S, Commitment>;
+    type Finalization = Finalization<S, Commitment>;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -1277,6 +1387,19 @@ impl TestHarness for CodingHarness {
         block.digest()
     }
 
+    fn make_proposal(
+        round: Round,
+        parent: View,
+        _parent_commitment: Commitment,
+        commitment: Commitment,
+    ) -> Self::Proposal {
+        Proposal {
+            round,
+            parent,
+            payload: commitment,
+        }
+    }
+
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
         block.height()
     }
@@ -1299,10 +1422,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Commitment> {
+    ) -> Self::Finalization {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -1312,10 +1435,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_notarization(
-        proposal: Proposal<Commitment>,
+        proposal: Self::Proposal,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Commitment> {
+    ) -> Self::Notarization {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -1324,16 +1447,24 @@ impl TestHarness for CodingHarness {
         Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
+    fn finalization_payload(finalization: &Self::Finalization) -> Self::Commitment {
+        finalization.proposal.payload
+    }
+
+    fn finalization_round(finalization: &Self::Finalization) -> Round {
+        finalization.round()
+    }
+
     async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        finalization: Self::Finalization,
     ) {
         mailbox.report(Activity::Finalization(finalization)).await;
     }
 
     async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Commitment>,
+        mailbox: &mut Mailbox<Self::Variant>,
+        notarization: Self::Notarization,
     ) {
         mailbox.report(Activity::Notarization(notarization)).await;
     }
@@ -1350,7 +1481,7 @@ impl TestHarness for CodingHarness {
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        Mailbox<S, Self::Variant>,
+        Mailbox<Self::Variant>,
         Self::ValidatorExtra,
         Application<CodingB>,
     ) {
@@ -3074,8 +3205,8 @@ pub fn get_finalization_by_height<H: TestHarness>() {
                 .get_finalization(Height::new(i))
                 .await
                 .unwrap();
-            assert_eq!(fin.proposal.payload, commitment);
-            assert_eq!(fin.round().view(), View::new(i));
+            assert_eq!(H::finalization_payload(&fin), commitment);
+            assert_eq!(H::finalization_round(&fin).view(), View::new(i));
 
             parent = digest;
             parent_commitment = commitment;
@@ -3204,7 +3335,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .get_finalization(Height::new(5))
             .await
             .expect("finalization should be fetched");
-        assert_eq!(finalization.proposal.round.view(), View::new(5));
+        assert_eq!(H::finalization_round(&finalization).view(), View::new(5));
     })
 }
 
@@ -3334,9 +3465,9 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Validator 1: Finalize with view 2 (simulates receiving finalization from different view)
         let proposal_v2 = Proposal {
-            round: Round::new(Epoch::new(0), View::new(2)), // Different view
+            round: Round::new(Epoch::new(0), View::new(2)),
             parent: View::new(0),
-            payload: commitment, // Same block
+            payload: commitment,
         };
         let notarization_v2 = H::make_notarization(proposal_v2.clone(), &schemes, QUORUM);
         let finalization_v2 = H::make_finalization(proposal_v2.clone(), &schemes, QUORUM);
@@ -3365,10 +3496,10 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .unwrap();
 
         // Verify the finalizations have the expected different views
-        assert_eq!(fin0.proposal.payload, commitment);
-        assert_eq!(fin0.round().view(), View::new(1));
-        assert_eq!(fin1.proposal.payload, commitment);
-        assert_eq!(fin1.round().view(), View::new(2));
+        assert_eq!(H::finalization_payload(&fin0), commitment);
+        assert_eq!(H::finalization_round(&fin0).view(), View::new(1));
+        assert_eq!(H::finalization_payload(&fin1), commitment);
+        assert_eq!(H::finalization_round(&fin1).view(), View::new(2));
 
         // Both validators can retrieve block by height
         assert_eq!(
@@ -3391,7 +3522,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .get_finalization(Height::new(1))
             .await
             .unwrap();
-        assert_eq!(fin0_after.round().view(), View::new(1));
+        assert_eq!(H::finalization_round(&fin0_after).view(), View::new(1));
 
         // Validator 1 should still have the original finalization (v2)
         let fin1_after = handles[1]
@@ -3399,7 +3530,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .get_finalization(Height::new(1))
             .await
             .unwrap();
-        assert_eq!(fin1_after.round().view(), View::new(2));
+        assert_eq!(H::finalization_round(&fin1_after).view(), View::new(2));
     })
 }
 

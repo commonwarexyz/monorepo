@@ -4,42 +4,50 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    marshal::core::{Buffer, Variant},
+    marshal::core::{Buffer, ConsensusEngine, MinimmitConsensus, SimplexConsensus, Variant},
     types::Round,
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
+use std::marker::PhantomData;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
 /// This variant sends the entire block to all peers.
 #[derive(Default, Clone, Copy)]
-pub struct Standard<B: Block>(std::marker::PhantomData<B>);
+pub struct Standard<B: Block, C: ConsensusEngine<Commitment = <B as Digestible>::Digest>>(
+    PhantomData<(B, C)>,
+);
 
-impl<B> Variant for Standard<B>
+/// Standard marshal coupled to simplex consensus.
+pub type StandardSimplex<B, S> = Standard<B, SimplexConsensus<S, <B as Digestible>::Digest>>;
+
+/// Standard marshal coupled to minimmit consensus.
+pub type StandardMinimmit<B, S> = Standard<B, MinimmitConsensus<S, <B as Digestible>::Digest>>;
+
+impl<B, C> Variant for Standard<B, C>
 where
     B: Block,
+    C: ConsensusEngine<Commitment = <B as Digestible>::Digest>,
 {
+    type Consensus = C;
     type ApplicationBlock = B;
     type Block = B;
     type StoredBlock = B;
     type Commitment = <B as Digestible>::Digest;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
-        // Standard variant commitment is exactly the block digest.
         block.digest()
     }
 
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
-        // Trivial left-inverse: digest == commitment in this variant.
         commitment
     }
 
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
-        // In standard mode, commitments are digests, so parent commitment is parent digest.
         block.parent()
     }
 
@@ -48,10 +56,11 @@ where
     }
 }
 
-impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>
+impl<B, C> Buffer<Standard<B, C>>
+    for buffered::Mailbox<<<C as ConsensusEngine>::Scheme as CertificateScheme>::PublicKey, B>
 where
     B: Block,
-    K: PublicKey,
+    C: ConsensusEngine<Commitment = <B as Digestible>::Digest>,
 {
     type CachedBlock = B;
 
@@ -60,7 +69,7 @@ where
     }
 
     async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Self::CachedBlock> {
-        self.find_by_digest(commitment).await
+        self.get(commitment).await
     }
 
     async fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<Self::CachedBlock> {
@@ -73,12 +82,12 @@ where
         &self,
         commitment: B::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
-        self.subscribe_by_digest(commitment).await
+        let (tx, rx) = oneshot::channel();
+        self.subscribe_prepared(commitment, tx).await;
+        rx
     }
 
-    async fn finalized(&self, _commitment: B::Digest) {
-        // No cleanup needed in standard mode - the buffer handles its own pruning
-    }
+    async fn finalized(&self, _commitment: B::Digest) {}
 
     async fn proposed(&self, _round: Round, block: B) {
         let _peers = Broadcaster::broadcast(self, Recipients::All, block).await;
