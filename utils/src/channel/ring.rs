@@ -131,8 +131,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
         let waker = shared.receiver_waker.take();
         drop(shared);
 
-        // Drop the old item after the lock is released to avoid potential mutex poisoning
-        drop(old_item);
+        // `old_item` is dropped after releasing the lock (end of scope)
 
         if let Some(w) = waker {
             w.wake();
