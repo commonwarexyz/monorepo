@@ -1,6 +1,9 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
-    simplex::types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
+    simplex::{
+        metrics::NullifyReason,
+        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
+    },
     types::{Participant, Round as Rnd},
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
@@ -44,6 +47,7 @@ pub struct Round<S: Scheme, D: Digest> {
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
+    nullify_reason: Option<NullifyReason>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
@@ -69,6 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
+            nullify_reason: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -298,6 +303,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Overrides the nullify retry deadline, allowing callers to reschedule retries deterministically.
     pub const fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
+    }
+
+    /// Records the first nullify reason observed for this round.
+    ///
+    /// Returns the canonical reason for the round (first write wins).
+    pub fn note_nullify_reason(&mut self, reason: NullifyReason) -> NullifyReason {
+        let canonical = self.nullify_reason.get_or_insert(reason);
+        *canonical
+    }
+
+    /// Returns the first nullify reason observed for this round, if any.
+    pub const fn nullify_reason(&self) -> Option<NullifyReason> {
+        self.nullify_reason
     }
 
     /// Returns a nullify vote if we should timeout/retry.

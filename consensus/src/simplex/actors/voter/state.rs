@@ -405,24 +405,33 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .map(|round| round.elapsed_since_start(now))
     }
 
-    /// Returns whether a proposal exists for the given view.
-    pub fn has_proposal(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.proposal().is_some())
-    }
-
-    /// Records that `view` was nullified.
+    /// Records that we emitted a nullify vote for `view`.
     ///
-    /// Only records the nullify metric on the first call per view.
+    /// This should be called by the timeout path when we actually broadcast a nullify vote.
     ///
-    /// Unlike [`Self::trigger_nullify`], this does not alter timeout deadlines.
-    pub fn record_nullify(&mut self, view: View, reason: NullifyReason) {
+    /// The first reason recorded for the view is retained and reused:
+    /// - if a prior [`Self::trigger_nullify`] stored a reason, that reason is used
+    /// - otherwise, infer [`NullifyReason::RoundTimeout`] when a proposal exists, or
+    ///   [`NullifyReason::LeaderTimeout`] when it does not.
+    pub fn nullify(&mut self, view: View) -> Option<NullifyReason> {
         if view != self.view {
-            return;
+            return None;
         }
 
-        let leader = self.create_round(view).leader();
+        let (reason, leader) = {
+            let round = self.create_round(view);
+            let reason = round
+                .nullify_reason()
+                .unwrap_or_else(|| {
+                    if round.proposal().is_some() {
+                        NullifyReason::RoundTimeout
+                    } else {
+                        NullifyReason::LeaderTimeout
+                    }
+                });
+            let reason = round.note_nullify_reason(reason);
+            (reason, round.leader())
+        };
 
         // Track nullified view per leader if we know who the leader was
         if !self.expired {
@@ -433,17 +442,22 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     .inc();
             }
         }
+        Some(reason)
     }
 
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
+    ///
+    /// This only records the first nullify reason for the view. Metrics are emitted
+    /// when [`Self::nullify`] is called after broadcasting a nullify vote.
     pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
         if view != self.view {
             return;
         }
 
         let now = self.context.current();
-        self.create_round(view).set_deadlines(now, now);
-        self.record_nullify(view, reason);
+        let round = self.create_round(view);
+        round.set_deadlines(now, now);
+        let _ = round.note_nullify_reason(reason);
     }
 
     /// Attempt to propose a new block.
@@ -851,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn record_nullify_preserves_retry_backoff_after_first_timeout_vote() {
+    fn nullify_preserves_retry_backoff_after_first_timeout_vote() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -877,11 +891,44 @@ mod tests {
 
             context.sleep(Duration::from_secs(2)).await;
             let now = context.current();
-            state.record_nullify(view, NullifyReason::LeaderTimeout);
+            let reason = state.nullify(view);
+            assert_eq!(reason, Some(NullifyReason::LeaderTimeout));
             assert_eq!(
                 state.next_timeout_deadline(),
                 now + retry,
                 "first retry should honor configured nullify backoff"
+            );
+        });
+    }
+
+    #[test]
+    fn nullify_without_reason_reuses_first_recorded_reason() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(31),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            state.trigger_nullify(view, NullifyReason::MissingProposal);
+            assert_eq!(
+                state.nullify(view),
+                Some(NullifyReason::MissingProposal),
+            );
+            assert_eq!(
+                state.nullify(view),
+                Some(NullifyReason::MissingProposal),
+                "inferred nullify should reuse the first recorded reason for the view"
             );
         });
     }
@@ -938,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_only_records_metric_once() {
+    fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -964,17 +1011,21 @@ mod tests {
             let leader_key = &participants[leader.get() as usize];
             let label = NullifyLabel::new(leader_key, NullifyReason::Abandon);
 
-            // First nullify should record the metric
+            // Fast-path trigger should not record metrics until we emit nullify.
             state.trigger_nullify(view, NullifyReason::Abandon);
+            assert_eq!(state.nullifies.get_or_create(&label).get(), 0);
+
+            // First emitted nullify should record the metric.
+            assert_eq!(state.nullify(view), Some(NullifyReason::Abandon));
             assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
 
-            // Second nullify (same view, same reason) should NOT increment
-            state.trigger_nullify(view, NullifyReason::Abandon);
-            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
-
-            // Third nullify (same view, different reason) should also NOT increment
-            let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
+            // Re-triggering with a different reason should preserve the first reason.
             state.trigger_nullify(view, NullifyReason::LeaderTimeout);
+            assert_eq!(state.nullify(view), Some(NullifyReason::Abandon));
+            assert_eq!(state.nullifies.get_or_create(&label).get(), 1);
+
+            // No metric should be emitted for the later reason.
+            let other_label = NullifyLabel::new(leader_key, NullifyReason::LeaderTimeout);
             assert_eq!(state.nullifies.get_or_create(&other_label).get(), 0);
         });
     }
