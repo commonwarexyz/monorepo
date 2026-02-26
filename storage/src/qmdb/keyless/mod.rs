@@ -163,7 +163,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
             let mut dirty_journal = journal.into_dirty();
-            dirty_journal.append(Operation::Commit(None)).await?;
+            dirty_journal.append(&Operation::Commit(None)).await?;
             journal = dirty_journal.merkleize();
             journal.sync().await?;
         }
@@ -266,7 +266,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
         self.journal
-            .append(Operation::Append(value))
+            .append(&Operation::Append(value))
             .await
             .map_err(Into::into)
     }
@@ -281,7 +281,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         metadata: Option<V>,
     ) -> Result<(Keyless<E, V, H, Unmerkleized, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
-        self.last_commit_loc = self.journal.append(Operation::Commit(metadata)).await?;
+        self.last_commit_loc = self.journal.append(&Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         let op_count = self.last_commit_loc + 1;
         debug!(size = ?op_count, "committed db");

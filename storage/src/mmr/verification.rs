@@ -208,7 +208,7 @@ mod tests {
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
-                    root,
+                    &root,
                 )
                 .unwrap();
 
@@ -224,7 +224,7 @@ mod tests {
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
-                        root
+                        &root
                     ));
                     subrange_start += 1;
                     subrange_end -= 1;

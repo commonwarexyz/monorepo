@@ -11,14 +11,17 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
+        diff,
         journaled::{CleanMmr, DirtyMmr, Mmr, State},
         mem::{Clean, Dirty},
+        read::{ChainInfo, MmrRead},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
     Persistable,
 };
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -33,6 +36,146 @@ pub enum Error {
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
+}
+
+/// Collect items from a chain of stacked auth batches for [`FinalizedBatch`].
+///
+/// Each [`MerkleizedBatch`] holds its items in an `Arc<Vec<Item>>`.
+/// [`MerkleizedBatch::finalize`] walks the chain via this trait, collecting
+/// one Arc clone (refcount bump) per level. The base MMR implements the
+/// trivial base case (no items).
+///
+/// This trait is public because it appears in trait bounds on
+/// [`MerkleizedBatch::finalize`], but callers never need to implement or
+/// name it directly.
+pub trait ItemChain<Item> {
+    /// Collect item Arcs from this node and all ancestors in append order.
+    fn collect_item_arcs(&self, into: &mut Vec<Arc<Vec<Item>>>);
+}
+
+impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for CleanMmr<E, D> {
+    fn collect_item_arcs(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
+}
+
+/// A speculative batch of mutations against an authenticated journal.
+/// Tracks both MMR leaf digests and the corresponding journal items.
+pub struct Batch<'a, H: Hasher, P: MmrRead<H::Digest>, Item> {
+    inner: diff::UnmerkleizedBatch<'a, H::Digest, P>,
+    hasher: StandardHasher<H>,
+    items: Vec<Item>,
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Encode> Batch<'a, H, P, Item> {
+    /// Add an item. Encodes it, adds its digest to the MMR batch, and stores the item.
+    pub fn add(&mut self, item: Item) {
+        let encoded = item.encode();
+        self.inner.add(&mut self.hasher, &encoded);
+        self.items.push(item);
+    }
+
+    /// Merkleize the batch, computing the speculative root.
+    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item> {
+        MerkleizedBatch {
+            inner: self.inner.merkleize(&mut self.hasher),
+            items: Arc::new(self.items),
+        }
+    }
+}
+
+/// A merkleized speculative batch with tracked items.
+pub struct MerkleizedBatch<'a, H: Hasher, P: MmrRead<H::Digest>, Item> {
+    inner: diff::MerkleizedBatch<'a, H::Digest, P>,
+    items: Arc<Vec<Item>>,
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
+    /// Return the root of the merkleized batch.
+    pub fn root(&self) -> H::Digest {
+        self.inner.root()
+    }
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Send + Sync> MmrRead<H::Digest>
+    for MerkleizedBatch<'a, H, P, Item>
+{
+    fn size(&self) -> Position {
+        self.inner.size()
+    }
+    fn get_node(&self, pos: Position) -> Option<H::Digest> {
+        self.inner.get_node(pos)
+    }
+    fn root(&self) -> H::Digest {
+        self.inner.root()
+    }
+    fn pruned_to_pos(&self) -> Position {
+        self.inner.pruned_to_pos()
+    }
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest> + ChainInfo<H::Digest>, Item: Send + Sync>
+    ChainInfo<H::Digest> for MerkleizedBatch<'a, H, P, Item>
+{
+    fn base_size(&self) -> Position {
+        self.inner.base_size()
+    }
+    fn base_visible(&self) -> Position {
+        self.inner.base_visible()
+    }
+    fn collect_chain_overwrites(&self, into: &mut BTreeMap<Position, H::Digest>) {
+        self.inner.collect_chain_overwrites(into);
+    }
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest> + ItemChain<Item>, Item: Send + Sync> ItemChain<Item>
+    for MerkleizedBatch<'a, H, P, Item>
+{
+    fn collect_item_arcs(&self, into: &mut Vec<Arc<Vec<Item>>>) {
+        self.inner.parent().collect_item_arcs(into); // recurse to parent first
+        into.push(self.items.clone()); // Arc refcount bump, not a data clone
+    }
+}
+
+impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Send + Sync + Encode>
+    MerkleizedBatch<'a, H, P, Item>
+{
+    /// Create a child batch on top of this merkleized batch.
+    ///
+    /// Takes `&self` so the parent is immutable: multiple children can be forked
+    /// from the same parent.
+    pub fn new_batch(&self) -> Batch<'_, H, Self, Item> {
+        let inner = diff::UnmerkleizedBatch::new(self);
+        #[cfg(feature = "std")]
+        let inner = inner.with_pool(self.inner.pool());
+        Batch {
+            inner,
+            hasher: StandardHasher::new(),
+            items: Vec::new(),
+        }
+    }
+}
+
+impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
+where
+    P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
+{
+    /// Consume this batch, flatten the diff chain into an owned changeset, and
+    /// collect all item Arcs from the entire chain. The result is fully owned
+    /// and can be applied to the journal without borrow conflicts.
+    pub fn finalize(self) -> FinalizedBatch<H::Digest, Item> {
+        let mut item_chain = Vec::new();
+        self.collect_item_arcs(&mut item_chain);
+        let changeset = self.inner.into_changeset();
+        FinalizedBatch {
+            changeset,
+            item_chain,
+        }
+    }
+}
+
+/// A finalized batch ready to be applied. Fully owned, no borrows.
+pub struct FinalizedBatch<D: Digest, Item> {
+    changeset: diff::Changeset<D>,
+    item_chain: Vec<Arc<Vec<Item>>>,
 }
 
 /// An append-only data structure that maintains a sequential journal of items alongside a Merkle
@@ -279,6 +422,16 @@ where
             hasher: self.hasher,
         }
     }
+
+    /// Create a speculative batch that reads through to this journal's MMR.
+    /// Multiple batches can coexist (shared borrow).
+    pub fn new_batch(&self) -> Batch<'_, H, CleanMmr<E, H::Digest>, C::Item> {
+        Batch {
+            inner: self.mmr.new_batch(),
+            hasher: StandardHasher::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
@@ -304,6 +457,29 @@ where
             self.mmr.sync().map_err(Error::Mmr)
         )?;
 
+        Ok(())
+    }
+}
+
+impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: Mutable<Item: EncodeShared>,
+    H: Hasher,
+{
+    /// Apply a finalized batch, appending all tracked items from the entire
+    /// chain and then applying the flattened MMR changeset.
+    pub async fn apply_batch(
+        &mut self,
+        batch: FinalizedBatch<H::Digest, C::Item>,
+    ) -> Result<(), Error> {
+        for items in &batch.item_chain {
+            for item in items.iter() {
+                self.journal.append(item).await?;
+            }
+        }
+        self.mmr.apply(batch.changeset);
+        debug_assert_eq!(*self.mmr.leaves(), self.journal.size().await);
         Ok(())
     }
 }
@@ -335,7 +511,7 @@ where
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
-    pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
+    pub async fn append(&mut self, item: &C::Item) -> Result<Location, Error> {
         let encoded_item = item.encode();
 
         // Append item to the journal, then update the MMR state.
@@ -471,7 +647,7 @@ where
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
-    async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
+    async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
@@ -640,7 +816,7 @@ mod tests {
 
         for i in 0..count {
             let op = create_operation(i as u8);
-            let loc = journal.append(op).await.unwrap();
+            let loc = journal.append(&op).await.unwrap();
             assert_eq!(loc, Location::new_unchecked(i as u64));
         }
 
@@ -733,13 +909,13 @@ mod tests {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
                 mmr.add(&mut hasher, &encoded).unwrap();
-                journal.append(op).await.unwrap();
+                journal.append(&op).await.unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher);
 
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
-            journal.append(commit_op).await.unwrap();
+            journal.append(&commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
@@ -763,12 +939,12 @@ mod tests {
             // Add 20 operations to journal only
             for i in 0..20 {
                 let op = create_operation(i as u8);
-                journal.append(op).await.unwrap();
+                journal.append(&op).await.unwrap();
             }
 
             // Add commit
             let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
-            journal.append(commit_op).await.unwrap();
+            journal.append(&commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
@@ -793,7 +969,7 @@ mod tests {
 
             // Add 20 uncommitted operations
             for i in 0..20 {
-                let loc = journal.append(create_operation(i as u8)).await.unwrap();
+                let loc = journal.append(&create_operation(i as u8)).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
             }
             let journal = journal.merkleize();
@@ -828,14 +1004,14 @@ mod tests {
 
                 // Add operations where operation 3 is a commit
                 for i in 0..3 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await
                     .unwrap();
                 for i in 4..7 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
 
                 // Rewind to last commit
@@ -858,17 +1034,17 @@ mod tests {
                 .unwrap();
 
                 // Add multiple commits
-                journal.append(create_operation(0)).await.unwrap();
+                journal.append(&create_operation(0)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await
                     .unwrap(); // pos 1
-                journal.append(create_operation(2)).await.unwrap();
+                journal.append(&create_operation(2)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(1)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(1)))
                     .await
                     .unwrap(); // pos 3
-                journal.append(create_operation(4)).await.unwrap();
+                journal.append(&create_operation(4)).await.unwrap();
 
                 // Should rewind to last commit (pos 3)
                 let final_size = journal.rewind_to(|op| op.is_commit()).await.unwrap();
@@ -893,7 +1069,7 @@ mod tests {
 
                 // Add operations with no commits
                 for i in 0..10 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
 
                 // Rewind should go to pruning boundary (0 for unpruned)
@@ -913,14 +1089,14 @@ mod tests {
 
                 // Add operations and a commit at position 10 (past first section boundary of 7)
                 for i in 0..10 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await
                     .unwrap(); // pos 10
                 for i in 11..15 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal.sync().await.unwrap();
 
@@ -930,7 +1106,7 @@ mod tests {
 
                 // Add more uncommitted operations
                 for i in 15..20 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
 
                 // Rewind should keep the commit at position 10
@@ -953,14 +1129,14 @@ mod tests {
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal.sync().await.unwrap();
 
@@ -971,7 +1147,7 @@ mod tests {
 
                 // Add uncommitted operations with no commits (in section 1: 7-13)
                 for i in 10..14 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
 
                 // Rewind with no matching commits after the pruning boundary
@@ -1010,14 +1186,14 @@ mod tests {
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 let journal = journal.merkleize();
                 assert_eq!(journal.size().await, 10);
@@ -1048,7 +1224,7 @@ mod tests {
                 // Test rewinding after pruning.
                 let mut journal = journal.into_dirty();
                 for i in 0..255 {
-                    journal.append(create_operation(i)).await.unwrap();
+                    journal.append(&create_operation(i)).await.unwrap();
                 }
                 let mut journal = journal.merkleize();
                 journal.prune(Location::new_unchecked(100)).await.unwrap();
@@ -1079,7 +1255,7 @@ mod tests {
             // Add 50 operations
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                let loc = journal.append(op.clone()).await.unwrap();
+                let loc = journal.append(op).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
                 assert_eq!(journal.size().await, (i + 1) as u64);
             }
@@ -1137,7 +1313,7 @@ mod tests {
 
             // Add commit and prune
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1201,13 +1377,13 @@ mod tests {
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                let loc = journal.append(op.clone()).await.unwrap();
+                let loc = journal.append(op).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64),);
             }
 
             // Add commit operation to commit the operations
             let commit_loc = journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await
                 .unwrap();
             let journal = journal.merkleize();
@@ -1258,7 +1434,7 @@ mod tests {
 
             // Add commit at position 50
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1281,7 +1457,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1310,7 +1486,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1347,7 +1523,7 @@ mod tests {
                 create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1385,7 +1561,7 @@ mod tests {
                     .await
                     .into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1407,7 +1583,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(25)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1580,7 +1756,7 @@ mod tests {
             // Add more operations after the historical state
             let mut journal = journal.into_dirty();
             for i in 50..100 {
-                journal.append(create_operation(i as u8)).await.unwrap();
+                journal.append(&create_operation(i as u8)).await.unwrap();
             }
             let journal = journal.merkleize();
             journal.sync().await.unwrap();
@@ -1617,7 +1793,7 @@ mod tests {
 
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(&Operation::CommitFloor(None, Location::new_unchecked(25)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1685,6 +1861,85 @@ mod tests {
 
             // Should have replayed positions 25-49 (25 operations)
             assert_eq!(count, 25);
+        });
+    }
+
+    /// Verify the speculative batch API: fork two batches, verify independent roots, apply one.
+    #[test_traced("INFO")]
+    fn test_speculative_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = create_journal_with_ops(context, "speculative_batch", 10).await;
+            let original_root = journal.root();
+
+            // Fork two independent speculative batches.
+            let mut b1 = journal.new_batch();
+            let mut b2 = journal.new_batch();
+
+            // Add different items to each batch.
+            let op_a = create_operation(100);
+            let op_b = create_operation(200);
+            b1.add(op_a.clone());
+            b2.add(op_b);
+
+            // Merkleize and verify independent roots.
+            let m1 = b1.merkleize();
+            let m2 = b2.merkleize();
+            assert_ne!(m1.root(), m2.root());
+            assert_ne!(m1.root(), original_root);
+            assert_ne!(m2.root(), original_root);
+
+            // Journal root should be unchanged (batches are speculative).
+            assert_eq!(journal.root(), original_root);
+
+            // Finalize batch 1 and apply.
+            let expected_root = m1.root();
+            let finalized = m1.finalize();
+            drop(m2); // release borrow on &journal
+            journal.apply_batch(finalized).await.unwrap();
+
+            // Journal should now match the applied batch's root.
+            assert_eq!(journal.root(), expected_root);
+            assert_eq!(*journal.size().await, 11);
+        });
+    }
+
+    /// Verify stacking: create batch A, merkleize, create batch B from merkleized A,
+    /// merkleize, finalize, and apply. Verify root and items.
+    #[test_traced("INFO")]
+    fn test_speculative_batch_stacking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = create_journal_with_ops(context, "batch_stacking", 10).await;
+
+            let op_a = create_operation(100);
+            let op_b = create_operation(200);
+
+            // Build stacked batches in a block so intermediate borrows drop.
+            let (expected_root, finalized) = {
+                let mut batch_a = journal.new_batch();
+                batch_a.add(op_a.clone());
+                let merkleized_a = batch_a.merkleize();
+
+                let mut batch_b = merkleized_a.new_batch();
+                batch_b.add(op_b.clone());
+                let merkleized_b = batch_b.merkleize();
+
+                let root = merkleized_b.root();
+                (root, merkleized_b.finalize())
+                // merkleized_a dropped here, releasing &journal.mmr
+            };
+
+            journal.apply_batch(finalized).await.unwrap();
+
+            assert_eq!(journal.root(), expected_root);
+            assert_eq!(*journal.size().await, 12);
+
+            // Verify both items were appended correctly.
+            let read_a = journal.read(Location::new_unchecked(10)).await.unwrap();
+            assert_eq!(read_a, op_a);
+            let read_b = journal.read(Location::new_unchecked(11)).await.unwrap();
+            assert_eq!(read_b, op_b);
         });
     }
 }

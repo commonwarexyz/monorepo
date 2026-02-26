@@ -218,7 +218,7 @@ mod tests {
             "root of empty MMR should be non-zero"
         );
         // Empty MMR root is the hash of size 0 bytes, not the empty hash
-        assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
+        assert_eq!(empty_out, Mmr::empty_mmr_root::<H>());
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new_unchecked(10), digests.iter());

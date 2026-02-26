@@ -486,7 +486,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = CleanMmr::new(&mut standard);
+            let mmr = CleanMmr::new::<Sha256>();
             let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
@@ -601,7 +601,7 @@ mod tests {
             let grafted =
                 build_test_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
-            let ops_root = *ops_mmr.root();
+            let ops_root = ops_mmr.root();
 
             {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);

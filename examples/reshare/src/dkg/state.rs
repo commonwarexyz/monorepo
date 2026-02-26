@@ -336,7 +336,7 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         self.msgs
             .append(
                 section,
-                Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
+                &Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
             .expect("should be able to write to msgs");
@@ -363,7 +363,7 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, Event::Ack(player.clone(), ack.clone()))
+            .append(section, &Event::Ack(player.clone(), ack.clone()))
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -387,7 +387,7 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
         // Persist to journal
         let section = epoch.get();
         self.msgs
-            .append(section, Event::Log(dealer.clone(), log.clone()))
+            .append(section, &Event::Log(dealer.clone(), log.clone()))
             .await
             .expect("should be able to write to msgs");
         self.msgs

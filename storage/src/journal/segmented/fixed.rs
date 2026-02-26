@@ -117,7 +117,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal in the given section.
     ///
     /// Returns the position of the item within the section (0-indexed).
-    pub async fn append(&mut self, section: u64, item: A) -> Result<u64, Error> {
+    pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
         let size = blob.size().await;
@@ -394,19 +394,19 @@ mod tests {
                 .expect("failed to init");
 
             let pos0 = journal
-                .append(1, test_digest(0))
+                .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
             assert_eq!(pos0, 0);
 
             let pos1 = journal
-                .append(1, test_digest(1))
+                .append(1, &test_digest(1))
                 .await
                 .expect("failed to append");
             assert_eq!(pos1, 1);
 
             let pos2 = journal
-                .append(2, test_digest(2))
+                .append(2, &test_digest(2))
                 .await
                 .expect("failed to append");
             assert_eq!(pos2, 0);
@@ -441,13 +441,13 @@ mod tests {
 
             for i in 0u64..10 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
             for i in 10u64..20 {
                 journal
-                    .append(2, test_digest(i))
+                    .append(2, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -505,14 +505,14 @@ mod tests {
             // Append 10 items to section 1
             for i in 0u64..10 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
             // Append 5 items to section 2
             for i in 10u64..15 {
                 journal
-                    .append(2, test_digest(i))
+                    .append(2, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -624,7 +624,7 @@ mod tests {
 
             for section in 1u64..=5 {
                 journal
-                    .append(section, test_digest(section))
+                    .append(section, &test_digest(section))
                     .await
                     .expect("failed to append");
             }
@@ -657,7 +657,7 @@ mod tests {
             // Create sections 1, 2, 3
             for section in 1u64..=3 {
                 journal
-                    .append(section, test_digest(section))
+                    .append(section, &test_digest(section))
                     .await
                     .expect("failed to append");
             }
@@ -703,7 +703,7 @@ mod tests {
             // Create sections 1-10
             for section in 1u64..=10 {
                 journal
-                    .append(section, test_digest(section))
+                    .append(section, &test_digest(section))
                     .await
                     .expect("failed to append");
             }
@@ -760,7 +760,7 @@ mod tests {
                 .expect("failed to init");
             for section in 1u64..=5 {
                 journal
-                    .append(section, test_digest(section))
+                    .append(section, &test_digest(section))
                     .await
                     .expect("failed to append");
             }
@@ -810,7 +810,7 @@ mod tests {
 
             for i in 0u64..5 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -861,7 +861,7 @@ mod tests {
 
             for i in 0u64..5 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -895,7 +895,7 @@ mod tests {
 
             for i in 0u64..5 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -920,15 +920,15 @@ mod tests {
 
             // Create sections with gaps: 1, 5, 10
             journal
-                .append(1, test_digest(100))
+                .append(1, &test_digest(100))
                 .await
                 .expect("failed to append");
             journal
-                .append(5, test_digest(500))
+                .append(5, &test_digest(500))
                 .await
                 .expect("failed to append");
             journal
-                .append(10, test_digest(1000))
+                .append(10, &test_digest(1000))
                 .await
                 .expect("failed to append");
             journal.sync_all().await.expect("failed to sync");
@@ -1011,13 +1011,13 @@ mod tests {
 
             // Append to section 1
             journal
-                .append(1, test_digest(100))
+                .append(1, &test_digest(100))
                 .await
                 .expect("failed to append");
 
             // Create section 2 but make it empty via rewind
             journal
-                .append(2, test_digest(200))
+                .append(2, &test_digest(200))
                 .await
                 .expect("failed to append");
             journal.sync(2).await.expect("failed to sync");
@@ -1028,7 +1028,7 @@ mod tests {
 
             // Append to section 3
             journal
-                .append(3, test_digest(300))
+                .append(3, &test_digest(300))
                 .await
                 .expect("failed to append");
 
@@ -1113,7 +1113,7 @@ mod tests {
             // Append 3 items (just over 2 pages worth)
             for i in 0u64..3 {
                 journal
-                    .append(1, test_digest(i))
+                    .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
@@ -1185,7 +1185,7 @@ mod tests {
             for section in 0..5u64 {
                 for i in 0..10u64 {
                     journal
-                        .append(section, test_digest(section * 1000 + i))
+                        .append(section, &test_digest(section * 1000 + i))
                         .await
                         .expect("Failed to append");
                 }
@@ -1210,7 +1210,7 @@ mod tests {
             // Append new data after clear
             for i in 0..5u64 {
                 journal
-                    .append(10, test_digest(i * 100))
+                    .append(10, &test_digest(i * 100))
                     .await
                     .expect("Failed to append after clear");
             }
@@ -1260,8 +1260,8 @@ mod tests {
                 .await
                 .expect("failed to init");
 
-            journal.append(0, test_digest(0)).await.unwrap();
-            journal.append(0, test_digest(1)).await.unwrap();
+            journal.append(0, &test_digest(0)).await.unwrap();
+            journal.append(0, &test_digest(1)).await.unwrap();
             journal.sync(0).await.unwrap();
 
             assert!(journal.last(0).await.unwrap().is_some());
@@ -1282,8 +1282,8 @@ mod tests {
                 .await
                 .expect("failed to init");
 
-            journal.append(0, test_digest(0)).await.unwrap();
-            journal.append(1, test_digest(1)).await.unwrap();
+            journal.append(0, &test_digest(0)).await.unwrap();
+            journal.append(1, &test_digest(1)).await.unwrap();
             journal.sync_all().await.unwrap();
 
             journal.prune(1).await.unwrap();

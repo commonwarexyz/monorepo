@@ -31,7 +31,7 @@ struct MmrRootStability;
 impl Conformance for MmrRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = CleanMmr::new(&mut hasher);
+        let mmr = CleanMmr::new::<Sha256>();
         let mmr = build_test_mmr(&mut hasher, mmr, seed);
 
         mmr.root().to_vec()

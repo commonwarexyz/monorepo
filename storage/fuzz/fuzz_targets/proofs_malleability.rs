@@ -134,7 +134,7 @@ fn fuzz(input: FuzzInput) {
             for (leaf, element) in digests.iter().enumerate() {
                 let loc = Location::new(leaf as u64).unwrap();
                 let original_proof = mmr.proof(loc).unwrap();
-                assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, root));
+                assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, &root));
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
@@ -144,7 +144,7 @@ fn fuzz(input: FuzzInput) {
                             &mut hasher,
                             element,
                             loc,
-                            root
+                            &root
                         ));
                     }
                 }
@@ -179,7 +179,7 @@ fn fuzz(input: FuzzInput) {
                 &mut hasher,
                 &range_elements,
                 start_loc,
-                root
+                &root
             ));
 
             for mutation in &input.mutations {
@@ -190,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                         &mut hasher,
                         &range_elements,
                         start_loc,
-                        root
+                        &root
                     ));
                 }
             }

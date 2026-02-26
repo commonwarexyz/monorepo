@@ -137,7 +137,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = CleanMmr::new::<Sha256>();
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -221,7 +221,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         let size_before = mmr.size();
-                        let root_before = *mmr.root();
+                        let root_before = mmr.root();
 
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
@@ -235,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                         );
 
                         // Root should change (unless data is identical)
-                        let root_after = *mmr.root();
+                        let root_after = mmr.root();
                         if limited_data != reference.leaf_data[location] {
                             assert_ne!(
                                 root_before, root_after,
@@ -312,7 +312,7 @@ fn fuzz(input: FuzzInput) {
                             &mut hasher,
                             reference.leaf_data[location_idx].as_slice(),
                             loc,
-                            root,
+                            &root,
                         ));
                     }
                 }
