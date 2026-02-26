@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
     /// Signal that the current view should be nullified (if not already).
-    Nullify(View, TimeoutReason),
+    Timeout(View, TimeoutReason),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -39,7 +39,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Signal that the current view should timeout (if not already).
     pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
-        self.sender.send_lossy(Message::Nullify(view, reason)).await;
+        self.sender.send_lossy(Message::Timeout(view, reason)).await;
     }
 
     /// Send a recovered certificate.

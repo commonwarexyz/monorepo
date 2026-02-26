@@ -226,7 +226,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let (reason, leader) = {
                 let round = self.create_round(view);
                 let reason = round.set_nullify_reason(if round.proposal().is_some() {
-                    TimeoutReason::RoundTimeout
+                    TimeoutReason::AdvanceTimeout
                 } else {
                     TimeoutReason::LeaderTimeout
                 });
