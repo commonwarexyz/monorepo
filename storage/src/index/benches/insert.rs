@@ -22,12 +22,9 @@ enum Variant {
     PartitionedUnordered2,
     PartitionedOrdered1,
     PartitionedOrdered2,
-    HashedOrdered,
     HashedUnordered,
     HashedPartitionedUnordered1,
     HashedPartitionedUnordered2,
-    HashedPartitionedOrdered1,
-    HashedPartitionedOrdered2,
 }
 
 impl Variant {
@@ -39,29 +36,23 @@ impl Variant {
             Self::PartitionedUnordered2 => "partitioned_unordered_2",
             Self::PartitionedOrdered1 => "partitioned_ordered_1",
             Self::PartitionedOrdered2 => "partitioned_ordered_2",
-            Self::HashedOrdered => "hashed_ordered",
             Self::HashedUnordered => "hashed_unordered",
             Self::HashedPartitionedUnordered1 => "hashed_partitioned_unordered_1",
             Self::HashedPartitionedUnordered2 => "hashed_partitioned_unordered_2",
-            Self::HashedPartitionedOrdered1 => "hashed_partitioned_ordered_1",
-            Self::HashedPartitionedOrdered2 => "hashed_partitioned_ordered_2",
         }
     }
 }
 
-const VARIANTS: [Variant; 12] = [
+const VARIANTS: [Variant; 9] = [
     Variant::Ordered,
     Variant::Unordered,
     Variant::PartitionedUnordered1,
     Variant::PartitionedUnordered2,
     Variant::PartitionedOrdered1,
     Variant::PartitionedOrdered2,
-    Variant::HashedOrdered,
     Variant::HashedUnordered,
     Variant::HashedPartitionedUnordered1,
     Variant::HashedPartitionedUnordered2,
-    Variant::HashedPartitionedOrdered1,
-    Variant::HashedPartitionedOrdered2,
 ];
 
 #[derive(Clone)]
@@ -150,13 +141,7 @@ fn bench_insert(c: &mut Criterion) {
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
-                            Variant::HashedOrdered => {
-                                let mut index = ordered::Index::new(
-                                    DummyMetrics,
-                                    Hashed::from_seed(0, FourCap),
-                                );
-                                total += run_benchmark(&mut index, &kvs_data);
-                            }
+
                             Variant::HashedUnordered => {
                                 let mut index = unordered::Index::new(
                                     DummyMetrics,
@@ -175,20 +160,6 @@ fn bench_insert(c: &mut Criterion) {
                                 let mut index = partitioned::unordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
                                     Hashed::from_seed(0, TwoCap),
-                                );
-                                total += run_benchmark(&mut index, &kvs_data);
-                            }
-                            Variant::HashedPartitionedOrdered1 => {
-                                let mut index = partitioned::ordered::Index::<_, _, 1>::new(
-                                    DummyMetrics,
-                                    Hashed::from_seed(0, Cap::<3>::new()),
-                                );
-                                total += run_benchmark(&mut index, &kvs_data);
-                            }
-                            Variant::HashedPartitionedOrdered2 => {
-                                let mut index = partitioned::ordered::Index::<_, _, 2>::new(
-                                    DummyMetrics,
-                                    Hashed::from_seed(0, Cap::<2>::new()),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }

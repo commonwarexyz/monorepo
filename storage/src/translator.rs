@@ -1,9 +1,6 @@
 //! Primitive implementations of [Translator].
 
-use std::{
-    collections::hash_map::RandomState,
-    hash::{BuildHasher, DefaultHasher, Hash, Hasher},
-};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -193,25 +190,33 @@ impl<const N: usize> BuildHasher for Cap<N> {
 
 /// Collision-resistant wrapper for any [Translator].
 ///
-/// Hashes the full key with a per-instance secret seed (SipHash via
-/// [DefaultHasher]) before delegating to the inner translator. This makes
-/// translated-key collisions unpredictable to an adversary who does not know
-/// the seed, similar to how [std::collections::HashMap] uses
-/// [std::collections::hash_map::RandomState] to prevent HashDoS attacks.
+/// Hashes the full key with a per-instance secret seed (via [ahash::RandomState]) before delegating
+/// to the inner translator. This makes translated-key collisions unpredictable to an adversary who
+/// does not know the seed, similar to how [std::collections::HashMap] uses
+/// [std::collections::hash_map::RandomState] to prevent HashDoS attacks. It can also be used to
+/// ensure uniform distribution of skewed keyspaces when used by non-hashing structures such as
+/// [crate::index].
 ///
 /// # Warning
 ///
-/// Hashing destroys lexicographic key ordering. Do not use [Hashed] with
-/// ordered indices when callers rely on translated-key adjacency matching
-/// original-key adjacency (e.g., exclusion proofs in the ordered QMDB).
-/// [Hashed] is safe for unordered indices and partitioned unordered indices.
+/// Hashing destroys lexicographic key ordering. Do not use [Hashed] with ordered indices when
+/// callers rely on translated-key adjacency matching original-key adjacency (e.g., exclusion proofs
+/// in the ordered QMDB). [Hashed] is safe for unordered indices and partitioned unordered indices.
+///
+/// # `no_std`
+///
+/// [Hashed::new] and [Default] use [ahash::RandomState::new] which requires OS-provided randomness
+/// (the `runtime-rng` feature of `ahash`, enabled by the `std` feature of this crate). In `no_std`
+/// builds without `runtime-rng`, [Hashed::new] will compile but may use fixed seeds, providing no
+/// adversarial protection. In `no_std` environments, use [Hashed::from_seed] with an
+/// externally-sourced random seed instead.
 ///
 /// # Stability
 ///
-/// [DefaultHasher] is provided by the standard library and its exact algorithm
-/// is intentionally unspecified. As a result, transformed outputs are not
-/// stable across Rust versions or platforms. Treat this translator as an
-/// in-memory collision-hardening mechanism, not as a stable/persisted encoding.
+/// [ahash::RandomState] is used as the underlying hasher. While `ahash` is robust, its exact
+/// algorithm might change across versions. As a result, transformed outputs are not stable across
+/// Rust versions or platforms. Treat this translator as an in-memory collision-hardening mechanism,
+/// not as a stable/persisted encoding.
 ///
 /// # Examples
 ///
@@ -228,7 +233,7 @@ impl<const N: usize> BuildHasher for Cap<N> {
 /// ```
 #[derive(Clone)]
 pub struct Hashed<T: Translator> {
-    base_hasher: DefaultHasher,
+    random_state: ahash::RandomState,
     inner: T,
 }
 
@@ -241,20 +246,28 @@ impl<T: Translator + Default> Default for Hashed<T> {
 impl<T: Translator> Hashed<T> {
     /// Create a new [Hashed] translator with a random seed.
     pub fn new(inner: T) -> Self {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u8(0);
-        Self::from_seed(h.finish(), inner)
+        Self {
+            random_state: ahash::RandomState::new(),
+            inner,
+        }
     }
 
-    /// Create a new [Hashed] translator with a specific seed for deterministic behavior.
+    /// Create a new [Hashed] translator with a specific seed.
     ///
-    /// Determinism is scoped to the current standard-library hasher
-    /// implementation. Outputs are not guaranteed to be stable across Rust
-    /// versions or platforms.
+    /// Determinism is scoped to the current `ahash` implementation. Outputs are not guaranteed to
+    /// be stable across crate versions or platforms.
     pub fn from_seed(seed: u64, inner: T) -> Self {
-        let mut base_hasher = DefaultHasher::new();
-        base_hasher.write_u64(seed);
-        Self { base_hasher, inner }
+        // Derive four independent seeds from the single input using ahash itself.
+        // A fixed RandomState acts as a key-derivation function: hashing (seed, index) pairs
+        // produces well-distributed independent values without requiring std::hash::DefaultHasher.
+        let kdf = ahash::RandomState::with_seeds(0, 0, 0, 0);
+        let derive = |index: u64| -> u64 { kdf.hash_one((seed, index)) };
+        let random_state =
+            ahash::RandomState::with_seeds(derive(0), derive(1), derive(2), derive(3));
+        Self {
+            random_state,
+            inner,
+        }
     }
 }
 
@@ -263,9 +276,8 @@ impl<T: Translator> Translator for Hashed<T> {
 
     #[inline]
     fn transform(&self, key: &[u8]) -> T::Key {
-        let mut h = self.base_hasher.clone();
-        h.write(key);
-        self.inner.transform(&h.finish().to_le_bytes())
+        let hash_val = self.random_state.hash_one(key);
+        self.inner.transform(&hash_val.to_le_bytes())
     }
 }
 
