@@ -393,6 +393,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return (false, None);
         }
 
+        // Unlike nullification and finalization, we do not clear deadlines when adding a notarization (and
+        // instead wait for certification to successfully complete).
+
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
         (true, equivocator)
