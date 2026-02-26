@@ -430,7 +430,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let now = self.context.current();
         let round = self.create_round(view);
-        if round.set_timeout_reason(reason).1 {
+        let (_, is_first_timeout) = round.set_timeout_reason(reason);
+        if is_first_timeout || round.should_rearm_timeout() {
             round.set_deadlines(now, now);
         }
     }
@@ -937,6 +938,64 @@ mod tests {
                 .expect("retry timeout nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
+        });
+    }
+
+    #[test]
+    fn notarization_keeps_advance_timeout_for_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(32),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([52u8; 32]),
+            );
+
+            // Proposal arrival clears leader timeout and leaves only the advance timeout.
+            assert!(state.set_proposal(view, proposal.clone()));
+            let advance_deadline = state.next_timeout_deadline();
+            assert_eq!(advance_deadline, context.current() + Duration::from_secs(2));
+
+            // Receiving a notarization should not clear the advance timeout while certification is pending.
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_none());
+            assert_eq!(
+                state.next_timeout_deadline(),
+                advance_deadline,
+                "advance timeout must continue to bound certification latency"
+            );
+
+            // If certification stalls beyond the advance timeout, timeout handling should fire immediately.
+            context.sleep(Duration::from_secs(3)).await;
+            assert!(
+                state.next_timeout_deadline() <= context.current(),
+                "stalled certification should leave the view timed out"
+            );
         });
     }
 

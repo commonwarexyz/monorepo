@@ -319,6 +319,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    /// Returns true when a timeout hint should re-arm immediate deadlines.
+    pub const fn should_rearm_timeout(&self) -> bool {
+        self.leader_deadline.is_none()
+            && self.advance_deadline.is_none()
+            && self.nullify_retry.is_none()
+            && !self.broadcast_nullify
+            && !self.broadcast_finalize
+    }
+
     /// Returns a nullify vote if we should timeout/retry.
     ///
     /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
@@ -391,7 +400,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.notarization.is_some() {
             return (false, None);
         }
-        self.clear_deadlines();
+        // Leader timeout is no longer relevant once we have a notarization, but the
+        // advance deadline must remain to bound certification latency.
+        self.leader_deadline = None;
 
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
