@@ -1,4 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
+use socket2::SockRef;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -87,9 +88,11 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Set SO_LINGER if configured
+        // Set SO_LINGER if configured. SockRef sets the socket option at the
+        // syscall level without blocking the thread (unlike the deprecated
+        // TcpStream::set_linger which caused blocking on drop).
         if let Some(so_linger) = self.cfg.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+            if let Err(err) = SockRef::from(&stream).set_linger(Some(so_linger)) {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
@@ -254,9 +257,11 @@ impl crate::Network for Network {
             }
         }
 
-        // Set SO_LINGER if configured
+        // Set SO_LINGER if configured. SockRef sets the socket option at the
+        // syscall level without blocking the thread (unlike the deprecated
+        // TcpStream::set_linger which caused blocking on drop).
         if let Some(so_linger) = self.cfg.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+            if let Err(err) = SockRef::from(&stream).set_linger(Some(so_linger)) {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
