@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::{Inbound, Peer, SkipReason},
+        metrics::{Inbound, Peer, AbandonReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
@@ -226,7 +226,7 @@ impl<
                     let abandon_reason = if Self::leader_nullified(current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
-                        Some(SkipReason::LeaderNullify)
+                        Some(AbandonReason::LeaderNullify)
                     } else {
                         let skip_timeout = self.skip_timeout.get() as usize;
                         if
@@ -241,7 +241,7 @@ impl<
                                 .take(skip_timeout)
                                 .any(|(_, round)| round.is_active(leader))
                         {
-                            Some(SkipReason::Inactivity)
+                            Some(AbandonReason::Inactivity)
                         } else {
                             None
                         }
@@ -422,7 +422,7 @@ impl<
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(current, &work) {
-                        voter.abandon(current.0, SkipReason::LeaderNullify).await;
+                        voter.abandon(current.0, AbandonReason::LeaderNullify).await;
                     }
                 }
                 updated_view = view;

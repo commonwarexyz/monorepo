@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, Outbound, SkipReason},
+        metrics::{self, Outbound, AbandonReason},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
@@ -814,7 +814,7 @@ impl<
             "consensus initialized"
         );
         self.state
-            .abandon(observed_view, SkipReason::Initialization);
+            .abandon(observed_view, AbandonReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -905,7 +905,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.abandon(context.view(), SkipReason::MissingProposal);
+                        self.state.abandon(context.view(), AbandonReason::MissingProposal);
                         continue;
                     }
                 };
@@ -942,7 +942,7 @@ impl<
                     }
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.abandon(context.view(), SkipReason::InvalidProposal);
+                        self.state.abandon(context.view(), AbandonReason::InvalidProposal);
                         continue;
                     }
                     Err(err) => {
@@ -1078,7 +1078,7 @@ impl<
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
                     if let Some(reason) = abandon_reason {
-                        if reason == SkipReason::LeaderNullify || !self.state.is_me(leader) {
+                        if reason == AbandonReason::LeaderNullify || !self.state.is_me(leader) {
                             debug!(%view, %leader, ?reason, "abandoning round");
                             self.state.abandon(current_view, reason);
                         }

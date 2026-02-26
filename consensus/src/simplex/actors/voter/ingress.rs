@@ -1,6 +1,6 @@
 use crate::{
     simplex::{
-        metrics::SkipReason,
+        metrics::AbandonReason,
         types::{Certificate, Proposal},
     },
     types::View,
@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
     /// Signal that the current view should be abandoned (if not already).
-    Abandon(View, SkipReason),
+    Abandon(View, AbandonReason),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -38,7 +38,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Signal that the current view should be abandoned (if not already).
-    pub async fn abandon(&mut self, view: View, reason: SkipReason) {
+    pub async fn abandon(&mut self, view: View, reason: AbandonReason) {
         self.sender
             .send_lossy(Message::Abandon(view, reason))
             .await;

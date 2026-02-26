@@ -1,5 +1,5 @@
 use crate::{
-    simplex::{metrics::SkipReason, types::Vote},
+    simplex::{metrics::AbandonReason, types::Vote},
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -13,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
         leader: Participant,
         finalized: View,
 
-        active: oneshot::Sender<Option<SkipReason>>,
+        active: oneshot::Sender<Option<AbandonReason>>,
     },
     /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
@@ -39,7 +39,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         current: View,
         leader: Participant,
         finalized: View,
-    ) -> Option<SkipReason> {
+    ) -> Option<AbandonReason> {
         self.sender
             .request_or(
                 |active| Message::Update {

@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{Peer, Skip, SkipReason},
+        metrics::{Peer, Abandon, AbandonReason},
         min_active,
         scheme::Scheme,
         types::{
@@ -64,7 +64,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    skips_per_leader: Family<Skip, Counter>,
+    abandons_per_leader: Family<Abandon, Counter>,
     nullifications_per_leader: Family<Peer, Counter>,
 }
 
@@ -74,14 +74,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skips_per_leader = Family::<Skip, Counter>::default();
+        let abandons_per_leader = Family::<Abandon, Counter>::default();
         let nullifications_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register(
-            "skips_per_leader",
-            "skipped views per leader",
-            skips_per_leader.clone(),
+            "abandons_per_leader",
+            "abandoned views per leader",
+            abandons_per_leader.clone(),
         );
         context.register(
             "nullifications_per_leader",
@@ -112,7 +112,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            skips_per_leader,
+            abandons_per_leader,
             nullifications_per_leader,
         }
     }
@@ -300,12 +300,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 .get_or_create(&Peer::new(&leader.key))
                 .inc();
             let reason = if has_proposal {
-                SkipReason::RoundTimeout
+                AbandonReason::RoundTimeout
             } else {
-                SkipReason::LeaderTimeout
+                AbandonReason::LeaderTimeout
             };
-            self.skips_per_leader
-                .get_or_create(&Skip::new(&leader.key, reason))
+            self.abandons_per_leader
+                .get_or_create(&Abandon::new(&leader.key, reason))
                 .inc();
         }
 
@@ -422,7 +422,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Immediately abandons `view`, forcing its timeouts to trigger on the next tick.
-    pub fn abandon(&mut self, view: View, reason: SkipReason) {
+    pub fn abandon(&mut self, view: View, reason: AbandonReason) {
         if view != self.view {
             return;
         }
@@ -432,8 +432,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.set_deadlines(now, now);
 
         if let Some(leader) = round.leader() {
-            self.skips_per_leader
-                .get_or_create(&Skip::new(&leader.key, reason))
+            self.abandons_per_leader
+                .get_or_create(&Abandon::new(&leader.key, reason))
                 .inc();
         }
     }
@@ -562,7 +562,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if is_success {
             self.enter_view(view.next());
         } else {
-            self.abandon(view, SkipReason::CertificationFailure);
+            self.abandon(view, AbandonReason::CertificationFailure);
         }
 
         Some(notarization)
@@ -864,7 +864,7 @@ mod tests {
 
             // Expiring a non-current view should do nothing.
             let deadline_v1 = state.next_timeout_deadline();
-            state.abandon(View::zero(), SkipReason::Inactivity);
+            state.abandon(View::zero(), AbandonReason::Inactivity);
             assert_eq!(state.current_view(), View::new(1));
             assert_eq!(state.next_timeout_deadline(), deadline_v1);
             assert!(
@@ -887,7 +887,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(2));
 
             let deadline_v2 = state.next_timeout_deadline();
-            state.abandon(view_1, SkipReason::Inactivity);
+            state.abandon(view_1, AbandonReason::Inactivity);
             assert_eq!(state.current_view(), View::new(2));
             assert_eq!(state.next_timeout_deadline(), deadline_v2);
         });
