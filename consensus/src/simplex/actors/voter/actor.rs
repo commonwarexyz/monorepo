@@ -892,11 +892,7 @@ impl<
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
-                self.timeout(
-                    &mut batcher,
-                    &mut vote_sender,
-                    &mut certificate_sender,
-                )
+                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
                     .await;
                 view = self.state.current_view();
             },
@@ -909,7 +905,8 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        self.state.trigger_timeout(context.view(), TimeoutReason::MissingProposal);
+                        self.state
+                            .trigger_timeout(context.view(), TimeoutReason::MissingProposal);
                         continue;
                     }
                 };
@@ -946,7 +943,8 @@ impl<
                     }
                     Ok(false) => {
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.state.trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
+                        self.state
+                            .trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
