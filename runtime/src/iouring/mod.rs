@@ -1034,6 +1034,90 @@ mod tests {
         time::Duration,
     };
 
+    #[test]
+    fn test_waiters() {
+        // Start empty
+        let mut waiters = Waiters::new(3);
+        assert_eq!(waiters.len(), 0);
+        assert!(waiters.is_empty());
+
+        // Insert two waiters.
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+        let index0 = waiters.insert(Waiter {
+            sender: tx0,
+            buffer: Some(IoBuf::from(b"hello").into()),
+            _fd: None,
+            timespec: None,
+        });
+        let index1 = waiters.insert(Waiter {
+            sender: tx1,
+            buffer: Some(IoBuf::from(b"world").into()),
+            _fd: None,
+            timespec: None,
+        });
+        assert_eq!((index0, index1), (0, 1));
+        assert_eq!(waiters.len(), 2);
+        assert!(!waiters.is_empty());
+
+        // `get` returns the expected waiter state for an occupied slot.
+        match waiters.get(index0).buffer.as_ref() {
+            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"hello"),
+            _ => panic!("expected write buffer"),
+        }
+
+        // Remove the most recently inserted slot and verify we get that waiter back.
+        let waiter = waiters.remove(index1);
+        match waiter.buffer {
+            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"world"),
+            _ => panic!("expected write buffer"),
+        }
+        assert_eq!(waiters.len(), 1);
+
+        // Next allocation reuses that free slot (LIFO).
+        let (tx2, _rx2) = oneshot::channel();
+        let index2 = waiters.insert(Waiter {
+            sender: tx2,
+            buffer: None,
+            _fd: None,
+            timespec: None,
+        });
+        assert_eq!(index2, index1);
+
+        // Remove remaining waiters and return to empty state.
+        waiters.remove(index0);
+        waiters.remove(index2);
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "missing waiter")]
+    fn test_waiters_remove_missing_slot_panics() {
+        let mut waiters = Waiters::new(1);
+        let _ = waiters.remove(0u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "waiters should not exceed configured capacity")]
+    fn test_waiters_insert_full_panics() {
+        let mut waiters = Waiters::new(1);
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+
+        let _ = waiters.insert(Waiter {
+            sender: tx0,
+            buffer: None,
+            _fd: None,
+            timespec: None,
+        });
+        let _ = waiters.insert(Waiter {
+            sender: tx1,
+            buffer: None,
+            _fd: None,
+            timespec: None,
+        });
+    }
+
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
         let mut registry = Registry::default();
