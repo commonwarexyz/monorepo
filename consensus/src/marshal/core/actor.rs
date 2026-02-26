@@ -1015,34 +1015,13 @@ where
             return false;
         }
 
-        let mut verified = vec![false; delivers.len()];
-        for (index, item) in delivers.iter().enumerate() {
-            let epoch = match item {
-                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-            };
-            let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
-                continue;
-            };
-            verified[index] = match item {
-                PendingVerification::Notarized { notarization, .. } => {
-                    V::Consensus::verify_notarization(
-                        &mut self.context,
-                        scheme.as_ref(),
-                        notarization,
-                        &self.strategy,
-                    )
-                }
-                PendingVerification::Finalized { finalization, .. } => {
-                    V::Consensus::verify_finalization(
-                        &mut self.context,
-                        scheme.as_ref(),
-                        finalization,
-                        &self.strategy,
-                    )
-                }
-            };
-        }
+        // Batch verify using the all-epoch verifier if available, otherwise
+        // batch verify per epoch using scoped verifiers.
+        let verified = if let Some(scheme) = self.provider.all() {
+            self.batch_verify_all(scheme.as_ref(), &delivers)
+        } else {
+            self.batch_verify_by_epoch(&delivers)
+        };
 
         // Process each verified item, rejecting unverified ones.
         let mut wrote = false;
@@ -1130,6 +1109,94 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.provider.all().or_else(|| self.provider.scoped(epoch))
+    }
+
+    /// Batch-verifies a group of delivered items against a single scheme, writing
+    /// results into `verified` at the original deliver indices.
+    fn batch_verify_group(
+        &mut self,
+        scheme: &P::Scheme,
+        delivers: &[PendingVerification<V>],
+        indices: impl Iterator<Item = usize>,
+        verified: &mut [bool],
+    ) {
+        type Notarization<V> = <<V as Variant>::Consensus as ConsensusEngine>::Notarization;
+        type Finalization<V> = <<V as Variant>::Consensus as ConsensusEngine>::Finalization;
+
+        let mut notarizations: Vec<(&Notarization<V>, usize)> = Vec::new();
+        let mut finalizations: Vec<(&Finalization<V>, usize)> = Vec::new();
+
+        for i in indices {
+            match &delivers[i] {
+                PendingVerification::Notarized { notarization, .. } => {
+                    notarizations.push((notarization, i));
+                }
+                PendingVerification::Finalized { finalization, .. } => {
+                    finalizations.push((finalization, i));
+                }
+            }
+        }
+
+        let results = V::Consensus::verify_notarizations(
+            &mut self.context,
+            scheme,
+            notarizations.iter().map(|(n, _)| *n),
+            &self.strategy,
+        );
+        for (j, &(_, idx)) in notarizations.iter().enumerate() {
+            verified[idx] = results[j];
+        }
+
+        let results = V::Consensus::verify_finalizations(
+            &mut self.context,
+            scheme,
+            finalizations.iter().map(|(f, _)| *f),
+            &self.strategy,
+        );
+        for (j, &(_, idx)) in finalizations.iter().enumerate() {
+            verified[idx] = results[j];
+        }
+    }
+
+    /// Batch-verifies all delivered items using a single scheme (all-epoch verifier).
+    fn batch_verify_all(
+        &mut self,
+        scheme: &P::Scheme,
+        delivers: &[PendingVerification<V>],
+    ) -> Vec<bool> {
+        let mut verified = vec![false; delivers.len()];
+        self.batch_verify_group(scheme, delivers, 0..delivers.len(), &mut verified);
+        verified
+    }
+
+    /// Batch-verifies delivered items grouped by epoch using scoped verifiers.
+    fn batch_verify_by_epoch(&mut self, delivers: &[PendingVerification<V>]) -> Vec<bool> {
+        let mut verified = vec![false; delivers.len()];
+
+        // Group indices by epoch.
+        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+        for (i, item) in delivers.iter().enumerate() {
+            let epoch = match item {
+                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
+            };
+            by_epoch.entry(epoch).or_default().push(i);
+        }
+
+        // Batch verify each epoch group.
+        for (epoch, indices) in by_epoch {
+            let Some(scheme) = self.provider.scoped(epoch) else {
+                continue;
+            };
+            self.batch_verify_group(
+                scheme.as_ref(),
+                delivers,
+                indices.into_iter(),
+                &mut verified,
+            );
+        }
+
+        verified
     }
 
     // -------------------- Waiters --------------------
