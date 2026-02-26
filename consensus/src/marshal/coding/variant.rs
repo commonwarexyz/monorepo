@@ -6,13 +6,14 @@ use crate::{
         },
         core::{Buffer, SimplexConsensus, Variant},
     },
-    simplex::scheme,
-    simplex::types::Context,
+    simplex::{scheme, types::Context},
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{certificate::Scheme as CertificateScheme, Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{
+    certificate::Scheme as CertificateScheme, Committable, Digestible, Hasher, PublicKey,
+};
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 

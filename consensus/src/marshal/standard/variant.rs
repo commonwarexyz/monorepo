@@ -4,7 +4,7 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    marshal::core::{Buffer, ConsensusEngine, MinimmitConsensus, SimplexConsensus, Variant},
+    marshal::core::{Buffer, ConsensusEngine, SimplexConsensus, Variant},
     types::Round,
     Block,
 };
@@ -25,8 +25,12 @@ pub struct Standard<B: Block, C: ConsensusEngine<Commitment = <B as Digestible>:
 /// Standard marshal coupled to simplex consensus.
 pub type StandardSimplex<B, S> = Standard<B, SimplexConsensus<S, <B as Digestible>::Digest>>;
 
-/// Standard marshal coupled to minimmit consensus.
-pub type StandardMinimmit<B, S> = Standard<B, MinimmitConsensus<S, <B as Digestible>::Digest>>;
+commonware_macros::stability_scope!(ALPHA {
+    use crate::marshal::core::MinimmitConsensus;
+
+    /// Standard marshal coupled to minimmit consensus.
+    pub type StandardMinimmit<B, S> = Standard<B, MinimmitConsensus<S, <B as Digestible>::Digest>>;
+});
 
 impl<B, C> Variant for Standard<B, C>
 where

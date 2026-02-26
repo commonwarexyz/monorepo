@@ -88,6 +88,9 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 pub mod mocks;
 
+#[cfg(test)]
+pub mod tests;
+
 /// An identifier for a block request.
 pub enum Identifier<D: Digest> {
     /// The height of the block to retrieve.

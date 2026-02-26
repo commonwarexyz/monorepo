@@ -86,8 +86,7 @@ use crate::{
         },
         Update,
     },
-    simplex::scheme::Scheme as SimplexScheme,
-    simplex::types::Context,
+    simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     VerifyingApplication,
@@ -667,12 +666,12 @@ where
 mod tests {
     use super::Deferred;
     use crate::{
-        marshal::mocks::{
-            harness::{
-                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
-                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+        marshal::{
+            mocks::verifying::MockVerifyingApp,
+            tests::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardSimplexHarness,
+                TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
-            verifying::MockVerifyingApp,
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
@@ -700,7 +699,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
@@ -824,7 +823,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
@@ -912,7 +911,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),

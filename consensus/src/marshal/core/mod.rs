@@ -44,12 +44,13 @@ pub use actor::Actor;
 pub(crate) mod cache;
 
 mod consensus;
-pub use consensus::{
-    ConsensusCertificate, ConsensusEngine, MinimmitConsensus, SimplexConsensus,
-};
+pub use consensus::{ConsensusCertificate, ConsensusEngine, SimplexConsensus};
 
 mod mailbox;
 pub use mailbox::Mailbox;
 
 mod variant;
 pub use variant::{Buffer, IntoBlock, Variant};
+
+#[commonware_macros::stability(ALPHA)]
+pub use consensus::MinimmitConsensus;
