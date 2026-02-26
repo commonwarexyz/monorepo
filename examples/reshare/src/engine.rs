@@ -14,7 +14,7 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver::handler,
-        standard::{Deferred, Standard},
+        standard::{Deferred, StandardSimplex},
     },
     simplex::{scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
@@ -102,7 +102,7 @@ where
     #[allow(clippy::type_complexity)]
     marshal: MarshalActor<
         E,
-        Standard<Block<H, C, V>>,
+        StandardSimplex<Block<H, C, V>, S>,
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,

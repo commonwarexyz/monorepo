@@ -1,9 +1,6 @@
 //! Consensus abstractions and adapters for marshal.
 
-use crate::{
-    minimmit, simplex,
-    Epochable, Roundable,
-};
+use crate::{simplex, Roundable};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{certificate::Scheme, Committable, Digest};
 use commonware_parallel::Strategy;
@@ -28,22 +25,20 @@ pub trait ConsensusEngine: Clone + Send + Sync + 'static {
 
     /// Notarization certificate type.
     type Notarization: Clone
-        + Send
-        + Sync
-        + Epochable
         + Roundable
         + Committable<Commitment = Self::Commitment>
         + Codec<Cfg = <<Self::Scheme as Scheme>::Certificate as Read>::Cfg>
+        + Send
+        + Sync
         + 'static;
 
     /// Finalization certificate type.
     type Finalization: Clone
-        + Send
-        + Sync
-        + Epochable
         + Roundable
         + Committable<Commitment = Self::Commitment>
         + Codec<Cfg = <<Self::Scheme as Scheme>::Certificate as Read>::Cfg>
+        + Send
+        + Sync
         + 'static;
 
     /// Activity stream type emitted by the consensus engine.
@@ -119,50 +114,54 @@ where
     }
 }
 
-/// Minimmit consensus adapter for marshal.
-#[derive(Default, Clone, Copy)]
-pub struct MinimmitConsensus<S, D>(PhantomData<(S, D)>);
+commonware_macros::stability_scope!(ALPHA {
+    use crate::minimmit;
 
-impl<S, D> ConsensusEngine for MinimmitConsensus<S, D>
-where
-    S: Scheme + minimmit::scheme::Scheme<D>,
-    D: Digest,
-{
-    type Scheme = S;
-    type Commitment = D;
-    type Notarization = minimmit::types::MNotarization<S, D>;
-    type Finalization = minimmit::types::Finalization<S, D>;
-    type Activity = minimmit::types::Activity<S, D>;
+    /// Minimmit consensus adapter for marshal.
+    #[derive(Default, Clone, Copy)]
+    pub struct MinimmitConsensus<S, D>(PhantomData<(S, D)>);
 
-    fn into_certificate(
-        activity: Self::Activity,
-    ) -> Option<ConsensusCertificate<Self::Notarization, Self::Finalization>> {
-        match activity {
-            minimmit::types::Activity::MNotarization(notarization) => {
-                Some(ConsensusCertificate::Notarization(notarization))
+    impl<S, D> ConsensusEngine for MinimmitConsensus<S, D>
+    where
+        S: Scheme + minimmit::scheme::Scheme<D>,
+        D: Digest,
+    {
+        type Scheme = S;
+        type Commitment = D;
+        type Notarization = minimmit::types::MNotarization<S, D>;
+        type Finalization = minimmit::types::Finalization<S, D>;
+        type Activity = minimmit::types::Activity<S, D>;
+
+        fn into_certificate(
+            activity: Self::Activity,
+        ) -> Option<ConsensusCertificate<Self::Notarization, Self::Finalization>> {
+            match activity {
+                minimmit::types::Activity::MNotarization(notarization) => {
+                    Some(ConsensusCertificate::Notarization(notarization))
+                }
+                minimmit::types::Activity::Finalization(finalization) => {
+                    Some(ConsensusCertificate::Finalization(finalization))
+                }
+                _ => None,
             }
-            minimmit::types::Activity::Finalization(finalization) => {
-                Some(ConsensusCertificate::Finalization(finalization))
-            }
-            _ => None,
+        }
+
+        fn verify_notarization<R: CryptoRngCore>(
+            rng: &mut R,
+            scheme: &Self::Scheme,
+            notarization: &Self::Notarization,
+            strategy: &impl Strategy,
+        ) -> bool {
+            notarization.verify(rng, scheme, strategy)
+        }
+
+        fn verify_finalization<R: CryptoRngCore>(
+            rng: &mut R,
+            scheme: &Self::Scheme,
+            finalization: &Self::Finalization,
+            strategy: &impl Strategy,
+        ) -> bool {
+            finalization.verify(rng, scheme, strategy)
         }
     }
-
-    fn verify_notarization<R: CryptoRngCore>(
-        rng: &mut R,
-        scheme: &Self::Scheme,
-        notarization: &Self::Notarization,
-        strategy: &impl Strategy,
-    ) -> bool {
-        notarization.verify(rng, scheme, strategy)
-    }
-
-    fn verify_finalization<R: CryptoRngCore>(
-        rng: &mut R,
-        scheme: &Self::Scheme,
-        finalization: &Self::Finalization,
-        strategy: &impl Strategy,
-    ) -> bool {
-        finalization.verify(rng, scheme, strategy)
-    }
-}
+});

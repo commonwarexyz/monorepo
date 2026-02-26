@@ -10,7 +10,7 @@ use commonware_storage::{
 };
 use std::{error::Error, future::Future};
 
-/// Durable store for [Finalizations](Finalization) keyed by height and block digest.
+/// Durable store for finalizations keyed by height and block digest.
 pub trait Certificates: Send + Sync + 'static {
     /// The type of [Digest] used for block digests.
     type BlockDigest: Digest;
@@ -47,7 +47,7 @@ pub trait Certificates: Send + Sync + 'static {
     /// Flush all buffered writes to durable storage.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a [Finalization] by height or corresponding block digest.
+    /// Retrieve a finalization by height or corresponding block digest.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the application height or
     /// its corresponding block digest.

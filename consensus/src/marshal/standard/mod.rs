@@ -38,7 +38,10 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 mod variant;
-pub use variant::{Standard, StandardMinimmit, StandardSimplex};
+pub use variant::{Standard, StandardSimplex};
+
+#[commonware_macros::stability(ALPHA)]
+pub use variant::StandardMinimmit;
 
 #[cfg(test)]
 mod tests {
@@ -46,13 +49,10 @@ mod tests {
     use crate::{
         marshal::{
             core::{Mailbox, SimplexConsensus},
-            mocks::{
-                harness::{
-                    self, default_leader, make_raw_block, setup_network, Ctx, DeferredHarness,
-                    InlineHarness, StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, D, LINK,
-                    NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
-                },
-                verifying::MockVerifyingApp,
+            mocks::verifying::MockVerifyingApp,
+            tests::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardSimplexHarness,
+                TestHarness, B, BLOCKS_PER_EPOCH, D, NAMESPACE, NUM_VALIDATORS, S, V,
             },
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
@@ -68,168 +68,6 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::channel::oneshot;
     use std::time::Duration;
-
-    fn assert_finalize_deterministic<H: TestHarness>(
-        seed: u64,
-        link: commonware_p2p::simulated::Link,
-        quorum_sees_finalization: bool,
-    ) {
-        let r1 = harness::finalize::<H>(seed, link.clone(), quorum_sees_finalization);
-        let r2 = harness::finalize::<H>(seed, link, quorum_sees_finalization);
-        assert_eq!(r1, r2);
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalize_good_links() {
-        for seed in 0..5 {
-            assert_finalize_deterministic::<InlineHarness>(seed, LINK, false);
-            assert_finalize_deterministic::<DeferredHarness>(seed, LINK, false);
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalize_bad_links() {
-        for seed in 0..5 {
-            assert_finalize_deterministic::<InlineHarness>(seed, UNRELIABLE_LINK, false);
-            assert_finalize_deterministic::<DeferredHarness>(seed, UNRELIABLE_LINK, false);
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalize_good_links_quorum_sees_finalization() {
-        for seed in 0..5 {
-            assert_finalize_deterministic::<InlineHarness>(seed, LINK, true);
-            assert_finalize_deterministic::<DeferredHarness>(seed, LINK, true);
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalize_bad_links_quorum_sees_finalization() {
-        for seed in 0..5 {
-            assert_finalize_deterministic::<InlineHarness>(seed, UNRELIABLE_LINK, true);
-            assert_finalize_deterministic::<DeferredHarness>(seed, UNRELIABLE_LINK, true);
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ack_pipeline_backlog() {
-        harness::ack_pipeline_backlog::<InlineHarness>();
-        harness::ack_pipeline_backlog::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ack_pipeline_backlog_persists_on_restart() {
-        harness::ack_pipeline_backlog_persists_on_restart::<InlineHarness>();
-        harness::ack_pipeline_backlog_persists_on_restart::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_sync_height_floor() {
-        harness::sync_height_floor::<InlineHarness>();
-        harness::sync_height_floor::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_reject_stale_block_delivery_after_floor_update() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_prune_finalized_archives() {
-        harness::prune_finalized_archives::<InlineHarness>();
-        harness::prune_finalized_archives::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_subscribe_basic_block_delivery() {
-        harness::subscribe_basic_block_delivery::<InlineHarness>();
-        harness::subscribe_basic_block_delivery::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_subscribe_multiple_subscriptions() {
-        harness::subscribe_multiple_subscriptions::<InlineHarness>();
-        harness::subscribe_multiple_subscriptions::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_subscribe_canceled_subscriptions() {
-        harness::subscribe_canceled_subscriptions::<InlineHarness>();
-        harness::subscribe_canceled_subscriptions::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_subscribe_blocks_from_different_sources() {
-        harness::subscribe_blocks_from_different_sources::<InlineHarness>();
-        harness::subscribe_blocks_from_different_sources::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_get_info_basic_queries_present_and_missing() {
-        harness::get_info_basic_queries_present_and_missing::<InlineHarness>();
-        harness::get_info_basic_queries_present_and_missing::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_get_info_latest_progression_multiple_finalizations() {
-        harness::get_info_latest_progression_multiple_finalizations::<InlineHarness>();
-        harness::get_info_latest_progression_multiple_finalizations::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_get_block_by_height_and_latest() {
-        harness::get_block_by_height_and_latest::<InlineHarness>();
-        harness::get_block_by_height_and_latest::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_get_block_by_commitment_from_sources_and_missing() {
-        harness::get_block_by_commitment_from_sources_and_missing::<InlineHarness>();
-        harness::get_block_by_commitment_from_sources_and_missing::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_get_finalization_by_height() {
-        harness::get_finalization_by_height::<InlineHarness>();
-        harness::get_finalization_by_height::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_triggers_fetch() {
-        harness::hint_finalized_triggers_fetch::<InlineHarness>();
-        harness::hint_finalized_triggers_fetch::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ancestry_stream() {
-        harness::ancestry_stream::<InlineHarness>();
-        harness::ancestry_stream::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalize_same_height_different_views() {
-        harness::finalize_same_height_different_views::<InlineHarness>();
-        harness::finalize_same_height_different_views::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_init_processed_height() {
-        harness::init_processed_height::<InlineHarness>();
-        harness::init_processed_height::<DeferredHarness>();
-    }
-
-    #[test_traced("INFO")]
-    fn test_standard_broadcast_caches_block() {
-        harness::broadcast_caches_block::<InlineHarness>();
-        harness::broadcast_caches_block::<DeferredHarness>();
-    }
-
-    #[test_traced("INFO")]
-    fn test_standard_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
-    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum WrapperKind {
@@ -320,7 +158,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let setup = StandardHarness::setup_validator(
+                let setup = StandardSimplexHarness::setup_validator(
                     context.with_label("validator_0"),
                     &mut oracle,
                     me.clone(),
@@ -398,7 +236,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let setup = StandardHarness::setup_validator(
+                let setup = StandardSimplexHarness::setup_validator(
                     context.with_label("validator_0"),
                     &mut oracle,
                     me.clone(),
@@ -531,7 +369,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let setup = StandardHarness::setup_validator(
+                let setup = StandardSimplexHarness::setup_validator(
                     context.with_label("validator_0"),
                     &mut oracle,
                     me.clone(),
@@ -663,7 +501,7 @@ mod tests {
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let me = participants[0].clone();
 
-                let setup = StandardHarness::setup_validator(
+                let setup = StandardSimplexHarness::setup_validator(
                     context.with_label("validator_0"),
                     &mut oracle,
                     me.clone(),
