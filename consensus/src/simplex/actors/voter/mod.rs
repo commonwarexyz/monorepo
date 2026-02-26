@@ -4533,7 +4533,7 @@ mod tests {
                 elector,
                 Duration::from_millis(500),
                 Duration::from_millis(500),
-                Duration::from_secs(2 * 60 * 60),
+                Duration::from_mins(60),
                 mocks::application::Certifier::Cancel,
             )
             .await;
@@ -5292,7 +5292,7 @@ mod tests {
                 elector,
                 Duration::from_secs(3),
                 Duration::from_secs(4),
-                Duration::from_secs(2 * 60 * 60),
+                Duration::from_mins(60),
                 mocks::application::Certifier::Pending,
             )
             .await;
