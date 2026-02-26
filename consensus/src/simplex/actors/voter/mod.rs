@@ -5527,4 +5527,155 @@ mod tests {
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(ed25519::fixture);
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
     }
+
+    /// Regression: when a proposal is first observed through a notarization certificate,
+    /// leader timeout must still be cleared for the current view.
+    ///
+    /// We require:
+    /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
+    /// 2. Nullify eventually arrives only after `certification_timeout` when certification
+    ///    remains pending.
+    fn recovered_proposal_clears_leader_timeout_before_certification_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"recovered_proposal_clears_leader_timeout".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Pending,
+            )
+            .await;
+
+            // Advance to a follower view.
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Recover a notarization that carries the proposal for this view.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"recovered_proposal_clears_leader_timeout"),
+            );
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            // Ensure certificate processing happened and proposal from certificate
+            // is treated as verified by checking that we notarize.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize vote for view {target_view} from recovered certificate");
+                    },
+                }
+            }
+
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // see nullify in this 2s window after certificate handling, even though
+            // leader timeout has elapsed.
+            let no_nullify_deadline = context.current() + Duration::from_secs(2);
+            while context.current() < no_nullify_deadline {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!(
+                                "received nullify for view {target_view} before certification timeout after recovered certificate"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_millis(10)) => {}
+                }
+            }
+
+            // After certification timeout elapses, timeout recovery must emit nullify.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(6)) => {
+                        panic!(
+                            "expected nullify for view {target_view} after certification timeout with recovered certificate"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_recovered_proposal_clears_leader_timeout_before_certification_timeout() {
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            ed25519::fixture,
+        );
+        recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
+            secp256r1::fixture,
+        );
+    }
 }
