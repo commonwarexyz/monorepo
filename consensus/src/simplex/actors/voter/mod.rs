@@ -56,6 +56,7 @@ mod tests {
                 resolver::{self, MailboxMessage},
             },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
+            metrics::SkipReason,
             mocks, quorum,
             scheme::{
                 bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
@@ -2423,7 +2424,7 @@ mod tests {
             }
 
             let target_view = current_view;
-            mailbox.abandon(target_view).await;
+            mailbox.abandon(target_view, SkipReason::LeaderNullify).await;
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -2447,7 +2448,7 @@ mod tests {
             }
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
-            mailbox.abandon(target_view).await;
+            mailbox.abandon(target_view, SkipReason::LeaderNullify).await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             while context.current() < duplicate_window {

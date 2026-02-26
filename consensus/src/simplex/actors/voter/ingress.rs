@@ -1,5 +1,8 @@
 use crate::{
-    simplex::types::{Certificate, Proposal},
+    simplex::{
+        metrics::SkipReason,
+        types::{Certificate, Proposal},
+    },
     types::View,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -10,7 +13,7 @@ pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
     /// Signal that the current view should be abandoned (if not already).
-    Abandon(View),
+    Abandon(View, SkipReason),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
@@ -35,8 +38,10 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Signal that the current view should be abandoned (if not already).
-    pub async fn abandon(&mut self, view: View) {
-        self.sender.send_lossy(Message::Abandon(view)).await;
+    pub async fn abandon(&mut self, view: View, reason: SkipReason) {
+        self.sender
+            .send_lossy(Message::Abandon(view, reason))
+            .await;
     }
 
     /// Send a recovered certificate.

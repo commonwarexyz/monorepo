@@ -159,7 +159,7 @@ impl<
     }
 
     /// Returns true if the leader has nullified the current view.
-    fn leader_abandoned(
+    fn leader_nullified(
         current: (View, Option<Participant>),
         work: &BTreeMap<View, Round<S, B, D, R>>,
     ) -> bool {
@@ -223,10 +223,10 @@ impl<
 
                     // If the leader abandoned this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
-                    let abandon_reason = if Self::leader_abandoned(current, &work) {
+                    let abandon_reason = if Self::leader_nullified(current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
-                        Some(SkipReason::Abandoned)
+                        Some(SkipReason::LeaderNullify)
                     } else {
                         let skip_timeout = self.skip_timeout.get() as usize;
                         if
@@ -421,8 +421,8 @@ impl<
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
-                    if Self::leader_abandoned(current, &work) {
-                        voter.abandon(current.0).await;
+                    if Self::leader_nullified(current, &work) {
+                        voter.abandon(current.0, SkipReason::LeaderNullify).await;
                     }
                 }
                 updated_view = view;

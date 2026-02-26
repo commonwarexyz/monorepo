@@ -1035,9 +1035,9 @@ impl<
                             }
                         }
                     }
-                    Message::Abandon(view) => {
-                        debug!(%view, "leader abandoned view");
-                        self.state.abandon(view, SkipReason::Abandoned);
+                    Message::Abandon(view, reason) => {
+                        debug!(%view, ?reason, "abandoning view");
+                        self.state.abandon(view, reason);
                         continue;
                     }
                 }
@@ -1078,7 +1078,7 @@ impl<
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
                     if let Some(reason) = abandon_reason {
-                        if reason == SkipReason::Abandoned || !self.state.is_me(leader) {
+                        if reason == SkipReason::LeaderNullify || !self.state.is_me(leader) {
                             debug!(%view, %leader, ?reason, "abandoning round");
                             self.state.abandon(current_view, reason);
                         }

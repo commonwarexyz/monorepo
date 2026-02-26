@@ -18,7 +18,7 @@ impl Peer {
 pub enum SkipReason {
     Initialization,
     Inactivity,
-    Abandoned,
+    LeaderNullify,
     LeaderTimeout,
     RoundTimeout,
     MissingProposal,
