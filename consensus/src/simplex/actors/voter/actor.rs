@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, Outbound, AbandonReason},
+        metrics::{self, AbandonReason, Outbound},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,

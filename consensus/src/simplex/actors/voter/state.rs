@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
         interesting,
-        metrics::{Peer, Abandon, AbandonReason},
+        metrics::{Abandon, AbandonReason, Peer},
         min_active,
         scheme::Scheme,
         types::{

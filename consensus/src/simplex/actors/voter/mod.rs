@@ -2424,7 +2424,9 @@ mod tests {
             }
 
             let target_view = current_view;
-            mailbox.abandon(target_view, AbandonReason::LeaderNullify).await;
+            mailbox
+                .abandon(target_view, AbandonReason::LeaderNullify)
+                .await;
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -2448,7 +2450,9 @@ mod tests {
             }
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
-            mailbox.abandon(target_view, AbandonReason::LeaderNullify).await;
+            mailbox
+                .abandon(target_view, AbandonReason::LeaderNullify)
+                .await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             while context.current() < duplicate_window {

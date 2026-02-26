@@ -39,9 +39,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Signal that the current view should be abandoned (if not already).
     pub async fn abandon(&mut self, view: View, reason: AbandonReason) {
-        self.sender
-            .send_lossy(Message::Abandon(view, reason))
-            .await;
+        self.sender.send_lossy(Message::Abandon(view, reason)).await;
     }
 
     /// Send a recovered certificate.
