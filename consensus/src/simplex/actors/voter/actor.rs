@@ -956,7 +956,6 @@ impl<
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
-                        continue;
                     }
                 };
             },
