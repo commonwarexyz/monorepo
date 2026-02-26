@@ -50,7 +50,6 @@ mod mailbox;
 pub use mailbox::Mailbox;
 
 mod variant;
-pub use variant::{Buffer, IntoBlock, Variant};
-
 #[commonware_macros::stability(ALPHA)]
 pub use consensus::MinimmitConsensus;
+pub use variant::{Buffer, IntoBlock, Variant};

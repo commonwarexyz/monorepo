@@ -4,6 +4,7 @@ use crate::{simplex, Roundable};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{certificate::Scheme, Committable, Digest};
 use commonware_parallel::Strategy;
+use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::marker::PhantomData;
 
@@ -49,21 +50,27 @@ pub trait ConsensusEngine: Clone + Send + Sync + 'static {
         activity: Self::Activity,
     ) -> Option<ConsensusCertificate<Self::Notarization, Self::Finalization>>;
 
-    /// Verifies a notarization certificate.
-    fn verify_notarization<R: CryptoRngCore>(
+    /// Batch-verifies notarization certificates, returning a per-item result.
+    ///
+    /// Uses bisection to efficiently identify invalid certificates when batch
+    /// verification fails. Falls back to individual verification for non-batchable schemes.
+    fn verify_notarizations<'a, R: CryptoRngCore>(
         rng: &mut R,
         scheme: &Self::Scheme,
-        notarization: &Self::Notarization,
+        notarizations: impl IntoIterator<Item = &'a Self::Notarization>,
         strategy: &impl Strategy,
-    ) -> bool;
+    ) -> Vec<bool>;
 
-    /// Verifies a finalization certificate.
-    fn verify_finalization<R: CryptoRngCore>(
+    /// Batch-verifies finalization certificates, returning a per-item result.
+    ///
+    /// Uses bisection to efficiently identify invalid certificates when batch
+    /// verification fails. Falls back to individual verification for non-batchable schemes.
+    fn verify_finalizations<'a, R: CryptoRngCore>(
         rng: &mut R,
         scheme: &Self::Scheme,
-        finalization: &Self::Finalization,
+        finalizations: impl IntoIterator<Item = &'a Self::Finalization>,
         strategy: &impl Strategy,
-    ) -> bool;
+    ) -> Vec<bool>;
 }
 
 /// Simplex consensus adapter for marshal.
@@ -95,27 +102,50 @@ where
         }
     }
 
-    fn verify_notarization<R: CryptoRngCore>(
+    fn verify_notarizations<'a, R: CryptoRngCore>(
         rng: &mut R,
         scheme: &Self::Scheme,
-        notarization: &Self::Notarization,
+        notarizations: impl IntoIterator<Item = &'a Self::Notarization>,
         strategy: &impl Strategy,
-    ) -> bool {
-        notarization.verify(rng, scheme, strategy)
+    ) -> Vec<bool> {
+        let certs: Vec<_> = notarizations
+            .into_iter()
+            .map(|n| {
+                (
+                    simplex::types::Subject::Notarize {
+                        proposal: &n.proposal,
+                    },
+                    &n.certificate,
+                )
+            })
+            .collect();
+        scheme.verify_certificates_bisect::<_, D, N3f1>(rng, &certs, strategy)
     }
 
-    fn verify_finalization<R: CryptoRngCore>(
+    fn verify_finalizations<'a, R: CryptoRngCore>(
         rng: &mut R,
         scheme: &Self::Scheme,
-        finalization: &Self::Finalization,
+        finalizations: impl IntoIterator<Item = &'a Self::Finalization>,
         strategy: &impl Strategy,
-    ) -> bool {
-        finalization.verify(rng, scheme, strategy)
+    ) -> Vec<bool> {
+        let certs: Vec<_> = finalizations
+            .into_iter()
+            .map(|f| {
+                (
+                    simplex::types::Subject::Finalize {
+                        proposal: &f.proposal,
+                    },
+                    &f.certificate,
+                )
+            })
+            .collect();
+        scheme.verify_certificates_bisect::<_, D, N3f1>(rng, &certs, strategy)
     }
 }
 
 commonware_macros::stability_scope!(ALPHA {
     use crate::minimmit;
+    use commonware_utils::{M5f1, N5f1};
 
     /// Minimmit consensus adapter for marshal.
     #[derive(Default, Clone, Copy)]
@@ -146,22 +176,44 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        fn verify_notarization<R: CryptoRngCore>(
+        fn verify_notarizations<'a, R: CryptoRngCore>(
             rng: &mut R,
             scheme: &Self::Scheme,
-            notarization: &Self::Notarization,
+            notarizations: impl IntoIterator<Item = &'a Self::Notarization>,
             strategy: &impl Strategy,
-        ) -> bool {
-            notarization.verify(rng, scheme, strategy)
+        ) -> Vec<bool> {
+            let certs: Vec<_> = notarizations
+                .into_iter()
+                .map(|n| {
+                    (
+                        minimmit::types::Subject::Notarize {
+                            proposal: &n.proposal,
+                        },
+                        &n.certificate,
+                    )
+                })
+                .collect();
+            scheme.verify_certificates_bisect::<_, D, M5f1>(rng, &certs, strategy)
         }
 
-        fn verify_finalization<R: CryptoRngCore>(
+        fn verify_finalizations<'a, R: CryptoRngCore>(
             rng: &mut R,
             scheme: &Self::Scheme,
-            finalization: &Self::Finalization,
+            finalizations: impl IntoIterator<Item = &'a Self::Finalization>,
             strategy: &impl Strategy,
-        ) -> bool {
-            finalization.verify(rng, scheme, strategy)
+        ) -> Vec<bool> {
+            let certs: Vec<_> = finalizations
+                .into_iter()
+                .map(|f| {
+                    (
+                        minimmit::types::Subject::Notarize {
+                            proposal: &f.proposal,
+                        },
+                        &f.certificate,
+                    )
+                })
+                .collect();
+            scheme.verify_certificates_bisect::<_, D, N5f1>(rng, &certs, strategy)
         }
     }
 });

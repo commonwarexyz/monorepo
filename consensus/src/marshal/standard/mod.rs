@@ -38,10 +38,9 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 mod variant;
-pub use variant::{Standard, StandardSimplex};
-
 #[commonware_macros::stability(ALPHA)]
 pub use variant::StandardMinimmit;
+pub use variant::{Standard, StandardSimplex};
 
 #[cfg(test)]
 mod tests {
