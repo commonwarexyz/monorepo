@@ -431,7 +431,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let now = self.context.current();
         let round = self.create_round(view);
         let (_, is_first_timeout) = round.set_timeout_reason(reason);
-        if is_first_timeout || round.should_rearm_timeout() {
+        if is_first_timeout {
             round.set_deadlines(now, now);
         }
     }
