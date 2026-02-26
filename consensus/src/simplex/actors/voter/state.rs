@@ -545,10 +545,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns `None` if the view was already pruned. Otherwise returns the notarization
     /// regardless of success/failure.
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
-        // Clear deadlines if the certification was successful
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
         if is_success {
+            // Clear deadlines if the certification was successful
             round.clear_deadlines();
         }
 
