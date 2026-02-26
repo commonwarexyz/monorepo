@@ -368,7 +368,7 @@ impl<
             return;
         };
 
-        // Record nullify on first attempt (not retries)
+        // Record nullify on first attempt (not retries) without resetting retry backoff.
         if !retry {
             let reason = if self.state.has_proposal(view) {
                 NullifyReason::RoundTimeout
@@ -376,7 +376,7 @@ impl<
                 NullifyReason::LeaderTimeout
             };
             debug!(%view, ?reason, "nullifying round");
-            self.state.trigger_nullify(view, reason);
+            self.state.record_nullify(view, reason);
             return;
         }
 

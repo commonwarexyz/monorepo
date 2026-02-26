@@ -412,18 +412,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .is_some_and(|round| round.proposal().is_some())
     }
 
-    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
+    /// Records that `view` was nullified.
     ///
     /// Only records the nullify metric on the first call per view.
-    pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
+    ///
+    /// Unlike [`Self::trigger_nullify`], this does not alter timeout deadlines.
+    pub fn record_nullify(&mut self, view: View, reason: NullifyReason) {
         if view != self.view {
             return;
         }
 
-        let now = self.context.current();
-        let round = self.create_round(view);
-        round.set_deadlines(now, now);
-        let leader = round.leader();
+        let leader = self.create_round(view).leader();
 
         // Track nullified view per leader if we know who the leader was
         if !self.expired {
@@ -434,6 +433,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     .inc();
             }
         }
+    }
+
+    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
+    pub fn trigger_nullify(&mut self, view: View, reason: NullifyReason) {
+        if view != self.view {
+            return;
+        }
+
+        let now = self.context.current();
+        self.create_round(view).set_deadlines(now, now);
+        self.record_nullify(view, reason);
     }
 
     /// Attempt to propose a new block.
@@ -837,6 +847,42 @@ mod tests {
             let sixth = state.next_timeout_deadline();
             let later = context.current();
             assert_eq!(sixth, later + retry, "retry deadline should be set");
+        });
+    }
+
+    #[test]
+    fn record_nullify_preserves_retry_backoff_after_first_timeout_vote() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let retry = Duration::from_secs(3);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(30),
+                activity_timeout: ViewDelta::new(2),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: retry,
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            let (was_retry, _) = state
+                .construct_nullify(view, true)
+                .expect("first timeout nullify should exist");
+            assert!(!was_retry, "first timeout should not be marked as retry");
+
+            context.sleep(Duration::from_secs(2)).await;
+            let now = context.current();
+            state.record_nullify(view, NullifyReason::LeaderTimeout);
+            assert_eq!(
+                state.next_timeout_deadline(),
+                now + retry,
+                "first retry should honor configured nullify backoff"
+            );
         });
     }
 
