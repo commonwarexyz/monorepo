@@ -59,7 +59,11 @@ impl Blob {
             };
 
             if ret < 0 {
-                return Err(std::io::Error::last_os_error().into());
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
             }
 
             let bytes_written = ret as usize;
