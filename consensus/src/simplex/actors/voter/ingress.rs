@@ -12,7 +12,7 @@ use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
-    /// Signal that the current view should be nullified (if not already).
+    /// Signal that the current view should timeout (if not already).
     Timeout(View, TimeoutReason),
     /// Certificate from batcher or resolver.
     ///

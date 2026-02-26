@@ -1041,7 +1041,7 @@ impl<
                     }
                     Message::Timeout(target_view, reason) => {
                         view = target_view;
-                        debug!(%target_view, ?reason, "nullifying view");
+                        debug!(%target_view, ?reason, "timing out view");
                         self.state.trigger_timeout(target_view, reason);
                     }
                 }
