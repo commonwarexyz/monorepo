@@ -283,10 +283,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
 
+        // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
-
-        // Update metrics
         let leader = added.then(|| round.leader()).flatten();
         if let Some(leader) = leader {
             self.nullifications
