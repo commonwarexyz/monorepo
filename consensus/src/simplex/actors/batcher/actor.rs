@@ -221,7 +221,8 @@ impl<
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
-                    // Check if the round should be abandoned
+                    // If the leader abandoned this view or has not been active
+                    // recently, tell the voter to reduce the leader timeout to now
                     let abandon_reason = if Self::leader_abandoned(current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).

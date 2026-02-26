@@ -1074,6 +1074,8 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
+                    // If the leader abandoned or is inactive, reduce leader
+                    // timeout to now
                     let abandon_reason = batcher
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
