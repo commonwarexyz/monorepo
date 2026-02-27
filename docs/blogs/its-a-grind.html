@@ -175,8 +175,8 @@ Bayardo</a></div>
         configured) randomly seed the hash function at startup,
         preventing an attacker from knowing whether any two keys might
         collide.</p>
-        <p>So, how do we at Commonware deal with grinding attacks?
-        Commonware’s authenticated databases, like <a
+        <p>So, how do you deal with grinding attacks? Commonware’s
+        authenticated databases, like <a
         href="/blogs/adb-any"><code>qmdb::any</code></a>, use a Merkle
         Mountain Range (MMR) over database operations for the canonical
         structure. A Merkle mountain range is a tree structure with the
@@ -210,6 +210,9 @@ Bayardo</a></div>
         validator, it would differ from that of all others, providing
         the entire network strong immunity against DoS attacks from
         state key grinding.</p>
+        <p>TL;DR don’t canonicalize structures that can be manipulated
+        by user input, or your database’s performance will be at the
+        mercy of a grinder’s GPU.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

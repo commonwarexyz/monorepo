@@ -35,3 +35,5 @@ But an MMR alone doesn’t allow for efficient key lookups, so QMDB couples the 
 ![Key translation for memory efficient indexing.](/imgs/compressed-index.png)
 
 In QMDB, the index stores only a shortened (aka “translated”) representation of each key to reduce memory (fig. 3). Even if raw keys are the result of a cryptographic hash, if the key translation function is known, the index would be susceptible to grinding attacks that generate collisions among translated keys and degrade performance. Much as a good hashtable implementation will randomize its hash function, the Commonware index can be instantiated with a [translator](https://github.com/commonwarexyz/monorepo/blob/4870589ea077a1170b9747e305f83ea7592b621d/storage/src/translator.rs#L191) that applies a randomly-seeded hash per instance. Even in the unlikely event that an adversary learns the seed of one validator, it would differ from that of all others, providing the entire network strong immunity against DoS attacks from state key grinding.
+
+TL;DR don't canonicalize structures that can be manipulated by user input, or your database's performance will be at the mercy of a grinder's GPU.
