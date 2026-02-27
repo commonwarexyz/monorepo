@@ -205,10 +205,9 @@ impl<const N: usize> BuildHasher for Cap<N> {
 ///
 /// # `no_std` Support
 ///
-/// [Hashed::new] and [Default] use [ahash::RandomState::new] which requires OS-provided randomness
-/// (the `runtime-rng` feature of `ahash`, enabled by the `std` feature of this crate). In `no_std`
-/// builds without `runtime-rng`, [Hashed::new] will compile but may use fixed seeds, providing no
-/// adversarial protection. In `no_std` environments, use [Hashed::from_seed] with an
+/// [Hashed::new] and [Default] are available only with this crate's `std` feature. They use
+/// [ahash::RandomState::new], which requires OS-provided randomness (the `runtime-rng` feature of
+/// `ahash`, enabled by `std` here). In `no_std` environments, use [Hashed::from_seed] with an
 /// externally-sourced random seed instead.
 ///
 /// # No Stability Guarantees
