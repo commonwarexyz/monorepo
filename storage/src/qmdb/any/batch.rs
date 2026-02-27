@@ -179,7 +179,7 @@ where
     /// The authenticated journal's MerkleizedBatch. Contains only THIS batch's
     /// operations. Parent operations are accessed through the MMR chain via
     /// `JP::MmrParent`, avoiding re-encoding and re-hashing.
-    journal_merkleized: authenticated::MerkleizedBatch<'a, H, JP::MmrParent, Operation<K, V, U>>,
+    journal_merkleized: authenticated::MerkleizedBatch<'a, H, JP::Parent, Operation<K, V, U>>,
 
     /// Snapshot overlay: for each key touched by this batch chain,
     /// maps to the new state (including floor-raise mutations).
@@ -1110,7 +1110,7 @@ where
         I,
         H,
         U,
-        authenticated::MerkleizedBatch<'a, H, JP::MmrParent, Operation<K, V, U>>,
+        authenticated::MerkleizedBatch<'a, H, JP::Parent, Operation<K, V, U>>,
     > {
         let db_journal_size = *self.db.last_commit_loc + 1;
         let chain_ops_len: u64 = self.operation_chain.iter().map(|s| s.len() as u64).sum();

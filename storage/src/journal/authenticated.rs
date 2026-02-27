@@ -59,10 +59,10 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for Mmr<E, D
 /// Implemented by types that can produce authenticated journal batches.
 pub trait Batchable<H: Hasher, Item: Encode + Send + Sync> {
     /// The MMR parent type for batches produced by this source.
-    type MmrParent: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>;
+    type Parent: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>;
 
     /// Create a new speculative batch.
-    fn new_batch(&self) -> Batch<'_, H, Self::MmrParent, Item>;
+    fn new_batch(&self) -> Batch<'_, H, Self::Parent, Item>;
 }
 
 /// A speculative batch of mutations against an authenticated journal.
@@ -168,7 +168,7 @@ where
     P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
     Item: Encode + Send + Sync,
 {
-    type MmrParent = Self;
+    type Parent = Self;
 
     fn new_batch(&self) -> Batch<'_, H, Self, Item> {
         MerkleizedBatch::new_batch(self)
@@ -253,7 +253,7 @@ where
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
-    type MmrParent = Mmr<E, H::Digest>;
+    type Parent = Mmr<E, H::Digest>;
 
     fn new_batch(&self) -> Batch<'_, H, Mmr<E, H::Digest>, C::Item> {
         Self::new_batch(self)
