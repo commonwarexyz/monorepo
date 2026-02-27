@@ -252,7 +252,7 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::DirtyMmr, Location};
+    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -260,11 +260,16 @@ mod tests {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = DirtyMmr::new();
+        let mut mmr = Mmr::new(&mut hasher);
         let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
-            loc_to_pos.push(mmr.add(&mut hasher, &digest));
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                loc_to_pos.push(batch.add(&mut hasher, &digest));
+                batch.finalize(&mut hasher)
+            };
+            mmr.apply(changeset);
         }
 
         let mut last_leaf_pos = 0;
@@ -293,7 +298,7 @@ mod tests {
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = DirtyMmr::new();
+        let mut mmr = Mmr::new(&mut hasher);
         let digest = [1u8; 32];
 
         for _ in 0..1000 {
@@ -324,7 +329,12 @@ mod tests {
                 }
             }
 
-            mmr.add(&mut hasher, &digest);
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                batch.add(&mut hasher, &digest);
+                batch.finalize(&mut hasher)
+            };
+            mmr.apply(changeset);
         }
     }
 

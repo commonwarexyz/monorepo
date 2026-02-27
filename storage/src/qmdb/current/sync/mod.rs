@@ -31,7 +31,7 @@ use crate::{
         contiguous::{fixed, variable, Mutable},
     },
     mmr::{
-        self, hasher::Hasher as _, journaled::Config as MmrConfig, mem::Clean, Location, Position,
+        self, hasher::Hasher as _, journaled::Config as MmrConfig, Location, Position,
         StandardHasher,
     },
     qmdb::{
@@ -51,8 +51,7 @@ use crate::{
             VariableConfig as AnyVariableConfig, VariableValue,
         },
         current::{
-            db::{self, Merkleized},
-            grafting,
+            db, grafting,
             ordered::{
                 fixed::Db as CurrentOrderedFixedDb, variable::Db as CurrentOrderedVariableDb,
             },
@@ -137,7 +136,7 @@ async fn build_db<E, K, V, U, I, H, J, const N: usize>(
     apply_batch_size: usize,
     metadata_partition: String,
     thread_pool: Option<commonware_parallel::ThreadPool>,
-) -> Result<db::Db<E, J, I, H, U, N, Merkleized<DigestOf<H>>, Durable>, qmdb::Error>
+) -> Result<db::Db<E, J, I, H, U, N, Durable>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -160,13 +159,8 @@ where
         &mut hasher,
     )
     .await?;
-    let log = authenticated::Journal::<_, _, _, Clean<DigestOf<H>>>::from_components(
-        mmr,
-        log,
-        hasher,
-        apply_batch_size as u64,
-    )
-    .await?;
+    let log =
+        authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64).await?;
 
     // Initialize bitmap with pruned chunks.
     //
@@ -183,7 +177,7 @@ where
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new_unchecked(status.len());
-    let any: AnyDb<E, J, I, H, U, _, _> = AnyDb::init_from_log(
+    let any: AnyDb<E, J, I, H, U, _> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -262,7 +256,8 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        state: Merkleized { root },
+        dirty_chunks: std::collections::HashSet::new(),
+        root,
     };
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
@@ -273,8 +268,7 @@ where
 
 // --- Database trait implementations ---
 
-impl<E, K, V, H, T, const N: usize> Database
-    for CurrentUnorderedFixedDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedFixedDb<E, K, V, H, T, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -323,7 +317,7 @@ where
 }
 
 impl<E, K, V, H, T, const N: usize> Database
-    for CurrentUnorderedVariableDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+    for CurrentUnorderedVariableDb<E, K, V, H, T, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -372,8 +366,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, const N: usize> Database
-    for CurrentOrderedFixedDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedFixedDb<E, K, V, H, T, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -421,8 +414,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, const N: usize> Database
-    for CurrentOrderedVariableDb<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedVariableDb<E, K, V, H, T, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -479,7 +471,7 @@ where
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>>
+            for std::sync::Arc<$db<E, K, V, H, T, N, Durable>>
         where
             E: Storage + Clock + Metrics,
             K: $key_bound,
@@ -513,7 +505,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>,
+                    $db<E, K, V, H, T, N, Durable>,
                 >,
             >
         where
@@ -550,7 +542,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>>,
+                    Option<$db<E, K, V, H, T, N, Durable>>,
                 >,
             >
         where

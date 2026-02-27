@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Position, StandardHasher},
+    mmr::{journaled::Config as MmrConfig, Location, Position, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -35,12 +35,12 @@ use crate::{
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
         operation::{Committable, Key, Operation},
-        Durable, Merkleized,
+        Durable,
     },
     translator::Translator,
 };
 use commonware_codec::{CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
@@ -57,7 +57,7 @@ async fn build_db<E, O, I, H, U, C>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: Range<Location>,
     apply_batch_size: usize,
-) -> Result<Db<E, C, I, H, U, Merkleized<H>, Durable>, qmdb::Error>
+) -> Result<Db<E, C, I, H, U, Durable>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
@@ -79,7 +79,7 @@ where
     )
     .await?;
 
-    let log = authenticated::Journal::<_, _, _, Clean<DigestOf<H>>>::from_components(
+    let log = authenticated::Journal::<_, _, _>::from_components(
         mmr,
         log,
         hasher,
@@ -115,7 +115,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -157,8 +157,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for UnorderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedVariableDb<E, K, V, H, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -201,7 +200,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -243,8 +242,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedVariableDb<E, K, V, H, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,

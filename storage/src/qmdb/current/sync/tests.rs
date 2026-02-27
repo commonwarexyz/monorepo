@@ -83,7 +83,7 @@ mod harnesses {
                 }
             }
             let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+            durable
         }
     }
 
@@ -151,7 +151,7 @@ mod harnesses {
                 }
             }
             let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+            durable
         }
     }
 
@@ -219,7 +219,7 @@ mod harnesses {
                 }
             }
             let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+            durable
         }
     }
 
@@ -287,7 +287,7 @@ mod harnesses {
                 }
             }
             let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+            durable
         }
     }
 }

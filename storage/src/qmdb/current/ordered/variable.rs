@@ -13,28 +13,26 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
-        current::{db::Merkleized, VariableConfig as Config},
+        current::VariableConfig as Config,
         operation::Key,
         Durable, Error,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    super::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        VariableEncoding<V>,
-        Index<T, Location>,
-        H,
-        N,
-        S,
-        D,
-    >;
+pub type Db<E, K, V, H, T, const N: usize, D = Durable> = super::db::Db<
+    E,
+    Journal<E, Operation<K, V>>,
+    K,
+    VariableEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+    D,
+>;
 
 // Functionality for the Merkleized state - init only.
 impl<
@@ -44,7 +42,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+    > Db<E, K, V, H, T, N, Durable>
 where
     Operation<K, V>: Codec,
 {
@@ -70,14 +68,14 @@ pub mod partitioned {
             any::{
                 ordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
-            current::{db::Merkleized, VariableConfig as Config},
+            current::VariableConfig as Config,
             operation::Key,
             Durable, Error,
         },
         translator::Translator,
     };
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::{DigestOf, Hasher};
+    use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
     /// A partitioned variant of [super::Db].
@@ -86,27 +84,17 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<
-        E,
-        K,
-        V,
-        H,
-        T,
-        const P: usize,
-        const N: usize,
-        S = Merkleized<DigestOf<H>>,
-        D = Durable,
-    > = crate::qmdb::current::ordered::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        VariableEncoding<V>,
-        Index<T, Location, P>,
-        H,
-        N,
-        S,
-        D,
-    >;
+    pub type Db<E, K, V, H, T, const P: usize, const N: usize, D = Durable> =
+        crate::qmdb::current::ordered::db::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            K,
+            VariableEncoding<V>,
+            Index<T, Location, P>,
+            H,
+            N,
+            D,
+        >;
 
     impl<
             E: RStorage + Clock + Metrics,
@@ -116,7 +104,7 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
+        > Db<E, K, V, H, T, P, N, Durable>
     where
         Operation<K, V>: Codec,
     {
@@ -139,7 +127,6 @@ mod test {
         qmdb::{
             any::ordered::variable::Operation,
             current::{
-                db::{Merkleized, Unmerkleized},
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::{apply_random_ops, variable_config},
@@ -160,12 +147,11 @@ mod test {
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
-    type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Digest>, Durable>;
+    type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Durable>;
 
-    /// A type alias for the Mutable variant of CurrentTest (Unmerkleized, NonDurable state).
+    /// A type alias for the Mutable variant of CurrentTest (NonDurable state).
     type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, NonDurable>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(
@@ -192,7 +178,6 @@ mod test {
             let v1 = Sha256::fill(0xA1);
             db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -231,7 +216,6 @@ mod test {
             let mut db = db.into_mutable();
             db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -374,7 +358,6 @@ mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -430,7 +413,6 @@ mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -524,8 +506,7 @@ mod test {
                 let mut dirty_db = db.into_mutable();
                 dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
-                let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
-                let clean_db = dirty_db.into_merkleized().await.unwrap();
+                let (clean_db, _) = dirty_db.commit(None).await.unwrap();
                 db = clean_db;
                 let root = db.root();
 
@@ -591,7 +572,6 @@ mod test {
             let mut db = db.into_mutable();
             db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -641,7 +621,6 @@ mod test {
             let mut db = db.into_mutable();
             db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -735,7 +714,6 @@ mod test {
             db.write_batch([(key_exists_1, None)]).await.unwrap();
             db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a

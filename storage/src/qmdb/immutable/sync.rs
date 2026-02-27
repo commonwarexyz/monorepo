@@ -13,7 +13,7 @@ use crate::{
         build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
-        Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -82,7 +82,7 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _, Merkleized<H>>::from_components(
+        let journal = authenticated::Journal::<_, _, _>::from_components(
             mmr,
             log,
             hasher,
@@ -156,7 +156,7 @@ mod tests {
         sync::Arc,
     };
 
-    /// Type alias for sync tests with simple codec config (Merkleized, Durable)
+    /// Type alias for sync tests with simple codec config (Durable)
     type ImmutableSyncTest = immutable::Immutable<
         deterministic::Context,
         sha256::Digest,
@@ -165,14 +165,13 @@ mod tests {
         crate::translator::TwoCap,
     >;
 
-    /// Type alias for mutable state (Unmerkleized, NonDurable)
+    /// Type alias for mutable state (NonDurable)
     type ImmutableSyncTestMutable = immutable::Immutable<
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
         Sha256,
         crate::translator::TwoCap,
-        immutable::Unmerkleized,
         immutable::NonDurable,
     >;
 
@@ -267,7 +266,7 @@ mod tests {
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             let metadata = Some(Sha256::fill(1));
             let (durable_db, _) = target_db.commit(metadata).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
@@ -343,9 +342,9 @@ mod tests {
             }
 
             let (got_durable, _) = got_db.commit(None).await.unwrap();
-            got_durable.into_merkleized().destroy().await.unwrap();
+            got_durable.destroy().await.unwrap();
             let (target_durable, _) = target_db.commit(None).await.unwrap();
-            target_durable.into_merkleized().destroy().await.unwrap();
+            target_durable.destroy().await.unwrap();
         });
     }
 
@@ -358,7 +357,7 @@ mod tests {
             let target_db = create_test_db(context.with_label("target")).await;
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
@@ -408,7 +407,7 @@ mod tests {
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(0))).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture target state
             let target_root = target_db.root();
@@ -483,7 +482,7 @@ mod tests {
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture the state after first commit
             let bounds = target_db.bounds().await;
@@ -497,7 +496,7 @@ mod tests {
             let additional_ops = create_test_ops_seeded(25, 1);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
             let final_upper_bound = target_db.bounds().await.end;
             let final_root = target_db.root();
 
@@ -625,7 +624,7 @@ mod tests {
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             let target_root = target_db.root();
             let bounds = target_db.bounds().await;
@@ -636,7 +635,7 @@ mod tests {
             let mut target_db = target_db.into_mutable();
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             let target_db = Arc::new(target_db);
             let config = Config {
@@ -689,9 +688,9 @@ mod tests {
             apply_ops(&mut target_db, original_ops.clone()).await;
             apply_ops(&mut sync_db, original_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
             let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_merkleized();
+            let sync_db = durable_db;
 
             drop(sync_db);
 
@@ -701,7 +700,7 @@ mod tests {
             let last_op = create_test_ops_seeded(1, 1);
             apply_ops(&mut target_db, last_op.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
             let root = target_db.root();
             let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
@@ -758,9 +757,9 @@ mod tests {
             apply_ops(&mut target_db, target_ops.clone()).await;
             apply_ops(&mut sync_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
             let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_merkleized();
+            let sync_db = durable_db;
 
             drop(sync_db);
 
@@ -808,7 +807,7 @@ mod tests {
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_merkleized();
+            let mut target_db = durable_db;
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
@@ -870,7 +869,7 @@ mod tests {
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -930,7 +929,7 @@ mod tests {
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -944,12 +943,12 @@ mod tests {
             let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut target_db, more_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_merkleized();
+            let mut target_db = durable_db;
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture final target state
             let bounds = target_db.bounds().await;
@@ -1017,7 +1016,7 @@ mod tests {
             let target_ops = create_test_ops(25);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -1078,7 +1077,7 @@ mod tests {
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            let target_db = durable_db;
 
             // Capture target state
             let bounds = target_db.bounds().await;

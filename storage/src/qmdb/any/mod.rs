@@ -22,7 +22,7 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         operation::{Committable, Key},
-        Durable, Error, Merkleized,
+        Durable, Error,
     },
     translator::Translator,
 };
@@ -125,7 +125,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -154,7 +154,7 @@ where
         page_cache: cfg.page_cache,
     };
 
-    let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -162,17 +162,12 @@ where
     )
     .await?;
 
-    let log = if log.size().await != 0 {
-        log
-    } else {
+    if log.size().await == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(&commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
-        log
-    };
+    }
 
     let index = new_index(context.with_label("index"), cfg.translator);
     db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
@@ -185,7 +180,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -216,7 +211,7 @@ where
         write_buffer: cfg.log_write_buffer,
     };
 
-    let log = authenticated::Journal::<_, VJournal<_, _>, _, _>::new(
+    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -224,17 +219,12 @@ where
     )
     .await?;
 
-    let log = if log.size().await != 0 {
-        log
-    } else {
+    if log.size().await == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(&commit_floor).await?;
-        let log = log.merkleize();
         log.sync().await?;
-        log
-    };
+    }
 
     let index = new_index(context.with_label("index"), cfg.translator);
     db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
@@ -297,10 +287,9 @@ pub(crate) mod test {
         kv::{Batchable as _, Gettable as _},
         mmr::Location,
         qmdb::{
-            any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+            any::states::{CleanAny, MutableAny},
             store::{LogStore, MerkleizedStore},
         },
-        Persistable,
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -334,14 +323,8 @@ pub(crate) mod test {
         let steps = db.steps();
         assert_ne!(steps, 0);
 
-        // Steps shouldn't change from merkleization.
-        let db = db.into_merkleized().await.unwrap();
-        let db = db.into_mutable();
-        assert_eq!(db.steps(), steps);
-
         // Cleanup
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -362,8 +345,7 @@ pub(crate) mod test {
             let v = make_value(i * 1000);
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
-        let db = db.commit(None).await.unwrap().0;
-        let mut db = db.into_merkleized().await.unwrap();
+        let mut db = db.commit(None).await.unwrap().0;
         db.prune(db.inactivity_floor_loc().await).await.unwrap();
         let root = db.root();
         let op_count = db.size().await;
@@ -478,7 +460,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
         drop(db);
         let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.size().await > 1);
@@ -533,8 +514,7 @@ pub(crate) mod test {
         }
 
         // Commit + sync with pruning raises inactivity floor.
-        let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_merkleized().await.unwrap();
+        let (mut db, _) = db.commit(None).await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc().await).await.unwrap();
 
@@ -594,7 +574,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
         let root = db.root();
 
         // Reopen and verify the state is preserved correctly.
@@ -628,7 +607,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
         let root_hash = db.root();
         let original_op_count = db.size().await;
 
@@ -661,7 +639,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
 
         // Historical proof should remain the same even though database has grown
         let (historical_proof2, historical_ops2) = db
@@ -703,7 +680,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
 
         let historical_op_count = Location::new_unchecked(5);
         let (proof, ops) = db
@@ -835,7 +811,6 @@ pub(crate) mod test {
             db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
 
         // Test singleton database (historical size = 2 means 1 op after initial commit)
         let (single_proof, single_ops) = db
@@ -898,14 +873,13 @@ pub(crate) mod test {
                 map.insert(k, v);
             }
             let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
-            db = clean_db.into_merkleized().await.unwrap().into_mutable();
+            db = clean_db.into_mutable();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
         db.write_batch([(k, None)]).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

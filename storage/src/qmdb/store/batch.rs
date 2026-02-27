@@ -3,9 +3,9 @@
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        kv::{Batchable as _, Deletable as _, Gettable, Updatable as _},
+        kv::{Deletable as _, Gettable, Updatable as _},
         qmdb::{
-            any::states::{MutableAny, UnmerkleizedDurableAny},
+            any::states::{CleanAny, MutableAny},
             Error,
         },
         Persistable as _,
@@ -47,7 +47,7 @@ pub mod tests {
     /// Destroy an MutableAny database by committing and then destroying.
     async fn destroy_db<D: MutableAny>(db: D) -> Result<(), Error> {
         let db = db.commit(None).await?.0;
-        db.into_merkleized().await?.destroy().await
+        db.destroy().await
     }
 
     /// Run the batch test suite against a database factory within a deterministic executor twice,
@@ -59,7 +59,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let executor = deterministic::Runner::default();
         let mut new_db_clone = new_db.clone();
@@ -97,7 +97,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let counter = &mut 0usize;
 
@@ -126,7 +126,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(1);
@@ -148,7 +148,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         let mut batch = db.start_batch();
@@ -176,7 +176,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         let base_key = TestKey::from_seed(4);
@@ -203,7 +203,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(6);
@@ -231,7 +231,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         let mut batch = db.start_batch();
@@ -256,7 +256,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         for i in 0..100 {
@@ -300,7 +300,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
+        <D::Clean as CleanAny>::Mutable: MutableAny,
     {
         let mut db = next_db(new_db, counter).await;
         // Create 100 keys and commit them.

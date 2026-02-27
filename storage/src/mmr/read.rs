@@ -83,7 +83,7 @@ pub trait MmrRead<D: Digest>: Send + Sync {
 /// This trait lets it recurse through the chain to discover the base size and
 /// collect overwrites from every layer.
 ///
-/// Base MMR types (`Mmr`, `CleanMmr`) implement the trivial base case.
+/// Base MMR types (`Mmr`) implement the trivial base case.
 /// `MerkleizedBatch` recurses through its parent.
 ///
 /// This trait is public because it appears in trait bounds on public methods

@@ -11,7 +11,7 @@
 //! # Lifecycle
 //!
 //! ```text
-//! CleanMmr ──borrow──> UnmerkleizedBatch  (accumulate mutations)
+//! Mmr ─────borrow────> UnmerkleizedBatch  (accumulate mutations)
 //!                            │
 //!                       merkleize()
 //!                            │
@@ -26,7 +26,7 @@
 //!                      mmr.apply(cs)
 //!                            │
 //!                            v
-//!                        CleanMmr          (updated in place)
+//!                           Mmr             (updated in place)
 //! ```
 //!
 //! # Type aliases
@@ -39,7 +39,7 @@
 //!
 //! ```ignore
 //! let mut hasher = StandardHasher::<Sha256>::new();
-//! let mut mmr = CleanMmr::new(&mut hasher.inner());
+//! let mut mmr = Mmr::new(&mut hasher);
 //!
 //! // Build a batch of mutations.
 //! let changeset = {
@@ -106,7 +106,7 @@ pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 
 /// Owned delta extracted from a batch chain, relative to the ultimate base.
 ///
-/// Apply via [`super::mem::CleanMmr::apply`].
+/// Apply via [`super::mem::Mmr::apply`].
 pub struct Changeset<D: Digest> {
     /// Base nodes to keep: [0, parent_end). If < base.size(), truncate tail.
     pub(crate) parent_end: Position,
@@ -366,7 +366,7 @@ impl<'a, D: Digest, P: MmrRead<D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     // NOTE: The serial/parallel merkleize logic is intentionally duplicated in
-    // `mem::DirtyMmr` which uses direct indexing instead of resolve_node/store_node.
+    // `mem::Mmr` (before batch API) used direct indexing instead of resolve_node/store_node.
     fn merkleize_serial(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -594,15 +594,15 @@ mod tests {
     use crate::mmr::{
         conformance::build_test_mmr,
         hasher::{Hasher as _, Standard},
-        mem::CleanMmr,
+        mem::Mmr,
         read::MmrRead,
     };
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
     /// Build a reference MMR with `n` elements for comparison.
-    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> CleanMmr<sha256::Digest> {
-        let mmr = CleanMmr::new(hasher);
+    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<sha256::Digest> {
+        let mmr = Mmr::new(hasher);
         build_test_mmr(hasher, mmr, n)
     }
 
@@ -620,7 +620,7 @@ mod tests {
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Batch: start from empty base, add all via batch
-                let base = CleanMmr::new(&mut hasher);
+                let base = Mmr::new(&mut hasher);
                 let mut diff = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
                     hasher.inner().update(&i.to_be_bytes());

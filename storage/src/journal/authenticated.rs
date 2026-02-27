@@ -12,8 +12,7 @@ use crate::{
     },
     mmr::{
         batch,
-        journaled::{CleanMmr, DirtyMmr, Mmr, State},
-        mem::{Clean, Dirty},
+        journaled::Mmr,
         read::{ChainInfo, MmrRead},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
@@ -21,7 +20,7 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -53,7 +52,7 @@ pub trait ItemChain<Item> {
     fn collect_item_arcs(&self, into: &mut Vec<Arc<Vec<Item>>>);
 }
 
-impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for CleanMmr<E, D> {
+impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for Mmr<E, D> {
     fn collect_item_arcs(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
 
@@ -182,7 +181,7 @@ pub struct FinalizedBatch<D: Digest, Item> {
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
 /// specific location.
-pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
+pub struct Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -190,7 +189,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, S>,
+    pub(crate) mmr: Mmr<E, H::Digest>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
@@ -199,25 +198,38 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>>,
 {
     /// Returns the Location of the next item appended to the journal.
     pub async fn size(&self) -> Location {
         Location::new_unchecked(self.journal.size().await)
     }
+
+    /// Return the root of the MMR.
+    pub fn root(&self) -> H::Digest {
+        self.mmr.root()
+    }
+
+    /// Create a speculative batch that reads through to this journal's MMR.
+    /// Multiple batches can coexist (shared borrow).
+    pub fn new_batch(&self) -> Batch<'_, H, Mmr<E, H::Digest>, C::Item> {
+        Batch {
+            inner: self.mmr.new_batch(),
+            hasher: StandardHasher::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
-    S: State<DigestOf<H>>,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
@@ -226,7 +238,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item: EncodeShared>,
@@ -234,12 +246,12 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mmr: CleanMmr<E, H::Digest>,
+        mut mmr: Mmr<E, H::Digest>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, apply_batch_size).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -256,11 +268,11 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: DirtyMmr<E, H::Digest>,
+        mmr: &mut Mmr<E, H::Digest>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<CleanMmr<E, H::Digest>, Error> {
+    ) -> Result<(), Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size().await;
@@ -268,7 +280,7 @@ where
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
-            mmr.pop(*pop_count as usize).await?;
+            mmr.pop(*pop_count as usize, hasher).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
 
@@ -281,24 +293,59 @@ where
             );
 
             let reader = journal.reader().await;
-            let mut batch_size = 0;
             while mmr_size < journal_size {
-                let op = reader.read(*mmr_size).await?;
-                mmr.add(hasher, &op.encode())?;
-                mmr_size += 1;
-                batch_size += 1;
-                if batch_size >= apply_batch_size {
-                    mmr = mmr.merkleize(hasher).into_dirty();
-                    batch_size = 0;
-                }
+                let changeset = {
+                    let mut batch = mmr.new_batch();
+                    let mut count = 0u64;
+                    while count < apply_batch_size && mmr_size < journal_size {
+                        let op = reader.read(*mmr_size).await?;
+                        batch.add(hasher, &op.encode());
+                        mmr_size += 1;
+                        count += 1;
+                    }
+                    batch.finalize(hasher)
+                };
+                mmr.apply(changeset);
             }
-            return Ok(mmr.merkleize(hasher));
+            return Ok(());
         }
 
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size().await, *mmr.leaves());
 
-        Ok(mmr.merkleize(hasher))
+        Ok(())
+    }
+
+    /// Append an item to the journal and update the MMR.
+    pub async fn append(&mut self, item: &C::Item) -> Result<Location, Error> {
+        let encoded_item = item.encode();
+
+        // Append item to the journal, then update the MMR state.
+        let loc = self.journal.append(item).await?;
+        let changeset = {
+            let mut batch = self.mmr.new_batch();
+            batch.add(&mut self.hasher, &encoded_item);
+            batch.finalize(&mut self.hasher)
+        };
+        self.mmr.apply(changeset);
+
+        Ok(Location::new_unchecked(loc))
+    }
+
+    /// Apply a finalized batch, appending all tracked items from the entire
+    /// chain and then applying the flattened MMR changeset.
+    pub async fn apply_batch(
+        &mut self,
+        batch: FinalizedBatch<H::Digest, C::Item>,
+    ) -> Result<(), Error> {
+        for items in &batch.item_chain {
+            for item in items.iter() {
+                self.journal.append(item).await?;
+            }
+        }
+        self.mmr.apply(batch.changeset);
+        debug_assert_eq!(*self.mmr.leaves(), self.journal.size().await);
+        Ok(())
     }
 
     /// Prune both the MMR and journal to the given location.
@@ -333,7 +380,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -408,33 +455,9 @@ where
 
         Ok((proof, ops))
     }
-
-    /// Return the root of the MMR.
-    pub fn root(&self) -> H::Digest {
-        self.mmr.root()
-    }
-
-    /// Convert this journal into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Journal<E, C, H, Dirty> {
-        Journal {
-            mmr: self.mmr.into_dirty(),
-            journal: self.journal,
-            hasher: self.hasher,
-        }
-    }
-
-    /// Create a speculative batch that reads through to this journal's MMR.
-    /// Multiple batches can coexist (shared borrow).
-    pub fn new_batch(&self) -> Batch<'_, H, CleanMmr<E, H::Digest>, C::Item> {
-        Batch {
-            inner: self.mmr.new_batch(),
-            hasher: StandardHasher::new(),
-            items: Vec::new(),
-        }
-    }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
@@ -461,90 +484,10 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
-where
-    E: Storage + Clock + Metrics,
-    C: Mutable<Item: EncodeShared>,
-    H: Hasher,
-{
-    /// Apply a finalized batch, appending all tracked items from the entire
-    /// chain and then applying the flattened MMR changeset.
-    pub async fn apply_batch(
-        &mut self,
-        batch: FinalizedBatch<H::Digest, C::Item>,
-    ) -> Result<(), Error> {
-        for items in &batch.item_chain {
-            for item in items.iter() {
-                self.journal.append(item).await?;
-            }
-        }
-        self.mmr.apply(batch.changeset);
-        debug_assert_eq!(*self.mmr.leaves(), self.journal.size().await);
-        Ok(())
-    }
-}
-
-impl<E, C, H> Journal<E, C, H, Dirty>
-where
-    E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
-{
-    /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
-        let Self {
-            mmr,
-            journal,
-            mut hasher,
-        } = self;
-        Journal {
-            mmr: mmr.merkleize(&mut hasher),
-            journal,
-            hasher,
-        }
-    }
-}
-
-impl<E, C, H> Journal<E, C, H, Dirty>
-where
-    E: Storage + Clock + Metrics,
-    C: Mutable<Item: EncodeShared>,
-    H: Hasher,
-{
-    pub async fn append(&mut self, item: &C::Item) -> Result<Location, Error> {
-        let encoded_item = item.encode();
-
-        // Append item to the journal, then update the MMR state.
-        let loc = self.journal.append(item).await?;
-        self.mmr
-            .add(&mut self.hasher, &encoded_item)
-            .map_err(Error::Mmr)?;
-
-        Ok(Location::new_unchecked(loc))
-    }
-
-    /// Create a new dirty journal from aligned components.
-    pub async fn from_components(
-        mmr: CleanMmr<E, H::Digest>,
-        journal: C,
-        hasher: StandardHasher<H>,
-        apply_batch_size: u64,
-    ) -> Result<Self, Error> {
-        let clean = Journal::<E, C, H, Clean<H::Digest>>::from_components(
-            mmr,
-            journal,
-            hasher,
-            apply_batch_size,
-        )
-        .await?;
-        Ok(clean.into_dirty())
-    }
-}
-
 /// The number of items to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
+impl<E, O, H> Journal<E, fixed::Journal<E, O>, H>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixedShared,
@@ -567,8 +510,8 @@ where
 
         // Align the MMR and journal.
         let mut hasher = StandardHasher::<H>::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -583,7 +526,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, H>
 where
     E: Storage + Clock + Metrics,
     O: CodecShared,
@@ -600,7 +543,7 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
@@ -608,7 +551,7 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -623,12 +566,11 @@ where
     }
 }
 
-impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
+impl<E, C, H> Contiguous for Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>>,
 {
     type Item = C::Item;
 
@@ -641,7 +583,7 @@ where
     }
 }
 
-impl<E, C, H> Mutable for Journal<E, C, H, Dirty>
+impl<E, C, H> Mutable for Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item: EncodeShared>,
@@ -666,7 +608,7 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .pop((leaves - size) as usize)
+                .pop((leaves - size) as usize, &mut self.hasher)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -675,7 +617,7 @@ where
     }
 }
 
-impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Persistable for Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
@@ -706,12 +648,11 @@ where
 }
 
 #[cfg(test)]
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H> Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>>,
 {
     /// Test helper: Read the item at the given location.
     pub(crate) async fn read(&self, loc: Location) -> Result<C::Item, Error> {
@@ -779,7 +720,6 @@ mod tests {
         deterministic::Context,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Sha256,
-        Clean<sha256::Digest>,
     >;
 
     /// Create a new empty authenticated journal.
@@ -812,7 +752,7 @@ mod tests {
         suffix: &str,
         count: usize,
     ) -> AuthenticatedJournal {
-        let mut journal = create_empty_journal(context, suffix).await.into_dirty();
+        let mut journal = create_empty_journal(context, suffix).await;
 
         for i in 0..count {
             let op = create_operation(i as u8);
@@ -820,7 +760,6 @@ mod tests {
             assert_eq!(loc, Location::new_unchecked(i as u64));
         }
 
-        let journal = journal.merkleize();
         journal.sync().await.unwrap();
         journal
     }
@@ -833,7 +772,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        CleanMmr<deterministic::Context, sha256::Digest>,
+        Mmr<deterministic::Context, sha256::Digest>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
@@ -885,9 +824,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "align-empty").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "align-empty").await;
 
-            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -901,17 +840,22 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
-            let mmr = mmr.into_dirty();
-            for i in 0..20 {
-                let op = create_operation(i as u8);
-                let encoded = op.encode();
-                mmr.add(&mut hasher, &encoded).unwrap();
-                journal.append(&op).await.unwrap();
+            {
+                let changeset = {
+                    let mut batch = mmr.new_batch();
+                    for i in 0..20 {
+                        let op = create_operation(i as u8);
+                        let encoded = op.encode();
+                        batch.add(&mut hasher, &encoded);
+                        journal.append(&op).await.unwrap();
+                    }
+                    batch.finalize(&mut hasher)
+                };
+                mmr.apply(changeset);
             }
-            let mmr = mmr.merkleize(&mut hasher);
 
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
@@ -919,11 +863,11 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
-            // MMR should have been popped to match journal
+            // MMR should have been aligned to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
             assert_eq!(journal.size().await, 21);
         });
@@ -934,7 +878,7 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "journal-ahead").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "journal-ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -948,7 +892,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -963,16 +907,13 @@ mod tests {
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context.with_label("first"), "mismatched")
-                .await
-                .into_dirty();
+            let mut journal = create_empty_journal(context.with_label("first"), "mismatched").await;
 
             // Add 20 uncommitted operations
             for i in 0..20 {
                 let loc = journal.append(&create_operation(i as u8)).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
             }
-            let journal = journal.merkleize();
 
             // Don't sync - these are uncommitted
             // After alignment, they should be discarded
@@ -1181,8 +1122,7 @@ mod tests {
                 let mut journal =
                     AuthenticatedJournal::new(context, mmr_cfg, journal_cfg, |op| op.is_commit())
                         .await
-                        .unwrap()
-                        .into_dirty();
+                        .unwrap();
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
@@ -1195,10 +1135,8 @@ mod tests {
                 for i in 6..10 {
                     journal.append(&create_operation(i)).await.unwrap();
                 }
-                let journal = journal.merkleize();
                 assert_eq!(journal.size().await, 10);
 
-                let mut journal = journal.into_dirty();
                 journal.rewind(2).await.unwrap();
                 assert_eq!(journal.size().await, 2);
                 assert_eq!(journal.mmr.leaves(), 2);
@@ -1213,7 +1151,6 @@ mod tests {
                 ));
 
                 journal.rewind(0).await.unwrap();
-                let journal = journal.merkleize();
                 assert_eq!(journal.size().await, 0);
                 assert_eq!(journal.mmr.leaves(), 0);
                 assert_eq!(journal.mmr.size(), 0);
@@ -1222,14 +1159,11 @@ mod tests {
                 assert!(bounds.is_empty());
 
                 // Test rewinding after pruning.
-                let mut journal = journal.into_dirty();
                 for i in 0..255 {
                     journal.append(&create_operation(i)).await.unwrap();
                 }
-                let mut journal = journal.merkleize();
                 journal.prune(Location::new_unchecked(100)).await.unwrap();
                 assert_eq!(journal.reader().await.bounds().start, 98);
-                let mut journal = journal.into_dirty();
                 let res = journal.rewind(97).await;
                 assert!(matches!(res, Err(JournalError::InvalidRewind(97))));
                 journal.rewind(98).await.unwrap();
@@ -1248,7 +1182,7 @@ mod tests {
     fn test_apply_op_and_read_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "apply_op").await.into_dirty();
+            let mut journal = create_empty_journal(context, "apply_op").await;
 
             assert_eq!(journal.size().await, 0);
 
@@ -1259,7 +1193,6 @@ mod tests {
                 assert_eq!(loc, Location::new_unchecked(i as u64));
                 assert_eq!(journal.size().await, (i + 1) as u64);
             }
-            let journal = journal.merkleize();
 
             assert_eq!(journal.size().await, 50);
 
@@ -1307,16 +1240,13 @@ mod tests {
     fn test_read_pruned_operation_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "read_pruned", 100)
-                .await
-                .into_dirty();
+            let mut journal = create_journal_with_ops(context, "read_pruned", 100).await;
 
             // Add commit and prune
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
             let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
@@ -1370,9 +1300,8 @@ mod tests {
     fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context.with_label("first"), "close_pending")
-                .await
-                .into_dirty();
+            let mut journal =
+                create_empty_journal(context.with_label("first"), "close_pending").await;
 
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
@@ -1386,7 +1315,6 @@ mod tests {
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await
                 .unwrap();
-            let journal = journal.merkleize();
             assert_eq!(
                 commit_loc,
                 Location::new_unchecked(20),
@@ -1428,16 +1356,13 @@ mod tests {
     fn test_prune_to_location() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "prune_to", 100)
-                .await
-                .into_dirty();
+            let mut journal = create_journal_with_ops(context, "prune_to", 100).await;
 
             // Add commit at position 50
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
@@ -1452,15 +1377,12 @@ mod tests {
     fn test_prune_returns_actual_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "prune_boundary", 100)
-                .await
-                .into_dirty();
+            let mut journal = create_journal_with_ops(context, "prune_boundary", 100).await;
 
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let requested = Location::new_unchecked(50);
@@ -1481,15 +1403,12 @@ mod tests {
     fn test_prune_preserves_operation_count() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "prune_count", 100)
-                .await
-                .into_dirty();
+            let mut journal = create_journal_with_ops(context, "prune_count", 100).await;
 
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let count_before = journal.size().await;
@@ -1519,14 +1438,12 @@ mod tests {
             journal.destroy().await.unwrap();
 
             // Test after pruning
-            let journal =
+            let mut journal =
                 create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
-            let mut journal = journal.into_dirty();
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
@@ -1557,14 +1474,11 @@ mod tests {
 
             // Test after pruning
             let mut journal =
-                create_journal_with_ops(context.with_label("pruned"), "boundary", 100)
-                    .await
-                    .into_dirty();
+                create_journal_with_ops(context.with_label("pruned"), "boundary", 100).await;
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
@@ -1578,15 +1492,12 @@ mod tests {
     fn test_mmr_prunes_to_journal_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "mmr_boundary", 50)
-                .await
-                .into_dirty();
+            let mut journal = create_journal_with_ops(context, "mmr_boundary", 50).await;
 
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(25)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
@@ -1746,7 +1657,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create journal with initial operations
-            let journal = create_journal_with_ops(context, "proof_historical", 50).await;
+            let mut journal = create_journal_with_ops(context, "proof_historical", 50).await;
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
@@ -1754,11 +1665,9 @@ mod tests {
             let historical_size = journal.size().await;
 
             // Add more operations after the historical state
-            let mut journal = journal.into_dirty();
             for i in 50..100 {
                 journal.append(&create_operation(i as u8)).await.unwrap();
             }
-            let journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             // Generate proof for the historical state
@@ -1789,14 +1698,12 @@ mod tests {
     fn test_historical_proof_pruned_location_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "proof_pruned", 50).await;
+            let mut journal = create_journal_with_ops(context, "proof_pruned", 50).await;
 
-            let mut journal = journal.into_dirty();
             journal
                 .append(&Operation::CommitFloor(None, Location::new_unchecked(25)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
             let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
 

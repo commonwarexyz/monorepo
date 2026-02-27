@@ -19,7 +19,7 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted MMR** (`CleanMmr<Digest>`): An in-memory MMR of digests at and above the
+//! - **Grafted MMR** (`Mmr<Digest>`): An in-memory MMR of digests at and above the
 //!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
 //!   into a single authenticated structure (see below).
 //!
@@ -125,9 +125,9 @@
 //! ## Incremental updates
 //!
 //! When operations are added or bits change (e.g. an operation becomes inactive during floor
-//! raising), only the affected chunks are marked "dirty". During merkleization
-//! (`into_merkleized`), only dirty grafted leaves are recomputed and their ancestors are
-//! propagated upward through the cache. This avoids recomputing the entire grafted tree.
+//! raising), only the affected chunks are marked "dirty". During `commit`, only dirty grafted
+//! leaves are recomputed and their ancestors are propagated upward through the cache. This avoids
+//! recomputing the entire grafted tree.
 //!
 //! ## Pruning
 //!
@@ -188,7 +188,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
@@ -321,10 +321,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
     context: E,
     config: FixedConfig<T>,
     new_index: NewIndex,
-) -> Result<
-    db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
-    Error,
->
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -400,7 +397,8 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        state: db::Merkleized { root },
+        dirty_chunks: std::collections::HashSet::new(),
+        root,
     })
 }
 
@@ -409,10 +407,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>
     context: E,
     config: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
     new_index: NewIndex,
-) -> Result<
-    db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
-    Error,
->
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N, Durable>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -488,7 +483,8 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool: pool,
-        state: db::Merkleized { root },
+        dirty_chunks: std::collections::HashSet::new(),
+        root,
     })
 }
 
@@ -514,7 +510,7 @@ pub mod tests {
     use crate::{
         kv::Batchable as _,
         qmdb::{
-            any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
+            any::states::{CleanAny, MutableAny as _},
             store::{
                 batch_tests::{TestKey, TestValue},
                 LogStore,
@@ -621,14 +617,12 @@ pub mod tests {
             db.write_batch([(rand_key, Some(v))]).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
-                let (durable_db, _) = db.commit(None).await?;
-                let clean_db: C = durable_db.into_merkleized().await?;
+                let (clean_db, _) = db.commit(None).await?;
                 db = clean_db.into_mutable();
             }
         }
         if commit_changes {
-            let (durable_db, _) = db.commit(None).await?;
-            let clean_db: C = durable_db.into_merkleized().await?;
+            let (clean_db, _) = db.commit(None).await?;
             db = clean_db.into_mutable();
         }
         Ok(db)
@@ -655,7 +649,7 @@ pub mod tests {
 
     /// Run `test_build_random_close_reopen` against a database factory.
     ///
-    /// The factory should return a clean (Merkleized, Durable) database when given a context and
+    /// The factory should return a clean (Durable) database when given a context and
     /// partition name. The factory will be called multiple times to test reopening.
     pub fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
     where
@@ -678,7 +672,6 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
@@ -703,7 +696,6 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             let root = db.root();
@@ -743,8 +735,7 @@ pub mod tests {
                 let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                     .await
                     .unwrap();
-                let (db, _) = db.commit(None).await.unwrap();
-                let mut db: C = db.into_merkleized().await.unwrap();
+                let (mut db, _) = db.commit(None).await.unwrap();
                 let committed_root = db.root();
                 let committed_op_count = db.bounds().await.end;
                 let committed_inactivity_floor = db.inactivity_floor_loc().await;
@@ -768,9 +759,8 @@ pub mod tests {
                     .unwrap();
 
                 // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-                // before the state of the pruned bitmap can be written to disk (i.e., before
-                // into_merkleized is called). We do this by committing and then dropping the durable
-                // db without calling close or into_merkleized.
+                // before sync/prune is called. We do this by committing and then dropping the
+                // db without calling sync or prune.
                 let (durable_db, _) = db.commit(None).await.unwrap();
                 let committed_op_count = durable_db.bounds().await.end;
                 drop(durable_db);
@@ -791,8 +781,7 @@ pub mod tests {
                 let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
                     .await
                     .unwrap();
-                let (db, _) = db.commit(None).await.unwrap();
-                let mut db: C = db.into_merkleized().await.unwrap();
+                let (mut db, _) = db.commit(None).await.unwrap();
                 db.prune(db.inactivity_floor_loc().await).await.unwrap();
                 // State from scenario #2 should match that of a successful commit.
                 assert_eq!(db.bounds().await.end, committed_op_count);
@@ -846,10 +835,8 @@ pub mod tests {
 
                 // Commit periodically
                 if i % 50 == 49 {
-                    let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
-                    let clean_no_pruning: C = db_1.into_merkleized().await.unwrap();
-                    let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
-                    let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
+                    let (clean_no_pruning, _) = db_no_pruning_mut.commit(None).await.unwrap();
+                    let (mut clean_pruning, _) = db_pruning_mut.commit(None).await.unwrap();
                     clean_pruning
                         .prune(clean_no_pruning.inactivity_floor_loc().await)
                         .await
@@ -860,10 +847,8 @@ pub mod tests {
             }
 
             // Final commit
-            let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
-            db_no_pruning = db_1.into_merkleized().await.unwrap();
-            let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
-            db_pruning = db_2.into_merkleized().await.unwrap();
+            (db_no_pruning, _) = db_no_pruning_mut.commit(None).await.unwrap();
+            (db_pruning, _) = db_pruning_mut.commit(None).await.unwrap();
 
             // Get roots from both databases - they should match
             let root_no_pruning = db_no_pruning.root();
@@ -884,7 +869,7 @@ pub mod tests {
     /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
     ///
     /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
+    /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
@@ -909,9 +894,8 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
 
-            // The bitmap should have been pruned during into_merkleized().
+            // The bitmap should have been pruned during commit().
             let pruned_bits_before = db.pruned_bits();
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
@@ -927,7 +911,7 @@ pub mod tests {
             );
 
             // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
-            // during into_merkleized(), and sync() should persist it.
+            // during commit(), and sync() should persist it.
             db.sync().await.unwrap();
 
             // Record the root before dropping.
@@ -961,7 +945,7 @@ pub mod tests {
     /// persists correctly after close and reopen.
     ///
     /// The `expected_op_count` and `expected_inactivity_floor` parameters specify the expected
-    /// values after commit + merkleize + prune. These differ between ordered and unordered variants.
+    /// values after commit + prune. These differ between ordered and unordered variants.
     pub fn test_current_db_build_big<C, F, Fut>(
         mut open_db: F,
         expected_op_count: u64,
@@ -1014,8 +998,7 @@ pub mod tests {
             }
 
             // Test that commit + sync w/ pruning will raise the activity floor.
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let (mut db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc().await).await.unwrap();
 

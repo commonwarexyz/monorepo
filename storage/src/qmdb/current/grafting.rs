@@ -38,11 +38,11 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard MMR hashing with ops-space positions.
 //!
-//! The grafted MMR is incrementally maintained via [GraftedHasher] + `DirtyMmr::merkleize` when
+//! The grafted MMR is incrementally maintained via [GraftedHasher] + the batch API when
 //! grafted leaves change.
 
 use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::CleanMmr,
+    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::Mmr,
     storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -316,25 +316,21 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
     }
 }
 
-/// A virtual [StorageTrait] that presents a grafted [CleanMmr] and ops MMR as a single combined
+/// A virtual [StorageTrait] that presents a grafted [Mmr] and ops MMR as a single combined
 /// MMR.
 ///
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
 pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
-    grafted_mmr: &'a CleanMmr<D>,
+    grafted_mmr: &'a Mmr<D>,
     grafting_height: u32,
     ops_mmr: &'a S,
 }
 
 impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(
-        grafted_mmr: &'a CleanMmr<D>,
-        grafting_height: u32,
-        ops_mmr: &'a S,
-    ) -> Self {
+    pub(super) const fn new(grafted_mmr: &'a Mmr<D>, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
             grafted_mmr,
             grafting_height,
@@ -361,37 +357,45 @@ impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::build_test_mmr,
-        iterator::PeakIterator,
-        mem::{CleanMmr, DirtyMmr},
-        verification, Position, StandardHasher,
+        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Position,
+        StandardHasher,
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    /// Precompute grafted leaf digests and return a [CleanMmr] in grafted-space.
+    /// Precompute grafted leaf digests and return a [Mmr] in grafted-space.
     ///
     /// Each grafted leaf is `hash(chunk || ops_subtree_root)` where `ops_subtree_root` is the ops
     /// MMR node at the mapped position.
     fn build_test_grafted_mmr(
         standard: &mut StandardHasher<Sha256>,
-        ops_mmr: &CleanMmr<sha256::Digest>,
+        ops_mmr: &Mmr<sha256::Digest>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> CleanMmr<sha256::Digest> {
-        let mut dirty = DirtyMmr::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
-            let ops_subtree_root = ops_mmr
-                .get_node(ops_pos)
-                .expect("ops MMR missing node at mapped position");
-            standard.inner().update(chunk);
-            standard.inner().update(&ops_subtree_root);
-            dirty.add_leaf_digest(standard.inner().finalize());
-        }
+    ) -> Mmr<sha256::Digest> {
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        dirty.merkleize(&mut grafted_hasher, None)
+        let mut grafted_mmr = Mmr::new(&mut grafted_hasher);
+        if !chunks.is_empty() {
+            // Use a separate hasher for leaf digest computation to avoid borrow conflict
+            // with grafted_hasher (which borrows standard via fork()).
+            let mut leaf_hasher = StandardHasher::<Sha256>::new();
+            let changeset = {
+                let mut batch = grafted_mmr.new_batch();
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
+                    let ops_subtree_root = ops_mmr
+                        .get_node(ops_pos)
+                        .expect("ops MMR missing node at mapped position");
+                    leaf_hasher.inner().update(chunk);
+                    leaf_hasher.inner().update(&ops_subtree_root);
+                    batch.add_leaf_digest(leaf_hasher.inner().finalize());
+                }
+                batch.finalize(&mut grafted_hasher)
+            };
+            grafted_mmr.apply(changeset);
+        }
+        grafted_mmr
     }
 
     #[test_traced]
@@ -486,7 +490,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = CleanMmr::new(&mut standard);
+            let mmr = Mmr::new(&mut standard);
             let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
@@ -535,32 +539,41 @@ mod tests {
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
-        let mut ops_mmr = DirtyMmr::new();
-        for i in 0u8..4 {
-            ops_mmr.add(&mut standard, &Sha256::fill(i));
-        }
-        let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+        let mut ops_mmr = Mmr::new(&mut standard);
+        let changeset = {
+            let mut batch = ops_mmr.new_batch();
+            for i in 0u8..4 {
+                batch.add(&mut standard, &Sha256::fill(i));
+            }
+            batch.finalize(&mut standard)
+        };
+        ops_mmr.apply(changeset);
 
         let c1 = Sha256::fill(0xF1);
         let c2 = Sha256::fill(0xF2);
 
-        // Build grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
-        let mut dirty = DirtyMmr::new();
+        // Build grafted MMR with 2 leaves via batch API + GraftedHasher.
+        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
+        let mut grafted = Mmr::new(&mut grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
-        let sub0 = ops_mmr.get_node(pos0).unwrap();
-        standard.inner().update(&c1);
-        standard.inner().update(&sub0);
-        dirty.add_leaf_digest(standard.inner().finalize());
+        let changeset = {
+            let mut batch = grafted.new_batch();
+            let mut leaf_hasher = StandardHasher::<Sha256>::new();
+            let sub0 = ops_mmr.get_node(pos0).unwrap();
+            leaf_hasher.inner().update(&c1);
+            leaf_hasher.inner().update(&sub0);
+            batch.add_leaf_digest(leaf_hasher.inner().finalize());
 
-        let sub1 = ops_mmr.get_node(pos1).unwrap();
-        standard.inner().update(&c2);
-        standard.inner().update(&sub1);
-        dirty.add_leaf_digest(standard.inner().finalize());
+            let sub1 = ops_mmr.get_node(pos1).unwrap();
+            leaf_hasher.inner().update(&c2);
+            leaf_hasher.inner().update(&sub1);
+            batch.add_leaf_digest(leaf_hasher.inner().finalize());
 
-        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+            batch.finalize(&mut grafted_hasher)
+        };
+        grafted.apply(changeset);
 
         // With 4 ops leaves and grafting height 1, the grafted tree has 2 leaves and 1 root.
         // All 3 nodes should be retrievable (via grafted-space positions).
@@ -585,12 +598,16 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Build an ops MMR with 4 leaves.
-            let mut ops_mmr = DirtyMmr::new();
-            ops_mmr.add(&mut standard, &b1);
-            ops_mmr.add(&mut standard, &b2);
-            ops_mmr.add(&mut standard, &b3);
-            ops_mmr.add(&mut standard, &b4);
-            let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+            let mut ops_mmr = Mmr::new(&mut standard);
+            let changeset = {
+                let mut batch = ops_mmr.new_batch();
+                batch.add(&mut standard, &b1);
+                batch.add(&mut standard, &b2);
+                batch.add(&mut standard, &b3);
+                batch.add(&mut standard, &b4);
+                batch.finalize(&mut standard)
+            };
+            ops_mmr.apply(changeset);
 
             // Bitmap chunk elements (one per grafted leaf).
             let c1 = Sha256::fill(0xF1);
@@ -732,9 +749,12 @@ mod tests {
             // Add a 5th ops leaf that has no corresponding grafted leaf (it falls below
             // the grafting height boundary since there's no complete chunk for it yet).
             let b5 = Sha256::fill(0x05);
-            let mut ops_mmr = ops_mmr.into_dirty();
-            ops_mmr.add(&mut standard, &b5);
-            let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+            let changeset = {
+                let mut batch = ops_mmr.new_batch();
+                batch.add(&mut standard, &b5);
+                batch.finalize(&mut standard)
+            };
+            ops_mmr.apply(changeset);
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());
@@ -778,14 +798,18 @@ mod tests {
         let grafting_height = 1u32;
         let standard: StandardHasher<Sha256> = StandardHasher::new();
 
-        // Build a grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
-        let mut dirty = DirtyMmr::new();
+        // Build a grafted MMR with 2 leaves via batch API + GraftedHasher.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
-        dirty.add_leaf_digest(d0);
-        dirty.add_leaf_digest(d1);
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+        let mut grafted = Mmr::new(&mut grafted_hasher);
+        let changeset = {
+            let mut batch = grafted.new_batch();
+            batch.add_leaf_digest(d0);
+            batch.add_leaf_digest(d1);
+            batch.finalize(&mut grafted_hasher)
+        };
+        grafted.apply(changeset);
 
         // Check that grafted leaves are retrievable via grafted-space positions.
         let ops_pos_0 = chunk_idx_to_ops_pos(0, grafting_height);
@@ -817,11 +841,19 @@ mod tests {
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
-        let mut dirty =
-            DirtyMmr::from_components(Vec::new(), grafted_pruned_to_pos, vec![pinned_digest]);
-        dirty.add_leaf_digest(d4);
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+        let mut grafted = Mmr::from_components(
+            &mut grafted_hasher,
+            Vec::new(),
+            grafted_pruned_to_pos,
+            vec![pinned_digest],
+        );
+        let changeset = {
+            let mut batch = grafted.new_batch();
+            batch.add_leaf_digest(d4);
+            batch.finalize(&mut grafted_hasher)
+        };
+        grafted.apply(changeset);
 
         // The pinned peak should be at grafted position 6.
         assert_eq!(grafted.get_node(Position::new(6)), Some(pinned_digest));

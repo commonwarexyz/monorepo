@@ -9,7 +9,7 @@ use commonware_storage::{
         self,
         immutable::{self, Config},
         store::LogStore,
-        Durable, Merkleized,
+        Durable,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -17,8 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias for the clean (merkleized, durable) state.
-pub type Database<E> =
-    immutable::Immutable<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
+pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator, Durable>;
 
 /// Operation type alias.
 pub type Operation = immutable::Operation<Key, Value>;
@@ -107,7 +106,7 @@ where
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
                         // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
+                        return Ok(durable_db);
                     }
                     // Not the last operation - continue in mutable state
                     db = durable_db.into_mutable();
