@@ -11,10 +11,13 @@
 use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
-        authenticated,
+        authenticated::{self, ItemChain},
         contiguous::{Contiguous, Mutable, Reader},
     },
-    mmr::Location,
+    mmr::{
+        read::{ChainInfo, MmrRead},
+        Location,
+    },
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -158,10 +161,10 @@ where
 /// `root()` returns the exact committed root -- identical to what `db.root()`
 /// will return after `apply_batch()`.
 ///
-/// `JP` is the journal parent type, matching the parent `Batch`'s `JP`.
-/// It is erased at `finalize()`.
+/// `P` is the MMR parent type from the journal batch that produced this
+/// merkleized state. It is erased at `finalize()`.
 #[allow(clippy::type_complexity)]
-pub struct MerkleizedBatch<'a, E, K, V, C, I, H, U, JP>
+pub struct MerkleizedBatch<'a, E, K, V, C, I, H, U, P>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -171,15 +174,15 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::Batchable<H, Operation<K, V, U>>,
+    P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Operation<K, V, U>>,
 {
     /// Reference to the parent DB.
     db: &'a Db<E, C, I, H, U>,
 
     /// The authenticated journal's MerkleizedBatch. Contains only THIS batch's
     /// operations. Parent operations are accessed through the MMR chain via
-    /// `JP::MmrParent`, avoiding re-encoding and re-hashing.
-    journal_merkleized: authenticated::MerkleizedBatch<'a, H, JP::Parent, Operation<K, V, U>>,
+    /// `P`, avoiding re-encoding and re-hashing.
+    journal_merkleized: authenticated::MerkleizedBatch<'a, H, P, Operation<K, V, U>>,
 
     /// Snapshot overlay: for each key touched by this batch chain,
     /// maps to the new state (including floor-raise mutations).
@@ -275,7 +278,8 @@ where
     pub async fn merkleize(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, JP>, Error> {
+    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, JP::Parent>, Error>
+    {
         let db = self.db;
         let base = self.parent_total_size;
 
@@ -587,7 +591,8 @@ where
     pub async fn merkleize(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, JP>, Error> {
+    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, JP::Parent>, Error>
+    {
         use crate::qmdb::any::ordered::{find_next_key, find_prev_key};
 
         let db = self.db;
@@ -1045,7 +1050,7 @@ where
 }
 
 // Ordered-specific: get() delegates to Db::get() which is only on ordered.
-impl<'a, E, K, V, C, I, H, JP> MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, JP>
+impl<'a, E, K, V, C, I, H, P> MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -1055,7 +1060,9 @@ where
     H: Hasher,
     Operation<K, V, update::Ordered<K, V>>: Codec,
     V::Value: Send + Sync,
-    JP: authenticated::Batchable<H, Operation<K, V, update::Ordered<K, V>>>,
+    P: MmrRead<H::Digest>
+        + ChainInfo<H::Digest>
+        + ItemChain<Operation<K, V, update::Ordered<K, V>>>,
 {
     /// Read through: overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -1073,7 +1080,7 @@ where
 // MerkleizedBatch: root, get, finalize
 // ============================================================
 
-impl<'a, E, K, V, C, I, H, U, JP> MerkleizedBatch<'a, E, K, V, C, I, H, U, JP>
+impl<'a, E, K, V, C, I, H, U, P> MerkleizedBatch<'a, E, K, V, C, I, H, U, P>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -1083,7 +1090,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::Batchable<H, Operation<K, V, U>>,
+    P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Operation<K, V, U>>,
 {
     /// Return the speculative root. This is the exact committed root -- identical
     /// to what `db.root()` will return after `apply_batch()`.
@@ -1101,17 +1108,8 @@ where
     #[allow(clippy::type_complexity)]
     pub fn new_batch(
         &self,
-    ) -> Batch<
-        '_,
-        E,
-        K,
-        V,
-        C,
-        I,
-        H,
-        U,
-        authenticated::MerkleizedBatch<'a, H, JP::Parent, Operation<K, V, U>>,
-    > {
+    ) -> Batch<'_, E, K, V, C, I, H, U, authenticated::MerkleizedBatch<'a, H, P, Operation<K, V, U>>>
+    {
         let db_journal_size = *self.db.last_commit_loc + 1;
         let chain_ops_len: u64 = self.operation_chain.iter().map(|s| s.len() as u64).sum();
         let total_size = db_journal_size + chain_ops_len;
@@ -1146,7 +1144,7 @@ where
 }
 
 // Unordered-specific: get() delegates to Db::get() which is only on unordered.
-impl<'a, E, K, V, C, I, H, JP> MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, JP>
+impl<'a, E, K, V, C, I, H, P> MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -1155,7 +1153,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, update::Unordered<K, V>>: Codec,
-    JP: authenticated::Batchable<H, Operation<K, V, update::Unordered<K, V>>>,
+    P: MmrRead<H::Digest>
+        + ChainInfo<H::Digest>
+        + ItemChain<Operation<K, V, update::Unordered<K, V>>>,
 {
     /// Read through: overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -1169,7 +1169,7 @@ where
     }
 }
 
-impl<'a, E, K, V, C, I, H, U, JP> MerkleizedBatch<'a, E, K, V, C, I, H, U, JP>
+impl<'a, E, K, V, C, I, H, U, P> MerkleizedBatch<'a, E, K, V, C, I, H, U, P>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -1179,7 +1179,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::Batchable<H, Operation<K, V, U>>,
+    P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Operation<K, V, U>>,
 {
     /// Consume this batch, producing an owned `FinalizedBatch` that can be
     /// applied to the DB without borrow conflicts.
