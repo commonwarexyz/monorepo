@@ -4,33 +4,33 @@ use core::num::NonZeroU32;
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_interpolator_creation(c: &mut Criterion) {
-    for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-        let t = N3f1::quorum(n);
-        let total = NonZeroU32::new(n).unwrap();
+    for bench_type in ["naive", "fast"] {
+        for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+            let t = N3f1::quorum(n);
+            let total = NonZeroU32::new(n).unwrap();
+            let points = BiMap::try_from_iter((0..t).map(|i| (i, i + 1)))
+                .expect("points should be in bijection");
 
-        let points = BiMap::try_from_iter((0..t).map(|i| (i, i + 1)))
-            .expect("points should be in bijection");
-
-        let naive_label = format!(
-            "{module}::interpolator_creation/type=naive n={n}",
-            module = module_path!()
-        );
-        c.bench_function(&naive_label, |b| {
-            b.iter(|| {
-                let _: Interpolator<u32, F> =
-                    Interpolator::roots_of_unity_naive(total, points.clone());
-            });
-        });
-
-        let fast_label = format!(
-            "{module}::interpolator_creation/type=fast n={n}",
-            module = module_path!()
-        );
-        c.bench_function(&fast_label, |b| {
-            b.iter(|| {
-                let _: Interpolator<u32, F> = Interpolator::roots_of_unity(total, points.clone());
-            });
-        });
+            let label = format!(
+                "{module}::interpolator_creation/type={bench_type} n={n}",
+                module = module_path!()
+            );
+            if bench_type == "naive" {
+                c.bench_function(&label, |b| {
+                    b.iter(|| {
+                        let _: Interpolator<u32, F> =
+                            Interpolator::roots_of_unity_naive(total, points.clone());
+                    });
+                });
+            } else {
+                c.bench_function(&label, |b| {
+                    b.iter(|| {
+                        let _: Interpolator<u32, F> =
+                            Interpolator::roots_of_unity(total, points.clone());
+                    });
+                });
+            }
+        }
     }
 }
 
