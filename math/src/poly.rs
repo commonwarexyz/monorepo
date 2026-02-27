@@ -1,6 +1,4 @@
-use crate::algebra::{
-    msm_naive, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
-};
+use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
@@ -475,7 +473,8 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
-impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
+#[commonware_macros::stability(ALPHA)]
+impl<I: Clone + Ord, F: crate::algebra::FieldNTT> Interpolator<I, F> {
     /// Create an interpolator for evaluation points at roots of unity.
     ///
     /// This uses the fast O(n log n) algorithm from [`crate::ntt::lagrange_coefficients`].
@@ -484,7 +483,6 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// a primitive root of unity of order `next_power_of_two(total)`.
     ///
     /// Indices `k >= total` are ignored.
-    #[commonware_macros::stability(ALPHA)]
     pub fn roots_of_unity(
         total: NonZeroU32,
         points: commonware_utils::ordered::BiMap<I, u32>,
@@ -504,8 +502,8 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// Useful for testing against [`Self::roots_of_unity`].
     ///
     /// Indices `k >= total` are ignored.
-    #[commonware_macros::stability(ALPHA)]
-    pub fn roots_of_unity_naive(
+    #[cfg(any(test, feature = "fuzz"))]
+    fn roots_of_unity_naive(
         total: NonZeroU32,
         points: commonware_utils::ordered::BiMap<I, u32>,
     ) -> Self {

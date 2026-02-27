@@ -11,6 +11,7 @@
 //! - This key material should be stored securely (e.g., encrypted at rest)
 //! - Old shares should be securely deleted after successful resharing
 
+use crate::dkg::Mode;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
@@ -19,7 +20,7 @@ use commonware_cryptography::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
-        primitives::{group::Share, sharing::Mode, variant::Variant},
+        primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
     PublicKey, Signer,
@@ -648,7 +649,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::Info,
-            primitives::{group::Scalar, sharing::Mode, variant::MinPk},
+            primitives::{group::Scalar, variant::MinPk},
         },
         ed25519, Signer,
     };
