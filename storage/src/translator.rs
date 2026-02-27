@@ -257,15 +257,8 @@ impl<T: Translator> Hashed<T> {
     /// Determinism is scoped to the current `ahash` implementation. Outputs are not guaranteed to
     /// be stable across crate versions or platforms.
     pub fn from_seed(seed: u64, inner: T) -> Self {
-        // Derive four independent seeds from the single input using ahash itself.
-        // A fixed RandomState acts as a key-derivation function: hashing (seed, index) pairs
-        // produces well-distributed independent values without requiring std::hash::DefaultHasher.
-        let kdf = ahash::RandomState::with_seeds(0, 0, 0, 0);
-        let derive = |index: u64| -> u64 { kdf.hash_one((seed, index)) };
-        let random_state =
-            ahash::RandomState::with_seeds(derive(0), derive(1), derive(2), derive(3));
         Self {
-            random_state,
+            random_state: ahash::RandomState::with_seed(seed as usize),
             inner,
         }
     }
