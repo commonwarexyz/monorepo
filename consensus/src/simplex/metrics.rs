@@ -14,6 +14,47 @@ impl Peer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum TimeoutReason {
+    Initialization,
+    Inactivity,
+    LeaderNullify,
+    LeaderTimeout,
+    AdvanceTimeout,
+    MissingProposal,
+    IgnoredProposal,
+    InvalidProposal,
+    FailedCertification,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Timeout {
+    pub leader: String,
+    pub reason: TimeoutReason,
+}
+
+impl Timeout {
+    pub fn new(leader: &impl Array, reason: TimeoutReason) -> Self {
+        Self {
+            leader: leader.to_string(),
+            reason,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Leader {
+    pub leader: String,
+}
+
+impl Leader {
+    pub fn new(leader: &impl Array) -> Self {
+        Self {
+            leader: leader.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageType {
     Notarize,
