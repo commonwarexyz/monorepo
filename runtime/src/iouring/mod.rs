@@ -37,7 +37,7 @@
 //!   Client task <- oneshot <- IoUringLoop <- CQE <- io_uring
 //!
 //! Wake path:
-//!   Submitter --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_WORK_ID)--> IoUringLoop
+//!   Submitter --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
 //!
 //! Loop behavior:
 //!   1) Drain CQEs.
@@ -47,8 +47,9 @@
 //!
 //! ## Work Tracking
 //!
-//! Each submitted operation is assigned a unique work ID that serves as the `user_data` field
-//! in the SQE. The event loop maintains a `waiters` HashMap that maps each work ID to:
+//! Each submitted operation is assigned a waiter slot index that serves as the
+//! `user_data` field in the SQE. The event loop maintains a flat `Waiters` store where
+//! each slot maps to:
 //! - A oneshot sender for returning results to the caller
 //! - An optional buffer that must be kept alive for the duration of the operation
 //! - An optional FD handle to prevent descriptor reuse while the operation is in flight
@@ -60,7 +61,8 @@
 //! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
 //! - Each operation is linked to a timeout using io_uring's `IOSQE_IO_LINK` flag
 //! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
-//! - Reserved work IDs distinguish internal timeout/wake completions from regular operations
+//! - Reserved `user_data` values distinguish internal timeout/wake completions from
+//!   regular operations
 //!
 //! ## Wake Handling
 //!
@@ -128,7 +130,6 @@ use io_uring::{
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{
-    collections::HashMap,
     fs::File,
     mem::size_of,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -140,10 +141,10 @@ use std::{
 };
 use tracing::warn;
 
-/// Reserved ID for a CQE that indicates an operation timed out.
-const TIMEOUT_WORK_ID: u64 = u64::MAX;
-/// Reserved ID for internal wake poll completions.
-const WAKE_WORK_ID: u64 = u64::MAX - 1;
+/// Reserved `user_data` value for a CQE that indicates an operation timed out.
+const TIMEOUT_USER_DATA: u64 = u64::MAX;
+/// Reserved `user_data` value for internal wake poll completions.
+const WAKE_USER_DATA: u64 = u64::MAX - 1;
 
 /// Bit used to mark that the loop is armed for sleep.
 const SLEEP_INTENT_BIT: u64 = 1;
@@ -189,21 +190,6 @@ pub enum OpFd {
     /// A file-backed descriptor.
     File(Arc<File>),
 }
-
-/// Active operations keyed by their work id.
-///
-/// Each entry keeps the caller's oneshot sender, the buffer that must stay
-/// alive until the kernel finishes touching it, and when op_timeout is enabled,
-/// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
-type Waiters = HashMap<
-    u64,
-    (
-        oneshot::Sender<(i32, Option<OpBuffer>)>,
-        Option<OpBuffer>,
-        Option<OpFd>,
-        Option<Box<Timespec>>,
-    ),
->;
 
 #[derive(Debug)]
 /// Tracks io_uring metrics.
@@ -499,7 +485,7 @@ impl Waker {
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
             .build()
-            .user_data(WAKE_WORK_ID);
+            .user_data(WAKE_USER_DATA);
 
         // SAFETY: The poll SQE owns no user pointers and references a valid FD.
         unsafe {
@@ -554,6 +540,103 @@ impl Submitter {
     }
 }
 
+/// State for one in-flight operation.
+///
+/// Holds the sender used for completion delivery and resources that must remain alive
+/// until CQE delivery.
+struct Waiter {
+    /// The oneshot sender used to deliver the operation result and buffer back to the
+    /// caller.
+    sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
+    /// The buffer associated with this operation, if any.
+    buffer: Option<OpBuffer>,
+    /// The file descriptor associated with this operation, if any. Used to keep the file
+    /// descriptor alive and prevent reuse while the operation is in-flight.
+    ///
+    /// NOTE: This field is never read since it only exists to keep the FD alive until
+    /// operation completion, hence the allow dead code.
+    #[allow(dead_code)]
+    fd: Option<OpFd>,
+    /// The linked timeout timespec associated with this operation, if any. Used to keep
+    /// the timespec alive and prevent use-after-free while the operation is in-flight.
+    timespec: Option<Timespec>,
+}
+
+/// Tracks in-flight operations and the state needed to complete them.
+struct Waiters {
+    /// Waiters indexed by slot index.
+    ///
+    /// Free slots have no waiter (`None`).
+    entries: Vec<Option<Waiter>>,
+    /// Stack of reusable free slot indices.
+    free: Vec<usize>,
+    /// Number of active waiters currently stored in `entries`.
+    len: usize,
+}
+
+impl Waiters {
+    /// Create an empty waiter set that can track at most `capacity` in-flight operations
+    /// at once.
+    fn new(capacity: usize) -> Self {
+        let mut entries = Vec::with_capacity(capacity);
+        entries.resize_with(capacity, || None);
+
+        let mut free = Vec::with_capacity(capacity);
+        free.extend((0..capacity).rev());
+
+        Self {
+            entries,
+            free,
+            len: 0,
+        }
+    }
+
+    /// Return the number of currently in-flight waiters.
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Return whether there are no in-flight waiters.
+    const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Return the waiter for `slot_index`.
+    ///
+    /// Panics if `slot_index` is out of range or not currently in use.
+    fn get(&self, slot_index: u64) -> &Waiter {
+        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
+        let slot = self.entries.get(index).expect("missing waiter");
+        slot.as_ref().expect("missing waiter")
+    }
+
+    /// Store a waiter and return its slot index.
+    ///
+    /// Panics if no free slot is available.
+    fn insert(&mut self, waiter: Waiter) -> u64 {
+        let index = self
+            .free
+            .pop()
+            .expect("waiters should not exceed configured capacity");
+        let replaced = self.entries[index].replace(waiter);
+        assert!(replaced.is_none(), "free slot should not contain waiter");
+        self.len += 1;
+        index as u64
+    }
+
+    /// Remove and return the waiter for `slot_index`.
+    ///
+    /// Panics if `slot_index` is out of range or not currently in use.
+    fn remove(&mut self, slot_index: u64) -> Waiter {
+        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
+        let slot = self.entries.get_mut(index).expect("missing waiter");
+        let waiter = slot.take().expect("missing waiter");
+        self.free.push(index);
+        self.len -= 1;
+        waiter
+    }
+}
+
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
     cfg: Config,
@@ -562,7 +645,6 @@ pub(crate) struct IoUringLoop {
     waiters: Waiters,
     waker: Waker,
     wake_rearm_needed: bool,
-    next_work_id: u64,
     processed_seq: u64,
 }
 
@@ -589,10 +671,9 @@ impl IoUringLoop {
                 cfg,
                 metrics,
                 receiver,
-                waiters: Waiters::with_capacity(size),
+                waiters: Waiters::new(size),
                 waker,
                 wake_rearm_needed: true,
-                next_work_id: 0,
                 processed_seq: 0,
             },
         )
@@ -677,6 +758,7 @@ impl IoUringLoop {
         // when `op_timeout` is enabled because each operation consumes 2 SQEs
         // (`op + linked timeout`) and staging is budgeted by SQ entries.
         while self.waiters.len() < self.cfg.size as usize {
+            // Check SQ capacity before staging each operation.
             let available = submission_queue.capacity() - submission_queue.len();
             let needed = if self.cfg.op_timeout.is_some() { 2 } else { 1 };
             if available < needed {
@@ -684,6 +766,8 @@ impl IoUringLoop {
                 break;
             }
 
+            // Try to drain one operation from the channel. If the channel is empty, we're
+            // done for now.
             let op = match self.receiver.try_recv() {
                 Ok(work) => work,
                 Err(TryRecvError::Disconnected) => return None,
@@ -701,69 +785,67 @@ impl IoUringLoop {
                 fd,
             } = op;
 
-            // Assign a unique ID, skipping reserved IDs.
-            let work_id = self.next_work_id;
-            self.next_work_id += 1;
-            if self.next_work_id >= WAKE_WORK_ID {
-                self.next_work_id = 0;
-            }
-            work = work.user_data(work_id);
+            // Prepare op timeout timespec. We build the linked timeout SQE later, after
+            // waiter insertion, so its pointer comes from stable waiter-backed storage.
+            let timespec = self.cfg.op_timeout.map(|timeout| {
+                Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos())
+            });
 
-            // Submit the operation to the ring, with timeout if configured.
-            let timespec = if let Some(timeout) = &self.cfg.op_timeout {
-                // Link the operation to the (following) timeout.
+            // Store in-flight operation state before submission.
+            let slot_index = self.waiters.insert(Waiter {
+                sender,
+                buffer,
+                fd,
+                timespec,
+            });
+
+            // Tag SQE with waiter slot index for completion matching.
+            work = work.user_data(slot_index);
+
+            if self.cfg.op_timeout.is_some() {
+                // Link this operation to the timeout SQE that will be pushed afterwards.
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
+            }
 
-                // The timespec needs to be allocated on the heap and kept
-                // alive for the duration of the operation so that the pointer
-                // stays valid.
-                let timespec = Box::new(
-                    Timespec::new()
-                        .sec(timeout.as_secs())
-                        .nsec(timeout.subsec_nanos()),
-                );
+            // Submit the operation.
+            //
+            // SAFETY:
+            // - `buffer` and `fd` are stored in `self.waiters` until CQE processing, so
+            //   SQE pointers remain valid and FD numbers cannot be reused early.
+            // - `IO_LINK` is set on `work` before pushing it, so the following timeout
+            //   SQE applies to this operation.
+            // - `available >= needed` was checked above, so this push fits.
+            unsafe {
+                submission_queue
+                    .push(&work)
+                    .expect("unable to push to queue");
+            }
 
-                // Create the timeout.
-                let timeout = LinkTimeout::new(&*timespec)
-                    .build()
-                    .user_data(TIMEOUT_WORK_ID);
+            if self.cfg.op_timeout.is_some() {
+                // Build linked timeout op from waiter-owned timespec storage.
+                let timeout = LinkTimeout::new(
+                    self.waiters
+                        .get(slot_index)
+                        .timespec
+                        .as_ref()
+                        .expect("missing timespec"),
+                )
+                .build()
+                .user_data(TIMEOUT_USER_DATA);
 
-                // Submit the op and timeout.
-                //
-                // SAFETY: `buffer`, `timespec`, and `fd` are stored in `self.waiters`
-                // until the CQE is processed, ensuring memory referenced by the SQEs
-                // remains valid and the FD cannot be reused. The ring was doubled in
-                // size for timeout support, and we checked `available >= needed` above,
-                // so the submission fits in the queue.
+                // SAFETY:
+                // - `timeout` was built from the waiter's stored `timespec`, and that
+                //   waiter entry stays alive until CQE handling, so the kernel `Timespec`
+                //   pointer remains valid.
+                // - `available >= needed` was checked above, so this push fits.
                 unsafe {
-                    submission_queue
-                        .push(&work)
-                        .expect("unable to push to queue");
                     submission_queue
                         .push(&timeout)
                         .expect("unable to push timeout to queue");
                 }
-
-                Some(timespec)
-            } else {
-                // No timeout, submit the operation normally.
-                //
-                // SAFETY: `buffer` and `fd` are stored in `self.waiters` until the
-                // CQE is processed, ensuring memory referenced by the SQE remains
-                // valid and the FD cannot be reused. We checked `available >= needed`
-                // above, so the submission fits in the queue.
-                unsafe {
-                    submission_queue
-                        .push(&work)
-                        .expect("unable to push to queue");
-                }
-
-                None
-            };
-
-            // Keep per-op resources alive until CQE handling so all SQE pointers
-            // stay valid and the FD cannot be reused early.
-            self.waiters.insert(work_id, (sender, buffer, fd, timespec));
+            }
         }
 
         // Track which submitted sequence has been consumed.
@@ -778,9 +860,9 @@ impl IoUringLoop {
     /// Internal wake and timeout CQEs are handled in-place, normal operation
     /// CQEs are matched to `waiters` and forwarded to the original requester.
     fn handle_cqe(&mut self, cqe: CqueueEntry) {
-        let work_id = cqe.user_data();
-        match work_id {
-            WAKE_WORK_ID => {
+        let user_data = cqe.user_data();
+        match user_data {
+            WAKE_USER_DATA => {
                 assert!(
                     cqe.result() >= 0,
                     "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
@@ -795,10 +877,10 @@ impl IoUringLoop {
                     self.wake_rearm_needed = true;
                 }
             }
-            TIMEOUT_WORK_ID => {
+            TIMEOUT_USER_DATA => {
                 assert!(
                     self.cfg.op_timeout.is_some(),
-                    "received TIMEOUT_WORK_ID with op_timeout disabled"
+                    "received TIMEOUT_USER_DATA with op_timeout disabled"
                 );
             }
             _ => {
@@ -810,8 +892,11 @@ impl IoUringLoop {
                     result
                 };
 
-                let (result_sender, buffer, _, _) =
-                    self.waiters.remove(&work_id).expect("missing sender");
+                let Waiter {
+                    sender: result_sender,
+                    buffer,
+                    ..
+                } = self.waiters.remove(user_data);
                 let _ = result_sender.send((result, buffer));
             }
         }
@@ -952,6 +1037,90 @@ mod tests {
         os::{fd::AsRawFd, unix::net::UnixStream},
         time::Duration,
     };
+
+    #[test]
+    fn test_waiters() {
+        // Start empty
+        let mut waiters = Waiters::new(3);
+        assert_eq!(waiters.len(), 0);
+        assert!(waiters.is_empty());
+
+        // Insert two waiters.
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+        let index0 = waiters.insert(Waiter {
+            sender: tx0,
+            buffer: Some(IoBuf::from(b"hello").into()),
+            fd: None,
+            timespec: None,
+        });
+        let index1 = waiters.insert(Waiter {
+            sender: tx1,
+            buffer: Some(IoBuf::from(b"world").into()),
+            fd: None,
+            timespec: None,
+        });
+        assert_eq!((index0, index1), (0, 1));
+        assert_eq!(waiters.len(), 2);
+        assert!(!waiters.is_empty());
+
+        // `get` returns the expected waiter state for an occupied slot.
+        match waiters.get(index0).buffer.as_ref() {
+            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"hello"),
+            _ => panic!("expected write buffer"),
+        }
+
+        // Remove the most recently inserted slot and verify we get that waiter back.
+        let waiter = waiters.remove(index1);
+        match waiter.buffer {
+            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"world"),
+            _ => panic!("expected write buffer"),
+        }
+        assert_eq!(waiters.len(), 1);
+
+        // Next allocation reuses that free slot (LIFO).
+        let (tx2, _rx2) = oneshot::channel();
+        let index2 = waiters.insert(Waiter {
+            sender: tx2,
+            buffer: None,
+            fd: None,
+            timespec: None,
+        });
+        assert_eq!(index2, index1);
+
+        // Remove remaining waiters and return to empty state.
+        waiters.remove(index0);
+        waiters.remove(index2);
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "missing waiter")]
+    fn test_waiters_remove_missing_slot_panics() {
+        let mut waiters = Waiters::new(1);
+        let _ = waiters.remove(0u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "waiters should not exceed configured capacity")]
+    fn test_waiters_insert_full_panics() {
+        let mut waiters = Waiters::new(1);
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+
+        let _ = waiters.insert(Waiter {
+            sender: tx0,
+            buffer: None,
+            fd: None,
+            timespec: None,
+        });
+        let _ = waiters.insert(Waiter {
+            sender: tx1,
+            buffer: None,
+            fd: None,
+            timespec: None,
+        });
+    }
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
