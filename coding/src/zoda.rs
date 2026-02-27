@@ -523,11 +523,19 @@ impl<D: Digest> CheckingData<D> {
         if *commitment != expected_commitment {
             return Err(Error::InvalidShard);
         }
-        let transcript = Transcript::resume(expected_commitment);
+        let mut transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
         }
+        // Commit to the checksum before generating the indices to check.
+        //
+        // Nota bene: `checksum.encode()` is *serializing* the checksum, not
+        // Reed-Solomon encoding it.
+        //
+        // cf. the implementation of `Scheme::encode` for ZODA for why it's important
+        // that we do Reed-Solomon encoding of the checksum ourselves.
+        transcript.commit(checksum.encode());
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
             .expect("checksum has too many rows")
@@ -671,15 +679,18 @@ impl<H: Hasher> Scheme for Zoda<H> {
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
 
-        // Step 5: Generate a checking matrix, and a shuffling with the commitment.
-        let transcript = Transcript::resume(commitment);
+        // Step 5: Generate a checking matrix and checksum with the commitment.
+        let mut transcript = Transcript::resume(commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
+        let checksum = Arc::new(data.mul(&checking_matrix));
+        // Bind index sampling to this checksum to prevent follower-specific malleability.
+        // It's important to commit to the checksum itself, rather than its encoding,
+        // because followers have to encode the checksum itself to prevent the leader from
+        // cheating.
+        transcript.commit(checksum.encode());
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
-        // Step 6: Multiply the data with the checking matrix.
-        let checksum = Arc::new(data.mul(&checking_matrix));
-
-        // Step 7: Produce the shards in parallel.
+        // Step 6: Produce the shards in parallel.
         let shard_results: Vec<Result<StrongShard<H::Digest>, Error>> =
             strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
                 let indices = &shuffled_indices
@@ -792,6 +803,7 @@ mod tests {
     use super::*;
     use crate::Config;
     use commonware_cryptography::Sha256;
+    use commonware_math::{algebra::Ring as _, ntt::PolynomialVector};
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
@@ -843,6 +855,81 @@ mod tests {
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn checksum_malleability() {
+        /// Construct the vanishing polynomial over specific indices.
+        ///
+        /// When encoded, this will be 0 at those indices, and non-zero elsewhere.
+        fn vanishing(lg_domain: u8, vanish_indices: &[u32]) -> PolynomialVector {
+            let w = F::root_of_unity(lg_domain).expect("domain too large for Goldilocks");
+            let mut domain = Vec::with_capacity(1usize << lg_domain);
+            let mut x = F::one();
+            for _ in 0..(1usize << lg_domain) {
+                domain.push(x);
+                x *= &w;
+            }
+            let roots: Vec<F> = vanish_indices.iter().map(|&i| domain[i as usize]).collect();
+            let mut out = EvaluationVector::empty(lg_domain as usize, 1);
+            domain.into_iter().enumerate().for_each(|(i, x)| {
+                let mut acc = F::one();
+                for root in &roots {
+                    acc *= &(x - root);
+                }
+                out.fill_row(i, &[acc]);
+            });
+            out.recover()
+        }
+
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = vec![0x5Au8; 256 * 1024];
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+
+        let leader_i = 0usize;
+        let a_i = 1usize;
+        let b_i = 2usize;
+
+        // Apply a shift to the checksums
+        {
+            let (checking_data, _, _) = Zoda::<Sha256>::weaken(
+                &config,
+                &commitment,
+                leader_i as u16,
+                shards[leader_i].clone(),
+            )
+            .unwrap();
+
+            let samples = checking_data.topology.samples;
+            let a_indices =
+                checking_data.shuffled_indices[a_i * samples..(a_i + 1) * samples].to_vec();
+            let lg_rows = checking_data.topology.encoded_rows.ilog2() as usize;
+            let shift = vanishing(lg_rows as u8, &a_indices);
+            let mut checksum = (*shards[1].checksum).clone();
+            for (i, shift_i) in shift.coefficients_up_to(checksum.rows()).enumerate() {
+                for j in 0..checksum.cols() {
+                    checksum[(i, j)] += &shift_i[0];
+                }
+            }
+            shards[1].checksum = Arc::new(checksum);
+            shards[2].checksum = shards[1].checksum.clone();
+        }
+
+        assert!(matches!(
+            Zoda::<Sha256>::weaken(&config, &commitment, b_i as u16, shards[b_i].clone()),
+            Err(Error::InvalidWeakShard)
+        ));
+
+        // Without robust Fiat-Shamir, this will succeed.
+        // This should be rejected once follower-specific challenge binding is fixed.
+        assert!(matches!(
+            Zoda::<Sha256>::weaken(&config, &commitment, a_i as u16, shards[a_i].clone()),
+            Err(Error::InvalidWeakShard)
+        ));
     }
 
     #[cfg(feature = "arbitrary")]

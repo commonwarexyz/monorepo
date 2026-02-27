@@ -86,13 +86,13 @@ pub struct Config<
     /// in a view.
     pub leader_timeout: Duration,
 
-    /// Amount of time to wait for a quorum of notarizations in a view
+    /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
-    pub notarization_timeout: Duration,
+    pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
-    pub nullify_retry: Duration,
+    pub timeout_retry: Duration,
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
@@ -134,16 +134,16 @@ impl<
             "leader timeout must be greater than zero"
         );
         assert!(
-            self.notarization_timeout > Duration::default(),
-            "notarization timeout must be greater than zero"
+            self.certification_timeout > Duration::default(),
+            "certification timeout must be greater than zero"
         );
         assert!(
-            self.leader_timeout <= self.notarization_timeout,
-            "leader timeout must be less than or equal to notarization timeout"
+            self.leader_timeout <= self.certification_timeout,
+            "leader timeout must be less than or equal to certification timeout"
         );
         assert!(
-            self.nullify_retry > Duration::default(),
-            "nullify retry broadcast must be greater than zero"
+            self.timeout_retry > Duration::default(),
+            "timeout retry broadcast must be greater than zero"
         );
         assert!(
             !self.activity_timeout.is_zero(),

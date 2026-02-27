@@ -7,7 +7,7 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         elector::Config as Elector,
-        metrics::{self, Outbound},
+        metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
@@ -133,8 +133,8 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
-        if cfg.leader_timeout > cfg.notarization_timeout {
-            panic!("leader timeout must be less than or equal to notarization timeout");
+        if cfg.leader_timeout > cfg.certification_timeout {
+            panic!("leader timeout must be less than or equal to certification timeout");
         }
 
         // Initialize metrics
@@ -169,8 +169,8 @@ impl<
                 epoch: cfg.epoch,
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
-                nullify_retry: cfg.nullify_retry,
+                certification_timeout: cfg.certification_timeout,
+                timeout_retry: cfg.timeout_retry,
             },
         );
         (
@@ -352,7 +352,7 @@ impl<
     }
 
     /// Handle a timeout.
-    async fn handle_timeout<Sp: Sender, Sr: Sender>(
+    async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
@@ -368,7 +368,7 @@ impl<
             return;
         };
 
-        // Broadcast entry to help others enter the view.
+        // Broadcast entry to help others enter the view (if on retry).
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
@@ -813,7 +813,8 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        self.state.expire_round(observed_view);
+        self.state
+            .trigger_timeout(observed_view, TimeoutReason::Initialization);
 
         // Initialize batcher with leader for current view
         //
@@ -890,8 +891,12 @@ impl<
                     .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
-                // Trigger the timeout
-                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                // Process the timeout
+                self.timeout(
+                    &mut batcher,
+                    &mut vote_sender,
+                    &mut certificate_sender,
+                )
                     .await;
                 view = self.state.current_view();
             },
@@ -904,6 +909,7 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
+                        self.state.trigger_timeout(context.view(), TimeoutReason::MissingProposal);
                         continue;
                     }
                 };
@@ -939,17 +945,13 @@ impl<
                         self.state.verified(view);
                     }
                     Ok(false) => {
-                        // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(
-                            &mut batcher,
-                            &mut vote_sender,
-                            &mut certificate_sender,
-                        )
-                        .await;
+                        self.state.trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
+                        self.state
+                            .trigger_timeout(context.view(), TimeoutReason::IgnoredProposal);
                     }
                 };
             },
@@ -1037,6 +1039,11 @@ impl<
                             }
                         }
                     }
+                    Message::Timeout(target_view, reason) => {
+                        view = target_view;
+                        debug!(%target_view, ?reason, "timing out view");
+                        self.state.trigger_timeout(target_view, reason);
+                    }
                 }
             },
             on_end => {
@@ -1069,13 +1076,14 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // If the leader is not active (and not us), we should reduce leader timeout to now
-                    let is_active = batcher
+                    // If the leader nullified or is inactive, reduce leader
+                    // timeout to now
+                    if let Some(reason) = batcher
                         .update(current_view, leader, self.state.last_finalized())
-                        .await;
-                    if !is_active && !self.state.is_me(leader) {
-                        debug!(%view, %leader, "skipping leader timeout due to inactivity");
-                        self.state.expire_round(current_view);
+                        .await
+                    {
+                        debug!(%current_view, %leader, ?reason, "nullifying round");
+                        self.state.trigger_timeout(current_view, reason);
                     }
                 }
             },

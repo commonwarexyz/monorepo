@@ -520,6 +520,7 @@ impl<'a, D: Digest, P: MmrRead<D> + ChainInfo<D>> ChainInfo<D> for MerkleizedBat
 
 impl<'a, D: Digest, P: MmrRead<D>> MerkleizedBatch<'a, D, P> {
     /// Access the parent MMR.
+    #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
         self.parent
     }
