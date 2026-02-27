@@ -11,7 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        diff,
+        batch,
         journaled::{CleanMmr, DirtyMmr, Mmr, State},
         mem::{Clean, Dirty},
         read::{ChainInfo, MmrRead},
@@ -60,7 +60,7 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for CleanMmr
 /// A speculative batch of mutations against an authenticated journal.
 /// Tracks both MMR leaf digests and the corresponding journal items.
 pub struct Batch<'a, H: Hasher, P: MmrRead<H::Digest>, Item> {
-    inner: diff::UnmerkleizedBatch<'a, H::Digest, P>,
+    inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
     hasher: StandardHasher<H>,
     items: Vec<Item>,
 }
@@ -84,7 +84,7 @@ impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Encode> Batch<'a, H, P, Item> {
 
 /// A merkleized speculative batch with tracked items.
 pub struct MerkleizedBatch<'a, H: Hasher, P: MmrRead<H::Digest>, Item> {
-    inner: diff::MerkleizedBatch<'a, H::Digest, P>,
+    inner: batch::MerkleizedBatch<'a, H::Digest, P>,
     items: Arc<Vec<Item>>,
 }
 
@@ -143,7 +143,7 @@ impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Send + Sync + Encode>
     /// Takes `&self` so the parent is immutable: multiple children can be forked
     /// from the same parent.
     pub fn new_batch(&self) -> Batch<'_, H, Self, Item> {
-        let inner = diff::UnmerkleizedBatch::new(self);
+        let inner = batch::UnmerkleizedBatch::new(self);
         #[cfg(feature = "std")]
         let inner = inner.with_pool(self.inner.pool());
         Batch {
@@ -158,7 +158,7 @@ impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
     P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
 {
-    /// Consume this batch, flatten the diff chain into an owned changeset, and
+    /// Consume this batch, flatten the batch chain into an owned changeset, and
     /// collect all item Arcs from the entire chain. The result is fully owned
     /// and can be applied to the journal without borrow conflicts.
     pub fn finalize(self) -> FinalizedBatch<H::Digest, Item> {
@@ -174,7 +174,7 @@ where
 
 /// A finalized batch ready to be applied. Fully owned, no borrows.
 pub struct FinalizedBatch<D: Digest, Item> {
-    changeset: diff::Changeset<D>,
+    changeset: batch::Changeset<D>,
     item_chain: Vec<Arc<Vec<Item>>>,
 }
 

@@ -1,11 +1,11 @@
-//! A lightweight, borrow-based diff layer over a merkleized MMR.
+//! A lightweight, borrow-based batch layer over a merkleized MMR.
 //!
 //! # Overview
 //!
-//! A [`Diff`] borrows a parent MMR (anything implementing [`MmrRead`])
+//! A [`Batch`] borrows a parent MMR (anything implementing [`MmrRead`])
 //! immutably and records mutations -- appends, leaf updates, pops, and
-//! pruning advances -- without touching the parent. Multiple diffs can
-//! coexist on the same parent, and diffs can be stacked (Base <- A <- B)
+//! pruning advances -- without touching the parent. Multiple batches can
+//! coexist on the same parent, and batches can be stacked (Base <- A <- B)
 //! to arbitrary depth.
 //!
 //! # Lifecycle
@@ -76,12 +76,12 @@ cfg_if::cfg_if! {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
-/// A diff layer over a parent MMR.
+/// A batch layer over a parent MMR.
 ///
 /// Stores only mutations (appends, overwrites, pops, pruning) and reads
 /// through the parent for unchanged nodes. The type-state parameter `S`
-/// tracks whether the diff has been merkleized ([`Clean`]) or not ([`Dirty`]).
-pub struct Diff<'a, D: Digest, P: MmrRead<D>, S: State<D> = Dirty> {
+/// tracks whether the batch has been merkleized ([`Clean`]) or not ([`Dirty`]).
+pub struct Batch<'a, D: Digest, P: MmrRead<D>, S: State<D> = Dirty> {
     parent: &'a P,
     /// How many of the parent's nodes remain visible (decreases on pop).
     parent_visible: Position,
@@ -98,13 +98,13 @@ pub struct Diff<'a, D: Digest, P: MmrRead<D>, S: State<D> = Dirty> {
     pool: Option<ThreadPool>,
 }
 
-/// A diff whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = Diff<'a, D, P, Dirty>;
+/// A batch whose root digest has not been computed.
+pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
 
-/// A diff whose root digest has been computed.
-pub type MerkleizedBatch<'a, D, P> = Diff<'a, D, P, Clean<D>>;
+/// A batch whose root digest has been computed.
+pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 
-/// Owned delta extracted from a diff chain, relative to the ultimate base.
+/// Owned delta extracted from a batch chain, relative to the ultimate base.
 ///
 /// Apply via [`super::mem::CleanMmr::apply`].
 pub struct Changeset<D: Digest> {
@@ -120,7 +120,7 @@ pub struct Changeset<D: Digest> {
     pub(crate) pruned_to_pos: Position,
 }
 
-impl<'a, D: Digest, P: MmrRead<D>, S: State<D>> Diff<'a, D, P, S> {
+impl<'a, D: Digest, P: MmrRead<D>, S: State<D>> Batch<'a, D, P, S> {
     /// The total number of nodes visible through this diff.
     fn effective_size(&self) -> Position {
         Position::new(*self.parent_visible + self.appended.len() as u64)
@@ -352,7 +352,7 @@ impl<'a, D: Digest, P: MmrRead<D>> UnmerkleizedBatch<'a, D, P> {
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        Diff {
+        Batch {
             parent: self.parent,
             parent_visible: self.parent_visible,
             appended: self.appended,
@@ -540,7 +540,7 @@ impl<'a, D: Digest, P: MmrRead<D>> MerkleizedBatch<'a, D, P> {
 
     /// Convert back to a dirty diff for further mutations.
     pub fn into_dirty(self) -> UnmerkleizedBatch<'a, D, P> {
-        Diff {
+        Batch {
             parent: self.parent,
             parent_visible: self.parent_visible,
             appended: self.appended,
@@ -608,7 +608,7 @@ mod tests {
 
     use commonware_cryptography::sha256;
 
-    /// For N in {1, 2, 10, 100, 199}, build via reference and via Diff, verify same root and nodes.
+    /// For N in {1, 2, 10, 100, 199}, build via reference and via Batch, verify same root and nodes.
     #[test]
     fn test_consistency_with_reference() {
         let executor = deterministic::Runner::default();
@@ -619,7 +619,7 @@ mod tests {
                 // Reference via build_reference
                 let reference = build_reference(&mut hasher, n);
 
-                // Via Diff: start from empty base, add all via diff
+                // Via Batch: start from empty base, add all via batch
                 let base = CleanMmr::new(&mut hasher);
                 let mut diff = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
@@ -664,7 +664,7 @@ mod tests {
             }
             let clean_diff = diff.merkleize(&mut hasher);
 
-            // Diff root should differ from base.
+            // Batch root should differ from base.
             assert_ne!(clean_diff.root(), base_root);
 
             // Proof from clean diff should work.
@@ -1206,7 +1206,7 @@ mod tests {
         });
     }
 
-    /// Diff advances pruning, changeset carries it, apply prunes base.
+    /// Batch advances pruning, changeset carries it, apply prunes base.
     #[test]
     fn test_advance_pruning() {
         let executor = deterministic::Runner::default();

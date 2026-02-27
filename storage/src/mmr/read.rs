@@ -2,11 +2,11 @@
 //!
 //! [`MmrRead`] provides a synchronous, `no_std`-compatible interface for
 //! reading from any merkleized MMR. It is implemented by [`super::mem::Mmr`]
-//! (base) and [`super::diff::MerkleizedBatch`] (diff layer).
+//! (base) and [`super::batch::MerkleizedBatch`] (batch layer).
 //!
 //! [`ChainInfo`] is used internally by changeset flattening to walk stacked
-//! diff chains. It appears in public trait bounds (e.g. on
-//! [`super::diff::MerkleizedBatch::into_changeset`]) but callers never need
+//! batch chains. It appears in public trait bounds (e.g. on
+//! [`super::batch::MerkleizedBatch::into_changeset`]) but callers never need
 //! to name it directly because all concrete MMR types already implement it.
 
 use crate::mmr::{iterator::PeakIterator, proof, Error, Location, Position, Proof};
@@ -76,9 +76,9 @@ pub trait MmrRead<D: Digest>: Send + Sync {
     }
 }
 
-/// Information needed to flatten a stack of diffs into a single [`super::diff::Changeset`].
+/// Information needed to flatten a stack of batches into a single [`super::batch::Changeset`].
 ///
-/// When diffs are stacked (Base <- A <- B), `into_changeset` must produce a
+/// When batches are stacked (Base <- A <- B), `into_changeset` must produce a
 /// changeset relative to the ultimate base MMR, not just the immediate parent.
 /// This trait lets it recurse through the chain to discover the base size and
 /// collect overwrites from every layer.
@@ -90,7 +90,7 @@ pub trait MmrRead<D: Digest>: Send + Sync {
 /// (e.g. `MerkleizedBatch::into_changeset`), but callers never need to
 /// implement or name it directly.
 pub trait ChainInfo<D: Digest> {
-    /// Node count of the base MMR at the bottom of the diff chain.
+    /// Node count of the base MMR at the bottom of the batch chain.
     fn base_size(&self) -> Position;
 
     /// Highest base position still visible after accounting for all pops in

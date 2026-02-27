@@ -1,7 +1,7 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::mmr::{
-    diff::UnmerkleizedBatch, location::LocationRangeExt as _, mem::CleanMmr, Location,
+    batch::UnmerkleizedBatch, location::LocationRangeExt as _, mem::CleanMmr, Location,
     StandardHasher,
 };
 use criterion::{criterion_group, Criterion};

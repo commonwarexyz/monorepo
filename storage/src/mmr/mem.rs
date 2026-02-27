@@ -433,16 +433,16 @@ impl<D: Digest> CleanMmr<D> {
         self.pinned_nodes.clone()
     }
 
-    /// Create a new [`super::diff::UnmerkleizedBatch`] that borrows this MMR.
-    pub fn new_batch(&self) -> super::diff::UnmerkleizedBatch<'_, D, Self> {
-        super::diff::UnmerkleizedBatch::new(self)
+    /// Create a new [`super::batch::UnmerkleizedBatch`] that borrows this MMR.
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, D, Self> {
+        super::batch::UnmerkleizedBatch::new(self)
     }
 
-    /// Apply a changeset produced by [`super::diff::MerkleizedBatch::into_changeset`].
+    /// Apply a changeset produced by [`super::batch::MerkleizedBatch::into_changeset`].
     ///
     /// This is the only way to transfer diff changes into the base MMR.
     /// After apply, the base's root matches the diff's root.
-    pub fn apply(&mut self, changeset: super::diff::Changeset<D>) {
+    pub fn apply(&mut self, changeset: super::batch::Changeset<D>) {
         // 1. Truncate: if diff popped into base range, remove tail nodes.
         if changeset.parent_end < self.size() {
             let keep = (*changeset.parent_end - *self.pruned_to_pos) as usize;

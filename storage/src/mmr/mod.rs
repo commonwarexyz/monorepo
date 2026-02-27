@@ -67,7 +67,7 @@
 //! )
 //! ```
 
-pub mod diff;
+pub mod batch;
 pub mod hasher;
 pub mod iterator;
 pub mod location;
@@ -87,7 +87,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub use diff::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};

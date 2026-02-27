@@ -13,7 +13,7 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        diff::UnmerkleizedBatch,
+        batch::UnmerkleizedBatch,
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
         mem::{CleanMmr, Config},

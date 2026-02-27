@@ -14,7 +14,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        diff::{self, UnmerkleizedBatch},
+        batch::{self, UnmerkleizedBatch},
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
@@ -793,12 +793,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         Ok(())
     }
 
-    /// Apply a changeset produced by the diff/batch API.
-    pub fn apply(&mut self, changeset: diff::Changeset<D>) {
+    /// Apply a changeset produced by the batch API.
+    pub fn apply(&mut self, changeset: batch::Changeset<D>) {
         self.inner.get_mut().mem_mmr.apply(changeset);
     }
 
-    /// Create a new batch for adding elements via the diff/batch API.
+    /// Create a new batch for adding elements via the batch API.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, D, Self> {
         UnmerkleizedBatch::new(self).with_pool(self.pool())
     }

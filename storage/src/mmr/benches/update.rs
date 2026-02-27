@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{diff::UnmerkleizedBatch, mem::CleanMmr, Location, StandardHasher};
+use commonware_storage::mmr::{batch::UnmerkleizedBatch, mem::CleanMmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
