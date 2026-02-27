@@ -32,7 +32,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
-    pub mod translator;
 
     /// A storage structure with capabilities to persist and recover state across restarts.
     pub trait Persistable {
@@ -58,4 +57,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// artifacts. This can be used to clean up disk resources in tests.
         fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
+});
+commonware_macros::stability_scope!(BETA {
+    pub mod translator;
 });
