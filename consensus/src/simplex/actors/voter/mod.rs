@@ -3398,7 +3398,8 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            // Keep the mailbox alive for the duration of the restarted actor.
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -4635,8 +4636,9 @@ mod tests {
 
     /// Regression: a canceled certification attempt must not be persisted as failure.
     ///
-    /// We first trigger a canceled certify receiver, restart the voter, and then require
-    /// successful certification for the same view from replayed notarization state.
+    /// We first trigger a canceled certify receiver, restart the voter, and then require:
+    /// 1. successful certification for the same view from replayed notarization state, and
+    /// 2. no immediate timeout/nullify for that view after restart.
     fn cancelled_certification_recertifies_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4820,7 +4822,8 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            // Keep the mailbox alive for the duration of the restarted actor.
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -4848,17 +4851,29 @@ mod tests {
                 response.send(None).unwrap();
             }
 
+            let mut saw_immediate_nullify = false;
             let recertified = loop {
                 select! {
-                    msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                    msg = resolver_receiver.recv() => match msg {
+                        Some(MailboxMessage::Certified { view, success }) if view == target_view => {
                             break success;
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                        Some(MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_)) => {}
+                        None => break false,
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        match msg {
+                            Some(batcher::Message::Constructed(Vote::Nullify(nullify)))
+                                if nullify.view() == target_view =>
+                            {
+                                saw_immediate_nullify = true;
+                                break false;
+                            }
+                            Some(batcher::Message::Update { response, .. }) => {
+                                response.send(None).unwrap();
+                            }
+                            Some(_) => {}
+                            None => break false,
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -4868,8 +4883,24 @@ mod tests {
             };
 
             assert!(
+                !saw_immediate_nullify,
+                "unexpected immediate nullify for view {target_view} after restart"
+            );
+            assert!(
                 recertified,
                 "expected successful certification after restart for canceled certification view"
+            );
+
+            // Give reporter a moment to ingest any late events and ensure no nullify artifacts
+            // were emitted for the restarted target view.
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(
+                !reporter.nullifies.lock().contains_key(&target_view),
+                "did not expect nullify votes for restarted view {target_view}"
+            );
+            assert!(
+                !reporter.nullifications.lock().contains_key(&target_view),
+                "did not expect nullification certificate for restarted view {target_view}"
             );
         });
     }
