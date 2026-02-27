@@ -159,7 +159,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
-        let pos = self.journal.append(item).await?;
+        let pos = self.journal.append(&item).await?;
         let _ = self.metrics.tip.try_set(pos + 1);
         debug!(pos, "appended item");
         Ok(pos)

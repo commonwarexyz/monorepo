@@ -508,7 +508,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
-    pub async fn append(&self, item: V) -> Result<u64, Error> {
+    pub async fn append(&self, item: &V) -> Result<u64, Error> {
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
@@ -519,7 +519,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         let (offset, _size) = inner.data.append(section, item).await?;
 
         // Append offset to offsets journal
-        let offsets_pos = self.offsets.append(offset).await?;
+        let offsets_pos = self.offsets.append(&offset).await?;
         assert_eq!(offsets_pos, inner.size);
 
         // Return the current position
@@ -883,7 +883,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 continue;
             }
 
-            offsets.append(offset).await?;
+            offsets.append(&offset).await?;
         }
 
         Ok(())
@@ -904,7 +904,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+    async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
 
@@ -973,7 +973,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         item: V,
     ) -> Result<(u64, u32), Error> {
         let mut inner = self.inner.write().await;
-        inner.data.append(section, item).await
+        inner.data.append(section, &item).await
     }
 
     /// Test helper: Sync the internal data journal.
@@ -1028,7 +1028,7 @@ mod tests {
 
             // Append 40 items across 4 sections (0-3)
             for i in 0..40u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
 
             // Prune to position 20 (removes sections 0-1, keeps sections 2-3)
@@ -1084,7 +1084,7 @@ mod tests {
 
             // Append 20 items across 2 sections
             for i in 0..20u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             variable.sync().await.unwrap();
@@ -1116,7 +1116,7 @@ mod tests {
             }
 
             // Can append new data starting at position 20
-            let pos = journal.append(999).await.unwrap();
+            let pos = journal.append(&999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
 
@@ -1143,7 +1143,7 @@ mod tests {
 
             // Append 40 items across 4 sections (0-3)
             for i in 0..40u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
 
             // Test 1: Full replay
@@ -1275,7 +1275,7 @@ mod tests {
 
             // Append items across 4 sections: [0-9], [10-19], [20-29], [30-39]
             for i in 0..40u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
 
             // Initial state: all items accessible
@@ -1363,7 +1363,7 @@ mod tests {
                 .unwrap();
 
             for i in 0..100u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
 
             let bounds = journal.bounds().await;
@@ -1410,7 +1410,7 @@ mod tests {
 
             // === Phase 4: Append new data ===
             // Next append should get position 100
-            journal.append(10000).await.unwrap();
+            journal.append(&10000).await.unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 101);
             // Now we have one item at position 100
@@ -1450,7 +1450,7 @@ mod tests {
 
             // Append 40 items across 4 sections to both journals
             for i in 0..40u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             // Prune to position 10 normally (both data and offsets journals pruned)
@@ -1513,7 +1513,7 @@ mod tests {
 
             // Append 40 items across 4 sections to both journals
             for i in 0..40u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             // Prune offsets journal ahead of data journal (impossible state)
@@ -1550,7 +1550,7 @@ mod tests {
 
             // Append 15 items to both journals (fills section 0, partial section 1)
             for i in 0..15u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             assert_eq!(variable.size().await, 15);
@@ -1607,7 +1607,7 @@ mod tests {
 
             // Append 50 items across 5 sections to both journals
             for i in 0..50u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             // Prune to position 10 normally (both data and offsets journals pruned)
@@ -1676,7 +1676,7 @@ mod tests {
 
             // Append 25 items across 3 sections (section 0: 0-9, section 1: 10-19, section 2: 20-24)
             for i in 0..25u64 {
-                variable.append(i * 100).await.unwrap();
+                variable.append(&(i * 100)).await.unwrap();
             }
 
             assert_eq!(variable.size().await, 25);
@@ -1708,7 +1708,7 @@ mod tests {
             assert_eq!(variable.test_offsets_size().await, 25);
 
             // Verify next append gets position 25
-            let pos = variable.append(2500).await.unwrap();
+            let pos = variable.append(&2500).await.unwrap();
             assert_eq!(pos, 25);
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
@@ -1738,7 +1738,7 @@ mod tests {
 
             // Append 10 items (positions 0-9), fills section 0
             for i in 0..10u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 10);
@@ -1807,7 +1807,7 @@ mod tests {
 
             // Append items across a section boundary
             for i in 0..15u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
 
             // Manually sync only data to simulate crash during concurrent sync
@@ -1854,7 +1854,7 @@ mod tests {
             assert!(journal.bounds().await.is_empty());
 
             // Next append should get position 0
-            let pos = journal.append(100).await.unwrap();
+            let pos = journal.append(&100).await.unwrap();
             assert_eq!(pos, 0);
             assert_eq!(journal.size().await, 1);
             assert_eq!(journal.read(0).await.unwrap(), 100);
@@ -1889,13 +1889,13 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Next append should get position 10
-            let pos = journal.append(1000).await.unwrap();
+            let pos = journal.append(&1000).await.unwrap();
             assert_eq!(pos, 10);
             assert_eq!(journal.size().await, 11);
             assert_eq!(journal.read(10).await.unwrap(), 1000);
 
             // Can continue appending
-            let pos = journal.append(1001).await.unwrap();
+            let pos = journal.append(&1001).await.unwrap();
             assert_eq!(pos, 11);
             assert_eq!(journal.read(11).await.unwrap(), 1001);
 
@@ -1929,7 +1929,7 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Next append should get position 7
-            let pos = journal.append(700).await.unwrap();
+            let pos = journal.append(&700).await.unwrap();
             assert_eq!(pos, 7);
             assert_eq!(journal.size().await, 8);
             assert_eq!(journal.read(7).await.unwrap(), 700);
@@ -1959,7 +1959,7 @@ mod tests {
 
             // Append some items
             for i in 0..5u64 {
-                let pos = journal.append(1500 + i).await.unwrap();
+                let pos = journal.append(&(1500 + i)).await.unwrap();
                 assert_eq!(pos, 15 + i);
             }
 
@@ -1984,7 +1984,7 @@ mod tests {
             }
 
             // Can continue appending
-            let pos = journal.append(9999).await.unwrap();
+            let pos = journal.append(&9999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 9999);
 
@@ -2028,7 +2028,7 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Can append starting at position 15
-            let pos = journal.append(1500).await.unwrap();
+            let pos = journal.append(&1500).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 1500);
 
@@ -2058,7 +2058,7 @@ mod tests {
 
             // Append 3 items at positions 7, 8, 9 (fills rest of section 1)
             for i in 0..3u64 {
-                let pos = journal.append(700 + i).await.unwrap();
+                let pos = journal.append(&(700 + i)).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
 
@@ -2114,7 +2114,7 @@ mod tests {
 
             // Append 8 items: positions 7-14 (section 1: 3 items, section 2: 5 items)
             for i in 0..8u64 {
-                let pos = journal.append(700 + i).await.unwrap();
+                let pos = journal.append(&(700 + i)).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
 
@@ -2164,7 +2164,7 @@ mod tests {
                 .await
                 .unwrap();
             for i in 0..7u64 {
-                journal.append(100 + i).await.unwrap();
+                journal.append(&(100 + i)).await.unwrap();
             }
             journal.sync().await.unwrap();
 
@@ -2181,7 +2181,7 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Append one item at position 7.
-            let pos = journal.append(777).await.unwrap();
+            let pos = journal.append(&777).await.unwrap();
             assert_eq!(pos, 7);
             assert_eq!(journal.size().await, 8);
             assert_eq!(journal.read(7).await.unwrap(), 777);
@@ -2233,7 +2233,7 @@ mod tests {
 
             // Append 3 items
             for i in 0..3u64 {
-                journal.append(700 + i).await.unwrap();
+                journal.append(&(700 + i)).await.unwrap();
             }
 
             // Sync only the data journal, not offsets (simulate crash)
@@ -2280,7 +2280,7 @@ mod tests {
 
             // Append a few items at positions 7..9
             for i in 0..3u64 {
-                let pos = journal.append(700 + i).await.unwrap();
+                let pos = journal.append(&(700 + i)).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
             assert_eq!(journal.bounds().await.start, 7);
@@ -2319,7 +2319,7 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Next append should get position 1000
-            let pos = journal.append(100000).await.unwrap();
+            let pos = journal.append(&100000).await.unwrap();
             assert_eq!(pos, 1000);
             assert_eq!(journal.read(1000).await.unwrap(), 100000);
 
@@ -2347,7 +2347,7 @@ mod tests {
 
             // Append items 20-29
             for i in 0..10u64 {
-                journal.append(2000 + i).await.unwrap();
+                journal.append(&(2000 + i)).await.unwrap();
             }
 
             assert_eq!(journal.size().await, 30);
@@ -2365,7 +2365,7 @@ mod tests {
             }
 
             // Continue appending
-            let pos = journal.append(3000).await.unwrap();
+            let pos = journal.append(&3000).await.unwrap();
             assert_eq!(pos, 30);
 
             journal.destroy().await.unwrap();
@@ -2399,11 +2399,11 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Append items using the contiguous API
-            let pos1 = journal.append(42u64).await.unwrap();
+            let pos1 = journal.append(&42u64).await.unwrap();
             assert_eq!(pos1, lower_bound);
             assert_eq!(journal.read(pos1).await.unwrap(), 42u64);
 
-            let pos2 = journal.append(43u64).await.unwrap();
+            let pos2 = journal.append(&43u64).await.unwrap();
             assert_eq!(pos2, lower_bound + 1);
             assert_eq!(journal.read(pos2).await.unwrap(), 43u64);
 
@@ -2433,7 +2433,7 @@ mod tests {
 
             // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
             for i in 0..20u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2471,7 +2471,7 @@ mod tests {
             ));
 
             // Assert journal can accept new items
-            let pos = journal.append(999).await.unwrap();
+            let pos = journal.append(&999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
 
@@ -2527,7 +2527,7 @@ mod tests {
 
             // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
             for i in 0..20u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2564,7 +2564,7 @@ mod tests {
             ));
 
             // Assert journal can accept new operations
-            let pos = journal.append(999).await.unwrap();
+            let pos = journal.append(&999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
 
@@ -2598,7 +2598,7 @@ mod tests {
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
-                journal.append(i * 1000).await.unwrap();
+                journal.append(&(i * 1000)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2644,7 +2644,7 @@ mod tests {
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2697,7 +2697,7 @@ mod tests {
 
             // Add data at positions 0-24 (sections 0-4 with items_per_section=5)
             for i in 0..25u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2734,7 +2734,7 @@ mod tests {
             ));
 
             // Assert journal can accept new operations
-            let pos = journal.append(999).await.unwrap();
+            let pos = journal.append(&999).await.unwrap();
             assert_eq!(pos, 25);
             assert_eq!(journal.read(25).await.unwrap(), 999);
 
@@ -2765,7 +2765,7 @@ mod tests {
 
             // Add data at positions 0-14 (sections 0-2 with items_per_section=5)
             for i in 0..15u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -2803,7 +2803,7 @@ mod tests {
             ));
 
             // Assert journal can accept new operations
-            let pos = journal.append(999).await.unwrap();
+            let pos = journal.append(&999).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 999);
 
@@ -2839,7 +2839,7 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Append 1 item (value = position * 100, so position 0 has value 0)
-            let pos = journal.append(0).await.unwrap();
+            let pos = journal.append(&0).await.unwrap();
             assert_eq!(pos, 0);
             assert_eq!(journal.size().await, 1);
 
@@ -2852,7 +2852,7 @@ mod tests {
 
             // === Test 2: Multiple items with single item per section ===
             for i in 1..10u64 {
-                let pos = journal.append(i * 100).await.unwrap();
+                let pos = journal.append(&(i * 100)).await.unwrap();
                 assert_eq!(pos, i);
                 assert_eq!(journal.size().await, i + 1);
 
@@ -2898,7 +2898,7 @@ mod tests {
 
             // Append more items after pruning
             for i in 10..15u64 {
-                let pos = journal.append(i * 100).await.unwrap();
+                let pos = journal.append(&(i * 100)).await.unwrap();
                 assert_eq!(pos, i);
 
                 // Verify we can read from size() - 1
@@ -2939,7 +2939,7 @@ mod tests {
 
             // Append 10 items (positions 0-9)
             for i in 0..10u64 {
-                journal.append(i * 1000).await.unwrap();
+                journal.append(&(i * 1000)).await.unwrap();
             }
 
             // Prune to position 5 (removes positions 0-4)
@@ -2981,7 +2981,7 @@ mod tests {
                 .unwrap();
 
             for i in 0..5u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             journal.sync().await.unwrap();
 
@@ -2996,7 +2996,7 @@ mod tests {
             assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
 
             // After appending, reading works again
-            journal.append(500).await.unwrap();
+            journal.append(&500).await.unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 5);
             assert_eq!(journal.read(bounds.end - 1).await.unwrap(), 500);
@@ -3024,7 +3024,7 @@ mod tests {
 
             // Append 25 items (spanning multiple sections)
             for i in 0..25u64 {
-                journal.append(i * 100).await.unwrap();
+                journal.append(&(i * 100)).await.unwrap();
             }
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 25);
@@ -3057,7 +3057,7 @@ mod tests {
 
             // Append new data starting at position 100
             for i in 100..105u64 {
-                let pos = journal.append(i * 100).await.unwrap();
+                let pos = journal.append(&(i * 100)).await.unwrap();
                 assert_eq!(pos, i);
             }
             let bounds = journal.bounds().await;

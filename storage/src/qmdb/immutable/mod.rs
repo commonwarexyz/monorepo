@@ -295,7 +295,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         if journal.size().await == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             let mut dirty_journal = journal.into_dirty();
-            dirty_journal.append(Operation::Commit(None)).await?;
+            dirty_journal.append(&Operation::Commit(None)).await?;
             journal = dirty_journal.merkleize();
             journal.sync().await?;
         }
@@ -397,7 +397,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.journal.append(op).await?;
+        self.journal.append(&op).await?;
 
         Ok(())
     }
@@ -431,7 +431,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         ),
         Error,
     > {
-        let loc = self.journal.append(Operation::Commit(metadata)).await?;
+        let loc = self.journal.append(&Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         self.last_commit_loc = loc;
         let range = loc..loc + 1;

@@ -6,6 +6,7 @@ use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof,
+    read::{ChainInfo, MmrRead},
     Error::{self, *},
     Location, Position, Proof,
 };
@@ -65,6 +66,26 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {}
+
+impl Dirty {
+    /// Insert a dirty node. Returns true if newly inserted.
+    pub(crate) fn insert(&mut self, pos: Position, height: u32) -> bool {
+        self.dirty_nodes.insert((pos, height))
+    }
+
+    /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
+    pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
+        let mut v: Vec<_> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        v.sort_by_key(|a| a.1);
+        v
+    }
+
+    /// Remove all dirty nodes at positions >= cutoff.
+    pub(crate) fn remove_above(&mut self, cutoff: Position) {
+        let _ = self.dirty_nodes.split_off(&(cutoff, 0));
+    }
+}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -411,6 +432,78 @@ impl<D: Digest> CleanMmr<D> {
     pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.pinned_nodes.clone()
     }
+
+    /// Create a new [`super::batch::UnmerkleizedBatch`] that borrows this MMR.
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, D, Self> {
+        super::batch::UnmerkleizedBatch::new(self)
+    }
+
+    /// Apply a changeset produced by [`super::batch::MerkleizedBatch::into_changeset`].
+    ///
+    /// This is the only way to transfer diff changes into the base MMR.
+    /// After apply, the base's root matches the diff's root.
+    pub fn apply(&mut self, changeset: super::batch::Changeset<D>) {
+        // 1. Truncate: if diff popped into base range, remove tail nodes.
+        if changeset.parent_end < self.size() {
+            let keep = (*changeset.parent_end - *self.pruned_to_pos) as usize;
+            self.nodes.truncate(keep);
+        }
+
+        // 2. Overwrite: write modified digests into surviving base nodes.
+        for (pos, digest) in changeset.overwrites {
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+        }
+
+        // 3. Append: push new nodes onto the end.
+        for digest in changeset.appended {
+            self.nodes.push_back(digest);
+        }
+
+        // 4. Root: set the pre-computed root from the diff.
+        self.state = Clean {
+            root: changeset.root,
+        };
+
+        // 5. Prune: if pruning advanced, physically prune and pin.
+        //    Must be last because prune_to_pos needs all nodes present.
+        if changeset.pruned_to_pos > self.pruned_to_pos {
+            self.prune_to_pos(changeset.pruned_to_pos);
+        }
+    }
+}
+
+impl<D: Digest> MmrRead<D> for CleanMmr<D> {
+    fn size(&self) -> Position {
+        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        if pos < self.pruned_to_pos {
+            return self.pinned_nodes.get(&pos).copied();
+        }
+        self.nodes.get(self.pos_to_index(pos)).copied()
+    }
+
+    fn root(&self) -> D {
+        *self.root()
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.pruned_to_pos
+    }
+}
+
+impl<D: Digest> ChainInfo<D> for CleanMmr<D> {
+    fn base_size(&self) -> Position {
+        self.size()
+    }
+
+    fn base_visible(&self) -> Position {
+        self.size()
+    }
+
+    fn collect_chain_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 /// Implementation for Dirty MMR state.

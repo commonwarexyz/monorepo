@@ -14,6 +14,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        batch::{self, UnmerkleizedBatch},
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
@@ -22,6 +23,7 @@ use crate::{
             State as MemState,
         },
         position::Position,
+        read::{ChainInfo, MmrRead},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -377,7 +379,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             for p in journal.size().await..*mem_mmr.size() {
                 let p = Position::new(p);
                 let node = *mem_mmr.get_node_unchecked(p);
-                journal.append(node).await?;
+                journal.append(&node).await?;
             }
             journal.sync().await?;
             assert_eq!(mem_mmr.size(), journal.size().await);
@@ -594,7 +596,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
         // Append missing nodes to the journal without holding the mem_mmr read lock.
         for node in missing_nodes {
-            self.journal.append(node).await?;
+            self.journal.append(&node).await?;
         }
 
         // Sync the journal while still holding the sync_lock to ensure durability before returning.
@@ -760,7 +762,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         let mut written_count = 0usize;
         for i in *journal_size..*inner.mem_mmr.size() {
             let node = *inner.mem_mmr.get_node_unchecked(Position::new(i));
-            self.journal.append(node).await?;
+            self.journal.append(&node).await?;
             written_count += 1;
             if written_count >= write_limit {
                 break;
@@ -790,6 +792,51 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // Don't actually prune the journal to simulate failure
         Ok(())
     }
+
+    /// Apply a changeset produced by the batch API.
+    pub fn apply(&mut self, changeset: batch::Changeset<D>) {
+        self.inner.get_mut().mem_mmr.apply(changeset);
+    }
+
+    /// Create a new batch for adding elements via the batch API.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, D, Self> {
+        UnmerkleizedBatch::new(self).with_pool(self.pool())
+    }
+
+    /// Return the thread pool, if any.
+    pub fn pool(&self) -> Option<ThreadPool> {
+        self.pool.clone()
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, D: Digest> MmrRead<D> for CleanMmr<E, D> {
+    fn size(&self) -> Position {
+        self.size()
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        self.inner.read().mem_mmr.get_node(pos)
+    }
+
+    fn root(&self) -> D {
+        *self.inner.read().mem_mmr.root()
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.inner.read().pruned_to_pos
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<D> for CleanMmr<E, D> {
+    fn base_size(&self) -> Position {
+        self.size()
+    }
+
+    fn base_visible(&self) -> Position {
+        self.size()
+    }
+
+    fn collect_chain_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
@@ -1009,7 +1056,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
         // Write the cached pending nodes to the journal.
         for node in pending_nodes {
-            clean_mmr.journal.append(node).await?;
+            clean_mmr.journal.append(&node).await?;
         }
         clean_mmr.journal.sync().await?;
 
@@ -2881,6 +2928,66 @@ mod tests {
                 failures.is_empty(),
                 "historical proof generation returned unexpected errors: {failures:?}"
             );
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Create batch A, merkleize, create batch B via `merkleized_a.new_batch()`,
+    /// merkleize, flatten changeset, apply, and verify root matches a reference MMR.
+    #[test_traced]
+    fn test_journaled_mmr_batch_stacking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
+
+            // Build base journaled MMR with 10 elements.
+            let mut mmr = Mmr::init(
+                context.clone(),
+                &mut Standard::<Sha256>::new(),
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+
+            for i in 0u64..10 {
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                let dirty = mmr.into_dirty();
+                dirty.add(&mut hasher, &element).unwrap();
+                mmr = dirty.merkleize(&mut hasher);
+            }
+            mmr.sync().await.unwrap();
+
+            // Batch A: add 5 elements.
+            let mut batch_a = mmr.new_batch();
+            for i in 10u64..15 {
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                batch_a.add(&mut hasher, &element);
+            }
+            let merkleized_a = batch_a.merkleize(&mut hasher);
+
+            // Batch B on merkleized A: add 5 more elements.
+            let mut batch_b = merkleized_a.new_batch();
+            for i in 15u64..20 {
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                batch_b.add(&mut hasher, &element);
+            }
+            let merkleized_b = batch_b.merkleize(&mut hasher);
+            let expected_root = merkleized_b.root();
+
+            // Flatten and apply.
+            let changeset = merkleized_b.into_changeset();
+            drop(merkleized_a);
+            mmr.apply(changeset);
+            assert_eq!(mmr.root(), expected_root);
+
+            // Build a reference in-memory MMR with 20 elements to verify.
+            let empty = mem::CleanMmr::new(&mut hasher);
+            let reference = build_test_mmr(&mut hasher, empty, 20);
+            assert_eq!(mmr.root(), *reference.root());
 
             mmr.destroy().await.unwrap();
         });

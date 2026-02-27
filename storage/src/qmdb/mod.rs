@@ -335,7 +335,7 @@ where
         }
 
         // Apply the operation at tip.
-        self.log.append(op).await?;
+        self.log.append(&op).await?;
 
         Ok(true)
     }

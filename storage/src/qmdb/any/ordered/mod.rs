@@ -309,7 +309,7 @@ where
 
                 // Update the log and snapshot.
                 delete_known_loc(&mut self.snapshot, &key, old_loc);
-                self.log.append(Operation::Delete(key)).await?;
+                self.log.append(&Operation::Delete(key)).await?;
                 callback(false, Some(old_loc));
 
                 // Each delete reduces the active key count by one and inactivates that key.
@@ -373,7 +373,7 @@ where
                 value: value.clone(),
                 next_key,
             });
-            self.log.append(op).await?;
+            self.log.append(&op).await?;
             callback(true, Some(loc));
 
             // Each update of an existing key inactivates its previous location.
@@ -393,7 +393,7 @@ where
             });
 
             // Each newly created key increases the active key count.
-            self.log.append(op).await?;
+            self.log.append(&op).await?;
             callback(true, None);
             self.active_keys += 1;
 
@@ -415,7 +415,7 @@ where
                 value: prev_value.clone(),
                 next_key,
             });
-            self.log.append(op).await?;
+            self.log.append(&op).await?;
             callback(true, Some(*prev_loc));
 
             // Each key whose next-key value is updated inactivates its previous location.
@@ -442,7 +442,7 @@ where
                 value: prev_value.clone(),
                 next_key,
             });
-            self.log.append(op).await?;
+            self.log.append(&op).await?;
             callback(true, Some(*prev_loc));
 
             // Each key whose next-key value is updated inactivates its previous location.
