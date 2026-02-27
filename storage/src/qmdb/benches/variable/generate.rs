@@ -10,7 +10,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::qmdb::{
-    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    any::states::{CleanAny, MutableAny},
     store::LogStore,
     Error,
 };
@@ -90,20 +90,15 @@ async fn test_db<C>(
 ) -> Result<Duration, Error>
 where
     C: CleanAny<Key = Digest>,
-    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    <C::Mutable as MutableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
+    C::Mutable: MutableAny<Key = Digest, Clean = C> + LogStore<Value = Vec<u8>>,
 {
     let start = Instant::now();
 
     // Convert clean → mutable
     let mutable = db.into_mutable();
 
-    // Generate random operations, returns in durable state
-    let durable = gen_random_kv(mutable, elements, operations, commit_frequency).await;
-
-    // Convert durable → provable (clean) for pruning
-    let mut clean = durable.into_merkleized().await?;
+    // Generate random operations, returns in clean state
+    let mut clean = gen_random_kv(mutable, elements, operations, commit_frequency).await;
     clean.prune(clean.inactivity_floor_loc().await).await?;
     clean.sync().await?;
 

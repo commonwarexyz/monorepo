@@ -7,7 +7,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::variable::Db as OVariable,
-            states::{MutableAny, UnmerkleizedDurableAny},
+            states::{CleanAny, MutableAny},
             unordered::variable::Db as UVariable,
             VariableConfig as AConfig,
         },
@@ -77,11 +77,11 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) db type aliases for Any databases.
+/// Clean (Durable) db type aliases for Any databases.
 type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
-/// Clean (Merkleized, Durable) db type aliases for Current databases.
+/// Clean (Durable) db type aliases for Current databases.
 type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
@@ -154,16 +154,15 @@ async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
 ///
-/// Takes a mutable database and returns it in durable state after final commit.
+/// Takes a mutable database and returns it in clean state after final commit.
 async fn gen_random_kv<M>(
     mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: u32,
-) -> M::Durable
+) -> M::Clean
 where
     M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -187,13 +186,13 @@ where
         assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             assert!(db.write_batch(batch.into_iter()).await.is_ok());
-            let (durable, _) = db.commit(None).await.unwrap();
-            db = durable.into_mutable();
+            let (clean, _) = db.commit(None).await.unwrap();
+            db = clean.into_mutable();
             batch = db.start_batch();
         }
     }
 
     assert!(db.write_batch(batch.into_iter()).await.is_ok());
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    let (clean, _) = db.commit(None).await.expect("commit shouldn't fail");
+    clean
 }

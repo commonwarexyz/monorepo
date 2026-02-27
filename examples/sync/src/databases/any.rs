@@ -102,7 +102,7 @@ where
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
                         // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
+                        return Ok(durable_db);
                     }
                     // Not the last operation - continue in mutable state
                     db = durable_db.into_mutable();

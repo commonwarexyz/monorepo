@@ -12,7 +12,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::qmdb::{
-    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    any::states::{CleanAny, MutableAny},
     store::LogStore,
 };
 use criterion::{criterion_group, Criterion};
@@ -36,13 +36,10 @@ cfg_if::cfg_if! {
 async fn setup_db<C>(db: C, elements: u64, operations: u64)
 where
     C: CleanAny<Key = Digest>,
-    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    <C::Mutable as MutableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
+    C::Mutable: MutableAny<Key = Digest, Clean = C> + LogStore<Value = Vec<u8>>,
 {
     let mutable = db.into_mutable();
-    let durable = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;
-    let mut clean = durable.into_merkleized().await.unwrap();
+    let mut clean = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;
     clean
         .prune(clean.inactivity_floor_loc().await)
         .await

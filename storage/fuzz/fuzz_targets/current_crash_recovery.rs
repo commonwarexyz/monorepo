@@ -213,20 +213,30 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         }
-                        let Ok(clean_db) = durable_db.into_merkleized().await else {
-                            break;
-                        };
-                        db = Some(clean_db.into_mutable());
+                        db = Some(durable_db.into_mutable());
                     }
                     CurrentOperation::Prune => {
-                        let Ok(mut merkleized_db) = current.into_merkleized().await else {
+                        let Ok((mut durable_db, _)) = current.commit(None).await else {
+                            for key in pending.keys() {
+                                committed.remove(key);
+                            }
                             break;
                         };
-                        let floor = merkleized_db.inactivity_floor_loc();
-                        if merkleized_db.prune(floor).await.is_err() {
+                        for (k, v) in pending.drain() {
+                            match v {
+                                Some(val) => {
+                                    committed.insert(k, val);
+                                }
+                                None => {
+                                    committed.remove(&k);
+                                }
+                            }
+                        }
+                        let floor = durable_db.inactivity_floor_loc();
+                        if durable_db.prune(floor).await.is_err() {
                             break;
                         }
-                        db = Some(merkleized_db.into_mutable());
+                        db = Some(durable_db.into_mutable());
                     }
                 }
             }
@@ -309,12 +319,8 @@ fn fuzz(input: FuzzInput) {
                 .commit(None)
                 .await
                 .expect("commit after recovery should succeed");
-            let clean_db = durable_db
-                .into_merkleized()
-                .await
-                .expect("merkleize after recovery should succeed");
 
-            clean_db
+            durable_db
                 .destroy()
                 .await
                 .expect("destroy after recovery should succeed");

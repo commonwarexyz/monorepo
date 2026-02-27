@@ -1,8 +1,7 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::mmr::{
-    batch::UnmerkleizedBatch, location::LocationRangeExt as _, mem::CleanMmr, Location,
-    StandardHasher,
+    batch::UnmerkleizedBatch, location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -19,7 +18,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 

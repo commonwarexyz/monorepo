@@ -11,7 +11,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            states::{MutableAny, UnmerkleizedDurableAny},
+            states::{CleanAny, MutableAny},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
@@ -94,7 +94,7 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) Db type aliases for Any databases.
+/// Clean (Durable) Db type aliases for Any databases.
 type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
 type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
 type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
@@ -240,16 +240,15 @@ async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations (if Some), or at the end (if None).
 ///
-/// Takes a mutable database and returns it in durable state after final commit.
+/// Takes a mutable database and returns it in clean state after final commit.
 async fn gen_random_kv<M>(
     mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> M::Durable
+) -> M::Clean
 where
     M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -282,8 +281,8 @@ where
                 db.write_batch(iter)
                     .await
                     .expect("write_batch shouldn't fail");
-                let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-                db = durable.into_mutable();
+                let (clean, _) = db.commit(None).await.expect("commit shouldn't fail");
+                db = clean.into_mutable();
                 batch = db.start_batch();
             }
         }
@@ -293,6 +292,6 @@ where
     db.write_batch(iter)
         .await
         .expect("write_batch shouldn't fail");
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    let (clean, _) = db.commit(None).await.expect("commit shouldn't fail");
+    clean
 }

@@ -15,29 +15,21 @@
 //!
 //! # Database States
 //!
-//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
-//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//! An _authenticated_ database can be in one of two states based on durability:
+//! - [Durable] (committed to disk, also called _Clean_)
+//! - [NonDurable] (uncommitted changes, also called _Mutable_)
 //!
-//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//! The root hash is always computed (the database is always merkleized).
 //!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
-//!
-//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
-//! - `init()`                                      → `Clean`
-//! - `Clean.into_mutable()`                        → `Mutable`
-//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
-//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
-//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
-//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
+//! State transitions result from `into_mutable()` and `commit()`:
+//! - `init()`                -> `Clean`
+//! - `Clean.into_mutable()`  -> `Mutable`
+//! - `Mutable.commit()`      -> `Clean`
 //!
 //! An authenticated database implements [store::LogStore] in every state, and keyed databases
 //! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
 //!
 //! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
-//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
 //!
 //! Keyed databases additionally implement:
 //! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
@@ -53,10 +45,9 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{journaled::State as MerkleizationState, Location},
+    mmr::Location,
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
-use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -123,10 +114,6 @@ impl From<crate::journal::authenticated::Error> for Error {
     }
 }
 
-/// Type alias for merkleized state of a QMDB.
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state of a QMDB.
-pub type Unmerkleized = crate::mmr::mem::Dirty;
 /// Type alias for durable state of a QMDB.
 pub type Durable = store::Durable;
 /// Type alias for non-durable state of a QMDB.

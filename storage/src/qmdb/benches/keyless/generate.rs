@@ -9,7 +9,7 @@ use commonware_runtime::{
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
-    NonDurable, Unmerkleized,
+    NonDurable,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
@@ -52,11 +52,11 @@ fn keyless_cfg(
     }
 }
 
-/// Clean (Merkleized, Durable) db type alias for Keyless.
+/// Clean (Durable) db type alias for Keyless.
 type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
 
-/// Mutable (Unmerkleized, NonDurable) type alias for Keyless.
-type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
+/// Mutable (NonDurable) type alias for Keyless.
+type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, NonDurable>;
 
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
@@ -77,8 +77,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
             db = durable.into_mutable();
         }
     }
-    let (durable, _) = db.commit(None).await.unwrap();
-    let mut clean = durable.into_merkleized();
+    let (mut clean, _) = db.commit(None).await.unwrap();
     clean.sync().await.unwrap();
 
     clean

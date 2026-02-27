@@ -13,30 +13,19 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::{db::Merkleized, FixedConfig as Config},
+        current::FixedConfig as Config,
         Durable, Error,
     },
     translator::Translator,
 };
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    super::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
-        Index<T, Location>,
-        H,
-        N,
-        S,
-        D,
-    >;
+pub type Db<E, K, V, H, T, const N: usize, D = Durable> =
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N, D>;
 
-// Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -44,7 +33,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
+    > Db<E, K, V, H, T, N, Durable>
 {
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -66,12 +55,12 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{unordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
-            current::{db::Merkleized, FixedConfig as Config},
+            current::FixedConfig as Config,
             Durable, Error,
         },
         translator::Translator,
     };
-    use commonware_cryptography::{DigestOf, Hasher};
+    use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
 
@@ -81,27 +70,17 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<
-        E,
-        K,
-        V,
-        H,
-        T,
-        const P: usize,
-        const N: usize,
-        S = Merkleized<DigestOf<H>>,
-        D = Durable,
-    > = crate::qmdb::current::unordered::db::Db<
-        E,
-        Journal<E, Operation<K, V>>,
-        K,
-        FixedEncoding<V>,
-        Index<T, Location, P>,
-        H,
-        N,
-        S,
-        D,
-    >;
+    pub type Db<E, K, V, H, T, const P: usize, const N: usize, D = Durable> =
+        crate::qmdb::current::unordered::db::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            K,
+            FixedEncoding<V>,
+            Index<T, Location, P>,
+            H,
+            N,
+            D,
+        >;
 
     impl<
             E: RStorage + Clock + Metrics,
@@ -111,7 +90,7 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
+        > Db<E, K, V, H, T, P, N, Durable>
     {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
         /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -130,7 +109,6 @@ pub mod test {
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
-                db::Unmerkleized,
                 proof::RangeProof,
                 tests::{apply_random_ops, fixed_config},
             },
@@ -154,7 +132,7 @@ pub mod test {
 
     /// A type alias for the concrete mutable [Db] type used in these unit tests.
     type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, NonDurable>;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(
@@ -183,7 +161,6 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -212,7 +189,6 @@ pub mod test {
             let mut db = db.into_mutable();
             db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -354,7 +330,6 @@ pub mod test {
             .await
             .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -410,7 +385,6 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -496,8 +470,8 @@ pub mod test {
                 let mut dirty_db = db.into_mutable();
                 dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
-                let (durable_db, _) = dirty_db.commit(None).await.unwrap();
-                db = durable_db.into_merkleized().await.unwrap();
+                let (clean_db, _) = dirty_db.commit(None).await.unwrap();
+                db = clean_db;
                 let root = db.root();
 
                 // Create a proof for the current value of k.

@@ -106,7 +106,7 @@ fn fuzz(data: FuzzInput) {
                         .commit(Some(Value::new(*value)))
                         .await
                         .expect("commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
+                    db = durable_db.into_mutable();
 
                     // Restore batch for subsequent operations
                     batch = Some(db.start_batch());
@@ -149,7 +149,7 @@ fn fuzz(data: FuzzInput) {
             .await
             .expect("write batch should not fail");
         let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        let db = durable_db.into_merkleized();
+        let db = durable_db;
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {

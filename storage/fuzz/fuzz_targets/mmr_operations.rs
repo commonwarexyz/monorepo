@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::CleanMmr, Location, Position, StandardHasher as Standard};
+use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -137,7 +137,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -157,9 +157,13 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_pos = dirty_mmr.add(&mut hasher, limited_data);
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
+                    let changeset = {
+                        let mut batch = mmr.new_batch();
+                        let mmr_pos_inner = batch.add(&mut hasher, limited_data);
+                        (mmr_pos_inner, batch.finalize(&mut hasher))
+                    };
+                    let mmr_pos = changeset.0;
+                    mmr.apply(changeset.1);
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
@@ -182,9 +186,14 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::Pop => {
                     let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_result = dirty_mmr.pop();
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
+                    let mmr_result = {
+                        let mut batch = mmr.new_batch();
+                        let r = batch.pop();
+                        if r.is_ok() {
+                            mmr.apply(batch.finalize(&mut hasher));
+                        }
+                        r
+                    };
                     let ref_result = reference.pop();
 
                     assert_eq!(

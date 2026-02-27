@@ -28,7 +28,7 @@ use crate::{
         },
         operation::Key,
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, MerkleizationState, NonDurable,
+        DurabilityState, Durable, Error, NonDurable,
     },
     Persistable,
 };
@@ -49,42 +49,6 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid [Db] type states.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
-    /// The merkleization type state for the inner `any::db::Db`.
-    type MerkleizationState: MerkleizationState<D>;
-}
-
-/// Merkleized state: the database has been merkleized and its root is cached.
-pub struct Merkleized<D: Digest> {
-    /// The cached canonical root.
-    /// See the [Root structure](super) section in the module documentation.
-    pub(super) root: D,
-}
-
-impl<D: Digest> private::Sealed for Merkleized<D> {}
-impl<D: Digest> State<D> for Merkleized<D> {
-    type MerkleizationState = mmr::mem::Clean<D>;
-}
-
-/// Unmerkleized state: the database has pending changes not yet merkleized.
-pub struct Unmerkleized {
-    /// Bitmap chunks modified since the last merkleization. Only contains chunks that were
-    /// complete at last merkleization (index < old_grafted_leaves). Chunks completed or created
-    /// since then are covered by the `old_grafted_leaves..new_grafted_leaves` range in
-    /// `into_merkleized`.
-    pub(super) dirty_chunks: HashSet<usize>,
-}
-
-impl private::Sealed for Unmerkleized {}
-impl<D: Digest> State<D> for Unmerkleized {
-    type MerkleizationState = mmr::mem::Dirty;
-}
-
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
     E: Storage + Clock + Metrics,
@@ -93,12 +57,11 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    S: State<DigestOf<H>> = Merkleized<DigestOf<H>>,
     D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, S::MerkleizationState, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U, D>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -109,7 +72,7 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -119,12 +82,19 @@ pub struct Db<
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
 
-    /// Type state based on whether the database is [Merkleized] or [Unmerkleized].
-    pub(super) state: S,
+    /// Bitmap chunks modified since the last merkleization. Only contains chunks that were
+    /// complete at last merkleization (index < old_grafted_leaves). Chunks completed or created
+    /// since then are covered by the `old_grafted_leaves..new_grafted_leaves` range in
+    /// `commit`.
+    pub(super) dirty_chunks: HashSet<usize>,
+
+    /// The cached canonical root.
+    /// See the [Root structure](super) section in the module documentation.
+    pub(super) root: DigestOf<H>,
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, C, I, H, U, const N: usize, S, D> Db<E, C, I, H, U, N, S, D>
+impl<E, K, V, C, I, H, U, const N: usize, D> Db<E, C, I, H, U, N, D>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -133,7 +103,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: State<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -167,8 +136,8 @@ where
     }
 }
 
-// Functionality shared across Merkleized states with non-mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+// Functionality for the Durable state with non-mutable journal.
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -177,7 +146,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
@@ -190,24 +158,11 @@ where
             &self.any.log.mmr,
         )
     }
-}
 
-// Root and proof functionality for Clean state with non-mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
     /// Returns the canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub const fn root(&self) -> H::Digest {
-        self.state.root
+        self.root
     }
 
     /// Returns the ops MMR root.
@@ -263,8 +218,8 @@ where
     }
 }
 
-// Functionality shared across Merkleized states with mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+// Functionality for the Durable state with mutable journal.
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -273,7 +228,6 @@ where
     C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
@@ -345,8 +299,8 @@ where
     }
 }
 
-// Functionality specific to (Merkleized, Durable) state, such as ability to persist the database.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+// Functionality specific to Durable state with persistence.
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -376,150 +330,21 @@ where
     }
 
     /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, NonDurable> {
         Db {
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
             metadata: self.metadata,
             thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: HashSet::new(),
-            },
+            dirty_chunks: HashSet::new(),
+            root: self.root,
         }
     }
 }
 
-// Functionality shared across Unmerkleized states.
-impl<E, K, V, U, C, I, H, const N: usize, D> Db<E, C, I, H, U, N, Unmerkleized, D>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
-{
-    /// Merkleize the database and transition to the provable state.
-    pub async fn into_merkleized(
-        self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>, Error> {
-        let Self {
-            any,
-            mut status,
-            grafted_mmr,
-            metadata,
-            thread_pool: pool,
-            state,
-        } = self;
-
-        // Merkleize the any db
-        let mut any = any.into_merkleized();
-
-        // Number of grafted leaves (i.e. complete bitmap chunks) at last merkleization.
-        let old_grafted_leaves = *grafted_mmr.leaves() as usize;
-        // Number of grafted leaves (i.e. complete bitmap chunks) now.
-        let new_grafted_leaves = status.complete_chunks();
-
-        // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
-        // dirty_chunks is guaranteed to only contain indices < old_grafted_leaves, so no
-        // filtering or deduplication is needed.
-        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-            .chain(state.dirty_chunks.iter().copied())
-            .map(|chunk_idx| (chunk_idx, *status.get_chunk(chunk_idx)));
-        let grafted_leaves = compute_grafted_leaves::<H, N>(
-            &mut any.log.hasher,
-            &any.log.mmr,
-            chunks_to_update,
-            pool.as_ref(),
-        )
-        .await?;
-
-        // Update the grafted MMR with new/dirty leaves and re-merkleize.
-        let grafting_height = grafting::height::<N>();
-        let mut dirty = grafted_mmr.into_dirty();
-        for &(ops_pos, digest) in &grafted_leaves {
-            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
-            if grafted_pos < dirty.size() {
-                let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
-                dirty
-                    .update_leaf_digest(loc, digest)
-                    .expect("update_leaf_digest failed");
-            } else {
-                dirty.add_leaf_digest(digest);
-            }
-        }
-        let mut grafted_mmr = {
-            let mut grafted_hasher =
-                grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
-            dirty.merkleize(&mut grafted_hasher, pool.clone())
-        };
-
-        // Prune bitmap chunks that are fully below the inactivity floor. All their bits are
-        // guaranteed to be 0, so we can discard them.
-        status.prune_to_bit(*any.inactivity_floor_loc);
-
-        // Prune the grafted MMR to match: nodes for pruned bitmap chunks are no longer needed
-        // in memory. `prune_to_pos` pins the O(log n) peak digests covering the pruned region,
-        // which remain accessible via `get_node` for root computation and metadata persistence.
-        let pruned_chunks = status.pruned_chunks() as u64;
-        if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos =
-                Position::try_from(Location::new_unchecked(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
-                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
-            }
-        }
-
-        // Compute and cache the root.
-        let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
-        let partial_chunk = partial_chunk(&status);
-        let ops_root = any.log.root();
-        let root = compute_db_root(&mut any.log.hasher, &storage, partial_chunk, &ops_root).await?;
-
-        Ok(Db {
-            any,
-            status,
-            grafted_mmr,
-            metadata,
-            thread_pool: pool,
-            state: Merkleized { root },
-        })
-    }
-}
-
-// Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: self.state.dirty_chunks,
-            },
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, NonDurable>
+// Functionality specific to the NonDurable (mutable) state.
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -544,12 +369,12 @@ where
         self.status.set_bit(*self.any.last_commit_loc, false);
         let chunk = BitMap::<N>::to_chunk_index(*self.any.last_commit_loc);
         if chunk < old_grafted_leaves {
-            self.state.dirty_chunks.insert(chunk);
+            self.dirty_chunks.insert(chunk);
         }
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let dirty_chunks = &mut self.state.dirty_chunks;
+        let dirty_chunks = &mut self.dirty_chunks;
         let inactivity_floor_loc = self
             .any
             .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, _new_loc| {
@@ -570,16 +395,17 @@ where
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// This transitions to the Durable state without merkleizing. Returns the committed database
-    /// and the `[start_loc, end_loc)` range of committed operations.
+    /// This also merkleizes the grafted MMR and computes the canonical root.
+    /// Returns the committed database and the `[start_loc, end_loc)` range of committed
+    /// operations.
     pub async fn commit(
         mut self,
         metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, N, Unmerkleized, Durable>, Range<Location>), Error> {
+    ) -> Result<(Db<E, C, I, H, U, N, Durable>, Range<Location>), Error> {
         let range = self.apply_commit_op(metadata).await?;
 
-        // Transition to Durable state without merkleizing
-        let any = any::db::Db {
+        // Transition to Durable state.
+        let mut any = any::db::Db {
             log: self.any.log,
             inactivity_floor_loc: self.any.inactivity_floor_loc,
             last_commit_loc: self.any.last_commit_loc,
@@ -589,51 +415,79 @@ where
             _update: core::marker::PhantomData,
         };
 
+        // Merkleize: compute grafted leaves for new/dirty bitmap chunks.
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
+        let new_grafted_leaves = self.status.complete_chunks();
+        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
+            .chain(self.dirty_chunks.iter().copied())
+            .map(|chunk_idx| (chunk_idx, *self.status.get_chunk(chunk_idx)));
+        let grafted_leaves = compute_grafted_leaves::<H, N>(
+            &mut any.log.hasher,
+            &any.log.mmr,
+            chunks_to_update,
+            self.thread_pool.as_ref(),
+        )
+        .await?;
+
+        // Update the grafted MMR with new/dirty leaves via batch API.
+        let grafting_height = grafting::height::<N>();
+        let mut grafted_mmr = self.grafted_mmr;
+        if !grafted_leaves.is_empty() {
+            let changeset = {
+                let mut batch = grafted_mmr.new_batch().with_pool(self.thread_pool.clone());
+                for &(ops_pos, digest) in &grafted_leaves {
+                    let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
+                    if grafted_pos < batch.size() {
+                        let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
+                        batch
+                            .update_leaf_digest(loc, digest)
+                            .expect("update_leaf_digest failed");
+                    } else {
+                        batch.add_leaf_digest(digest);
+                    }
+                }
+                let mut grafted_hasher =
+                    grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
+                batch.finalize(&mut grafted_hasher)
+            };
+            grafted_mmr.apply(changeset);
+        }
+
+        // Prune bitmap chunks that are fully below the inactivity floor.
+        self.status.prune_to_bit(*any.inactivity_floor_loc);
+
+        // Prune the grafted MMR to match.
+        let pruned_chunks = self.status.pruned_chunks() as u64;
+        if pruned_chunks > 0 {
+            let new_grafted_mmr_prune_pos =
+                Position::try_from(Location::new_unchecked(pruned_chunks))?;
+            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
+                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            }
+        }
+
+        // Compute and cache the canonical root.
+        let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
+        let partial_chunk = partial_chunk(&self.status);
+        let ops_root = any.log.root();
+        let root = compute_db_root(&mut any.log.hasher, &storage, partial_chunk, &ops_root).await?;
+
         Ok((
             Db {
                 any,
                 status: self.status,
-                grafted_mmr: self.grafted_mmr,
+                grafted_mmr,
                 metadata: self.metadata,
                 thread_pool: self.thread_pool,
-                state: Unmerkleized {
-                    dirty_chunks: self.state.dirty_chunks,
-                },
+                dirty_chunks: HashSet::new(),
+                root,
             },
             range,
         ))
     }
 }
 
-// Functionality specific to (Merkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: HashSet::new(),
-            },
-        }
-    }
-}
-
-impl<E, K, V, U, C, I, H, const N: usize> Persistable
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -660,12 +514,11 @@ where
     }
 }
 
-// MerkleizedStore for Clean state.
+// MerkleizedStore for Durable state.
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -695,7 +548,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize, S, D> LogStore for Db<E, C, I, H, U, N, S, D>
+impl<E, K, V, U, C, I, H, const N: usize, D> LogStore for Db<E, C, I, H, U, N, D>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -704,7 +557,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: State<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -719,8 +571,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D, const N: usize> PrunableStore
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+impl<E, K, V, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -729,7 +580,6 @@ where
     C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
@@ -885,7 +735,7 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     )
 }
 
-/// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
+/// Build a grafted [mmr::mem::Mmr] from scratch using bitmap chunks and the ops MMR.
 ///
 /// For each non-pruned complete chunk (index in `pruned_chunks..complete_chunks`), reads the
 /// ops MMR node at the grafting height to compute the grafted leaf (see the
@@ -898,7 +748,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::CleanMmr<H::Digest>, Error> {
+) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -912,29 +762,33 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     )
     .await?;
 
-    // Build a DirtyMmr: either from pruned components or empty.
-    let mut dirty = if pruned_chunks > 0 {
+    // Build a base Mmr: either from pruned components or empty.
+    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
+    let mut grafted_mmr = if pruned_chunks > 0 {
         let grafted_pruned_to_pos =
             Position::try_from(Location::new_unchecked(pruned_chunks as u64))
                 .expect("pruned_chunks overflow");
-        mmr::mem::DirtyMmr::from_components(
+        mmr::mem::Mmr::from_components(
+            &mut grafted_hasher,
             Vec::new(),
             grafted_pruned_to_pos,
             pinned_nodes.to_vec(),
         )
     } else {
-        mmr::mem::DirtyMmr::default()
+        mmr::mem::Mmr::new(&mut grafted_hasher)
     };
 
-    // Add each grafted leaf digest. Leaves arrive in chunk-index order (ascending),
-    // which is the same as grafted leaf location order.
-    for &(_ops_pos, digest) in &leaves {
-        dirty.add_leaf_digest(digest);
+    // Add each grafted leaf digest via the batch API.
+    if !leaves.is_empty() {
+        let changeset = {
+            let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
+            for &(_ops_pos, digest) in &leaves {
+                batch.add_leaf_digest(digest);
+            }
+            batch.finalize(&mut grafted_hasher)
+        };
+        grafted_mmr.apply(changeset);
     }
-
-    // Merkleize with the GraftedHasher to produce ops-space positions in hash pre-images.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
-    let grafted_mmr = dirty.merkleize(&mut grafted_hasher, pool.cloned());
 
     Ok(grafted_mmr)
 }

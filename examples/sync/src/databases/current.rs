@@ -111,7 +111,7 @@ where
                 Operation::CommitFloor(metadata, _) => {
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
-                        return durable_db.into_merkleized().await;
+                        return Ok(durable_db);
                     }
                     db = durable_db.into_mutable();
                 }
