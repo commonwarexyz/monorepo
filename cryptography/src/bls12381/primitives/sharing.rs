@@ -45,6 +45,29 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub(crate) const fn max_supported() -> Self {
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))]
+        {
+            Self::RootsOfUnity
+        }
+        #[cfg(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))]
+        {
+            Self::NonZeroCounter
+        }
+    }
+
     /// Compute the scalar for one participant.
     ///
     /// This will return `None` only if `i >= total`.
@@ -209,13 +232,16 @@ impl Write for Mode {
 }
 
 impl Read for Mode {
-    type Cfg = ();
+    type Cfg = Self;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
+        max_supported_mode: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let tag: u8 = ReadExt::read(buf)?;
+        if tag > *max_supported_mode as u8 {
+            return Err(commonware_codec::Error::InvalidEnum(tag));
+        }
         match tag {
             0 => Ok(Self::NonZeroCounter),
             #[cfg(not(any(
@@ -364,18 +390,18 @@ impl<V: Variant> Write for Sharing<V> {
 }
 
 impl<V: Variant> Read for Sharing<V> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, Mode);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
+        (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let mode = ReadExt::read(buf)?;
+        let mode = Read::read_cfg(buf, max_supported_mode)?;
         // We bound total to the config, in order to prevent doing arbitrary
         // computation if we precompute public keys.
         let total = {
             let out: u32 = ReadExt::read(buf)?;
-            if out == 0 || out > cfg.get() {
+            if out == 0 || out > max_participants.get() {
                 return Err(commonware_codec::Error::Invalid(
                     "Sharing",
                     "total not in range",
@@ -384,7 +410,7 @@ impl<V: Variant> Read for Sharing<V> {
             // This will not panic, because we checked != 0 above.
             NZU32!(out)
         };
-        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*cfg), ()))?;
+        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*max_participants), ()))?;
         Ok(Self::new(mode, total, poly))
     }
 }
