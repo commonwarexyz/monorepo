@@ -15,24 +15,16 @@
 //!
 //! # Database States
 //!
-//! An _authenticated_ database can be in one of two states based on durability:
-//! - [Durable] (committed to disk, also called _Clean_)
-//! - [NonDurable] (uncommitted changes, also called _Mutable_)
+//! An authenticated database is always in a committed (durable) state. Mutations are performed
+//! through `write_batch()` followed by `commit()`:
 //!
-//! The root hash is always computed (the database is always merkleized).
+//! - `init()`                          -> committed `Db`
+//! - `db.write_batch(iter).await`      -> appends operations
+//! - `db.commit(metadata).await`       -> flushes to disk
 //!
-//! State transitions result from `into_mutable()` and `commit()`:
-//! - `init()`                -> `Clean`
-//! - `Clean.into_mutable()`  -> `Mutable`
-//! - `Mutable.commit()`      -> `Clean`
-//!
-//! An authenticated database implements [store::LogStore] in every state, and keyed databases
-//! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
-//!
-//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
-//!
-//! Keyed databases additionally implement:
-//! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
+//! An authenticated database implements [store::LogStore], [store::MerkleizedStore],
+//! [store::PrunableStore], [crate::Persistable], and [crate::kv::Gettable]. Keyed databases
+//! additionally implement [crate::kv::Batchable].
 //!
 //! # Acknowledgments
 //!
@@ -46,7 +38,7 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
     mmr::Location,
-    qmdb::{operation::Operation, store::State as DurabilityState},
+    qmdb::operation::Operation,
 };
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;

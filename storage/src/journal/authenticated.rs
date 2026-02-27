@@ -56,6 +56,15 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for Mmr<E, D
     fn collect_item_arcs(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
 
+/// Implemented by types that can produce authenticated journal batches.
+pub trait Batchable<H: Hasher, Item: Encode + Send + Sync> {
+    /// The MMR parent type for batches produced by this source.
+    type Parent: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>;
+
+    /// Create a new speculative batch.
+    fn new_batch(&self) -> Batch<'_, H, Self::Parent, Item>;
+}
+
 /// A speculative batch of mutations against an authenticated journal.
 /// Tracks both MMR leaf digests and the corresponding journal items.
 pub struct Batch<'a, H: Hasher, P: MmrRead<H::Digest>, Item> {
@@ -153,6 +162,19 @@ impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Send + Sync + Encode>
     }
 }
 
+impl<'a, H, P, Item> Batchable<H, Item> for MerkleizedBatch<'a, H, P, Item>
+where
+    H: Hasher,
+    P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
+    Item: Encode + Send + Sync,
+{
+    type Parent = Self;
+
+    fn new_batch(&self) -> Batch<'_, H, Self, Item> {
+        MerkleizedBatch::new_batch(self)
+    }
+}
+
 impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
     P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
@@ -222,6 +244,19 @@ where
             hasher: StandardHasher::new(),
             items: Vec::new(),
         }
+    }
+}
+
+impl<E, C, H> Batchable<H, C::Item> for Journal<E, C, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+{
+    type Parent = Mmr<E, H::Digest>;
+
+    fn new_batch(&self) -> Batch<'_, H, Mmr<E, H::Digest>, C::Item> {
+        Self::new_batch(self)
     }
 }
 

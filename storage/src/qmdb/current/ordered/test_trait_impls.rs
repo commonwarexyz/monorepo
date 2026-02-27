@@ -15,7 +15,7 @@ use crate::{
         current::BitmapPrunedBits,
         operation::Key,
         store::LogStore as _,
-        Durable, Error, NonDurable,
+        Error,
     },
     translator::Translator,
 };
@@ -23,7 +23,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use core::ops::Range;
+use core::{future::Future, ops::Range};
 
 // =============================================================================
 // Fixed variant test trait implementations
@@ -36,12 +36,12 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > CleanAny for fixed::Db<E, K, V, H, T, N, Durable>
+    > CleanAny for fixed::Db<E, K, V, H, T, N>
 {
-    type Mutable = fixed::Db<E, K, V, H, T, N, NonDurable>;
+    type Mutable = Self;
 
     fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
+        self
     }
 }
 
@@ -52,18 +52,26 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MutableAny for fixed::Db<E, K, V, H, T, N, NonDurable>
+    > MutableAny for fixed::Db<E, K, V, H, T, N>
 {
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
-    type Clean = fixed::Db<E, K, V, H, T, N, Durable>;
+    type Clean = Self;
 
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        self.commit(metadata).await
+    #[allow(clippy::manual_async_fn, clippy::needless_borrow)]
+    fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> impl Future<Output = Result<(Self::Clean, Range<Location>), Error>> + Send {
+        async move {
+            let mut db = self;
+            let range = (&mut db).commit(metadata).await?;
+            Ok::<_, Error>((db, range))
+        }
     }
 
     fn steps(&self) -> u64 {
-        self.any.durable_state.steps
+        self.any.steps
     }
 }
 
@@ -78,14 +86,14 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > CleanAny for variable::Db<E, K, V, H, T, N, Durable>
+    > CleanAny for variable::Db<E, K, V, H, T, N>
 where
     VariableOperation<K, V>: Codec,
 {
-    type Mutable = variable::Db<E, K, V, H, T, N, NonDurable>;
+    type Mutable = Self;
 
     fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
+        self
     }
 }
 
@@ -96,20 +104,28 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MutableAny for variable::Db<E, K, V, H, T, N, NonDurable>
+    > MutableAny for variable::Db<E, K, V, H, T, N>
 where
     VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
-    type Clean = variable::Db<E, K, V, H, T, N, Durable>;
+    type Clean = Self;
 
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        self.commit(metadata).await
+    #[allow(clippy::manual_async_fn, clippy::needless_borrow)]
+    fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> impl Future<Output = Result<(Self::Clean, Range<Location>), Error>> + Send {
+        async move {
+            let mut db = self;
+            let range = (&mut db).commit(metadata).await?;
+            Ok::<_, Error>((db, range))
+        }
     }
 
     fn steps(&self) -> u64 {
-        self.any.durable_state.steps
+        self.any.steps
     }
 }
 
@@ -124,7 +140,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Durable>
+    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N>
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -146,7 +162,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Durable>
+    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N>
 where
     VariableOperation<K, V>: Codec,
 {
@@ -175,12 +191,12 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > CleanAny for fixed::partitioned::Db<E, K, V, H, T, P, N, Durable>
+    > CleanAny for fixed::partitioned::Db<E, K, V, H, T, P, N>
 {
-    type Mutable = fixed::partitioned::Db<E, K, V, H, T, P, N, NonDurable>;
+    type Mutable = Self;
 
     fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
+        self
     }
 }
 
@@ -192,18 +208,26 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > MutableAny for fixed::partitioned::Db<E, K, V, H, T, P, N, NonDurable>
+    > MutableAny for fixed::partitioned::Db<E, K, V, H, T, P, N>
 {
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
-    type Clean = fixed::partitioned::Db<E, K, V, H, T, P, N, Durable>;
+    type Clean = Self;
 
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        self.commit(metadata).await
+    #[allow(clippy::manual_async_fn, clippy::needless_borrow)]
+    fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> impl Future<Output = Result<(Self::Clean, Range<Location>), Error>> + Send {
+        async move {
+            let mut db = self;
+            let range = (&mut db).commit(metadata).await?;
+            Ok::<_, Error>((db, range))
+        }
     }
 
     fn steps(&self) -> u64 {
-        self.any.durable_state.steps
+        self.any.steps
     }
 }
 
@@ -215,7 +239,7 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for fixed::partitioned::Db<E, K, V, H, T, P, N, Durable>
+    > BitmapPrunedBits for fixed::partitioned::Db<E, K, V, H, T, P, N>
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -242,14 +266,14 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > CleanAny for variable::partitioned::Db<E, K, V, H, T, P, N, Durable>
+    > CleanAny for variable::partitioned::Db<E, K, V, H, T, P, N>
 where
     VariableOperation<K, V>: Codec,
 {
-    type Mutable = variable::partitioned::Db<E, K, V, H, T, P, N, NonDurable>;
+    type Mutable = Self;
 
     fn into_mutable(self) -> Self::Mutable {
-        self.into_mutable()
+        self
     }
 }
 
@@ -261,20 +285,28 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > MutableAny for variable::partitioned::Db<E, K, V, H, T, P, N, NonDurable>
+    > MutableAny for variable::partitioned::Db<E, K, V, H, T, P, N>
 where
     VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
-    type Clean = variable::partitioned::Db<E, K, V, H, T, P, N, Durable>;
+    type Clean = Self;
 
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        self.commit(metadata).await
+    #[allow(clippy::manual_async_fn, clippy::needless_borrow)]
+    fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> impl Future<Output = Result<(Self::Clean, Range<Location>), Error>> + Send {
+        async move {
+            let mut db = self;
+            let range = (&mut db).commit(metadata).await?;
+            Ok::<_, Error>((db, range))
+        }
     }
 
     fn steps(&self) -> u64 {
-        self.any.durable_state.steps
+        self.any.steps
     }
 }
 
@@ -286,7 +318,7 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for variable::partitioned::Db<E, K, V, H, T, P, N, Durable>
+    > BitmapPrunedBits for variable::partitioned::Db<E, K, V, H, T, P, N>
 where
     VariableOperation<K, V>: Codec,
 {

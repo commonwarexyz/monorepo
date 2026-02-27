@@ -15,8 +15,8 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         operation::{Committable, Key, Operation as OperationTrait},
-        store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, FloorHelper, NonDurable,
+        store::{LogStore, MerkleizedStore, PrunableStore},
+        Error, FloorHelper,
     },
     Persistable,
 };
@@ -43,7 +43,6 @@ pub struct Db<
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     U: Send + Sync,
-    D: DurabilityState = Durable,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -72,15 +71,16 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
-    /// Whether the database is in the durable or non-durable state.
-    pub(crate) durable_state: D,
+    /// The number of steps to raise the inactivity floor on the next commit. Each step involves
+    /// moving exactly one active operation to tip.
+    pub(crate) steps: u64,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-// Functionality shared across all DB states.
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, D>
+// Non-mutating functionality (available with any journal type).
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -89,7 +89,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -116,63 +115,8 @@ where
     }
 }
 
-// Functionality requiring Mutable journal (proofs, pruning).
-impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, D>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
-{
-    pub async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
-    }
-
-    pub async fn proof(
-        &self,
-        loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
-    }
-}
-
-// Functionality specific to Durable state: initialization, persistence, and mutable transition.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Durable>
+// Functionality requiring Mutable journal (proofs, pruning, mutations, persistence).
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -230,7 +174,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
-            durable_state: store::Durable,
+            steps: 0,
             _update: core::marker::PhantomData,
         })
     }
@@ -245,32 +189,6 @@ where
         self.log.destroy().await.map_err(Into::into)
     }
 
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, NonDurable> {
-        Db {
-            log: self.log,
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: NonDurable { steps: 0 },
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to NonDurable state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
     ///
@@ -288,10 +206,7 @@ where
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `[start_loc, end_loc)` location range of committed operations.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, Durable>, Range<Location>), Error> {
+    pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
         let start_loc = self.last_commit_loc + 1;
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
@@ -304,17 +219,50 @@ where
 
         let range = start_loc..self.log.size().await;
 
-        let db = Db {
-            log: self.log,
-            inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: store::Durable,
-            _update: core::marker::PhantomData,
-        };
+        self.inactivity_floor_loc = inactivity_floor_loc;
 
-        Ok((db, range))
+        Ok(range)
+    }
+
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    pub async fn proof(
+        &self,
+        loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.historical_proof(self.log.size().await, loc, max_ops)
+            .await
     }
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip.
@@ -325,13 +273,13 @@ where
             self.inactivity_floor_loc = self.log.size().await;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
-            let steps_to_take = self.durable_state.steps + 1;
+            let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
                 self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
         }
-        self.durable_state.steps = 0;
+        self.steps = 0;
 
         Ok(self.inactivity_floor_loc)
     }
@@ -346,8 +294,8 @@ where
     ) -> Result<Location, Error> {
         let reader = self.log.reader().await;
         let tip = Location::new_unchecked(reader.bounds().end);
-        let steps_to_take = self.durable_state.steps + 1;
-        self.durable_state.steps = 0;
+        let steps_to_take = self.steps + 1;
+        self.steps = 0;
 
         // If the db is empty then raise the floor to tip and return.
         if self.is_empty() {
@@ -404,7 +352,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Durable>
+impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -431,7 +379,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U, Durable>
+impl<E, K, V, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -455,12 +403,14 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(historical_size, start_loc, max_ops)
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
             .await
+            .map_err(Into::into)
     }
 }
 
-impl<E, K, V, U, C, I, H, D> LogStore for Db<E, C, I, H, U, D>
+impl<E, K, V, U, C, I, H> LogStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -469,7 +419,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Value = V::Value;
@@ -484,7 +433,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, D>
+impl<E, K, V, U, C, I, H> PrunableStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -493,11 +442,17 @@ where
     C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        self.log.prune(prune_loc).await?;
+        Ok(())
     }
 
     async fn inactivity_floor_loc(&self) -> Location {

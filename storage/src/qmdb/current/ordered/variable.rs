@@ -15,7 +15,7 @@ use crate::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
         operation::Key,
-        Durable, Error,
+        Error,
     },
     translator::Translator,
 };
@@ -23,16 +23,8 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
-pub type Db<E, K, V, H, T, const N: usize, D = Durable> = super::db::Db<
-    E,
-    Journal<E, Operation<K, V>>,
-    K,
-    VariableEncoding<V>,
-    Index<T, Location>,
-    H,
-    N,
-    D,
->;
+pub type Db<E, K, V, H, T, const N: usize> =
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
 
 // Functionality for the Merkleized state - init only.
 impl<
@@ -42,7 +34,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Durable>
+    > Db<E, K, V, H, T, N>
 where
     Operation<K, V>: Codec,
 {
@@ -70,7 +62,7 @@ pub mod partitioned {
             },
             current::VariableConfig as Config,
             operation::Key,
-            Durable, Error,
+            Error,
         },
         translator::Translator,
     };
@@ -84,7 +76,7 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<E, K, V, H, T, const P: usize, const N: usize, D = Durable> =
+    pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::ordered::db::Db<
             E,
             Journal<E, Operation<K, V>>,
@@ -93,7 +85,6 @@ pub mod partitioned {
             Index<T, Location, P>,
             H,
             N,
-            D,
         >;
 
     impl<
@@ -104,7 +95,7 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N, Durable>
+        > Db<E, K, V, H, T, P, N>
     where
         Operation<K, V>: Codec,
     {
@@ -136,7 +127,7 @@ mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            Durable, Error, NonDurable,
+            Error,
         },
         translator::OneCap,
     };
@@ -146,12 +137,9 @@ mod test {
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
-    type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Durable>;
-
-    /// A type alias for the Mutable variant of CurrentTest (NonDurable state).
-    type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, NonDurable>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    type MutableCurrentTest = CleanCurrentTest;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(
@@ -171,13 +159,13 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build-small".into();
-            let mut db = open_db(context, partition).await.into_mutable();
+            let mut db = open_db(context, partition).await;
 
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
             db.write_batch([(k, Some(v1))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -213,9 +201,8 @@ mod test {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            let mut db = db.into_mutable();
             db.write_batch([(k, Some(v2))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -354,10 +341,10 @@ mod test {
             ));
 
             let rng_seed = context.next_u64();
-            let db = apply_random_ops::<CleanCurrentTest>(200, true, rng_seed, db.into_mutable())
+            let mut db = apply_random_ops::<CleanCurrentTest>(200, true, rng_seed, db)
                 .await
                 .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -406,13 +393,11 @@ mod test {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition.clone())
-                .await
-                .into_mutable();
-            let db = apply_random_ops::<CleanCurrentTest>(500, true, context.next_u64(), db)
+            let db = open_db(context.clone(), partition.clone()).await;
+            let mut db = apply_random_ops::<CleanCurrentTest>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -503,11 +488,9 @@ mod test {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                let mut dirty_db = db.into_mutable();
-                dirty_db.write_batch([(k, Some(v))]).await.unwrap();
-                assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
-                let (clean_db, _) = dirty_db.commit(None).await.unwrap();
-                db = clean_db;
+                db.write_batch([(k, Some(v))]).await.unwrap();
+                assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
+                db.commit(None).await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.
@@ -539,7 +522,7 @@ mod test {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
             let prefix = format!("current-ordered-variable-batch-{seed}");
-            open_db(ctx, prefix).await.into_mutable()
+            open_db(ctx, prefix).await
         });
     }
 
@@ -550,7 +533,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "exclusion-proofs".into();
-            let db = open_db(context, partition).await;
+            let mut db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 
@@ -569,9 +552,8 @@ mod test {
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
-            let mut db = db.into_mutable();
             db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -618,9 +600,8 @@ mod test {
             let key_exists_2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
 
-            let mut db = db.into_mutable();
             db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -710,10 +691,9 @@ mod test {
 
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
-            let mut db = db.into_mutable();
             db.write_batch([(key_exists_1, None)]).await.unwrap();
             db.write_batch([(key_exists_2, None)]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
@@ -777,7 +757,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: MutableCurrentTest) {
+    fn assert_mutable_db_commit_is_send(mut db: MutableCurrentTest) {
         assert_send(db.commit(None));
     }
 }

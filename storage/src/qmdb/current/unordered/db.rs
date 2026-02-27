@@ -15,7 +15,7 @@ use crate::{
             ValueEncoding,
         },
         current::proof::OperationProof,
-        DurabilityState, Durable, Error, NonDurable,
+        Error,
     },
 };
 use commonware_codec::Codec;
@@ -30,8 +30,8 @@ pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<E, C, K, V, I, H, const N: usize, D = Durable> =
-    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N, D>;
+pub type Db<E, C, K, V, I, H, const N: usize> =
+    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
@@ -42,8 +42,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: DurabilityState,
-    > Db<E, C, K, V, I, H, N, D>
+    > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -68,7 +67,6 @@ where
     }
 }
 
-// Functionality for Clean state.
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
@@ -77,7 +75,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N, Durable>
+    > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -100,22 +98,6 @@ where
         };
         self.operation_proof(hasher, loc).await
     }
-}
-
-// Functionality for the Mutable state.
-impl<
-        E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
-        const N: usize,
-    > Db<E, C, K, V, I, H, N, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
     /// Writes a batch of key-value pairs to the database.
     ///
     /// For each item in the iterator:
@@ -152,8 +134,7 @@ impl<
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, I, H, N, D>
+    > kv::Gettable for Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -167,8 +148,7 @@ where
     }
 }
 
-// Batchable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<E, C, K, V, I, H, const N: usize> Batchable for Db<E, C, K, V, I, H, N, NonDurable>
+impl<E, C, K, V, I, H, const N: usize> Batchable for Db<E, C, K, V, I, H, N>
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item = Operation<K, V>>,

@@ -27,8 +27,8 @@ use crate::{
             proof::{OperationProof, RangeProof},
         },
         operation::Key,
-        store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, NonDurable,
+        store::{LogStore, MerkleizedStore, PrunableStore},
+        Error,
     },
     Persistable,
 };
@@ -57,11 +57,10 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -93,8 +92,8 @@ pub struct Db<
     pub(super) root: DigestOf<H>,
 }
 
-// Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, C, I, H, U, const N: usize, D> Db<E, C, I, H, U, N, D>
+// Functionality shared across all DB states.
+impl<E, K, V, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -103,7 +102,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -136,8 +134,7 @@ where
     }
 }
 
-// Functionality for the Durable state with non-mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -218,8 +215,7 @@ where
     }
 }
 
-// Functionality for the Durable state with mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -299,8 +295,7 @@ where
     }
 }
 
-// Functionality specific to Durable state with persistence.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -329,32 +324,6 @@ where
         self.any.destroy().await
     }
 
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            dirty_chunks: HashSet::new(),
-            root: self.root,
-        }
-    }
-}
-
-// Functionality specific to the NonDurable (mutable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
     /// Raises the activity floor according to policy followed by appending a commit operation with
     /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
     /// end_loc)` location range of committed operations.
@@ -396,24 +365,9 @@ where
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
     /// This also merkleizes the grafted MMR and computes the canonical root.
-    /// Returns the committed database and the `[start_loc, end_loc)` range of committed
-    /// operations.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, N, Durable>, Range<Location>), Error> {
+    /// Returns the `[start_loc, end_loc)` range of committed operations.
+    pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
         let range = self.apply_commit_op(metadata).await?;
-
-        // Transition to Durable state.
-        let mut any = any::db::Db {
-            log: self.any.log,
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: store::Durable,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
 
         // Merkleize: compute grafted leaves for new/dirty bitmap chunks.
         let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
@@ -422,8 +376,8 @@ where
             .chain(self.dirty_chunks.iter().copied())
             .map(|chunk_idx| (chunk_idx, *self.status.get_chunk(chunk_idx)));
         let grafted_leaves = compute_grafted_leaves::<H, N>(
-            &mut any.log.hasher,
-            &any.log.mmr,
+            &mut self.any.log.hasher,
+            &self.any.log.mmr,
             chunks_to_update,
             self.thread_pool.as_ref(),
         )
@@ -431,10 +385,12 @@ where
 
         // Update the grafted MMR with new/dirty leaves via batch API.
         let grafting_height = grafting::height::<N>();
-        let mut grafted_mmr = self.grafted_mmr;
         if !grafted_leaves.is_empty() {
             let changeset = {
-                let mut batch = grafted_mmr.new_batch().with_pool(self.thread_pool.clone());
+                let mut batch = self
+                    .grafted_mmr
+                    .new_batch()
+                    .with_pool(self.thread_pool.clone());
                 for &(ops_pos, digest) in &grafted_leaves {
                     let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
                     if grafted_pos < batch.size() {
@@ -447,47 +403,39 @@ where
                     }
                 }
                 let mut grafted_hasher =
-                    grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
+                    grafting::GraftedHasher::new(self.any.log.hasher.fork(), grafting_height);
                 batch.finalize(&mut grafted_hasher)
             };
-            grafted_mmr.apply(changeset);
+            self.grafted_mmr.apply(changeset);
         }
 
         // Prune bitmap chunks that are fully below the inactivity floor.
-        self.status.prune_to_bit(*any.inactivity_floor_loc);
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc);
 
         // Prune the grafted MMR to match.
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
             let new_grafted_mmr_prune_pos =
                 Position::try_from(Location::new_unchecked(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
-                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            if new_grafted_mmr_prune_pos > self.grafted_mmr.bounds().start {
+                self.grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
             }
         }
 
         // Compute and cache the canonical root.
-        let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
+        let storage = grafting::Storage::new(&self.grafted_mmr, grafting_height, &self.any.log.mmr);
         let partial_chunk = partial_chunk(&self.status);
-        let ops_root = any.log.root();
-        let root = compute_db_root(&mut any.log.hasher, &storage, partial_chunk, &ops_root).await?;
+        let ops_root = self.any.log.root();
+        let root =
+            compute_db_root(&mut self.any.log.hasher, &storage, partial_chunk, &ops_root).await?;
 
-        Ok((
-            Db {
-                any,
-                status: self.status,
-                grafted_mmr,
-                metadata: self.metadata,
-                thread_pool: self.thread_pool,
-                dirty_chunks: HashSet::new(),
-                root,
-            },
-            range,
-        ))
+        self.dirty_chunks = HashSet::new();
+        self.root = root;
+        Ok(range)
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -514,11 +462,10 @@ where
     }
 }
 
-// MerkleizedStore for Durable state.
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -548,7 +495,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize, D> LogStore for Db<E, C, I, H, U, N, D>
+impl<E, K, V, U, C, I, H, const N: usize> LogStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -557,7 +504,6 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Value = V::Value;
@@ -571,7 +517,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,

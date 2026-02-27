@@ -62,7 +62,6 @@ use crate::{
         },
         operation::{Committable, Key},
         sync::{Database, DatabaseConfig as Config},
-        Durable,
     },
     translator::Translator,
     Persistable,
@@ -136,7 +135,7 @@ async fn build_db<E, K, V, U, I, H, J, const N: usize>(
     apply_batch_size: usize,
     metadata_partition: String,
     thread_pool: Option<commonware_parallel::ThreadPool>,
-) -> Result<db::Db<E, J, I, H, U, N, Durable>, qmdb::Error>
+) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -177,7 +176,7 @@ where
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new_unchecked(status.len());
-    let any: AnyDb<E, J, I, H, U, _> = AnyDb::init_from_log(
+    let any: AnyDb<E, J, I, H, U> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -268,7 +267,7 @@ where
 
 // --- Database trait implementations ---
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedFixedDb<E, K, V, H, T, N, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedFixedDb<E, K, V, H, T, N>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -316,8 +315,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, const N: usize> Database
-    for CurrentUnorderedVariableDb<E, K, V, H, T, N, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedVariableDb<E, K, V, H, T, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -366,7 +364,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedFixedDb<E, K, V, H, T, N, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedFixedDb<E, K, V, H, T, N>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -414,7 +412,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedVariableDb<E, K, V, H, T, N, Durable>
+impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedVariableDb<E, K, V, H, T, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -471,7 +469,7 @@ where
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<E, K, V, H, T, N, Durable>>
+            for std::sync::Arc<$db<E, K, V, H, T, N>>
         where
             E: Storage + Clock + Metrics,
             K: $key_bound,
@@ -505,7 +503,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<E, K, V, H, T, N, Durable>,
+                    $db<E, K, V, H, T, N>,
                 >,
             >
         where
@@ -542,7 +540,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<E, K, V, H, T, N, Durable>>,
+                    Option<$db<E, K, V, H, T, N>>,
                 >,
             >
         where
