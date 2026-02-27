@@ -552,7 +552,11 @@ struct Waiter {
     buffer: Option<OpBuffer>,
     /// The file descriptor associated with this operation, if any. Used to keep the file
     /// descriptor alive and prevent reuse while the operation is in-flight.
-    _fd: Option<OpFd>,
+    ///
+    /// NOTE: This field is never read since it only exists to keep the FD alive until
+    /// operation completion, hence the allow dead code.
+    #[allow(dead_code)]
+    fd: Option<OpFd>,
     /// The linked timeout timespec associated with this operation, if any. Used to keep
     /// the timespec alive and prevent use-after-free while the operation is in-flight.
     timespec: Option<Timespec>,
@@ -793,7 +797,7 @@ impl IoUringLoop {
             let slot_index = self.waiters.insert(Waiter {
                 sender,
                 buffer,
-                _fd: fd,
+                fd,
                 timespec,
             });
 
@@ -1047,13 +1051,13 @@ mod tests {
         let index0 = waiters.insert(Waiter {
             sender: tx0,
             buffer: Some(IoBuf::from(b"hello").into()),
-            _fd: None,
+            fd: None,
             timespec: None,
         });
         let index1 = waiters.insert(Waiter {
             sender: tx1,
             buffer: Some(IoBuf::from(b"world").into()),
-            _fd: None,
+            fd: None,
             timespec: None,
         });
         assert_eq!((index0, index1), (0, 1));
@@ -1079,7 +1083,7 @@ mod tests {
         let index2 = waiters.insert(Waiter {
             sender: tx2,
             buffer: None,
-            _fd: None,
+            fd: None,
             timespec: None,
         });
         assert_eq!(index2, index1);
@@ -1107,13 +1111,13 @@ mod tests {
         let _ = waiters.insert(Waiter {
             sender: tx0,
             buffer: None,
-            _fd: None,
+            fd: None,
             timespec: None,
         });
         let _ = waiters.insert(Waiter {
             sender: tx1,
             buffer: None,
-            _fd: None,
+            fd: None,
             timespec: None,
         });
     }
