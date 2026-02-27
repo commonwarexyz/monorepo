@@ -1082,7 +1082,7 @@ impl<
                         .update(current_view, leader, self.state.last_finalized())
                         .await
                     {
-                        debug!(%view, %leader, ?reason, "nullifying round");
+                        debug!(%current_view, %leader, ?reason, "nullifying round");
                         self.state.trigger_timeout(current_view, reason);
                     }
                 }
