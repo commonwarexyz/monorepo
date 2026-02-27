@@ -1148,9 +1148,9 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
             let mut hasher: Standard<Sha256> = Standard::new();
-            let test_mmr = mem::CleanMmr::new::<Sha256>();
+            let test_mmr = mem::CleanMmr::new(&mut hasher);
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = *test_mmr.root();
+            let expected_root = test_mmr.root();
 
             let journaled_mmr = Mmr::init(
                 context.clone(),
@@ -1168,7 +1168,7 @@ mod tests {
             }
 
             let journaled_mmr = journaled_mmr.merkleize(&mut hasher);
-            assert_eq!(journaled_mmr.root(), expected_root);
+            assert_eq!(journaled_mmr.root(), *expected_root);
 
             journaled_mmr.destroy().await.unwrap();
         });
@@ -1312,7 +1312,7 @@ mod tests {
                 assert!(mmr.pop(2).await.is_ok(), "at position {i:?}");
                 let clean_mmr = mmr.merkleize(&mut hasher);
                 let root = clean_mmr.root();
-                let reference_mmr = mem::CleanMmr::new::<Sha256>();
+                let reference_mmr = mem::CleanMmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
@@ -2985,7 +2985,8 @@ mod tests {
             assert_eq!(mmr.root(), expected_root);
 
             // Build a reference in-memory MMR with 20 elements to verify.
-            let reference = build_test_mmr(&mut hasher, mem::CleanMmr::new::<Sha256>(), 20);
+            let empty = mem::CleanMmr::new(&mut hasher);
+            let reference = build_test_mmr(&mut hasher, empty, 20);
             assert_eq!(mmr.root(), *reference.root());
 
             mmr.destroy().await.unwrap();

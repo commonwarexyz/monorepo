@@ -63,7 +63,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = CleanMmr::new::<Sha256>();
+                            let mut mmr = CleanMmr::new(&mut h);
                             let changeset = {
                                 let mut diff = UnmerkleizedBatch::new(&mmr);
                                 for _ in 0..leaves {

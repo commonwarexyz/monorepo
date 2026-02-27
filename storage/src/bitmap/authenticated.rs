@@ -303,11 +303,11 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     ///
     /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
     /// underlying storage error.
-    pub async fn init<H: MmrHasher<Digest = D>>(
+    pub async fn init(
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &mut H,
+        hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -328,7 +328,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             }
         } as usize;
         if pruned_chunks == 0 {
-            let mmr = CleanMmr::new::<H::Inner>();
+            let mmr = CleanMmr::new(hasher);
             let cached_root = *mmr.root();
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),

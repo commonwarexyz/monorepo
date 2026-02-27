@@ -39,7 +39,7 @@
 //!
 //! ```ignore
 //! let mut hasher = StandardHasher::<Sha256>::new();
-//! let mut mmr = CleanMmr::new::<Sha256>();
+//! let mut mmr = CleanMmr::new(&mut hasher.inner());
 //!
 //! // Build a batch of mutations.
 //! let changeset = {
@@ -602,7 +602,7 @@ mod tests {
 
     /// Build a reference MMR with `n` elements for comparison.
     fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> CleanMmr<sha256::Digest> {
-        let mmr = CleanMmr::new::<Sha256>();
+        let mmr = CleanMmr::new(hasher);
         build_test_mmr(hasher, mmr, n)
     }
 
@@ -620,7 +620,7 @@ mod tests {
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Diff: start from empty base, add all via diff
-                let base = CleanMmr::new::<Sha256>();
+                let base = CleanMmr::new(&mut hasher);
                 let mut diff = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
                     hasher.inner().update(&i.to_be_bytes());

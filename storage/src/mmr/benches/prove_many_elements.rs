@@ -19,7 +19,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = CleanMmr::new::<Sha256>();
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 

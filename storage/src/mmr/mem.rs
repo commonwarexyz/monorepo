@@ -288,15 +288,9 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Create a new, empty MMR in the Clean state.
-    pub fn new<H: commonware_cryptography::Hasher<Digest = D>>() -> Self {
-        Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            state: Clean {
-                root: Self::empty_mmr_root::<H>(),
-            },
-        }
+    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
+        let mmr: DirtyMmr<D> = Default::default();
+        mmr.merkleize(hasher, None)
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
@@ -364,13 +358,7 @@ impl<D: Digest> CleanMmr<D> {
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        let placeholder = Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            state: Clean { root: D::EMPTY },
-        };
-        let mut dirty_mmr = mem::replace(self, placeholder).into_dirty();
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.update_leaf(hasher, loc, element);
         *self = dirty_mmr.merkleize(hasher, None);
         result
@@ -387,10 +375,9 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
-    pub fn empty_mmr_root<H: commonware_cryptography::Hasher<Digest = D>>() -> D {
-        let mut h = H::new();
-        h.update(&0u64.to_be_bytes());
-        h.finalize()
+    pub fn empty_mmr_root(hasher: &mut impl commonware_cryptography::Hasher<Digest = D>) -> D {
+        hasher.update(&0u64.to_be_bytes());
+        hasher.finalize()
     }
 
     /// Return an inclusion proof for the element at location `loc`.
@@ -884,7 +871,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -895,7 +882,7 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), Mmr::empty_mmr_root::<Sha256>());
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
             let mut mmr = mmr.into_dirty();
             assert!(matches!(mmr.pop(), Err(Empty)));
             let mut mmr = mmr.merkleize(&mut hasher, None);
@@ -1057,7 +1044,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new::<Sha256>();
+            let mut mmr = CleanMmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
@@ -1102,11 +1089,11 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let mut test_mmr = CleanMmr::new::<Sha256>();
+            let mut test_mmr = CleanMmr::new(&mut hasher);
             test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = *test_mmr.root();
+            let expected_root = test_mmr.root();
 
-            let batched_mmr = CleanMmr::new::<Sha256>();
+            let batched_mmr = CleanMmr::new(&mut hasher);
 
             // First element transitions Clean -> Dirty explicitly
             let mut dirty_mmr = batched_mmr.into_dirty();
@@ -1124,7 +1111,7 @@ mod tests {
             let batched_mmr = dirty_mmr.merkleize(&mut hasher, None);
 
             assert_eq!(
-                *batched_mmr.root(),
+                batched_mmr.root(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -1139,9 +1126,9 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let test_mmr = CleanMmr::new::<Sha256>();
+            let test_mmr = CleanMmr::new(&mut hasher);
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = *test_mmr.root();
+            let expected_root = test_mmr.root();
 
             let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -1165,7 +1152,7 @@ mod tests {
             }
             let mmr = mmr.merkleize(&mut hasher, Some(pool));
             assert_eq!(
-                *mmr.root(),
+                mmr.root(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -1205,7 +1192,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 100;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
 
             // Pop off one node at a time until empty, confirming the root matches reference.
@@ -1214,7 +1201,7 @@ mod tests {
                 assert!(dirty_mmr.pop().is_ok());
                 mmr = dirty_mmr.merkleize(&mut hasher, None);
                 let root = *mmr.root();
-                let reference_mmr = CleanMmr::new::<Sha256>();
+                let reference_mmr = CleanMmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
@@ -1243,7 +1230,7 @@ mod tests {
                 mmr.pop().unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let reference_mmr = CleanMmr::new::<Sha256>();
+            let reference_mmr = CleanMmr::new(&mut hasher);
             let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
             assert_eq!(*mmr.root(), *reference_mmr.root());
             let mut mmr = mmr.into_dirty();
@@ -1260,7 +1247,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1298,7 +1285,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
             let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
@@ -1313,7 +1300,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
             let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
@@ -1326,7 +1313,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
             do_batch_update(&mut hasher, mmr, None);
         });
@@ -1360,7 +1347,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
@@ -1402,7 +1389,7 @@ mod tests {
         executor.start(|_| async move {
             {
                 // Out of bounds: location >= leaf count.
-                let mmr = CleanMmr::new::<Sha256>();
+                let mmr = CleanMmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100).into_dirty();
                 let result = mmr.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::InvalidPosition(_))));
@@ -1410,7 +1397,7 @@ mod tests {
 
             {
                 // Pruned leaf.
-                let mmr = CleanMmr::new::<Sha256>();
+                let mmr = CleanMmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
                 mmr.prune_to_pos(Position::new(50));
                 let mut dirty = mmr.into_dirty();
@@ -1622,7 +1609,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Range end > leaves errors on empty MMR
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             let result = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
@@ -1646,7 +1633,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
-            let mmr = CleanMmr::new::<Sha256>();
+            let mmr = CleanMmr::new(&mut hasher);
             let result = mmr.proof(Location::new_unchecked(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
