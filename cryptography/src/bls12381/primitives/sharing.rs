@@ -133,6 +133,7 @@ impl Mode {
                         count += 1;
                     });
                 let out = Interpolator::new(iter);
+                // If any indices fail to produce a scalar, reject.
                 if count != indices.len() {
                     return None;
                 }
@@ -164,6 +165,7 @@ impl Mode {
                     })
                     .collect();
 
+                // If any indices fail to produce a scalar, reject.
                 if count != indices.len() {
                     return None;
                 }
