@@ -3,6 +3,8 @@ name = "commonware-utils"
 edition.workspace = true
 publish = true
 version.workspace = true
+# We use https://doc.rust-lang.org/stable/std/primitive.usize.html#method.unbounded_shr
+rust-version = "1.87"
 license.workspace = true
 description = "Leverage common functionality across multiple primitives."
 readme = "README.md"
