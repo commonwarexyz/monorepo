@@ -190,20 +190,20 @@ impl<const N: usize> BuildHasher for Cap<N> {
 
 /// Collision-resistant wrapper for any [Translator].
 ///
-/// Hashes the full key with a per-instance secret seed (via [ahash::RandomState]) before delegating
-/// to the inner translator. This makes translated-key collisions unpredictable to an adversary who
+/// Hashes the full key with a per-instance secret seed before delegating to the inner translator.
+/// This makes translated-key collisions unpredictable to an adversary who
 /// does not know the seed, similar to how [std::collections::HashMap] uses
 /// [std::collections::hash_map::RandomState] to prevent HashDoS attacks. It can also be used to
 /// ensure uniform distribution of skewed keyspaces when used by non-hashing structures such as
 /// [crate::index].
 ///
-/// # Warning
+/// # No Ordering
 ///
 /// Hashing destroys lexicographic key ordering. Do not use [Hashed] with ordered indices when
 /// callers rely on translated-key adjacency matching original-key adjacency (e.g., exclusion proofs
 /// in the ordered QMDB). [Hashed] is safe for unordered indices and partitioned unordered indices.
 ///
-/// # `no_std`
+/// # `no_std` Support
 ///
 /// [Hashed::new] and [Default] use [ahash::RandomState::new] which requires OS-provided randomness
 /// (the `runtime-rng` feature of `ahash`, enabled by the `std` feature of this crate). In `no_std`
@@ -211,7 +211,7 @@ impl<const N: usize> BuildHasher for Cap<N> {
 /// adversarial protection. In `no_std` environments, use [Hashed::from_seed] with an
 /// externally-sourced random seed instead.
 ///
-/// # Stability
+/// # No Stability Guarantees
 ///
 /// [ahash::RandomState] is used as the underlying hasher. While `ahash` is robust, its exact
 /// algorithm might change across versions. As a result, transformed outputs are not stable across
@@ -253,12 +253,9 @@ impl<T: Translator> Hashed<T> {
     }
 
     /// Create a new [Hashed] translator with a specific seed.
-    ///
-    /// Determinism is scoped to the current `ahash` implementation. Outputs are not guaranteed to
-    /// be stable across crate versions or platforms.
-    pub fn from_seed(seed: u64, inner: T) -> Self {
+    pub const fn from_seed(seed: u64, inner: T) -> Self {
         Self {
-            random_state: ahash::RandomState::with_seed(seed as usize),
+            random_state: ahash::RandomState::with_seeds(seed, 0, 0, 0),
             inner,
         }
     }
