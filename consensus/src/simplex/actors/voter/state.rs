@@ -975,7 +975,10 @@ mod tests {
             // Proposal arrival clears leader timeout and leaves only the certification timeout.
             assert!(state.set_proposal(view, proposal.clone()));
             let certification_deadline = state.next_timeout_deadline();
-            assert_eq!(certification_deadline, context.current() + Duration::from_secs(2));
+            assert_eq!(
+                certification_deadline,
+                context.current() + Duration::from_secs(2)
+            );
 
             // Receiving a notarization should not clear the certification timeout while certification is pending.
             let votes: Vec<_> = schemes
