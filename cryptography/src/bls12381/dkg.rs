@@ -432,16 +432,16 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, Mode);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_participants: &Self::Cfg,
+        (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_participants_usize = max_participants.get() as usize;
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(buf, &(max_participants, Mode::max_supported()))?,
+            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
             dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
             revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals

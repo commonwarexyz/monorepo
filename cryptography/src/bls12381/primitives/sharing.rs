@@ -45,30 +45,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Returns the most permissive mode supported by the current stability cfg.
-    pub const fn max_supported() -> Self {
-        #[cfg(not(any(
-            commonware_stability_BETA,
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON,
-            commonware_stability_RESERVED
-        )))]
-        {
-            Self::RootsOfUnity
-        }
-        #[cfg(any(
-            commonware_stability_BETA,
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON,
-            commonware_stability_RESERVED
-        ))]
-        {
-            Self::NonZeroCounter
-        }
-    }
-
     /// Compute the scalar for one participant.
     ///
     /// This will return `None` only if `i >= total`.

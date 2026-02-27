@@ -803,7 +803,10 @@ mod tests {
     use super::*;
     use crate::Config;
     use commonware_cryptography::Sha256;
-    use commonware_math::{algebra::Ring as _, ntt::PolynomialVector};
+    use commonware_math::{
+        algebra::{FieldNTT as _, Ring as _},
+        ntt::PolynomialVector,
+    };
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
@@ -862,7 +865,7 @@ mod tests {
         /// Construct the vanishing polynomial over specific indices.
         ///
         /// When encoded, this will be 0 at those indices, and non-zero elsewhere.
-        fn vanishing(lg_domain: u8, vanish_indices: &[u32]) -> PolynomialVector {
+        fn vanishing(lg_domain: u8, vanish_indices: &[u32]) -> PolynomialVector<F> {
             let w = F::root_of_unity(lg_domain).expect("domain too large for Goldilocks");
             let mut domain = Vec::with_capacity(1usize << lg_domain);
             let mut x = F::one();

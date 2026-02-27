@@ -19,7 +19,7 @@ use commonware_cryptography::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
-        primitives::{group::Share, variant::Variant},
+        primitives::{group::Share, sharing::Mode, variant::Variant},
     },
     transcript::{Summary, Transcript},
     PublicKey, Signer,
@@ -75,7 +75,7 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, Mode);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
@@ -185,14 +185,19 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
 {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
-    pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
+    pub async fn init(
+        context: E,
+        partition_prefix: &str,
+        max_read_size: NonZeroU32,
+        max_supported_mode: Mode,
+    ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                codec_config: max_read_size,
+                codec_config: (max_read_size, max_supported_mode),
             },
         )
         .await
@@ -670,7 +675,7 @@ mod tests {
             TEST_NAMESPACE,
             0,
             None,
-            Mode::NonZeroCounter,
+            crate::dkg::MAX_SUPPORTED_MODE,
             dealers,
             players,
         )
@@ -688,6 +693,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -729,6 +735,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -770,6 +777,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -819,6 +827,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 

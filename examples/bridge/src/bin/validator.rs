@@ -119,7 +119,7 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let max_supported_mode = Mode::max_supported();
+    let max_supported_mode = Mode::NonZeroCounter;
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
         identity.as_ref(),
         &(NZU32!(validators.len() as u32), max_supported_mode),
