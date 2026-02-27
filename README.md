@@ -30,7 +30,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 
 ## Examples
 
-_Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
+_Examples may include insecure code (i.e. deriving keypairs from integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
 * [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
 * [battleware](https://github.com/commonwarexyz/battleware): An onchain battle secured by a VRF, Timelock Encryption, and MMRs.
