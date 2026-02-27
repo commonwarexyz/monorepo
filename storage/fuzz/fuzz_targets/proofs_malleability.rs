@@ -129,12 +129,12 @@ fn fuzz(input: FuzzInput) {
                 mmr.add(&mut hasher, digest);
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let root = *mmr.root();
+            let root = mmr.root();
 
             for (leaf, element) in digests.iter().enumerate() {
                 let loc = Location::new(leaf as u64).unwrap();
                 let original_proof = mmr.proof(loc).unwrap();
-                assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, &root));
+                assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, root));
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
@@ -144,7 +144,7 @@ fn fuzz(input: FuzzInput) {
                             &mut hasher,
                             element,
                             loc,
-                            &root
+                            root
                         ));
                     }
                 }
@@ -157,7 +157,7 @@ fn fuzz(input: FuzzInput) {
                 mmr.add(&mut hasher, digest);
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let root = *mmr.root();
+            let root = mmr.root();
 
             let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
                 (0, 0)
@@ -179,7 +179,7 @@ fn fuzz(input: FuzzInput) {
                 &mut hasher,
                 &range_elements,
                 start_loc,
-                &root
+                root
             ));
 
             for mutation in &input.mutations {
@@ -190,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                         &mut hasher,
                         &range_elements,
                         start_loc,
-                        &root
+                        root
                     ));
                 }
             }

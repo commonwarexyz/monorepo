@@ -307,12 +307,12 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Ok(proof) = mmr.proof(loc) {
-                        let root = *mmr.root();
+                        let root = mmr.root();
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
                             reference.leaf_data[location_idx].as_slice(),
                             loc,
-                            &root,
+                            root,
                         ));
                     }
                 }
