@@ -56,11 +56,8 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> ItemChain<Item> for Mmr<E, D
     fn collect_item_arcs(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
 
-/// Types that can produce authenticated journal batches.
-///
-/// Implemented by [`Journal`] (for top-level batches from the base MMR) and
-/// [`MerkleizedBatch`] (for stacked child batches that inherit parent MMR state).
-pub trait BatchSource<H: Hasher, Item: Encode + Send + Sync> {
+/// Implemented by types that can produce authenticated journal batches.
+pub trait Batchable<H: Hasher, Item: Encode + Send + Sync> {
     /// The MMR parent type for batches produced by this source.
     type MmrParent: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>;
 
@@ -165,7 +162,7 @@ impl<'a, H: Hasher, P: MmrRead<H::Digest>, Item: Send + Sync + Encode>
     }
 }
 
-impl<'a, H, P, Item> BatchSource<H, Item> for MerkleizedBatch<'a, H, P, Item>
+impl<'a, H, P, Item> Batchable<H, Item> for MerkleizedBatch<'a, H, P, Item>
 where
     H: Hasher,
     P: MmrRead<H::Digest> + ChainInfo<H::Digest> + ItemChain<Item>,
@@ -250,7 +247,7 @@ where
     }
 }
 
-impl<E, C, H> BatchSource<H, C::Item> for Journal<E, C, H>
+impl<E, C, H> Batchable<H, C::Item> for Journal<E, C, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,

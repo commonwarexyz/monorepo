@@ -117,7 +117,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, U>>,
+    JP: authenticated::Batchable<H, Operation<K, V, U>>,
 {
     /// Reference to the underlying DB for journal reads and snapshot access.
     db: &'a Db<E, C, I, H, U>,
@@ -171,7 +171,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, U>>,
+    JP: authenticated::Batchable<H, Operation<K, V, U>>,
 {
     /// Reference to the parent DB.
     db: &'a Db<E, C, I, H, U>,
@@ -228,7 +228,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, U>>,
+    JP: authenticated::Batchable<H, Operation<K, V, U>>,
 {
     /// Record a mutation. Sync -- just inserts into BTreeMap, no I/O.
     /// Use `Some(value)` for update/create, `None` for delete.
@@ -248,7 +248,7 @@ where
     H: Hasher,
     Operation<K, V, update::Unordered<K, V>>: Codec,
     V::Value: Send + Sync,
-    JP: authenticated::BatchSource<H, Operation<K, V, update::Unordered<K, V>>>,
+    JP: authenticated::Batchable<H, Operation<K, V, update::Unordered<K, V>>>,
 {
     /// Read through: mutations -> parent_overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -561,7 +561,7 @@ where
     H: Hasher,
     Operation<K, V, update::Ordered<K, V>>: Codec,
     V::Value: Send + Sync,
-    JP: authenticated::BatchSource<H, Operation<K, V, update::Ordered<K, V>>>,
+    JP: authenticated::Batchable<H, Operation<K, V, update::Ordered<K, V>>>,
 {
     /// Read through: mutations -> parent_overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -1055,7 +1055,7 @@ where
     H: Hasher,
     Operation<K, V, update::Ordered<K, V>>: Codec,
     V::Value: Send + Sync,
-    JP: authenticated::BatchSource<H, Operation<K, V, update::Ordered<K, V>>>,
+    JP: authenticated::Batchable<H, Operation<K, V, update::Ordered<K, V>>>,
 {
     /// Read through: overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -1083,7 +1083,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, U>>,
+    JP: authenticated::Batchable<H, Operation<K, V, U>>,
 {
     /// Return the speculative root. This is the exact committed root -- identical
     /// to what `db.root()` will return after `apply_batch()`.
@@ -1155,7 +1155,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, update::Unordered<K, V>>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, update::Unordered<K, V>>>,
+    JP: authenticated::Batchable<H, Operation<K, V, update::Unordered<K, V>>>,
 {
     /// Read through: overlay -> db snapshot + journal.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -1179,7 +1179,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
-    JP: authenticated::BatchSource<H, Operation<K, V, U>>,
+    JP: authenticated::Batchable<H, Operation<K, V, U>>,
 {
     /// Consume this batch, producing an owned `FinalizedBatch` that can be
     /// applied to the DB without borrow conflicts.
