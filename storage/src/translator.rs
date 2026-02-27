@@ -1,6 +1,6 @@
 //! Primitive implementations of [Translator].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -223,9 +223,12 @@ impl<const N: usize> BuildHasher for Cap<N> {
 /// ```
 /// use commonware_storage::translator::{Hashed, TwoCap, Translator};
 ///
-/// // Random seed (production use):
+/// # #[cfg(feature = "std")]
+/// # {
+/// // Random seed (production use, requires `std`):
 /// let t = Hashed::new(TwoCap);
-/// let k = t.transform(b"hello");
+/// let _k = t.transform(b"hello");
+/// # }
 ///
 /// // Deterministic seed (testing within the same toolchain/runtime):
 /// let t = Hashed::from_seed(42, TwoCap);
@@ -237,6 +240,7 @@ pub struct Hashed<T: Translator> {
     inner: T,
 }
 
+#[cfg(feature = "std")]
 impl<T: Translator + Default> Default for Hashed<T> {
     fn default() -> Self {
         Self::new(T::default())
@@ -245,6 +249,7 @@ impl<T: Translator + Default> Default for Hashed<T> {
 
 impl<T: Translator> Hashed<T> {
     /// Create a new [Hashed] translator with a random seed.
+    #[cfg(feature = "std")]
     pub fn new(inner: T) -> Self {
         Self {
             random_state: ahash::RandomState::new(),
@@ -283,7 +288,7 @@ impl<T: Translator> BuildHasher for Hashed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::Hasher;
+    use core::hash::Hasher;
 
     #[test]
     fn test_one_cap() {
