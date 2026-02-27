@@ -110,9 +110,9 @@ Bayardo</a></div>
         permissionless blockchains, key uniformity is unfortunately not
         guaranteed. If you’ve been in crypto for any amount of time,
         your wallet’s activity history almost certainly contains at
-        least one transaction that involves an address you might believe
-        you’ve interacted with in the past, but actually differs in
-        bytes elided from an abbreviated rendering.</p>
+        least one transaction involving an address you might believe
+        you’ve interacted with in the past, but that actually differs in
+        the bytes omitted in an abbreviated rendering.</p>
         <figure>
         <img src="/imgs/address-poisoning.jpeg"
         alt="Address poisoning exploits the fact that wallet addresses are rarely rendered in full." />
@@ -173,19 +173,19 @@ Bayardo</a></div>
         service vector for many internet services over the years. As a
         result, modern hashtable implementations will (unless otherwise
         configured) randomly seed the hash function at startup,
-        preventing an attacker from knowing if any two keys might
+        preventing an attacker from knowing whether any two keys might
         collide.</p>
         <p>So, how do we at Commonware deal with grinding attacks?
         Commonware’s authenticated databases, like <a
-        href="/blogs/adb-any">qmdb::any</a>, use a Merkle Mountain Range
-        (MMR) over database operations for the canonical structure. A
-        Merkle mountain range is a tree structure with the property that
-        its <em>maximum</em> (not average) leaf depth is log2(n) where n
-        is the number of operations. Grind all you want, your node’s
-        depth won’t be affected (it’s independent of the key’s
-        content)!</p>
+        href="/blogs/adb-any"><code>qmdb::any</code></a>, use a Merkle
+        Mountain Range (MMR) over database operations for the canonical
+        structure. A Merkle mountain range is a tree structure with the
+        property that its <em>maximum</em> (not average) leaf depth is
+        log2(n) where n is the number of operations. Grind all you want;
+        your node’s depth won’t be affected (it’s independent of the
+        key’s content)!</p>
         <p>But an MMR alone doesn’t allow for efficient key lookups, so
-        QMDB couples the canonical MMR with a <em>memory efficient
+        QMDB couples the canonical MMR with a <em>memory-efficient
         index</em> that maps keys to their values on disk. By decoupling
         fast key lookup from merkleization, the exact structure of the
         index need not be canonical, allowing flexibility in its
@@ -205,11 +205,11 @@ Bayardo</a></div>
         will randomize its hash function, the Commonware index can be
         instantiated with a <a
         href="https://github.com/commonwarexyz/monorepo/blob/4870589ea077a1170b9747e305f83ea7592b621d/storage/src/translator.rs#L191">translator</a>
-        that applies a randomly-seeded hash per instance. Even if the
-        unlikely event an adversary learns the seed of one validator, it
-        would differ from that of all others, providing the entire
-        network strong immunity against DoS attacks from state key
-        grinding.</p>
+        that applies a randomly-seeded hash per instance. Even in the
+        unlikely event that an adversary learns the seed of one
+        validator, it would differ from that of all others, providing
+        the entire network strong immunity against DoS attacks from
+        state key grinding.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
