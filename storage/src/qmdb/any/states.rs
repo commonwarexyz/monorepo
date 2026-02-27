@@ -19,9 +19,6 @@ use std::{future::Future, num::NonZeroU64, ops::Range};
 ///
 /// This state allows authentication (root, proofs), pruning, and persistence operations
 /// (sync/close/destroy). Use `into_mutable` to transition to the NonDurable (Mutable) state.
-///
-/// Used by `current::Db` (which still has `DurabilityState`). The `any::Db` type no longer
-/// implements this trait since it removed its `DurabilityState` parameter.
 pub trait CleanAny:
     MerkleizedStore
     + PrunableStore
@@ -44,9 +41,6 @@ pub trait CleanAny:
 ///
 /// This is the only state that allows mutations via write_batch. Use `commit` to transition
 /// to the Durable (Clean) state.
-///
-/// Used by `current::Db` (which still has `DurabilityState`). The `any::Db` type no longer
-/// implements this trait since it removed its `DurabilityState` parameter.
 pub trait MutableAny:
     LogStore + Batchable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
@@ -75,11 +69,10 @@ pub trait MutableAny:
     fn steps(&self) -> u64;
 }
 
-/// A unified trait for testing Any databases (without DurabilityState).
+/// A unified trait for testing Any databases.
 ///
-/// Since `any::Db` no longer has a `DurabilityState` parameter, there is a single
-/// state that supports both reads and writes. This is a self-contained trait
-/// that avoids supertrait conflicts.
+/// `any::Db` supports both reads and writes in a single state. This is a
+/// self-contained trait that avoids supertrait conflicts.
 pub trait TestableAny: Send + Sync {
     /// The key type.
     type Key: Key;

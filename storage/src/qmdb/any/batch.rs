@@ -45,6 +45,7 @@ use tracing::debug;
 /// Each entry stores the `base_old_loc`: the key's location in the base DB's snapshot
 /// (not a virtual location from an intermediate batch). This ensures `finalize()` always
 /// produces snapshot deltas that are valid against the base DB.
+#[derive(Clone)]
 pub(crate) enum OverlayEntry<V> {
     /// Key was updated (existing) or created (new).
     Active {
@@ -61,25 +62,6 @@ pub(crate) enum OverlayEntry<V> {
         /// created by an ancestor batch and never existed in the base DB.
         base_old_loc: Option<Location>,
     },
-}
-
-impl<V: Clone> Clone for OverlayEntry<V> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Active {
-                value,
-                loc,
-                base_old_loc,
-            } => Self::Active {
-                value: value.clone(),
-                loc: *loc,
-                base_old_loc: *base_old_loc,
-            },
-            Self::Deleted { base_old_loc } => Self::Deleted {
-                base_old_loc: *base_old_loc,
-            },
-        }
-    }
 }
 
 /// A single snapshot index mutation to apply to the base DB's snapshot.
@@ -775,7 +757,6 @@ where
 
         // 4a. Process deletes.
         for key in deleted.iter() {
-            let new_loc = Location::new_unchecked(base + ops.len() as u64);
             ops.push(Operation::Delete(key.clone()));
 
             // Find the old_loc from the original results.
@@ -799,7 +780,6 @@ where
             overlay.insert(key.clone(), OverlayEntry::Deleted { base_old_loc });
             active_keys_delta -= 1;
             user_steps += 1;
-            let _ = new_loc; // used only to record position in ops
         }
 
         // 4b. Process updates of existing keys.
@@ -1128,7 +1108,14 @@ where
                 _ => 0,
             })
             .sum();
-        let parent_active_keys = (self.db.active_keys as isize + overlay_delta) as usize;
+        let parent_active_keys_signed = self.db.active_keys as isize + overlay_delta;
+        debug_assert!(
+            parent_active_keys_signed >= 0,
+            "active_keys underflow: base={}, delta={}",
+            self.db.active_keys,
+            overlay_delta
+        );
+        let parent_active_keys = parent_active_keys_signed as usize;
 
         Batch {
             db: self.db,
@@ -1326,7 +1313,14 @@ where
         }
 
         // 4. Update DB metadata.
-        self.active_keys = (self.active_keys as isize + batch.active_keys_delta) as usize;
+        let new_active_keys = self.active_keys as isize + batch.active_keys_delta;
+        debug_assert!(
+            new_active_keys >= 0,
+            "active_keys underflow: base={}, delta={}",
+            self.active_keys,
+            batch.active_keys_delta
+        );
+        self.active_keys = new_active_keys as usize;
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
 

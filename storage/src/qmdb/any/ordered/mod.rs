@@ -625,14 +625,7 @@ where
     }
 
     async fn prune(&mut self, loc: Location) -> Result<(), crate::qmdb::Error> {
-        if loc > self.inactivity_floor_loc {
-            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
-                loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        self.log.prune(loc).await?;
-        Ok(())
+        Self::prune(self, loc).await
     }
 
     async fn inactivity_floor_loc(&self) -> Location {
@@ -640,7 +633,7 @@ where
     }
 
     async fn destroy(self) -> Result<(), crate::qmdb::Error> {
-        self.log.destroy().await.map_err(Into::into)
+        Self::destroy(self).await
     }
 }
 
