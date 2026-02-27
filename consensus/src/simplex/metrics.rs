@@ -20,7 +20,7 @@ pub enum TimeoutReason {
     Inactivity,
     LeaderNullify,
     LeaderTimeout,
-    AdvanceTimeout,
+    CertificationTimeout,
     MissingProposal,
     IgnoredProposal,
     InvalidProposal,

@@ -225,7 +225,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if timeout && !is_retry {
             let round = self.create_round(view);
             let reason = if round.proposal().is_some() {
-                TimeoutReason::AdvanceTimeout
+                TimeoutReason::CertificationTimeout
             } else {
                 TimeoutReason::LeaderTimeout
             };
