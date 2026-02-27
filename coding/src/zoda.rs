@@ -528,13 +528,19 @@ impl<D: Digest> CheckingData<D> {
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
         }
+        // Commit to the checksum before generating the indices to check.
+        //
+        // Nota bene: `checksum.encode()` is *serializing* the checksum, not
+        // Reed-Solomon encoding it.
+        //
+        // cf. the implementation of `Scheme::encode` for ZODA for why it's important
+        // that we do Reed-Solomon encoding of the checksum ourselves.
+        transcript.commit(checksum.encode());
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
             .expect("checksum has too many rows")
             .evaluate()
             .data();
-        // Commit to the checksum before generating the indices to check.
-        transcript.commit(checksum.encode());
         let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
 
         Ok(Self {
@@ -678,6 +684,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checking_matrix = checking_matrix(&transcript, &topology);
         let checksum = Arc::new(data.mul(&checking_matrix));
         // Bind index sampling to this checksum to prevent follower-specific malleability.
+        // It's important to commit to the checksum itself, rather than its encoding,
+        // because followers have to encode the checksum itself to prevent the leader from
+        // cheating.
         transcript.commit(checksum.encode());
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
@@ -914,6 +923,7 @@ mod tests {
             Zoda::<Sha256>::weaken(&config, &commitment, b_i as u16, shards[b_i].clone()),
             Err(Error::InvalidWeakShard)
         ));
+
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
