@@ -387,7 +387,12 @@ impl<
                 // Validate that we need to process the ack
                 if let Err(err) = self.validate_ack(&ack, &sender) {
                     if err.blockable() {
-                        commonware_p2p::block!(self.blocker, sender, ?err, "ack validation failure");
+                        commonware_p2p::block!(
+                            self.blocker,
+                            sender,
+                            ?err,
+                            "ack validation failure"
+                        );
                     } else {
                         debug!(?sender, ?err, "ack validate failed");
                     }

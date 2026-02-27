@@ -247,10 +247,10 @@ impl<
                     } else {
                         let skip_timeout = self.skip_timeout.get() as usize;
                         if
-                            // Ensure we have enough data to judge activity (none of this
-                            // data may be in the last skip_timeout views if we jumped ahead
-                            // to a new view)
-                            work.len() >= skip_timeout
+                        // Ensure we have enough data to judge activity (none of this
+                        // data may be in the last skip_timeout views if we jumped ahead
+                        // to a new view)
+                        work.len() >= skip_timeout
                             // Leader not active in any recent round
                             && !work
                                 .iter()
@@ -449,7 +449,9 @@ impl<
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
-                        voter.timeout(current.view, TimeoutReason::LeaderNullify).await;
+                        voter
+                            .timeout(current.view, TimeoutReason::LeaderNullify)
+                            .await;
                     }
                 }
                 updated_view = view;
@@ -508,7 +510,11 @@ impl<
                     // Block invalid signers
                     for invalid in failed {
                         if let Some(signer) = self.participants.key(invalid) {
-                            commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                            commonware_p2p::block!(
+                                self.blocker,
+                                signer.clone(),
+                                "invalid signature"
+                            );
                         }
                     }
 

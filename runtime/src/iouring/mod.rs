@@ -116,7 +116,7 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight operations never depend on
 //!   later queued operations, otherwise the loop can deadlock.
 
-use crate::{IoBuf, IoBufMut};
+use crate::{IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
@@ -157,13 +157,18 @@ const SUBMISSION_SEQ_MASK: u64 = u64::MAX >> 1;
 ///
 /// The variant must match the operation type:
 /// - `Read`: For operations where the kernel writes INTO the buffer (e.g., recv, read)
-/// - `Write`: For operations where the kernel reads FROM the buffer (e.g., send, write)
+/// - `Write`: For operations where the kernel reads FROM a single contiguous buffer (e.g., send, write)
+/// - `WriteVectored`: For operations where the kernel reads FROM multiple buffers (e.g., writev)
 #[derive(Debug)]
 pub enum OpBuffer {
     /// Buffer for read operations - kernel writes into this.
     Read(IoBufMut),
     /// Buffer for write operations - kernel reads from this.
     Write(IoBuf),
+    /// Buffers for vectored write operations - kernel reads from these.
+    ///
+    /// NOTE: currently this is only used by the storage backend, hence the allow dead code.
+    WriteVectored(#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))] IoBufs),
 }
 
 impl From<IoBufMut> for OpBuffer {
@@ -178,18 +183,60 @@ impl From<IoBuf> for OpBuffer {
     }
 }
 
+impl From<IoBufs> for OpBuffer {
+    fn from(bufs: IoBufs) -> Self {
+        Self::WriteVectored(bufs)
+    }
+}
+
 /// File descriptor for io_uring operations.
 ///
 /// The variant must match the descriptor type:
 /// - `Fd`: For network sockets and other OS file descriptors
 /// - `File`: For file-backed descriptors
-#[allow(dead_code)]
 pub enum OpFd {
     /// A socket or other OS file descriptor.
-    Fd(Arc<OwnedFd>),
+    ///
+    /// NOTE: this is only used by the network backend, hence the allow dead
+    /// code. The field itself is never read regardless, since this only exists
+    /// to keep the FD alive until operation completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    Fd(#[allow(dead_code)] Arc<OwnedFd>),
     /// A file-backed descriptor.
-    File(Arc<File>),
+    ///
+    /// NOTE: this is only used by the storage backend, hence the allow dead
+    /// code. The field itself is never read regardless, since this only exists
+    /// to keep the FD alive until operation completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    File(#[allow(dead_code)] Arc<File>),
 }
+
+/// Owned iovecs that back a vectored io_uring operation.
+///
+/// This wrapper allows transferring iovec arrays through channels while keeping
+/// the pointed-to buffer memory alive through [`OpBuffer`].
+///
+/// The field is never read directly, since this only exists to keep the iovecs
+/// alive until operation completion.
+pub struct OpIovecs(#[allow(dead_code)] Box<[libc::iovec]>);
+
+/// NOTE: this is currently only used by the storage backend, hence the allow
+/// dead code.
+#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+impl OpIovecs {
+    pub const fn new(iovecs: Box<[libc::iovec]>) -> Self {
+        Self(iovecs)
+    }
+
+    pub fn as_ptr(&self) -> *const libc::iovec {
+        self.0.as_ptr()
+    }
+}
+
+// SAFETY: `OpIovecs` only carries raw iovec descriptors. The pointed-to memory
+// is owned by `OpBuffer` and retained for the operation lifetime by the
+// io_uring waiter map.
+unsafe impl Send for OpIovecs {}
 
 #[derive(Debug)]
 /// Tracks io_uring metrics.
@@ -269,9 +316,10 @@ pub struct Op {
     /// The buffer used for the operation, if any.
     /// - For reads: `OpBuffer::Read(IoBufMut)` - kernel writes into this
     /// - For writes: `OpBuffer::Write(IoBuf)` - kernel reads from this
+    /// - For vectored writes: `OpBuffer::WriteVectored(IoBufs)` - kernel reads from these
     /// - None for operations that don't use a buffer (e.g. sync, timeout)
     ///
-    /// We hold the buffer here so it's guaranteed to live until the operation
+    /// We hold the buffer(s) here so it's guaranteed to live until the operation
     /// completes, preventing use-after-free issues.
     pub buffer: Option<OpBuffer>,
     /// The file descriptor used for the operation, if any.
@@ -279,6 +327,11 @@ pub struct Op {
     /// We hold the descriptor here so the OS cannot reuse the FD number
     /// while the operation is queued or in-flight.
     pub fd: Option<OpFd>,
+    /// Owned iovecs used by vectored operations, if any.
+    ///
+    /// We hold these iovecs here so they're guaranteed to live until the operation
+    /// completes, preventing use-after-free issues.
+    pub iovecs: Option<OpIovecs>,
 }
 
 /// Shared wake state used by submitters and the io_uring loop.
@@ -557,6 +610,13 @@ struct Waiter {
     /// operation completion, hence the allow dead code.
     #[allow(dead_code)]
     fd: Option<OpFd>,
+    /// The iovec array associated with this operation, if any. Used to keep iovec
+    /// storage alive and prevent use-after-free while the operation is in-flight.
+    ///
+    /// NOTE: This field is never read since it only exists to keep iovecs alive until
+    /// operation completion, hence the allow dead code.
+    #[allow(dead_code)]
+    iovecs: Option<OpIovecs>,
     /// The linked timeout timespec associated with this operation, if any. Used to keep
     /// the timespec alive and prevent use-after-free while the operation is in-flight.
     timespec: Option<Timespec>,
@@ -783,6 +843,7 @@ impl IoUringLoop {
                 sender,
                 buffer,
                 fd,
+                iovecs,
             } = op;
 
             // Prepare op timeout timespec. We build the linked timeout SQE later, after
@@ -798,6 +859,7 @@ impl IoUringLoop {
                 sender,
                 buffer,
                 fd,
+                iovecs,
                 timespec,
             });
 
@@ -812,8 +874,9 @@ impl IoUringLoop {
             // Submit the operation.
             //
             // SAFETY:
-            // - `buffer` and `fd` are stored in `self.waiters` until CQE processing, so
-            //   SQE pointers remain valid and FD numbers cannot be reused early.
+            // - `buffer`, `fd` and `iovecs` are stored in `self.waiters` until CQE
+            //   processing, so SQE pointers remain valid and FD numbers cannot be reused
+            //   early.
             // - `IO_LINK` is set on `work` before pushing it, so the following timeout
             //   SQE applies to this operation.
             // - `available >= needed` was checked above, so this push fits.
@@ -1052,12 +1115,14 @@ mod tests {
             sender: tx0,
             buffer: Some(IoBuf::from(b"hello").into()),
             fd: None,
+            iovecs: None,
             timespec: None,
         });
         let index1 = waiters.insert(Waiter {
             sender: tx1,
             buffer: Some(IoBuf::from(b"world").into()),
             fd: None,
+            iovecs: None,
             timespec: None,
         });
         assert_eq!((index0, index1), (0, 1));
@@ -1084,6 +1149,7 @@ mod tests {
             sender: tx2,
             buffer: None,
             fd: None,
+            iovecs: None,
             timespec: None,
         });
         assert_eq!(index2, index1);
@@ -1112,12 +1178,14 @@ mod tests {
             sender: tx0,
             buffer: None,
             fd: None,
+            iovecs: None,
             timespec: None,
         });
         let _ = waiters.insert(Waiter {
             sender: tx1,
             buffer: None,
             fd: None,
+            iovecs: None,
             timespec: None,
         });
     }
@@ -1142,6 +1210,7 @@ mod tests {
                 sender: recv_tx,
                 buffer: Some(buf.into()),
                 fd: None,
+                iovecs: None,
             })
             .await
             .expect("failed to send work");
@@ -1156,6 +1225,7 @@ mod tests {
                 sender: write_tx,
                 buffer: Some(msg.into()),
                 fd: None,
+                iovecs: None,
             })
             .await
             .expect("failed to send work");
@@ -1213,6 +1283,7 @@ mod tests {
                 sender: tx,
                 buffer: Some(buf.into()),
                 fd: None,
+                iovecs: None,
             })
             .await
             .expect("failed to send work");
@@ -1244,6 +1315,7 @@ mod tests {
                 sender: tx,
                 buffer: None,
                 fd: None,
+                iovecs: None,
             })
             .await
             .unwrap();
@@ -1279,6 +1351,7 @@ mod tests {
                 sender: tx,
                 buffer: None,
                 fd: None,
+                iovecs: None,
             })
             .await
             .unwrap();
@@ -1323,6 +1396,7 @@ mod tests {
                     sender: tx,
                     buffer: None,
                     fd: None,
+                    iovecs: None,
                 })
                 .await
                 .unwrap();
@@ -1362,6 +1436,7 @@ mod tests {
                 sender: tx,
                 buffer: None,
                 fd: None,
+                iovecs: None,
             })
             .await
             .unwrap();

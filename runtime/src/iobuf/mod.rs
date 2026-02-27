@@ -12,7 +12,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
 use pool::{PooledBuf, PooledBufMut};
-use std::{collections::VecDeque, ops::RangeBounds};
+use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
@@ -778,10 +778,40 @@ impl IoBufs {
         }
     }
 
+    /// Consume this container and return the single buffer if present.
+    ///
+    /// Returns `Ok(IoBuf)` only when all remaining data is already contained in
+    /// a single chunk. Returns `Err(Self)` with the original container
+    /// otherwise.
+    pub fn try_into_single(self) -> Result<IoBuf, Self> {
+        match self.inner {
+            IoBufsInner::Single(buf) => Ok(buf),
+            inner => Err(Self { inner }),
+        }
+    }
+
     /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
         self.remaining()
+    }
+
+    /// Number of non-empty readable chunks.
+    #[inline]
+    pub fn chunk_count(&self) -> usize {
+        // This assumes canonical form.
+        match &self.inner {
+            IoBufsInner::Single(buf) => {
+                if buf.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            IoBufsInner::Pair(_) => 2,
+            IoBufsInner::Triple(_) => 3,
+            IoBufsInner::Chunked(bufs) => bufs.len(),
+        }
     }
 
     /// Whether all buffers are empty.
@@ -949,6 +979,30 @@ impl Buf for IoBufs {
                     }
                 }
                 &[]
+            }
+        }
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        if dst.is_empty() {
+            return 0;
+        }
+
+        match &self.inner {
+            IoBufsInner::Single(buf) => {
+                let chunk = buf.chunk();
+                if !chunk.is_empty() {
+                    dst[0] = IoSlice::new(chunk);
+                    return 1;
+                }
+                0
+            }
+            IoBufsInner::Pair([a, b]) => fill_vectored_from_chunks(dst, [a.chunk(), b.chunk()]),
+            IoBufsInner::Triple([a, b, c]) => {
+                fill_vectored_from_chunks(dst, [a.chunk(), b.chunk(), c.chunk()])
+            }
+            IoBufsInner::Chunked(bufs) => {
+                fill_vectored_from_chunks(dst, bufs.iter().map(|buf| buf.chunk()))
             }
         }
     }
@@ -1195,6 +1249,18 @@ impl IoBufsMut {
         }
     }
 
+    /// Consume this container and return the single buffer if present.
+    ///
+    /// Returns `Ok(IoBufMut)` only when readable data is represented as one
+    /// chunk. Returns `Err(Self)` with the original container otherwise.
+    #[allow(clippy::result_large_err)]
+    pub fn try_into_single(self) -> Result<IoBufMut, Self> {
+        match self.inner {
+            IoBufsMutInner::Single(buf) => Ok(buf),
+            inner => Err(Self { inner }),
+        }
+    }
+
     /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
@@ -1422,6 +1488,30 @@ impl Buf for IoBufsMut {
                     }
                 }
                 &[]
+            }
+        }
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        if dst.is_empty() {
+            return 0;
+        }
+
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => {
+                let chunk = buf.chunk();
+                if !chunk.is_empty() {
+                    dst[0] = IoSlice::new(chunk);
+                    return 1;
+                }
+                0
+            }
+            IoBufsMutInner::Pair([a, b]) => fill_vectored_from_chunks(dst, [a.chunk(), b.chunk()]),
+            IoBufsMutInner::Triple([a, b, c]) => {
+                fill_vectored_from_chunks(dst, [a.chunk(), b.chunk(), c.chunk()])
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                fill_vectored_from_chunks(dst, bufs.iter().map(|buf| buf.chunk()))
             }
         }
     }
@@ -1761,6 +1851,27 @@ unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usi
     false
 }
 
+/// Fill `dst` with `IoSlice`s built from `chunks`.
+///
+/// Empty chunks are skipped. At most `dst.len()` slices are written.
+/// Returns the number of slices written.
+#[inline]
+fn fill_vectored_from_chunks<'a, I>(dst: &mut [IoSlice<'a>], chunks: I) -> usize
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut written = 0;
+    for chunk in chunks
+        .into_iter()
+        .filter(|chunk| !chunk.is_empty())
+        .take(dst.len())
+    {
+        dst[written] = IoSlice::new(chunk);
+        written += 1;
+    }
+    written
+}
+
 /// Extension trait for encoding values into pooled I/O buffers.
 ///
 /// This is useful for hot paths that need to avoid frequent heap allocations
@@ -1966,6 +2077,35 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufs_chunk_count() {
+        assert_eq!(IoBufs::default().chunk_count(), 0);
+        assert_eq!(IoBufs::from(IoBuf::from(b"a")).chunk_count(), 1);
+        assert_eq!(
+            IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]).chunk_count(),
+            2
+        );
+        assert_eq!(
+            IoBufs::from(vec![
+                IoBuf::from(b"a"),
+                IoBuf::from(b"b"),
+                IoBuf::from(b"c")
+            ])
+            .chunk_count(),
+            3
+        );
+        assert_eq!(
+            IoBufs::from(vec![
+                IoBuf::from(b"a"),
+                IoBuf::from(b"b"),
+                IoBuf::from(b"c"),
+                IoBuf::from(b"d")
+            ])
+            .chunk_count(),
+            4
+        );
+    }
+
+    #[test]
     fn test_iobufs_coalesce_after_advance() {
         let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
         bufs.append(IoBuf::from(b" world"));
@@ -2167,6 +2307,85 @@ mod tests {
         );
         assert_eq!(chain.remaining(), 0);
         assert_eq!(iobufs.remaining(), 0);
+    }
+
+    #[test]
+    fn test_iobufs_try_into_single() {
+        let single = IoBufs::from(IoBuf::from(b"hello"));
+        let single = single.try_into_single().expect("single expected");
+        assert_eq!(single, b"hello");
+
+        let multi = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let multi = multi.try_into_single().expect_err("multi expected");
+        assert_eq!(multi.coalesce(), b"abcd");
+    }
+
+    #[test]
+    fn test_iobufs_chunks_vectored_multiple_slices() {
+        // Single non-empty buffers should export exactly one slice.
+        let single = IoBufs::from(IoBuf::from(b"xy"));
+        let mut single_dst = [IoSlice::new(&[]); 2];
+        let count = single.chunks_vectored(&mut single_dst);
+        assert_eq!(count, 1);
+        assert_eq!(&single_dst[0][..], b"xy");
+
+        // Single empty buffers should export no slices.
+        let empty_single = IoBufs::default();
+        let mut empty_single_dst = [IoSlice::new(&[]); 1];
+        assert_eq!(empty_single.chunks_vectored(&mut empty_single_dst), 0);
+
+        let bufs = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::from(b"gh"),
+        ]);
+
+        // Destination capacity should cap how many chunks we export.
+        let mut small = [IoSlice::new(&[]); 2];
+        let count = bufs.chunks_vectored(&mut small);
+        assert_eq!(count, 2);
+        assert_eq!(&small[0][..], b"ab");
+        assert_eq!(&small[1][..], b"cd");
+
+        // Larger destination should include every readable chunk.
+        let mut large = [IoSlice::new(&[]); 8];
+        let count = bufs.chunks_vectored(&mut large);
+        assert_eq!(count, 4);
+        assert_eq!(&large[0][..], b"ab");
+        assert_eq!(&large[1][..], b"cd");
+        assert_eq!(&large[2][..], b"ef");
+        assert_eq!(&large[3][..], b"gh");
+
+        // Empty destination cannot accept any slices.
+        let mut empty_dst: [IoSlice<'_>; 0] = [];
+        assert_eq!(bufs.chunks_vectored(&mut empty_dst), 0);
+
+        // Non-canonical shapes should skip empty leading chunks.
+        let sparse = IoBufs {
+            inner: IoBufsInner::Pair([IoBuf::default(), IoBuf::from(b"x")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        let count = sparse.chunks_vectored(&mut dst);
+        assert_eq!(count, 1);
+        assert_eq!(&dst[0][..], b"x");
+
+        // Triple should skip empty chunks and preserve readable order.
+        let sparse_triple = IoBufs {
+            inner: IoBufsInner::Triple([IoBuf::default(), IoBuf::from(b"y"), IoBuf::from(b"z")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 3];
+        let count = sparse_triple.chunks_vectored(&mut dst);
+        assert_eq!(count, 2);
+        assert_eq!(&dst[0][..], b"y");
+        assert_eq!(&dst[1][..], b"z");
+
+        // Chunked shapes with only empty buffers should export no slices.
+        let empty_chunked = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([IoBuf::default(), IoBuf::default()])),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        assert_eq!(empty_chunked.chunks_vectored(&mut dst), 0);
     }
 
     #[test]
@@ -2710,6 +2929,92 @@ mod tests {
         let iobufs_bytes = iobufs.copy_to_bytes(8);
         assert_eq!(chain_bytes, iobufs_bytes);
         assert_eq!(chain_bytes.as_ref(), b"hello wo");
+    }
+
+    #[test]
+    fn test_iobufsmut_chunks_vectored_multiple_slices() {
+        // Single non-empty buffers should export exactly one slice.
+        let single = IoBufsMut::from(IoBufMut::from(b"xy"));
+        let mut single_dst = [IoSlice::new(&[]); 2];
+        let count = single.chunks_vectored(&mut single_dst);
+        assert_eq!(count, 1);
+        assert_eq!(&single_dst[0][..], b"xy");
+
+        // Single empty buffers should export no slices.
+        let empty_single = IoBufsMut::default();
+        let mut empty_single_dst = [IoSlice::new(&[]); 1];
+        assert_eq!(empty_single.chunks_vectored(&mut empty_single_dst), 0);
+
+        let bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"ab"),
+            IoBufMut::from(b"cd"),
+            IoBufMut::from(b"ef"),
+            IoBufMut::from(b"gh"),
+        ]);
+
+        // Destination capacity should cap how many chunks we export.
+        let mut small = [IoSlice::new(&[]); 2];
+        let count = bufs.chunks_vectored(&mut small);
+        assert_eq!(count, 2);
+        assert_eq!(&small[0][..], b"ab");
+        assert_eq!(&small[1][..], b"cd");
+
+        // Larger destination should include every readable chunk.
+        let mut large = [IoSlice::new(&[]); 8];
+        let count = bufs.chunks_vectored(&mut large);
+        assert_eq!(count, 4);
+        assert_eq!(&large[0][..], b"ab");
+        assert_eq!(&large[1][..], b"cd");
+        assert_eq!(&large[2][..], b"ef");
+        assert_eq!(&large[3][..], b"gh");
+
+        // Empty destination cannot accept any slices.
+        let mut empty_dst: [IoSlice<'_>; 0] = [];
+        assert_eq!(bufs.chunks_vectored(&mut empty_dst), 0);
+
+        // Non-canonical shapes should skip empty leading chunks.
+        let sparse = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::from(b"y")]),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        let count = sparse.chunks_vectored(&mut dst);
+        assert_eq!(count, 1);
+        assert_eq!(&dst[0][..], b"y");
+
+        // Triple should skip empty chunks and preserve readable order.
+        let sparse_triple = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::from(b"z"),
+                IoBufMut::from(b"w"),
+            ]),
+        };
+        let mut dst = [IoSlice::new(&[]); 3];
+        let count = sparse_triple.chunks_vectored(&mut dst);
+        assert_eq!(count, 2);
+        assert_eq!(&dst[0][..], b"z");
+        assert_eq!(&dst[1][..], b"w");
+
+        // Chunked shapes with only empty buffers should export no slices.
+        let empty_chunked = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([
+                IoBufMut::default(),
+                IoBufMut::default(),
+            ])),
+        };
+        let mut dst = [IoSlice::new(&[]); 2];
+        assert_eq!(empty_chunked.chunks_vectored(&mut dst), 0);
+    }
+
+    #[test]
+    fn test_iobufsmut_try_into_single() {
+        let single = IoBufsMut::from(IoBufMut::from(b"hello"));
+        let single = single.try_into_single().expect("single expected");
+        assert_eq!(single, b"hello");
+
+        let multi = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
+        let multi = multi.try_into_single().expect_err("multi expected");
+        assert_eq!(multi.coalesce(), b"abcd");
     }
 
     #[test]
