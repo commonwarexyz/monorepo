@@ -341,6 +341,7 @@ impl<D: Digest> Mmr<D> {
     ///
     /// `new_size` must be a valid MMR size (i.e., `new_size.is_mmr_size()`) and must be
     /// >= `pruned_to_pos`.
+    #[cfg(feature = "std")]
     pub(crate) fn truncate(&mut self, new_size: Position, hasher: &mut impl Hasher<Digest = D>) {
         debug_assert!(new_size.is_mmr_size());
         debug_assert!(new_size >= self.pruned_to_pos);
