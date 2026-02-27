@@ -26,6 +26,7 @@ use std::{
 };
 use tracing::warn;
 
+pub mod batch;
 mod operation;
 pub use operation::Operation;
 
@@ -335,6 +336,55 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         self.journal.commit().await?;
         self.last_commit_loc = loc;
         Ok(loc..loc + 1)
+    }
+
+    /// Create a new batch. Borrows `&self` immutably so multiple batches can
+    /// coexist.
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(&self) -> batch::Batch<'_, E, K, V, H, T, Journal<E, K, V, H>> {
+        let journal_size = *self.last_commit_loc + 1;
+        batch::Batch {
+            immutable: self,
+            journal_parent: &self.journal,
+            mutations: std::collections::BTreeMap::new(),
+            parent_overlay: std::collections::BTreeMap::new(),
+            parent_operation_chain: Vec::new(),
+            parent_total_size: journal_size,
+        }
+    }
+
+    /// Apply a finalized batch to the database.
+    ///
+    /// Writes all operations to the journal, flushes, updates snapshot, and
+    /// updates state. Returns the range of locations written.
+    pub async fn apply_batch(
+        &mut self,
+        batch: batch::FinalizedBatch<K, H::Digest, V>,
+    ) -> Result<Range<Location>, Error> {
+        let start_loc = Location::new_unchecked(*self.last_commit_loc + 1);
+
+        // Write all operations to the authenticated journal + apply MMR changeset.
+        self.journal.apply_batch(batch.journal_finalized).await?;
+
+        // Flush journal to disk.
+        self.journal.commit().await?;
+
+        // Apply snapshot deltas.
+        let bounds = self.journal.reader().await.bounds();
+        for delta in batch.snapshot_deltas {
+            match delta {
+                batch::SnapshotDelta::Insert { key, new_loc } => {
+                    self.snapshot
+                        .insert_and_prune(&key, new_loc, |v| *v < bounds.start);
+                }
+            }
+        }
+
+        // Update state.
+        self.last_commit_loc = batch.new_last_commit_loc;
+
+        let end_loc = Location::new_unchecked(*self.last_commit_loc + 1);
+        Ok(start_loc..end_loc)
     }
 }
 
@@ -824,5 +874,153 @@ pub(super) mod test {
         assert_send(db.sync());
         assert_send(db.set(key, value));
         assert_send(db.commit(None));
+    }
+
+    #[test_traced("INFO")]
+    fn test_immutable_batch_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Keys must be in sorted order for both paths to produce same root.
+            let k1 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1");
+            let k2 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2");
+            let v1 = vec![1, 2, 3];
+            let v2 = vec![4, 5, 6, 7, 8];
+
+            // Build via batch.
+            let batch_cfg = db_config("batch", &context);
+            let mut batch_db: Db = Immutable::init(context.with_label("batch"), batch_cfg)
+                .await
+                .unwrap();
+            let mut batch = batch_db.new_batch();
+            batch.set(k1, v1.clone());
+            batch.set(k2, v2.clone());
+
+            // Verify get works during batch.
+            assert_eq!(batch.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(batch.get(&k2).await.unwrap().unwrap(), v2);
+
+            let merkleized = batch.merkleize(None);
+            let batch_root = merkleized.root();
+
+            // Verify get works on merkleized batch.
+            assert_eq!(merkleized.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(merkleized.get(&k2).await.unwrap().unwrap(), v2);
+
+            let finalized = merkleized.finalize();
+            batch_db.apply_batch(finalized).await.unwrap();
+
+            // Build via sequential (keys in sorted order).
+            let seq_cfg = db_config("sequential", &context);
+            let mut seq_db: Db = Immutable::init(context.with_label("sequential"), seq_cfg)
+                .await
+                .unwrap();
+            seq_db.set(k1, v1.clone()).await.unwrap();
+            seq_db.set(k2, v2.clone()).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+
+            // Roots should match.
+            assert_eq!(batch_db.root(), seq_db.root());
+            assert_eq!(batch_db.root(), batch_root);
+
+            // State should match.
+            assert_eq!(batch_db.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(batch_db.get(&k2).await.unwrap().unwrap(), v2);
+            assert_eq!(batch_db.bounds().await, seq_db.bounds().await);
+
+            batch_db.destroy().await.unwrap();
+            seq_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_immutable_batch_stacked_equals_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Keys in sorted order for both paths.
+            let k1 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1");
+            let k2 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2");
+            let k3 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3");
+            let k4 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4");
+            let v1 = vec![1, 2, 3];
+            let v2 = vec![4, 5, 6, 7, 8];
+            let v3 = vec![9, 10];
+            let v4 = vec![11, 12, 13, 14];
+
+            // Build via stacked batches.
+            let batch_cfg = db_config("batch", &context);
+            let mut batch_db: Db = Immutable::init(context.with_label("batch"), batch_cfg)
+                .await
+                .unwrap();
+            let mut parent_batch = batch_db.new_batch();
+            parent_batch.set(k1, v1.clone());
+            parent_batch.set(k2, v2.clone());
+            let parent_merkleized = parent_batch.merkleize(None);
+
+            let mut child_batch = parent_merkleized.new_batch();
+            child_batch.set(k3, v3.clone());
+            child_batch.set(k4, v4.clone());
+            let child_merkleized = child_batch.merkleize(None);
+            let stacked_root = child_merkleized.root();
+
+            let finalized = child_merkleized.finalize();
+            batch_db.apply_batch(finalized).await.unwrap();
+
+            // Build via sequential (keys in sorted order on each commit).
+            let seq_cfg = db_config("sequential", &context);
+            let mut seq_db: Db = Immutable::init(context.with_label("sequential"), seq_cfg)
+                .await
+                .unwrap();
+            seq_db.set(k1, v1).await.unwrap();
+            seq_db.set(k2, v2).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+            seq_db.set(k3, v3).await.unwrap();
+            seq_db.set(k4, v4).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+
+            // Roots should match.
+            assert_eq!(batch_db.root(), seq_db.root());
+            assert_eq!(batch_db.root(), stacked_root);
+            assert_eq!(batch_db.bounds().await, seq_db.bounds().await);
+
+            batch_db.destroy().await.unwrap();
+            seq_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_immutable_batch_stacked_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let k1 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1");
+            let k2 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2");
+            let k3 = Digest::from(*b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3");
+            let v1 = vec![1, 2, 3];
+            let v2 = vec![4, 5, 6, 7, 8];
+            let v3 = vec![9, 10];
+
+            let db = open_db(context.with_label("db")).await;
+
+            // Create parent batch.
+            let mut parent_batch = db.new_batch();
+            parent_batch.set(k1, v1.clone());
+            parent_batch.set(k2, v2.clone());
+            let parent_merkleized = parent_batch.merkleize(None);
+
+            // Child batch should be able to read parent's values.
+            let mut child_batch = parent_merkleized.new_batch();
+            child_batch.set(k3, v3.clone());
+
+            // Read parent values from child batch.
+            assert_eq!(child_batch.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(child_batch.get(&k2).await.unwrap().unwrap(), v2);
+            // Read child's own value.
+            assert_eq!(child_batch.get(&k3).await.unwrap().unwrap(), v3);
+
+            // Read parent values from parent merkleized.
+            assert_eq!(parent_merkleized.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(parent_merkleized.get(&k2).await.unwrap().unwrap(), v2);
+
+            db.destroy().await.unwrap();
+        });
     }
 }

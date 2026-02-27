@@ -24,6 +24,7 @@ use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
+pub mod batch;
 mod operation;
 pub use operation::Operation;
 
@@ -247,6 +248,46 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         let op_count = self.last_commit_loc + 1;
         debug!(size = ?op_count, "committed db");
         Ok(start_loc..op_count)
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+    /// Create a new batch. Borrows `&self` immutably so multiple batches can
+    /// coexist.
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(&self) -> batch::Batch<'_, E, V, H, Journal<E, V, H>> {
+        let journal_size = *self.last_commit_loc + 1;
+        batch::Batch {
+            keyless: self,
+            journal_parent: &self.journal,
+            appends: Vec::new(),
+            parent_operation_chain: Vec::new(),
+            parent_total_size: journal_size,
+        }
+    }
+
+    /// Apply a finalized batch to the database.
+    ///
+    /// Writes all operations to the journal, flushes, and updates state.
+    /// Returns the range of locations written.
+    pub async fn apply_batch(
+        &mut self,
+        batch: batch::FinalizedBatch<H::Digest, V>,
+    ) -> Result<core::ops::Range<Location>, Error> {
+        let start_loc = self.last_commit_loc + 1;
+
+        // Write all operations to the authenticated journal + apply MMR changeset.
+        self.journal.apply_batch(batch.journal_finalized).await?;
+
+        // Flush journal to disk.
+        self.journal.commit().await?;
+
+        // Update state.
+        self.last_commit_loc = batch.new_last_commit_loc;
+
+        let end_loc = self.last_commit_loc + 1;
+        debug!(size = ?end_loc, "applied batch");
+        Ok(start_loc..end_loc)
     }
 }
 
@@ -1017,5 +1058,143 @@ mod test {
         assert_send(db.get(loc));
         assert_send(db.append(value));
         assert_send(db.commit(None));
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_batch_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Build via batch.
+            let batch_cfg = db_config("batch", &context);
+            let mut batch_db = Db::init(context.with_label("batch"), batch_cfg)
+                .await
+                .unwrap();
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 20];
+
+            let mut batch = batch_db.new_batch();
+            let loc1 = batch.append(v1.clone());
+            let loc2 = batch.append(v2.clone());
+
+            // Verify get works during batch.
+            assert_eq!(batch.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(batch.get(loc2).await.unwrap().unwrap(), v2);
+
+            let merkleized = batch.merkleize(None);
+            let batch_root = merkleized.root();
+
+            // Verify get works on merkleized batch.
+            assert_eq!(merkleized.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(merkleized.get(loc2).await.unwrap().unwrap(), v2);
+
+            let finalized = merkleized.finalize();
+            batch_db.apply_batch(finalized).await.unwrap();
+
+            // Build via sequential.
+            let seq_cfg = db_config("sequential", &context);
+            let mut seq_db = Db::init(context.with_label("sequential"), seq_cfg)
+                .await
+                .unwrap();
+            seq_db.append(v1.clone()).await.unwrap();
+            seq_db.append(v2.clone()).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+
+            // Roots should match.
+            assert_eq!(batch_db.root(), seq_db.root());
+            assert_eq!(batch_db.root(), batch_root);
+
+            // State should match.
+            assert_eq!(batch_db.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(batch_db.get(loc2).await.unwrap().unwrap(), v2);
+            assert_eq!(batch_db.bounds().await, seq_db.bounds().await);
+
+            batch_db.destroy().await.unwrap();
+            seq_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_batch_stacked_equals_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 20];
+            let v3 = vec![3u8; 12];
+            let v4 = vec![4u8; 5];
+
+            // Build via stacked batches.
+            let batch_cfg = db_config("batch", &context);
+            let mut batch_db = Db::init(context.with_label("batch"), batch_cfg)
+                .await
+                .unwrap();
+            let mut parent_batch = batch_db.new_batch();
+            parent_batch.append(v1.clone());
+            parent_batch.append(v2.clone());
+            let parent_merkleized = parent_batch.merkleize(None);
+
+            let mut child_batch = parent_merkleized.new_batch();
+            child_batch.append(v3.clone());
+            child_batch.append(v4.clone());
+            let child_merkleized = child_batch.merkleize(None);
+            let stacked_root = child_merkleized.root();
+
+            let finalized = child_merkleized.finalize();
+            batch_db.apply_batch(finalized).await.unwrap();
+
+            // Build via sequential.
+            let seq_cfg = db_config("sequential", &context);
+            let mut seq_db = Db::init(context.with_label("sequential"), seq_cfg)
+                .await
+                .unwrap();
+            seq_db.append(v1).await.unwrap();
+            seq_db.append(v2).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+            seq_db.append(v3).await.unwrap();
+            seq_db.append(v4).await.unwrap();
+            seq_db.commit(None).await.unwrap();
+
+            // Roots should match.
+            assert_eq!(batch_db.root(), seq_db.root());
+            assert_eq!(batch_db.root(), stacked_root);
+            assert_eq!(batch_db.bounds().await, seq_db.bounds().await);
+
+            batch_db.destroy().await.unwrap();
+            seq_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_batch_stacked_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 20];
+            let v3 = vec![3u8; 12];
+
+            let db = open_db(context.with_label("db")).await;
+
+            // Create parent batch.
+            let mut parent_batch = db.new_batch();
+            let loc1 = parent_batch.append(v1.clone());
+            let loc2 = parent_batch.append(v2.clone());
+            let parent_merkleized = parent_batch.merkleize(None);
+
+            // Child batch should be able to read parent's values.
+            let mut child_batch = parent_merkleized.new_batch();
+            let loc3 = child_batch.append(v3.clone());
+
+            // Read parent values from child batch.
+            assert_eq!(child_batch.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(child_batch.get(loc2).await.unwrap().unwrap(), v2);
+            // Read child's own value.
+            assert_eq!(child_batch.get(loc3).await.unwrap().unwrap(), v3);
+
+            // Also read parent values via the commit op location.
+            // The commit op for parent is at loc2 + 1.
+            let commit_loc = Location::new_unchecked(*loc2 + 1);
+            assert_eq!(child_batch.get(commit_loc).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
     }
 }
