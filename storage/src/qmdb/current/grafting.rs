@@ -601,7 +601,7 @@ mod tests {
             let grafted =
                 build_test_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
-            let ops_root = ops_mmr.root();
+            let ops_root = *ops_mmr.root();
 
             {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);

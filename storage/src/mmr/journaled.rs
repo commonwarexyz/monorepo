@@ -643,7 +643,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
     /// Return the root of the MMR.
     pub fn root(&self) -> D {
-        self.inner.read().mem_mmr.root()
+        *self.inner.read().mem_mmr.root()
     }
 
     /// Return an inclusion proof for the element at the location `loc` against a historical MMR
@@ -819,7 +819,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> MmrRead<D> for CleanMmr<E, D> {
     }
 
     fn root(&self) -> D {
-        self.inner.read().mem_mmr.root()
+        *self.inner.read().mem_mmr.root()
     }
 
     fn pruned_to_pos(&self) -> Position {
@@ -1150,7 +1150,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let test_mmr = mem::CleanMmr::new::<Sha256>();
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = *test_mmr.root();
 
             let journaled_mmr = Mmr::init(
                 context.clone(),
@@ -1285,7 +1285,11 @@ mod tests {
                     reference_mmr.add(&mut hasher, &element);
                 }
                 let reference_mmr = reference_mmr.merkleize(&mut hasher, None);
-                assert_eq!(root, reference_mmr.root(), "root mismatch after pop at {i}");
+                assert_eq!(
+                    root,
+                    *reference_mmr.root(),
+                    "root mismatch after pop at {i}"
+                );
                 mmr = clean_mmr.into_dirty();
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
@@ -1312,7 +1316,7 @@ mod tests {
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
-                    reference_mmr.root(),
+                    *reference_mmr.root(),
                     "root mismatch at position {i:?}"
                 );
                 mmr = clean_mmr.into_dirty();
@@ -2982,7 +2986,7 @@ mod tests {
 
             // Build a reference in-memory MMR with 20 elements to verify.
             let reference = build_test_mmr(&mut hasher, mem::CleanMmr::new::<Sha256>(), 20);
-            assert_eq!(mmr.root(), reference.root());
+            assert_eq!(mmr.root(), *reference.root());
 
             mmr.destroy().await.unwrap();
         });

@@ -221,7 +221,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         let size_before = mmr.size();
-                        let root_before = mmr.root();
+                        let root_before = *mmr.root();
 
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
@@ -235,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                         );
 
                         // Root should change (unless data is identical)
-                        let root_after = mmr.root();
+                        let root_after = *mmr.root();
                         if limited_data != reference.leaf_data[location] {
                             assert_ne!(
                                 root_before, root_after,
@@ -307,7 +307,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Ok(proof) = mmr.proof(loc) {
-                        let root = mmr.root();
+                        let root = *mmr.root();
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
                             reference.leaf_data[location_idx].as_slice(),

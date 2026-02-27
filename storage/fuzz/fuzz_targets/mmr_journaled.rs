@@ -110,7 +110,7 @@ fn historical_root(
     for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
         mmr.add(&mut hasher, element);
     }
-    mmr.merkleize(&mut hasher, None).root()
+    *mmr.merkleize(&mut hasher, None).root()
 }
 
 fn fuzz(input: FuzzInput) {

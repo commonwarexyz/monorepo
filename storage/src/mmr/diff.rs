@@ -654,7 +654,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             let mut diff = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
@@ -680,7 +680,7 @@ mod tests {
 
             // Drop diff, verify base unchanged.
             drop(clean_diff);
-            assert_eq!(base.root(), base_root);
+            assert_eq!(*base.root(), base_root);
         });
     }
 
@@ -703,7 +703,7 @@ mod tests {
             let changeset = clean_diff.into_changeset();
             base.apply(changeset);
 
-            assert_eq!(base.root(), diff_root);
+            assert_eq!(*base.root(), diff_root);
 
             // Verify matches building directly.
             let reference = build_reference(&mut hasher, 75);
@@ -726,7 +726,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             // Fork A: add 10 elements.
             let mut diff_a = UnmerkleizedBatch::new(&base);
@@ -752,7 +752,7 @@ mod tests {
 
             drop(clean_a);
             drop(clean_b);
-            assert_eq!(base.root(), base_root);
+            assert_eq!(*base.root(), base_root);
         });
     }
 
@@ -784,7 +784,7 @@ mod tests {
 
             // B should have the same root as building 70 elements directly.
             let reference = build_reference(&mut hasher, 70);
-            assert_eq!(clean_b.root(), reference.root());
+            assert_eq!(clean_b.root(), *reference.root());
 
             // Proofs from B should verify.
             for i in [0u64, 25, 55, 65, 69] {
@@ -835,7 +835,7 @@ mod tests {
             drop(clean_a);
             base.apply(changeset);
 
-            assert_eq!(base.root(), b_root);
+            assert_eq!(*base.root(), b_root);
 
             let reference = build_reference(&mut hasher, 70);
             assert_eq!(base.root(), reference.root());
@@ -857,7 +857,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 100);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             let updated_digest = Sha256::fill(0xFF);
 
@@ -887,7 +887,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             let updated_digest = Sha256::fill(0xAA);
             let mut diff = UnmerkleizedBatch::new(&base);
@@ -927,7 +927,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 100);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             let updated_digest = Sha256::fill(0xBB);
             let updates: Vec<(Location, sha256::Digest)> = [0u64, 10, 50, 99]
@@ -1016,7 +1016,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let base = build_reference(&mut hasher, 50);
-            let base_root = base.root();
+            let base_root = *base.root();
 
             let diff = UnmerkleizedBatch::new(&base);
             let clean_diff = diff.merkleize(&mut hasher);
@@ -1052,7 +1052,7 @@ mod tests {
             let clean_diff = diff.merkleize(&mut hasher);
 
             let reference = build_reference(&mut hasher, 54);
-            assert_eq!(clean_diff.root(), reference.root());
+            assert_eq!(clean_diff.root(), *reference.root());
         });
     }
 
@@ -1073,7 +1073,7 @@ mod tests {
             let clean_diff = diff.merkleize(&mut hasher);
 
             let reference = build_reference(&mut hasher, 45);
-            assert_eq!(clean_diff.root(), reference.root());
+            assert_eq!(clean_diff.root(), *reference.root());
 
             // Apply and verify.
             let mut base_copy = base.clone();
@@ -1117,7 +1117,7 @@ mod tests {
             };
             reference.apply(changeset);
 
-            assert_eq!(clean_diff.root(), reference.root());
+            assert_eq!(clean_diff.root(), *reference.root());
         });
     }
 
@@ -1169,7 +1169,7 @@ mod tests {
             let clean_again = dirty_again.merkleize(&mut hasher);
 
             let reference = build_reference(&mut hasher, 60);
-            assert_eq!(clean_again.root(), reference.root());
+            assert_eq!(clean_again.root(), *reference.root());
         });
     }
 
@@ -1301,7 +1301,7 @@ mod tests {
             drop(clean_a);
             base.apply(changeset);
 
-            assert_eq!(base.root(), b_root);
+            assert_eq!(*base.root(), b_root);
 
             // Verify leaf 5 has the updated digest.
             let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
@@ -1338,7 +1338,7 @@ mod tests {
             drop(clean_a);
             base.apply(changeset);
 
-            assert_eq!(base.root(), b_root);
+            assert_eq!(*base.root(), b_root);
 
             // Build reference: 45 base elements + 10 new.
             let mut reference = build_reference(&mut hasher, 45);
@@ -1396,7 +1396,7 @@ mod tests {
             drop(clean_a);
             base.apply(changeset);
 
-            assert_eq!(base.root(), c_root);
+            assert_eq!(*base.root(), c_root);
 
             // Build the equivalent directly: 97 base elements with leaf 5 overwritten,
             // then 10 new elements.
@@ -1456,7 +1456,7 @@ mod tests {
             drop(clean_a);
             base.apply(changeset);
 
-            assert_eq!(base.root(), b_root);
+            assert_eq!(*base.root(), b_root);
 
             // Verify leaf 5 has Y, not X.
             let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
@@ -1497,7 +1497,7 @@ mod tests {
                 diff.merkleize(&mut hasher).into_changeset()
             };
             reference.apply(changeset);
-            assert_eq!(clean_diff.root(), reference.root());
+            assert_eq!(clean_diff.root(), *reference.root());
         });
     }
 

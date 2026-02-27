@@ -382,8 +382,8 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Get the root digest of the MMR.
-    pub const fn root(&self) -> D {
-        self.state.root
+    pub const fn root(&self) -> &D {
+        &self.state.root
     }
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
@@ -499,7 +499,7 @@ impl<D: Digest> MmrRead<D> for CleanMmr<D> {
     }
 
     fn root(&self) -> D {
-        self.state.root
+        *self.root()
     }
 
     fn pruned_to_pos(&self) -> Position {
@@ -895,7 +895,7 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(mmr.root(), Mmr::empty_mmr_root::<Sha256>());
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root::<Sha256>());
             let mut mmr = mmr.into_dirty();
             assert!(matches!(mmr.pop(), Err(Empty)));
             let mut mmr = mmr.merkleize(&mut hasher, None);
@@ -903,7 +903,7 @@ mod tests {
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
             assert_eq!(
-                mmr.root(),
+                *mmr.root(),
                 hasher.root(Location::new_unchecked(0), [].iter())
             );
         });
@@ -990,7 +990,7 @@ mod tests {
             assert_eq!(mmr.nodes[14], digest14);
 
             // verify root
-            let root = mmr.root();
+            let root = *mmr.root();
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
             let expected_root = hasher.root(Location::new_unchecked(11), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
@@ -1018,7 +1018,7 @@ mod tests {
             assert!(mmr.proof(Location::new_unchecked(8)).is_ok());
             assert!(mmr.proof(Location::new_unchecked(10)).is_ok());
 
-            let root_after_prune = mmr.root();
+            let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
@@ -1047,7 +1047,7 @@ mod tests {
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
             assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.bounds().start, mmr.bounds().start);
-            assert_eq!(mmr_copy.root(), root);
+            assert_eq!(*mmr_copy.root(), root);
         });
     }
 
@@ -1104,7 +1104,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 199;
             let mut test_mmr = CleanMmr::new::<Sha256>();
             test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = *test_mmr.root();
 
             let batched_mmr = CleanMmr::new::<Sha256>();
 
@@ -1124,7 +1124,7 @@ mod tests {
             let batched_mmr = dirty_mmr.merkleize(&mut hasher, None);
 
             assert_eq!(
-                batched_mmr.root(),
+                *batched_mmr.root(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -1141,7 +1141,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 199;
             let test_mmr = CleanMmr::new::<Sha256>();
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root();
+            let expected_root = *test_mmr.root();
 
             let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -1165,7 +1165,7 @@ mod tests {
             }
             let mmr = mmr.merkleize(&mut hasher, Some(pool));
             assert_eq!(
-                mmr.root(),
+                *mmr.root(),
                 expected_root,
                 "Batched MMR root should match reference"
             );
@@ -1213,10 +1213,14 @@ mod tests {
                 let mut dirty_mmr = mmr.into_dirty();
                 assert!(dirty_mmr.pop().is_ok());
                 mmr = dirty_mmr.merkleize(&mut hasher, None);
-                let root = mmr.root();
+                let root = *mmr.root();
                 let reference_mmr = CleanMmr::new::<Sha256>();
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
-                assert_eq!(root, reference_mmr.root(), "root mismatch after pop at {i}");
+                assert_eq!(
+                    root,
+                    *reference_mmr.root(),
+                    "root mismatch after pop at {i}"
+                );
             }
             let mut mmr = mmr.into_dirty();
             assert!(
@@ -1241,7 +1245,7 @@ mod tests {
             let mmr = mmr.merkleize(&mut hasher, None);
             let reference_mmr = CleanMmr::new::<Sha256>();
             let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
-            assert_eq!(mmr.root(), reference_mmr.root());
+            assert_eq!(*mmr.root(), *reference_mmr.root());
             let mut mmr = mmr.into_dirty();
             let result = mmr.pop();
             assert!(matches!(result, Err(ElementPruned(_))));
@@ -1258,7 +1262,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
             let mmr = CleanMmr::new::<Sha256>();
             let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
-            let root = mmr.root();
+            let root = *mmr.root();
 
             // For a few leaves, update the leaf and ensure the root changes, and the root reverts
             // to its previous state then we update the leaf to its original value.
@@ -1266,14 +1270,14 @@ mod tests {
                 // Change the leaf.
                 let leaf_loc = Location::new_unchecked(leaf as u64);
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
-                let updated_root = mmr.root();
+                let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
-                let restored_root = mmr.root();
+                let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
 
@@ -1358,7 +1362,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
             let mmr = CleanMmr::new::<Sha256>();
             let mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
-            let root = mmr.root();
+            let root = *mmr.root();
 
             let updated_digest = Sha256::fill(0xFF);
 
@@ -1371,13 +1375,13 @@ mod tests {
             let mut dirty = mmr.into_dirty();
             dirty.update_leaf_digest(loc, updated_digest).unwrap();
             let mmr = dirty.merkleize(&mut hasher, None);
-            assert_ne!(mmr.root(), root);
+            assert_ne!(*mmr.root(), root);
 
             // Restore the original digest and confirm the root reverts.
             let mut dirty = mmr.into_dirty();
             dirty.update_leaf_digest(loc, original_digest).unwrap();
             let mmr = dirty.merkleize(&mut hasher, None);
-            assert_eq!(mmr.root(), root);
+            assert_eq!(*mmr.root(), root);
 
             // Update multiple leaves before a single merkleize.
             let mut dirty = mmr.into_dirty();
@@ -1387,7 +1391,7 @@ mod tests {
                     .unwrap();
             }
             let mmr = dirty.merkleize(&mut hasher, None);
-            assert_ne!(mmr.root(), root);
+            assert_ne!(*mmr.root(), root);
         });
     }
 
@@ -1422,7 +1426,7 @@ mod tests {
         pool: Option<ThreadPool>,
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
-        let root = mmr.root();
+        let root = *mmr.root();
 
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
@@ -1434,7 +1438,7 @@ mod tests {
         mmr.update_leaf_batched(hasher, pool, &updates).unwrap();
 
         let mmr = mmr.merkleize(hasher, None);
-        let updated_root = mmr.root();
+        let updated_root = *mmr.root();
         assert_ne!(updated_root, root);
 
         // Batch-restore the changed leaves to their original values.
@@ -1449,7 +1453,7 @@ mod tests {
         mmr.update_leaf_batched(hasher, None, &updates).unwrap();
 
         let mmr = mmr.merkleize(hasher, None);
-        let restored_root = mmr.root();
+        let restored_root = *mmr.root();
         assert_eq!(root, restored_root);
     }
 

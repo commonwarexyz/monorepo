@@ -329,7 +329,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         } as usize;
         if pruned_chunks == 0 {
             let mmr = CleanMmr::new::<H::Inner>();
-            let cached_root = mmr.root();
+            let cached_root = *mmr.root();
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
                 authenticated_len: 0,
@@ -366,7 +366,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned_chunks should never overflow");
-        let cached_root = mmr.root();
+        let cached_root = *mmr.root();
         Ok(Self {
             bitmap,
             // Pruned chunks are already authenticated in the MMR
@@ -482,7 +482,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             return Ok((
                 Proof {
                     leaves: Location::new_unchecked(self.len()),
-                    digests: vec![self.mmr.root()],
+                    digests: vec![*self.mmr.root()],
                 },
                 chunk,
             ));
@@ -629,7 +629,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         self.mmr.apply(changeset);
 
         // Compute the bitmap root.
-        let mmr_root = self.mmr.root();
+        let mmr_root = *self.mmr.root();
         let cached_root = if self.bitmap.is_chunk_aligned() {
             mmr_root
         } else {
@@ -840,7 +840,7 @@ mod tests {
 
             let bitmap = dirty.merkleize(&mut hasher).unwrap();
             let root = bitmap.root();
-            let inner_root = bitmap.mmr.root();
+            let inner_root = *bitmap.mmr.root();
             assert_eq!(root, inner_root);
 
             {

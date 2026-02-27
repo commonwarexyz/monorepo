@@ -74,7 +74,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                         &mut hasher,
                                         &elements[range.to_usize_range()],
                                         range.start,
-                                        &root,
+                                        root,
                                     ));
                                 }
                             })

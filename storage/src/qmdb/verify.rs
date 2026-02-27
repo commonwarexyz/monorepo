@@ -166,7 +166,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0), // start_loc
                 &operations,
-                &root,
+                root,
             ));
 
             // Verify the proof with the wrong root
@@ -186,7 +186,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &wrong_operations,
-                &root,
+                root,
             ));
         });
     }
@@ -222,7 +222,7 @@ mod tests {
                 &proof,
                 start_loc,
                 &operations,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong start location
@@ -231,7 +231,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0), // wrong start_loc
                 &operations,
-                &root,
+                root,
             ));
         });
     }
@@ -296,7 +296,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(1), // start_loc
                 &operations[range.to_usize_range()],
-                &root,
+                root,
             );
             assert!(result.is_ok());
             let digests = result.unwrap();
@@ -342,7 +342,7 @@ mod tests {
                 &proof,
                 range.start,                         // start_loc
                 &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
-                &root,
+                root,
             );
             assert!(result.is_ok());
             let proof_store = result.unwrap();
@@ -359,7 +359,7 @@ mod tests {
                 &sub_proof,
                 range.start,
                 &operations[range.to_usize_range()],
-                &root,
+                root,
             ));
         });
     }
@@ -423,7 +423,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -444,7 +444,7 @@ mod tests {
                 &sub_proof,
                 Location::new_unchecked(0),
                 &operations[0..2],
-                &root,
+                root,
             ));
         });
     }
@@ -476,7 +476,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -503,7 +503,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &selected_ops,
-                &root,
+                root,
             ));
         });
     }
@@ -546,7 +546,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &selected_ops,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong operations
@@ -559,7 +559,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &wrong_ops,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong locations
@@ -572,7 +572,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &wrong_locations,
-                &root,
+                root,
             ));
         });
     }
@@ -591,7 +591,7 @@ mod tests {
                 &mut hasher,
                 &empty_proof,
                 &[] as &[(Location, u64)],
-                &empty_root,
+                empty_root,
             ));
 
             // Proofs over empty locations should otherwise not be allowed.
@@ -629,7 +629,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -643,7 +643,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &[(Location::new_unchecked(1), operations[1])],
-                &root,
+                root,
             ));
         });
     }

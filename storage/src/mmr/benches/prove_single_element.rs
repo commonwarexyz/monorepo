@@ -55,7 +55,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                                     &mut hasher,
                                     &element,
                                     loc,
-                                    &root,
+                                    root,
                                 ));
                             }
                         });

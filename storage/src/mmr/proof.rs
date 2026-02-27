@@ -707,7 +707,7 @@ mod tests {
         // Test that an empty proof authenticates an empty MMR.
         let mut hasher: Standard<Sha256> = Standard::new();
         let mmr = CleanMmr::new::<Sha256>();
-        let root = mmr.root();
+        let root = *mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
             &mut hasher,
@@ -752,7 +752,7 @@ mod tests {
             mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher, None);
-        let root = mmr.root();
+        let root = *mmr.root();
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
@@ -845,7 +845,7 @@ mod tests {
         }
         let mmr = mmr.merkleize(&mut hasher, None);
         // test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root();
+        let root = *mmr.root();
 
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
@@ -972,10 +972,10 @@ mod tests {
         let mut mmr = mmr.merkleize(&mut hasher, None);
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
-        let root = mmr.root();
+        let root = *mmr.root();
         for i in 1..*mmr.size() {
             mmr.prune_to_pos(Position::new(i));
-            let pruned_root = mmr.root();
+            let pruned_root = *mmr.root();
             assert_eq!(root, pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new_unchecked(loc as u64);
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(mmr.bounds().start, PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root();
+        let root = *mmr.root();
         for i in 0..elements.len() - 1 {
             if Position::try_from(Location::new_unchecked(i as u64)).unwrap() < PRUNE_POS {
                 continue;
@@ -1043,7 +1043,7 @@ mod tests {
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
         assert_eq!(mmr.bounds().start, 130);
 
-        let updated_root = mmr.root();
+        let updated_root = *mmr.root();
         let range = Location::new_unchecked(elements.len() as u64 - 10)
             ..Location::new_unchecked(elements.len() as u64);
         let range_proof = mmr.range_proof(range.clone()).unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
         let mmr = mmr.merkleize(&mut hasher, None);
-        let root = mmr.root();
+        let root = *mmr.root();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
@@ -1370,7 +1370,7 @@ mod tests {
         }
         let mmr = dirty_mmr.merkleize(&mut hasher, None);
 
-        let root = mmr.root();
+        let root = *mmr.root();
 
         // Generate proof for non-contiguous single elements
         let locations = &[
@@ -1496,7 +1496,7 @@ mod tests {
         // Empty multi-proof
         let mut hasher: Standard<Sha256> = Standard::new();
         let empty_mmr = CleanMmr::new::<Sha256>();
-        let empty_root = empty_mmr.root();
+        let empty_root = *empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
             &mut hasher,
@@ -1540,7 +1540,7 @@ mod tests {
         assert!(multi_proof.digests.len() < total_digests_separate);
 
         // Verify it still works
-        let root = mmr.root();
+        let root = *mmr.root();
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[

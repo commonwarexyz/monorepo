@@ -129,7 +129,7 @@ fn fuzz(input: FuzzInput) {
                 mmr.add(&mut hasher, digest);
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let root = mmr.root();
+            let root = *mmr.root();
 
             for (leaf, element) in digests.iter().enumerate() {
                 let loc = Location::new(leaf as u64).unwrap();
@@ -157,7 +157,7 @@ fn fuzz(input: FuzzInput) {
                 mmr.add(&mut hasher, digest);
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let root = mmr.root();
+            let root = *mmr.root();
 
             let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
                 (0, 0)
