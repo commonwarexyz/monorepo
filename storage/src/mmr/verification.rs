@@ -194,7 +194,7 @@ mod tests {
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
             let mmr = mmr.merkleize(&mut hasher, None);
-            let root = *mmr.root();
+            let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
@@ -208,7 +208,7 @@ mod tests {
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
-                    &root,
+                    root,
                 )
                 .unwrap();
 
@@ -224,7 +224,7 @@ mod tests {
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
-                        &root
+                        root
                     ));
                     subrange_start += 1;
                     subrange_end -= 1;
