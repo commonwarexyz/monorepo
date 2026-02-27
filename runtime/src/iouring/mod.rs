@@ -157,7 +157,7 @@ const SUBMISSION_SEQ_MASK: u64 = u64::MAX >> 1;
 ///
 /// The variant must match the operation type:
 /// - `Read`: For operations where the kernel writes INTO the buffer (e.g., recv, read)
-/// - `Write`: For operations where the kernel reads FROM a single contiguous buffer (e.g., send)
+/// - `Write`: For operations where the kernel reads FROM a single contiguous buffer (e.g., send, write)
 /// - `WriteVectored`: For operations where the kernel reads FROM multiple buffers (e.g., writev)
 #[derive(Debug)]
 pub enum OpBuffer {
@@ -874,8 +874,9 @@ impl IoUringLoop {
             // Submit the operation.
             //
             // SAFETY:
-            // - `buffer` and `fd` are stored in `self.waiters` until CQE processing, so
-            //   SQE pointers remain valid and FD numbers cannot be reused early.
+            // - `buffer`, `fd` and `iovecs` are stored in `self.waiters` until CQE
+            //   processing, so SQE pointers remain valid and FD numbers cannot be reused
+            //   early.
             // - `IO_LINK` is set on `work` before pushing it, so the following timeout
             //   SQE applies to this operation.
             // - `available >= needed` was checked above, so this push fits.
