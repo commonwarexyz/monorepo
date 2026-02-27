@@ -151,8 +151,7 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_config("keyless-fuzz-test", &context);
         let mut db = CleanDb::init(context.clone(), cfg)
             .await
-            .expect("Failed to init keyless db")
-            .into_mutable();
+            .expect("Failed to init keyless db");
         let mut restarts = 0usize;
 
         for op in &input.ops {
@@ -164,10 +163,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (durable_db, _) = db.commit(metadata_bytes.clone())
+                    let _ = db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::Get { loc_offset } => {
@@ -183,17 +181,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let (mut durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    durable_db.prune(durable_db.last_commit_loc())
+                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    db.prune(db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::Sync => {
-                    let (mut durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    durable_db.sync().await.expect("Sync should not fail");
-                    db = durable_db.into_mutable();
+                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::OpCount => {
@@ -209,9 +205,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let _ = durable_db.root();
-                    db = durable_db.into_mutable();
+                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let _ = db.root();
                 }
 
                 Operation::Proof {
@@ -222,18 +217,17 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    let _ = db.commit(None).await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc).unwrap();
-                    let root = durable_db.root();
-                    if let Ok((proof, ops)) = durable_db.proof(start_loc, NZU64!(max_ops_value)).await {
+                    let root = db.root();
+                    if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -245,14 +239,14 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    let _ = db.commit(None).await.expect("Commit should not fail");
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size = Location::new(size).unwrap();
                     let start_loc = (*start_offset as u64) % *size;
                     let start_loc = Location::new(start_loc).unwrap();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = durable_db.root();
-                    if let Ok((proof, ops)) = durable_db
+                    let root = db.root();
+                    if let Ok((proof, ops)) = db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
@@ -260,7 +254,6 @@ fn fuzz(input: FuzzInput) {
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::SimulateFailure{} => {
@@ -272,15 +265,14 @@ fn fuzz(input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init keyless db")
-                    .into_mutable();
+                    .expect("Failed to init keyless db");
                     restarts += 1;
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-        durable_db.destroy().await.expect("Destroy should not fail");
+        let _ = db.commit(None).await.expect("Commit should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

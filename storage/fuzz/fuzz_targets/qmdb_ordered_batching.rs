@@ -59,8 +59,7 @@ fn fuzz(data: FuzzInput) {
 
         let mut db = OrderedDb::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb")
-            .into_mutable();
+            .expect("init qmdb");
         let mut batch = Some(db.start_batch());
         let mut last_commit = None;
 
@@ -102,11 +101,10 @@ fn fuzz(data: FuzzInput) {
                         .await
                         .expect("write batch should not fail");
                     last_commit = Some(Value::new(*value));
-                    let (durable_db, _) = db
+                    let _ = db
                         .commit(Some(Value::new(*value)))
                         .await
                         .expect("commit should not fail");
-                    db = durable_db.into_mutable();
 
                     // Restore batch for subsequent operations
                     batch = Some(db.start_batch());
@@ -148,8 +146,7 @@ fn fuzz(data: FuzzInput) {
         db.write_batch(iter)
             .await
             .expect("write batch should not fail");
-        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        let db = durable_db;
+        let _ = db.commit(None).await.expect("commit should not fail");
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {

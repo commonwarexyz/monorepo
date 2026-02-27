@@ -15,7 +15,7 @@ use crate::{
         },
         current::proof::OperationProof,
         operation::Key,
-        DurabilityState, Durable, Error, NonDurable,
+        Error,
     },
 };
 use commonware_codec::Codec;
@@ -35,8 +35,8 @@ pub struct KeyValueProof<K: Key, D: Digest, const N: usize> {
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<E, C, K, V, I, H, const N: usize, D = Durable> =
-    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N, D>;
+pub type Db<E, C, K, V, I, H, const N: usize> =
+    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
@@ -47,8 +47,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: DurabilityState,
-    > Db<E, C, K, V, I, H, N, D>
+    > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -108,7 +107,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, D>::span_contains(
+                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -136,7 +135,6 @@ where
     }
 }
 
-// Functionality for Clean state.
 impl<
         E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<K, V>>,
@@ -145,7 +143,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N, Durable>
+    > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -219,22 +217,6 @@ where
             }
         }
     }
-}
-
-// Functionality for the Mutable state.
-impl<
-        E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
-        K: Key,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location>,
-        H: Hasher,
-        const N: usize,
-    > Db<E, C, K, V, I, H, N, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
     /// Writes a batch of key-value pairs to the database.
     ///
     /// For each item in the iterator:
@@ -271,8 +253,7 @@ impl<
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         const N: usize,
-        D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, I, H, N, D>
+    > kv::Gettable for Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -286,8 +267,7 @@ where
     }
 }
 
-// Batchable for NonDurable (aka mutable) state
-impl<E, C, K, V, I, H, const N: usize> Batchable for Db<E, C, K, V, I, H, N, NonDurable>
+impl<E, C, K, V, I, H, const N: usize> Batchable for Db<E, C, K, V, I, H, N>
 where
     E: Storage + Clock + Metrics,
     C: Mutable<Item = Operation<K, V>>,

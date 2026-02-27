@@ -68,7 +68,7 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let mut db = db.into_mutable();
+            let mut db = db;
             for op in ops {
                 match op {
                     Operation::Update(Update(key, value)) => {
@@ -82,8 +82,8 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 
@@ -136,7 +136,7 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let mut db = db.into_mutable();
+            let mut db = db;
             for op in ops {
                 match op {
                     Operation::Update(Update(key, value)) => {
@@ -150,8 +150,8 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 
@@ -204,7 +204,7 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let mut db = db.into_mutable();
+            let mut db = db;
             for op in ops {
                 match op {
                     Operation::Update(Update { key, value, .. }) => {
@@ -218,8 +218,8 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 
@@ -272,7 +272,7 @@ mod harnesses {
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let mut db = db.into_mutable();
+            let mut db = db;
             for op in ops {
                 match op {
                     Operation::Update(Update { key, value, .. }) => {
@@ -286,8 +286,8 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 }

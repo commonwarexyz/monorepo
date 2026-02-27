@@ -102,7 +102,7 @@ fn fuzz(data: FuzzInput) {
 
         let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
             .await
-            .expect("Failed to initialize Current database").into_mutable();
+            .expect("Failed to initialize Current database");
 
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
@@ -164,26 +164,23 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::Commit => {
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    db = durable_db.into_mutable();
                 }
 
                 CurrentOperation::Prune => {
-                    let (mut durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    durable_db.prune(durable_db.inactivity_floor_loc()).await.expect("Prune should not fail");
-                    db = durable_db.into_mutable();
+                    db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    let _root = durable_db.root();
-                    db = durable_db.into_mutable();
+                    let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
@@ -192,17 +189,17 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    let current_root = durable_db.root();
+                    let current_root = db.root();
 
                     // Adjust start_loc and max_ops to be within the valid range
-                    let current_op_count = durable_db.bounds().await.end;
+                    let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % *current_op_count).unwrap();
-                    let oldest_loc = durable_db.inactivity_floor_loc();
+                    let oldest_loc = db.inactivity_floor_loc();
                     if start_loc >= oldest_loc {
-                        let (proof, ops, chunks) = durable_db
+                        let (proof, ops, chunks) = db
                             .range_proof(&mut hasher, start_loc, *max_ops)
                             .await
                             .expect("Range proof should not fail");
@@ -219,7 +216,6 @@ fn fuzz(data: FuzzInput) {
                                 "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
@@ -227,15 +223,15 @@ fn fuzz(data: FuzzInput) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
 
-                    let current_op_count = durable_db.bounds().await.end;
+                    let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = durable_db.root();
+                    let root = db.root();
 
-                    if let Ok((range_proof, ops, chunks)) = durable_db
+                    if let Ok((range_proof, ops, chunks)) = db
                         .range_proof(&mut hasher, start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
@@ -265,20 +261,19 @@ fn fuzz(data: FuzzInput) {
                             ), "proof with bad chunks should not verify");
                         }
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    let current_root = durable_db.root();
+                    let current_root = db.root();
 
-                    match durable_db.key_value_proof(&mut hasher, k.clone()).await {
+                    match db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
-                            let value = durable_db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
                                 &mut hasher,
                                 k,
@@ -298,16 +293,15 @@ fn fuzz(data: FuzzInput) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
-                    db = durable_db.into_mutable();
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
+        let _ = db.commit(None).await.expect("Final commit should not fail");
 
         for key in &all_keys {
             let k = Key::new(*key);
-            let result = durable_db.get(&k).await.expect("Final get should not fail");
+            let result = db.get(&k).await.expect("Final get should not fail");
 
             match expected_state.get(key) {
                 Some(Some(expected_value)) => {
@@ -325,7 +319,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        durable_db.destroy().await.expect("destroy should not fail");
+        db.destroy().await.expect("destroy should not fail");
     });
 }
 

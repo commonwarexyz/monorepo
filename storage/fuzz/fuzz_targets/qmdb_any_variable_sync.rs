@@ -163,8 +163,7 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
-            .expect("Failed to init source db")
-            .into_mutable();
+            .expect("Failed to init source db");
         let mut restarts = 0usize;
 
         let mut historical_roots: BTreeMap<
@@ -187,12 +186,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (durable_db, _) = db
+                    let _ = db
                         .commit(metadata_bytes.clone())
                         .await
                         .expect("commit should not fail");
-                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
-                    db = durable_db.into_mutable();
+                    historical_roots.insert(db.bounds().await.end, db.root());
                 }
 
                 Operation::Prune => {
@@ -211,17 +209,16 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Proof { start_loc, max_ops } => {
                     // proof requires commit
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
-                    let op_count = durable_db.bounds().await.end;
-                    let oldest_retained_loc = durable_db.inactivity_floor_loc();
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let op_count = db.bounds().await.end;
+                    let oldest_retained_loc = db.inactivity_floor_loc();
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
-                        if let Ok((proof, log)) = durable_db.proof(*start_loc, *max_ops).await {
-                            let root = durable_db.root();
+                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
+                            let root = db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -230,8 +227,8 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     // historical proof verification requires a root captured at a commit point.
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
                         *historical_roots
@@ -241,27 +238,23 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if *start_loc >= op_count || op_count > max_ops.get() {
-                        db = durable_db.into_mutable();
                         continue;
                     }
 
-                    if let Ok((proof, log)) = durable_db
-                        .historical_proof(op_count, *start_loc, *max_ops)
-                        .await
+                    if let Ok((proof, log)) =
+                        db.historical_proof(op_count, *start_loc, *max_ops).await
                     {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::Sync => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
-                    durable_db.sync().await.expect("Sync should not fail");
-                    db = durable_db.into_mutable();
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -274,10 +267,9 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     // root requires commit
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    historical_roots.insert(durable_db.bounds().await.end, durable_db.root());
-                    let _ = durable_db.root();
-                    db = durable_db.into_mutable();
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let _ = db.root();
                 }
 
                 Operation::SimulateFailure => {
@@ -292,14 +284,13 @@ fn fuzz(input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init source db")
-                    .into_mutable();
+                    .expect("Failed to init source db");
                     restarts += 1;
                 }
             }
         }
 
-        let db = db.commit(None).await.expect("commit should not fail").0;
+        let _ = db.commit(None).await.expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

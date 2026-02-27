@@ -166,7 +166,7 @@ fn fuzz(input: FuzzInput) {
             // Uncommitted changes since the last commit. None = delete, Some = update.
             let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
 
-            let mut db = Some(db.into_mutable());
+            let mut db = Some(db);
 
             for op in &operations {
                 let Some(mut current) = db.take() else {
@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         db = Some(current);
                     }
                     CurrentOperation::Commit => {
-                        let Ok((durable_db, _)) = current.commit(None).await else {
+                        if current.commit(None).await.is_err() {
                             // A failed commit may have partially persisted
                             // pending operations.
                             // Remove affected keys from committed since their
@@ -201,7 +201,7 @@ fn fuzz(input: FuzzInput) {
                                 committed.remove(key);
                             }
                             break;
-                        };
+                        }
                         // Data is durable. Merge pending into committed.
                         for (k, v) in pending.drain() {
                             match v {
@@ -213,15 +213,15 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         }
-                        db = Some(durable_db.into_mutable());
+                        db = Some(current);
                     }
                     CurrentOperation::Prune => {
-                        let Ok((mut durable_db, _)) = current.commit(None).await else {
+                        if current.commit(None).await.is_err() {
                             for key in pending.keys() {
                                 committed.remove(key);
                             }
                             break;
-                        };
+                        }
                         for (k, v) in pending.drain() {
                             match v {
                                 Some(val) => {
@@ -232,11 +232,11 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         }
-                        let floor = durable_db.inactivity_floor_loc();
-                        if durable_db.prune(floor).await.is_err() {
+                        let floor = current.inactivity_floor_loc();
+                        if current.prune(floor).await.is_err() {
                             break;
                         }
-                        db = Some(durable_db.into_mutable());
+                        db = Some(current);
                     }
                 }
             }
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db = CleanDb::init(
+            let mut db = CleanDb::init(
                 ctx.with_label("recovered"),
                 make_config(
                     &ctx,
@@ -308,20 +308,18 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Verify the recovered DB is usable.
-            let mut db = db.into_mutable();
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
             db.write_batch([(test_key, Some(test_value))])
                 .await
                 .expect("write_batch after recovery should succeed");
 
-            let (durable_db, _) = db
+            let _ = db
                 .commit(None)
                 .await
                 .expect("commit after recovery should succeed");
 
-            durable_db
-                .destroy()
+            db.destroy()
                 .await
                 .expect("destroy after recovery should succeed");
         }

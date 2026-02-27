@@ -116,8 +116,7 @@ fn fuzz(input: FuzzInput) {
         let cfg = db_config("fuzz-partition", &context);
         let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
             .await
-            .unwrap()
-            .into_mutable();
+            .unwrap();
 
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();
@@ -159,27 +158,22 @@ fn fuzz(input: FuzzInput) {
                         None
                     };
 
-                    let (durable_db, _) = db.commit(metadata).await.unwrap();
-                    last_commit_loc = Some(durable_db.bounds().await.end - 1);
+                    let _ = db.commit(metadata).await.unwrap();
+                    last_commit_loc = Some(db.bounds().await.end - 1);
                     uncommitted_ops.clear();
-                    db = durable_db.into_mutable();
                 }
 
                 ImmutableOperation::Prune { loc } => {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
-                        let (mut durable_db, _) = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(durable_db.bounds().await.end - 1);
+                        let _ = db.commit(None).await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
                         uncommitted_ops.clear();
-                        durable_db
-                            .prune(safe_loc)
-                            .await
-                            .expect("prune should not fail");
-                        let oldest = durable_db.bounds().await.start;
+                        db.prune(safe_loc).await.expect("prune should not fail");
+                        let oldest = db.bounds().await.start;
                         set_locations.retain(|(_, l)| *l >= oldest);
                         keys_set.retain(|(_, l)| *l >= oldest);
-                        db = durable_db.into_mutable();
                     }
                 }
 
@@ -193,14 +187,13 @@ fn fuzz(input: FuzzInput) {
                         let safe_start = Location::new(safe_start).unwrap();
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-                        let (durable_db, _) = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(durable_db.bounds().await.end - 1);
+                        let _ = db.commit(None).await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
                         uncommitted_ops.clear();
-                        if let Ok((proof, ops)) = durable_db.proof(safe_start, safe_max_ops).await {
-                            let root = durable_db.root();
+                        if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
+                            let root = db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
-                        db = durable_db.into_mutable();
                     }
                 }
 
@@ -218,14 +211,13 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        let (durable_db, _) = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(durable_db.bounds().await.end - 1);
-                        if safe_start >= durable_db.bounds().await.start {
-                            let _ = durable_db
+                        let _ = db.commit(None).await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        if safe_start >= db.bounds().await.start {
+                            let _ = db
                                 .historical_proof(safe_size, safe_start, safe_max_ops)
                                 .await;
                         }
-                        db = durable_db.into_mutable();
                     }
                 }
 
@@ -242,17 +234,16 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::Root => {
-                    let (durable_db, _) = db.commit(None).await.unwrap();
-                    last_commit_loc = Some(durable_db.bounds().await.end - 1);
+                    let _ = db.commit(None).await.unwrap();
+                    last_commit_loc = Some(db.bounds().await.end - 1);
                     uncommitted_ops.clear();
-                    let _ = durable_db.root();
-                    db = durable_db.into_mutable();
+                    let _ = db.root();
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.unwrap();
-        durable_db.destroy().await.unwrap();
+        let _ = db.commit(None).await.unwrap();
+        db.destroy().await.unwrap();
     });
 }
 

@@ -153,8 +153,7 @@ fn fuzz(mut input: FuzzInput) {
         let cfg = test_config(TEST_NAME, &context);
         let mut db = FixedDb::init(context.clone(), cfg)
             .await
-            .expect("Failed to init source db")
-            .into_mutable();
+            .expect("Failed to init source db");
         let mut restarts = 0usize;
 
         let mut sync_id = 0;
@@ -186,11 +185,10 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let (durable_db, _) = db
+                    let _ = db
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_mutable();
                 }
 
                 Operation::Prune => {
@@ -206,16 +204,16 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let (durable_db, _) = db
+                    let _ = db
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("commit should not fail");
                     let target = sync::Target {
-                        root: durable_db.root(),
-                        range: durable_db.inactivity_floor_loc()..durable_db.bounds().await.end,
+                        root: db.root(),
+                        range: db.inactivity_floor_loc()..db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(durable_db);
+                    let wrapped_src = Arc::new(db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -226,8 +224,7 @@ fn fuzz(mut input: FuzzInput) {
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
-                        .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_mutable();
+                        .unwrap_or_else(|_| panic!("Failed to unwrap src"));
                     sync_id += 1;
                 }
 
@@ -243,14 +240,13 @@ fn fuzz(mut input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init source db")
-                    .into_mutable();
+                    .expect("Failed to init source db");
                     restarts += 1;
                 }
             }
         }
 
-        let db = db.commit(None).await.expect("commit should not fail").0;
+        let _ = db.commit(None).await.expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

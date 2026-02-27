@@ -88,7 +88,7 @@ fn fuzz(data: FuzzInput) {
 
         let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb").into_mutable();
+            .expect("init qmdb");
 
         let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
@@ -136,36 +136,34 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Commit => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let _ = db.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = durable_db.bounds().await.end;
+                    last_known_op_count = db.bounds().await.end;
                     uncommitted_ops = 0; // Reset uncommitted operations counter
-                    db = durable_db.into_mutable();
                 }
 
                 QmdbOperation::Root => {
                     // root requires commit
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_known_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    durable_db.root();
-                    db = durable_db.into_mutable();
+                    db.root();
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
                     // proof requires commit
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_known_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    let actual_op_count = durable_db.bounds().await.end;
+                    let actual_op_count = db.bounds().await.end;
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let current_root = durable_db.root();
+                        let current_root = db.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
-                        let (proof, log) = durable_db
+                        let (proof, log) = db
                             .proof(adjusted_start, *max_ops)
                             .await
                             .expect("proof should not fail");
@@ -181,15 +179,14 @@ fn fuzz(data: FuzzInput) {
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                         );
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
                     // proof requires commit
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
+                    let _ = db.commit(None).await.expect("commit should not fail");
+                    last_known_op_count = db.bounds().await.end;
                     uncommitted_ops = 0;
-                    let actual_op_count = durable_db.bounds().await.end;
+                    let actual_op_count = db.bounds().await.end;
 
                     let proof = Proof {
                         leaves: *proof_leaves,
@@ -198,10 +195,10 @@ fn fuzz(data: FuzzInput) {
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let current_root = durable_db.root();
+                        let current_root = db.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
-                        if let Ok(res) = durable_db
+                        if let Ok(res) = db
                             .proof(adjusted_start, *max_ops)
                             .await {
                                 let _ = verify_proof(
@@ -214,7 +211,6 @@ fn fuzz(data: FuzzInput) {
 
                         }
                     }
-                    db = durable_db.into_mutable();
                 }
 
                 QmdbOperation::Get { key } => {
@@ -250,8 +246,7 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all operations are persisted
         if uncommitted_ops > 0 {
-            let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-            db = durable_db.into_mutable();
+            let _ = db.commit(None).await.expect("final commit should not fail");
         }
 
         // Comprehensive final verification - check ALL keys ever touched
@@ -277,8 +272,8 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-        durable_db.destroy().await.expect("destroy should not fail");
+        let _ = db.commit(None).await.expect("final commit should not fail");
+        db.destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });

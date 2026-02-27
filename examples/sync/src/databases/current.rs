@@ -97,7 +97,7 @@ where
             error!("operations must end with a commit");
             return Ok(self);
         }
-        let mut db = self.into_mutable();
+        let mut db = self;
         let num_ops = operations.len();
 
         for (i, operation) in operations.into_iter().enumerate() {
@@ -109,11 +109,10 @@ where
                     db.write_batch([(key, None)]).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let (durable_db, _) = db.commit(metadata).await?;
+                    let _ = db.commit(metadata).await?;
                     if i == num_ops - 1 {
-                        return Ok(durable_db);
+                        return Ok(db);
                     }
-                    db = durable_db.into_mutable();
                 }
             }
         }
