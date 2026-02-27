@@ -45,7 +45,8 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub(crate) const fn max_supported() -> Self {
+    /// Returns the most permissive mode supported by the current stability cfg.
+    pub const fn max_supported() -> Self {
         #[cfg(not(any(
             commonware_stability_BETA,
             commonware_stability_GAMMA,
