@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn notarization_keeps_advance_timeout_for_certification() {
+    fn notarization_keeps_certification_timeout_pending_certification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -972,12 +972,12 @@ mod tests {
                 Sha256Digest::from([52u8; 32]),
             );
 
-            // Proposal arrival clears leader timeout and leaves only the advance timeout.
+            // Proposal arrival clears leader timeout and leaves only the certification timeout.
             assert!(state.set_proposal(view, proposal.clone()));
-            let advance_deadline = state.next_timeout_deadline();
-            assert_eq!(advance_deadline, context.current() + Duration::from_secs(2));
+            let certification_deadline = state.next_timeout_deadline();
+            assert_eq!(certification_deadline, context.current() + Duration::from_secs(2));
 
-            // Receiving a notarization should not clear the advance timeout while certification is pending.
+            // Receiving a notarization should not clear the certification timeout while certification is pending.
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
@@ -989,11 +989,11 @@ mod tests {
             assert!(equivocator.is_none());
             assert_eq!(
                 state.next_timeout_deadline(),
-                advance_deadline,
-                "advance timeout must continue to bound certification latency"
+                certification_deadline,
+                "certification timeout must continue to bound certification latency"
             );
 
-            // If certification stalls beyond the advance timeout, timeout handling should fire immediately.
+            // If certification stalls beyond the certification timeout, timeout handling should fire immediately.
             context.sleep(Duration::from_secs(3)).await;
             assert!(
                 state.next_timeout_deadline() <= context.current(),
