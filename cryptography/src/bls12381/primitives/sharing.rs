@@ -412,6 +412,17 @@ mod tests {
     }
 
     #[test]
+    fn test_mode_read_rejects_mode_above_max_supported_mode() {
+        let encoded = [Mode::RootsOfUnity as u8];
+        let err = Mode::read_cfg(&mut &encoded[..], &Mode::NonZeroCounter)
+            .expect_err("roots mode must be rejected when max mode is counter");
+        assert!(matches!(
+            err,
+            commonware_codec::Error::InvalidEnum(mode) if mode == Mode::RootsOfUnity as u8
+        ));
+    }
+
+    #[test]
     fn test_all_scalars_matches_scalar() {
         minifuzz::test(|u| {
             let mode = match u.int_in_range(0u8..=1)? {
