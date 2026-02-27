@@ -132,6 +132,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transcript_operations"
+path = "fuzz_targets/transcript_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcript_equivalence"
+path = "fuzz_targets/transcript_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bls12381_dkg"
 path = "fuzz_targets/bls12381_dkg.rs"
 test = false
