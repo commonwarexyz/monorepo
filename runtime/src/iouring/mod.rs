@@ -79,6 +79,40 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits. Dropping the last submitter signals `eventfd` so shutdown is observed
 //!    promptly even if the loop is blocked.
+//!
+//! ## Liveness Model
+//!
+//! This loop enforces a configured upper bound on in-flight operations, and submissions are staged
+//! from a FIFO MPSC queue.
+//!
+//! This implies a bounded-liveness caveat: if all in-flight operations are waiting on operations
+//! that are still queued behind the capacity limit, the loop cannot make progress until some
+//! in-flight operation completes or is canceled.
+//!
+//! Concrete example with `cfg.size = 2`:
+//!
+//! 1. Queue `read(fd1)`, `read(fd2)`, `write(fd1)`, `write(fd2)` in that order.
+//! 2. The loop stages the first two reads and reaches waiter capacity.
+//! 3. If each read depends on its corresponding write being submitted through the same loop, both
+//!    reads remain blocked.
+//! 4. The writes stay queued behind the capacity limit, so no completion is produced and the loop
+//!    cannot free capacity on its own.
+//!
+//! The runtime cannot infer dependency relationships between arbitrary queued and in-flight
+//! operations, so it cannot implement dependency-aware admission (and doing so generically would
+//! add substantial overhead).
+//!
+//! The practical way to recover from this condition is cancellation via per-op timeouts. When
+//! timed-out in-flight operations are canceled, waiter capacity is eventually released and queued
+//! operations can be staged. Without cancellation, liveness depends on workload structure: callers
+//! must avoid submission patterns where in-flight operations require later queued operations to
+//! run.
+//!
+//! Operational guidance:
+//! - Workloads that may create causal dependencies across queued and in-flight operations must use
+//!   per-op timeouts.
+//! - If cancellation is disabled, callers must guarantee that in-flight operations never depend on
+//!   later queued operations, otherwise the loop can deadlock.
 
 use crate::{IoBuf, IoBufMut};
 use commonware_utils::channel::{
