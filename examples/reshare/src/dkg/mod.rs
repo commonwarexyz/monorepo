@@ -1,8 +1,8 @@
 //! DKG participant actor
-use commonware_cryptography::bls12381::primitives::sharing::Mode;
+use commonware_cryptography::bls12381::primitives::sharing::ModeVersion;
 
 /// Highest sharing mode this example can decode/use.
-pub const MAX_SUPPORTED_MODE: Mode = Mode::NonZeroCounter;
+pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 
 mod state;
 

@@ -208,19 +208,35 @@ impl Write for Mode {
     }
 }
 
-impl Read for Mode {
-    type Cfg = Self;
+/// Determines which modes can be parsed.
+///
+/// As modes have been added over time, this versioning mechanism helps with
+/// supporting compatibility.
+///
+/// This allows upgrading to a new version of the library, including more modes,
+/// while using this version to determine which modes are supported at runtime.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModeVersion(u8);
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        max_supported_mode: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let tag: u8 = ReadExt::read(buf)?;
-        if tag > *max_supported_mode as u8 {
-            return Err(commonware_codec::Error::InvalidEnum(tag));
-        }
-        match tag {
-            0 => Ok(Self::NonZeroCounter),
+impl ModeVersion {
+    /// Version 0, supporting:
+    ///
+    /// - [`Mode::NonZeroCounter`]
+    pub const fn v0() -> Self {
+        Self(0)
+    }
+
+    /// Version 1, supporting v0, and:
+    ///
+    /// - [`Mode::RootsOfUnity`]
+    #[stability(ALPHA)]
+    pub const fn v1() -> Self {
+        Self(1)
+    }
+
+    const fn supports(&self, mode: &Mode) -> bool {
+        match mode {
+            Mode::NonZeroCounter => true,
             #[cfg(not(any(
                 commonware_stability_BETA,
                 commonware_stability_GAMMA,
@@ -228,9 +244,38 @@ impl Read for Mode {
                 commonware_stability_EPSILON,
                 commonware_stability_RESERVED
             )))]
-            1 => Ok(Self::RootsOfUnity),
-            o => Err(commonware_codec::Error::InvalidEnum(o)),
+            Mode::RootsOfUnity => self.0 >= 1,
         }
+    }
+}
+
+impl Read for Mode {
+    type Cfg = ModeVersion;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        version: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag: u8 = ReadExt::read(buf)?;
+        let mode = match tag {
+            0 => Self::NonZeroCounter,
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            1 => Self::RootsOfUnity,
+            o => return Err(commonware_codec::Error::InvalidEnum(o)),
+        };
+        if !version.supports(&mode) {
+            return Err(commonware_codec::Error::Invalid(
+                "Mode",
+                "unsupported mode for version",
+            ));
+        }
+        Ok(mode)
     }
 }
 
@@ -367,7 +412,7 @@ impl<V: Variant> Write for Sharing<V> {
 }
 
 impl<V: Variant> Read for Sharing<V> {
-    type Cfg = (NonZeroU32, Mode);
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -414,12 +459,8 @@ mod tests {
     #[test]
     fn test_mode_read_rejects_mode_above_max_supported_mode() {
         let encoded = [Mode::RootsOfUnity as u8];
-        let err = Mode::read_cfg(&mut &encoded[..], &Mode::NonZeroCounter)
+        Mode::read_cfg(&mut &encoded[..], &ModeVersion::v0())
             .expect_err("roots mode must be rejected when max mode is counter");
-        assert!(matches!(
-            err,
-            commonware_codec::Error::InvalidEnum(mode) if mode == Mode::RootsOfUnity as u8
-        ));
     }
 
     #[test]

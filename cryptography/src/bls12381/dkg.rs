@@ -305,7 +305,7 @@ use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
         group::Scalar,
-        sharing::{Mode, Sharing},
+        sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
     transcript::{Summary, Transcript},
@@ -432,7 +432,7 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    type Cfg = (NonZeroU32, Mode);
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,

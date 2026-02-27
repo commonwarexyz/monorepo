@@ -13,7 +13,11 @@ use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
-        primitives::{group::Share, sharing::Mode, variant::Variant},
+        primitives::{
+            group::Share,
+            sharing::{Mode, ModeVersion},
+            variant::Variant,
+        },
     },
     transcript::Summary,
     Hasher, PublicKey, Signer,
@@ -107,7 +111,7 @@ pub struct Config<C: Signer, P> {
     pub mailbox_size: usize,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<C::PublicKey>,
-    pub max_supported_mode: Mode,
+    pub max_supported_mode: ModeVersion,
 }
 
 pub struct Actor<E, P, H, C, V>
@@ -124,7 +128,7 @@ where
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
-    max_supported_mode: Mode,
+    max_supported_mode: ModeVersion,
 
     successful_epochs: Counter,
     failed_epochs: Counter,
@@ -336,7 +340,7 @@ where
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
-                self.max_supported_mode,
+                Mode::NonZeroCounter,
                 dealers,
                 players.clone(),
             )
