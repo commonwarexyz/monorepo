@@ -642,13 +642,22 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
-        let summary = Transcript::new(NAMESPACE)
-            .commit(namespace)
-            .commit(round.encode())
-            .commit(previous.encode())
-            .commit(dealers.encode())
-            .commit(players.encode())
-            .summarize();
+        let summary = {
+            let mut transcript = Transcript::new(NAMESPACE);
+            transcript
+                .commit(namespace)
+                .commit(round.encode())
+                .commit(previous.encode())
+                .commit(dealers.encode())
+                .commit(players.encode());
+            // We want backwards compatibility with the default mode, which wasn't
+            // committed. The absence of the mode is thus treated as an implicit
+            // default in the transcript, so this is sound.
+            if mode != Mode::default() {
+                transcript.commit([mode as u8].as_slice());
+            }
+            transcript.summarize()
+        };
         Ok(Self {
             summary,
             round,
@@ -3033,6 +3042,34 @@ mod test {
         assert!(log0.check(&info).is_none());
         assert!(log1.check(&info).is_none());
 
+        Ok(())
+    }
+
+    #[test]
+    fn info_with_different_mode_is_not_equal() -> Result<(), Error> {
+        let sk = ed25519::PrivateKey::from_seed(0);
+        let pk = sk.public_key();
+        let dealers: Set<ed25519::PublicKey> = vec![pk.clone()].try_into().unwrap();
+        let players: Set<ed25519::PublicKey> = vec![pk].try_into().unwrap();
+
+        let default_mode_info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::default(),
+            dealers.clone(),
+            players.clone(),
+        )?;
+        let roots_of_unity_mode_info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::RootsOfUnity,
+            dealers,
+            players,
+        )?;
+
+        assert_ne!(default_mode_info, roots_of_unity_mode_info);
         Ok(())
     }
 
