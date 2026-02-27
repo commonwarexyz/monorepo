@@ -1,16 +1,11 @@
 use crate::algebra::{
-    msm_naive, powers, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
+    msm_naive, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    non_empty_vec,
-    ordered::{BiMap, Map},
-    vec::NonEmptyVec,
-    TryCollect, TryFromIterator,
-};
+use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
     fmt::Debug,
     iter,
@@ -489,8 +484,12 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// a primitive root of unity of order `next_power_of_two(total)`.
     ///
     /// Indices `k >= total` are ignored.
-    pub fn roots_of_unity(total: NonZeroU32, points: BiMap<I, u32>) -> Self {
-        let weights = Map::try_from_iter(
+    #[commonware_macros::stability(ALPHA)]
+    pub fn roots_of_unity(
+        total: NonZeroU32,
+        points: commonware_utils::ordered::BiMap<I, u32>,
+    ) -> Self {
+        let weights = <Map<I, F> as commonware_utils::TryFromIterator<(I, F)>>::try_from_iter(
             crate::ntt::lagrange_coefficients(total, points.values().iter().copied())
                 .into_iter()
                 .filter_map(|(k, coeff)| Some((points.get_key(&k)?.clone(), coeff))),
@@ -505,7 +504,13 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     /// Useful for testing against [`Self::roots_of_unity`].
     ///
     /// Indices `k >= total` are ignored.
-    pub fn roots_of_unity_naive(total: NonZeroU32, points: BiMap<I, u32>) -> Self {
+    #[commonware_macros::stability(ALPHA)]
+    pub fn roots_of_unity_naive(
+        total: NonZeroU32,
+        points: commonware_utils::ordered::BiMap<I, u32>,
+    ) -> Self {
+        use crate::algebra::powers;
+
         let total_u32 = total.get();
         let size = (total_u32 as u64).next_power_of_two();
         let lg_size = size.ilog2() as u8;
@@ -549,7 +554,10 @@ pub mod fuzz {
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
-    use commonware_utils::ordered::Map;
+    use commonware_utils::{
+        ordered::{BiMap, Map},
+        TryFromIterator,
+    };
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
