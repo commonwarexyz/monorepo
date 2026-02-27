@@ -22,6 +22,7 @@ members = [
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/collector-demo",
     "examples/estimator",
     "examples/flood",
     "examples/log",
