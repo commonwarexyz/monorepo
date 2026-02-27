@@ -11,6 +11,7 @@
 //! - This key material should be stored securely (e.g., encrypted at rest)
 //! - Old shares should be securely deleted after successful resharing
 
+use crate::dkg::ModeVersion;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
@@ -75,7 +76,7 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
@@ -185,14 +186,19 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
 {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
-    pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
+    pub async fn init(
+        context: E,
+        partition_prefix: &str,
+        max_read_size: NonZeroU32,
+        max_supported_mode: ModeVersion,
+    ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                codec_config: max_read_size,
+                codec_config: (max_read_size, max_supported_mode),
             },
         )
         .await
@@ -688,6 +694,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -729,6 +736,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -770,6 +778,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -819,6 +828,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 

@@ -10,7 +10,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        sharing::Sharing,
+        sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
     ed25519, Sha256, Signer as _,
@@ -119,9 +119,11 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Sharing<MinSig> =
-        Sharing::decode_cfg(identity.as_ref(), &NZU32!(validators.len() as u32))
-            .expect("Identity not well-formed");
+    let identity: Sharing<MinSig> = Sharing::decode_cfg(
+        identity.as_ref(),
+        &(NZU32!(validators.len() as u32), ModeVersion::v0()),
+    )
+    .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");

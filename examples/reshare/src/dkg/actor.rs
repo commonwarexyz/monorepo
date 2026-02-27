@@ -13,7 +13,11 @@ use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
-        primitives::{group::Share, variant::Variant},
+        primitives::{
+            group::Share,
+            sharing::{Mode, ModeVersion},
+            variant::Variant,
+        },
     },
     transcript::Summary,
     Hasher, PublicKey, Signer,
@@ -107,6 +111,7 @@ pub struct Config<C: Signer, P> {
     pub mailbox_size: usize,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<C::PublicKey>,
+    pub max_supported_mode: ModeVersion,
 }
 
 pub struct Actor<E, P, H, C, V>
@@ -123,6 +128,7 @@ where
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
+    max_supported_mode: ModeVersion,
 
     successful_epochs: Counter,
     failed_epochs: Counter,
@@ -179,6 +185,7 @@ where
                 signer: config.signer,
                 peer_config: config.peer_config,
                 partition_prefix: config.partition_prefix,
+                max_supported_mode: config.max_supported_mode,
 
                 successful_epochs,
                 failed_epochs,
@@ -232,6 +239,7 @@ where
             self.context.with_label("storage"),
             &self.partition_prefix,
             max_read_size,
+            self.max_supported_mode,
         )
         .await;
         if storage.epoch().is_none() {
@@ -332,7 +340,7 @@ where
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
-                Default::default(),
+                Mode::NonZeroCounter,
                 dealers,
                 players.clone(),
             )
