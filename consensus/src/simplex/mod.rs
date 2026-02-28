@@ -407,7 +407,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Round},
+        types::{Epoch, Participant, Round},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -444,6 +444,53 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    /// Elector pre-populated with a fixed leader for view 1, falling back to
+    /// round-robin for all other views.
+    #[derive(Clone, Debug)]
+    struct FixedFirstLeader(Participant);
+
+    impl Default for FixedFirstLeader {
+        fn default() -> Self {
+            Self(Participant::new(0))
+        }
+    }
+
+    impl<S: commonware_cryptography::certificate::Scheme> Elector<S> for FixedFirstLeader {
+        type Elector = FixedFirstLeaderElector<S>;
+
+        fn build(
+            self,
+            participants: &commonware_utils::ordered::Set<S::PublicKey>,
+        ) -> Self::Elector {
+            assert!(!participants.is_empty(), "no participants");
+            FixedFirstLeaderElector {
+                leader: self.0,
+                n: participants.len() as u32,
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedFirstLeaderElector<S> {
+        leader: Participant,
+        n: u32,
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S>
+        for FixedFirstLeaderElector<S>
+    {
+        fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+            if round.view() == View::new(1) {
+                self.leader
+            } else {
+                let idx = (round.epoch().get().wrapping_add(round.view().get())) as u32 % self.n;
+                Participant::new(idx)
+            }
+        }
+    }
 
     #[test]
     fn test_interesting() {
@@ -2939,8 +2986,10 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                // Byzantine node uses a short timeout so its invalid nullify
-                // arrives while view 1 is still within the activity window.
+                // The Byzantine node's batcher blocks all honest peers as
+                // unknown, so its only vote is a nullify on leader timeout.
+                // A short timeout ensures that nullify reaches honest nodes
+                // before they advance past the activity window for view 1.
                 let (leader_timeout, certification_timeout) = if idx_scheme == 0 {
                     (Duration::from_millis(100), Duration::from_millis(200))
                 } else {
@@ -4665,7 +4714,7 @@ mod tests {
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector_cfg: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4731,13 +4780,8 @@ mod tests {
 
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
-            // Use epoch 7 so the leader for view 1 is a Byzantine node
-            // (Random: (7+1)%10=8, RoundRobin: (7+0)%10=7), preventing
-            // honest voters from proposing before injected certificates arrive.
-            let epoch = Epoch::new(7);
-
             // Create engines: 7 honest engines, 3 byzantine
-            let elector = L::default();
+            let elector = elector_cfg;
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4797,7 +4841,7 @@ mod tests {
                         strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch,
+                        epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
                         timeout_retry: Duration::from_secs(10),
@@ -4842,18 +4886,18 @@ mod tests {
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
-            let round_f = Round::new(epoch, View::new(f_view));
+            let round_f = Round::new(Epoch::new(333), View::new(f_view));
             let payload_b0 = Sha256::hash(b"B_F");
             let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
             let payload_b1a = Sha256::hash(b"B_G1");
             let proposal_b1a = Proposal::new(
-                Round::new(epoch, View::new(f_view + 1)),
+                Round::new(Epoch::new(333), View::new(f_view + 1)),
                 View::new(f_view),
                 payload_b1a,
             );
             let payload_b1b = Sha256::hash(b"B_G2");
             let proposal_b1b = Proposal::new(
-                Round::new(epoch, View::new(f_view + 2)),
+                Round::new(Epoch::new(333), View::new(f_view + 2)),
                 View::new(f_view),
                 payload_b1b,
             );
@@ -4865,8 +4909,8 @@ mod tests {
             let b1a_notarization = build_notarization(&proposal_b1a);
             let b1b_notarization = build_notarization(&proposal_b1b);
             // Build nullifications for F+1 and F+2
-            let null_a = build_nullification(Round::new(epoch, View::new(f_view + 1)));
-            let null_b = build_nullification(Round::new(epoch, View::new(f_view + 2)));
+            let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
+            let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
             // Create an 11th non-participant injector and obtain senders
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
@@ -5030,14 +5074,15 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
-        split_views_no_lockup::<_, _, RoundRobin>(secp256r1::fixture);
+        let elector = FixedFirstLeader(Participant::new(9));
+        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(bls12381_threshold_std::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(ed25519::fixture, elector.clone());
+        split_views_no_lockup(secp256r1::fixture, elector);
     }
 
     fn tle<V, L>()
