@@ -31,7 +31,7 @@ impl<V: Variant> PublicKey<V> {
     }
 
     /// Returns the inner public key value.
-    pub(crate) const fn inner(&self) -> &V::Public {
+    pub const fn inner(&self) -> &V::Public {
         &self.0
     }
 
@@ -82,8 +82,19 @@ impl<V: Variant> Signature<V> {
         Self(V::Signature::zero())
     }
 
+    /// Creates an aggregate signature from a raw signature value.
+    ///
+    /// # Warning
+    ///
+    /// This constructor does not verify that the signature is actually
+    /// an aggregate. Use only when you know the signature came from
+    /// aggregating multiple signatures.
+    pub const fn from_raw(signature: V::Signature) -> Self {
+        Self(signature)
+    }
+
     /// Returns the inner signature value.
-    pub(crate) const fn inner(&self) -> &V::Signature {
+    pub const fn inner(&self) -> &V::Signature {
         &self.0
     }
 
@@ -427,6 +438,32 @@ mod tests {
     fn test_aggregate_verify_same_message_wrong_public_key_count() {
         aggregate_verify_same_message_wrong_public_key_count::<MinPk>();
         aggregate_verify_same_message_wrong_public_key_count::<MinSig>();
+    }
+
+    fn aggregate_from_raw_does_not_bypass_multi_signer_verification<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (_, public2) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+
+        // Signature from exactly one signer.
+        let sig1 = sign_message::<V>(&private1, namespace, message);
+
+        // Aggregate public key from multiple signers.
+        let aggregate_pk = aggregate::combine_public_keys::<V, _>([public1, public2].iter());
+
+        // Wrapping a single signature with from_raw must not make it verify
+        // against a multi-signer aggregate public key.
+        let forged = Signature::from_raw(sig1);
+        let result = verify_same_message::<V>(&aggregate_pk, namespace, message, &forged);
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_aggregate_from_raw_does_not_bypass_multi_signer_verification() {
+        aggregate_from_raw_does_not_bypass_multi_signer_verification::<MinPk>();
+        aggregate_from_raw_does_not_bypass_multi_signer_verification::<MinSig>();
     }
 
     fn blst_aggregate_verify_same_signer<'a, V, I>(

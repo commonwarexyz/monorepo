@@ -7,8 +7,7 @@ use crate::{
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
-    marshal::resolver::p2p as marshal_resolver,
-    simplex::{elector::Config as Elector, scheme::Scheme},
+    elector::Config as Elector, marshal::resolver::p2p as marshal_resolver, simplex::scheme::Scheme,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
@@ -159,7 +158,7 @@ mod test {
     };
     use anyhow::anyhow;
     use commonware_consensus::{
-        simplex::elector::{Random, RoundRobin},
+        elector::{Random, RoundRobin},
         types::Epoch,
     };
     use commonware_cryptography::{

@@ -9,13 +9,14 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
+    elector::Config as Elector,
     marshal::{
         self,
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
     },
-    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
+    simplex::{scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{

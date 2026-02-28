@@ -1,26 +1,31 @@
 //! Byzantine fault tolerance models for consensus protocols.
 //!
 //! This module provides abstractions over quorum calculations for different BFT
-//! fault models. The two primary models are:
+//! fault models. The primary models are:
 //!
 //! - [`N3f1`]: Fault model requiring `n >= 3f + 1` participants
-//! - [`N5f1`]: Fault model requiring `n >= 5f + 1` participants
+//! - [`N5f1`]: Fault model requiring `n >= 5f + 1` participants (L-quorum: `n - f`)
+//! - [`M5f1`]: M-quorum variant of `N5f1` (M-quorum: `2f + 1`)
 //!
 //! _`f` denotes the maximum number of faults that can be tolerated._
 //!
 //! # Example
 //!
 //! ```
-//! use commonware_utils::{Faults, N3f1, N5f1};
+//! use commonware_utils::{Faults, N3f1, N5f1, M5f1};
 //!
 //! // n >= 3f+1
 //! let n = 10;
 //! assert_eq!(N3f1::max_faults(n), 3);  // f = (n-1)/3 = 3
 //! assert_eq!(N3f1::quorum(n), 7);       // q = n - f = 7
 //!
-//! // n >= 5f+1
+//! // n >= 5f+1 (L-quorum)
 //! assert_eq!(N5f1::max_faults(n), 1);  // f = (n-1)/5 = 1
-//! assert_eq!(N5f1::quorum(n), 9);       // q = n - f = 9
+//! assert_eq!(N5f1::quorum(n), 9);       // L-quorum = n - f = 9
+//!
+//! // n >= 5f+1 (M-quorum)
+//! assert_eq!(M5f1::max_faults(n), 1);  // f = (n-1)/5 = 1
+//! assert_eq!(M5f1::quorum(n), 3);       // M-quorum = 2f + 1 = 3
 //!
 //! // Works with any integer type
 //! let n_i32: i32 = 10;
@@ -53,7 +58,11 @@ pub trait Faults {
     /// Compute the quorum size for `n` participants.
     ///
     /// This is the minimum number of participants that must agree for the protocol
-    /// to make progress. It equals `n - max_faults(n)`.
+    /// to make progress.
+    ///
+    /// The default implementation returns `n - max_faults(n)`, but specific models
+    /// may override this. For example, [`M5f1`] uses M-quorum (`2f + 1`) while
+    /// preserving [`Faults::max_faults`] from [`N5f1`].
     ///
     /// # Panics
     ///
@@ -146,6 +155,37 @@ impl N5f1 {
     /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
     pub fn l_quorum(n: impl ToPrimitive) -> u32 {
         Self::quorum(n)
+    }
+}
+
+/// M-quorum variant of the `n >= 5f + 1` fault model.
+///
+/// This type uses the same fault tolerance as [`N5f1`] but returns `2f + 1`
+/// (M-quorum) from [`Faults::quorum`] instead of `n - f` (L-quorum).
+///
+/// This is useful for protocols like Minimmit that require different quorum
+/// thresholds for different certificate types:
+/// - M-notarization and Nullification use M-quorum (`2f + 1`)
+/// - Finalization uses L-quorum (`n - f`)
+///
+/// # Example
+///
+/// | n  | f  | M-quorum (2f+1) | L-quorum (n-f) |
+/// |----|----| ----------------|----------------|
+/// | 6  | 1  | 3               | 5              |
+/// | 11 | 2  | 5               | 9              |
+/// | 16 | 3  | 7               | 13             |
+/// | 21 | 4  | 9               | 17             |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct M5f1;
+
+impl Faults for M5f1 {
+    fn max_faults(n: impl ToPrimitive) -> u32 {
+        N5f1::max_faults(n)
+    }
+
+    fn quorum(n: impl ToPrimitive) -> u32 {
+        N5f1::m_quorum(n)
     }
 }
 
@@ -268,6 +308,57 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "n must not be zero")]
+    fn test_m5f1_max_faults_zero_panics() {
+        M5f1::max_faults(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "n must not be zero")]
+    fn test_m5f1_quorum_zero_panics() {
+        M5f1::quorum(0);
+    }
+
+    #[rstest]
+    // n=1 to n=5: f=0, M-quorum=1
+    #[case(1, 0, 1)]
+    #[case(2, 0, 1)]
+    #[case(3, 0, 1)]
+    #[case(4, 0, 1)]
+    #[case(5, 0, 1)]
+    // n=6 to n=10: f=1, M-quorum=3
+    #[case(6, 1, 3)]
+    #[case(7, 1, 3)]
+    #[case(8, 1, 3)]
+    #[case(9, 1, 3)]
+    #[case(10, 1, 3)]
+    // n=11 to n=15: f=2, M-quorum=5
+    #[case(11, 2, 5)]
+    #[case(12, 2, 5)]
+    #[case(13, 2, 5)]
+    #[case(14, 2, 5)]
+    #[case(15, 2, 5)]
+    // n=16 to n=20: f=3, M-quorum=7
+    #[case(16, 3, 7)]
+    #[case(17, 3, 7)]
+    #[case(18, 3, 7)]
+    #[case(19, 3, 7)]
+    #[case(20, 3, 7)]
+    // n=21: f=4, M-quorum=9
+    #[case(21, 4, 9)]
+    fn test_m5f1_quorums(#[case] n: u32, #[case] expected_f: u32, #[case] expected_m_quorum: u32) {
+        assert_eq!(M5f1::max_faults(n), expected_f);
+        assert_eq!(M5f1::quorum(n), expected_m_quorum);
+
+        // Verify M5f1 matches N5f1's m_quorum
+        assert_eq!(M5f1::quorum(n), N5f1::m_quorum(n));
+        assert_eq!(M5f1::max_faults(n), N5f1::max_faults(n));
+
+        // Verify invariant: m = 2f + 1
+        assert_eq!(expected_m_quorum, 2 * expected_f + 1);
+    }
+
+    #[test]
     fn test_generic_integer_types() {
         // Test with various integer types
         assert_eq!(N3f1::max_faults(10u8), 3);
@@ -289,6 +380,14 @@ mod tests {
         assert_eq!(N5f1::quorum(10usize), 9);
         assert_eq!(N5f1::m_quorum(10i32), 3);
         assert_eq!(N5f1::l_quorum(10i64), 9);
+
+        // M5f1 integer type tests
+        assert_eq!(M5f1::max_faults(10u64), 1);
+        assert_eq!(M5f1::max_faults(10usize), 1);
+        assert_eq!(M5f1::max_faults(10i32), 1);
+        assert_eq!(M5f1::quorum(10u64), 3);
+        assert_eq!(M5f1::quorum(10usize), 3);
+        assert_eq!(M5f1::quorum(10i32), 3);
     }
 
     #[test]
@@ -336,6 +435,51 @@ mod tests {
             // Both quorums must be achievable
             prop_assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
             prop_assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
+        }
+
+        /// M5f1 must be consistent with N5f1's m_quorum.
+        ///
+        /// M5f1::quorum(n) == N5f1::m_quorum(n) for all valid n.
+        #[test]
+        fn test_m5f1_consistency_with_n5f1(n in 1u32..10_000) {
+            // M5f1::quorum must equal N5f1::m_quorum
+            prop_assert_eq!(
+                M5f1::quorum(n),
+                N5f1::m_quorum(n),
+                "M5f1::quorum({}) != N5f1::m_quorum({})",
+                n, n
+            );
+
+            // M5f1::max_faults must equal N5f1::max_faults
+            prop_assert_eq!(
+                M5f1::max_faults(n),
+                N5f1::max_faults(n),
+                "M5f1::max_faults({}) != N5f1::max_faults({})",
+                n, n
+            );
+        }
+
+        /// Minimmit safety boundary: M-quorum and L-quorum must intersect in
+        /// more than `f` participants, guaranteeing at least one honest overlap.
+        ///
+        /// Mathematically: `m + l > n + f` where:
+        /// - `m = 2f + 1` (M-quorum)
+        /// - `l = n - f` (L-quorum)
+        #[test]
+        fn test_n5f1_m_l_intersection_exceeds_faults(n in 1u32..10_000) {
+            let f = N5f1::max_faults(n);
+            let m = M5f1::quorum(n);
+            let l = N5f1::l_quorum(n);
+
+            prop_assert!(
+                m + l > n + f,
+                "N5f1/M5f1 intersection violated for n={}: {} + {} <= {} + {}",
+                n,
+                m,
+                l,
+                n,
+                f
+            );
         }
 
         /// BFT safety property: two quorums must intersect in at least one honest node.

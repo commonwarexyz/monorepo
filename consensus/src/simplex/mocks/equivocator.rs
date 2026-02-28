@@ -2,8 +2,8 @@
 
 use super::relay::Relay;
 use crate::{
+    elector::{Config as ElectorConfig, Elector},
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
