@@ -119,7 +119,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         self.keys.contains_key(item)
     }
 
-    /// Returns the item with the highest priority.
+    /// Returns the item with the lowest priority value (i.e., the first item in ascending order).
     pub fn peek(&self) -> Option<(&I, &P)> {
         self.entries
             .iter()
@@ -127,7 +127,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
             .map(|entry| (&entry.item, &entry.priority))
     }
 
-    /// Removes and returns the item with the highest priority.
+    /// Removes and returns the item with the lowest priority value (i.e., the first item in ascending order).
     pub fn pop(&mut self) -> Option<(I, P)> {
         self.entries.pop_first().map(|entry| {
             self.keys.remove(&entry.item);
