@@ -25,8 +25,8 @@ use blst::{
     blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -452,13 +452,6 @@ pub struct Private {
 }
 
 impl Private {
-    /// Creates a new private key from a scalar.
-    pub const fn new(private: Scalar) -> Self {
-        Self {
-            scalar: Secret::new(private),
-        }
-    }
-
     /// Temporarily exposes the inner scalar to a closure.
     ///
     /// See [`Secret::expose`](crate::Secret::expose) for more details.
@@ -474,6 +467,22 @@ impl Private {
     }
 }
 
+impl TryFrom<Scalar> for Private {
+    type Error = Error;
+
+    /// Converts a scalar to a private key.
+    ///
+    /// Returns an error if the scalar is zero.
+    fn try_from(scalar: Scalar) -> Result<Self, Self::Error> {
+        if scalar == Scalar::zero() {
+            return Err(Invalid("Private", "Zero"));
+        }
+        Ok(Self {
+            scalar: Secret::new(scalar),
+        })
+    }
+}
+
 impl Write for Private {
     fn write(&self, buf: &mut impl BufMut) {
         self.expose(|scalar| scalar.write(buf));
@@ -484,8 +493,26 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read(buf)?;
-        Ok(Self::new(scalar))
+        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let mut ret = blst_fr::default();
+        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
+        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
+        // per IETF BLS12-381 spec (Draft 4+).
+        //
+        // References:
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+            if !blst_sk_check(&scalar) {
+                return Err(Invalid("Private", "Invalid"));
+            }
+            blst_fr_from_scalar(&mut ret, &scalar);
+        }
+        Ok(Self {
+            scalar: Secret::new(Scalar(ret)),
+        })
     }
 }
 
@@ -495,14 +522,16 @@ impl FixedSize for Private {
 
 impl Random for Private {
     fn random(rng: impl CryptoRngCore) -> Self {
-        Self::new(Scalar::random(rng))
+        Scalar::random(rng)
+            .try_into()
+            .expect("random scalar is non-zero")
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        Ok(Self::try_from(u.arbitrary::<Scalar>()?).expect("arbitrary scalar is non-zero"))
     }
 }
 
@@ -611,17 +640,12 @@ impl Read for Scalar {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
-        // per IETF BLS12-381 spec (Draft 4+).
-        //
-        // References:
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+        // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
+        // Zero is allowed for algebraic Scalar, Private enforces non-zero for secret keys.
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
+            if !blst_scalar_fr_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
@@ -922,6 +946,12 @@ impl G1 {
         Self(p)
     }
 
+    /// Returns true if this point is the identity (infinity).
+    pub fn is_identity(&self) -> bool {
+        // SAFETY: blst_p1_is_inf is safe for any blst_p1.
+        unsafe { blst_p1_is_inf(&self.0) }
+    }
+
     /// Batch converts projective G1 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -1107,32 +1137,31 @@ impl Read for G1 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding
+        // and curve membership.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
                 BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_PK_IS_INFINITY => {
+                    // Identity point allowed for algebraic G1 (rejected at PublicKey layer)
+                    return Ok(Self::zero());
+                }
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
                 BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
                 BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
             }
             blst_p1_from_affine(&mut ret, &affine);
 
-            // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
-                return Err(Invalid("G1", "Infinity"));
-            }
-
             // Verify that the deserialized element is in G1
             if !blst_p1_in_g1(&ret) {
-                return Err(Invalid("G1", "Outside G1"));
+                return Err(Invalid("G1", "Not in group"));
             }
         }
+
         Ok(Self(ret))
     }
 }
@@ -1357,6 +1386,12 @@ impl G2 {
         Self(p)
     }
 
+    /// Returns true if this point is the identity (infinity).
+    pub fn is_identity(&self) -> bool {
+        // SAFETY: blst_p2_is_inf is safe for any blst_p2.
+        unsafe { blst_p2_is_inf(&self.0) }
+    }
+
     /// Batch converts projective G2 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -1527,32 +1562,31 @@ impl Read for G2 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding
+        // and curve membership.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
                 BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_PK_IS_INFINITY => {
+                    // Identity point allowed for algebraic G2 (rejected at PublicKey layer)
+                    return Ok(Self::zero());
+                }
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
                 BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
                 BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
             }
             blst_p2_from_affine(&mut ret, &affine);
 
-            // Verify that deserialized element isn't infinite
-            if blst_p2_is_inf(&ret) {
-                return Err(Invalid("G2", "Infinity"));
-            }
-
             // Verify that the deserialized element is in G2
             if !blst_p2_in_g2(&ret) {
-                return Err(Invalid("G2", "Outside G2"));
+                return Err(Invalid("G2", "Not in group"));
             }
         }
+
         Ok(Self(ret))
     }
 }
@@ -1814,6 +1848,20 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_decode_zero() {
+        let zero_bytes = [0u8; SCALAR_LENGTH];
+        let decoded = Scalar::decode(&mut zero_bytes.as_slice()).unwrap();
+        assert_eq!(decoded, Scalar::zero());
+    }
+
+    #[test]
+    fn test_private_decode_rejects_zero() {
+        let zero_bytes = [0u8; PRIVATE_KEY_LENGTH];
+        let result = Private::decode(&mut zero_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("Private", "Invalid"))));
+    }
+
+    #[test]
     fn test_g1_codec() {
         let original = G1::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
@@ -1829,6 +1877,76 @@ mod tests {
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g1_decode_identity() {
+        let identity = G1::zero();
+        let mut encoded = identity.encode();
+        let decoded = G1::decode(&mut encoded).unwrap();
+        assert_eq!(decoded, identity);
+        assert!(decoded.is_identity());
+    }
+
+    #[test]
+    fn test_g2_decode_identity() {
+        let identity = G2::zero();
+        let mut encoded = identity.encode();
+        let decoded = G2::decode(&mut encoded).unwrap();
+        assert_eq!(decoded, identity);
+        assert!(decoded.is_identity());
+    }
+
+    #[test]
+    fn test_g1_decode_rejects_not_on_curve() {
+        // Compressed G1: high bit set (0x80), X coordinate = 1.
+        // X=1 is a valid field element but not an X coordinate of any curve point.
+        let mut bad_bytes = [0u8; G1_ELEMENT_BYTE_LENGTH];
+        bad_bytes[0] = 0x80; // compression flag
+        bad_bytes[G1_ELEMENT_BYTE_LENGTH - 1] = 0x01; // X = 1
+        let result = G1::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G1", "Not on curve"))));
+    }
+
+    #[test]
+    fn test_g2_decode_rejects_not_on_curve() {
+        // Compressed G2: high bit set (0x80), X coordinate = 1.
+        let mut bad_bytes = [0u8; G2_ELEMENT_BYTE_LENGTH];
+        bad_bytes[0] = 0x80; // compression flag
+        bad_bytes[G2_ELEMENT_BYTE_LENGTH - 1] = 0x01; // X = 1
+        let result = G2::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G2", "Not on curve"))));
+    }
+
+    #[test]
+    fn test_g1_decode_rejects_not_in_subgroup() {
+        // Point with X=4 is on the BLS12-381 curve (y² = x³ + 4) but not in G1.
+        let bad_bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        ];
+        let result = G1::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G1", "Not in group"))));
+    }
+
+    #[test]
+    fn test_g2_decode_rejects_not_in_subgroup() {
+        // Point with X=(2,0) is on the BLS12-381 G2 curve (y² = x³ + 4(1+u)) but not in G2.
+        let bad_bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = [
+            // X.c1 (imaginary part) = 0, with compression flag
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // X.c0 (real part) = 2
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ];
+        let result = G2::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G2", "Not in group"))));
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
