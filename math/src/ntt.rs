@@ -1455,6 +1455,7 @@ pub mod fuzz {
         }
     }
 
+    #[commonware_macros::test_group("slow")]
     #[test]
     fn test_fuzz() {
         use commonware_invariants::minifuzz;

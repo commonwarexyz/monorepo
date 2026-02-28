@@ -923,7 +923,7 @@ pub(crate) mod test {
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Runner as _};
 
     // Type aliases for all 12 variants (all use OneCap for collision coverage).
@@ -1040,6 +1040,7 @@ pub(crate) mod test {
         }};
     }
 
+    #[test_group("slow")]
     #[test_traced("DEBUG")]
     fn test_all_variants_steps_not_reset() {
         let executor = deterministic::Runner::default();
@@ -1048,6 +1049,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_log_replay() {
         let executor = deterministic::Runner::default();
@@ -1056,6 +1058,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_build_and_authenticate() {
         let executor = deterministic::Runner::default();
@@ -1064,6 +1067,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_basic() {
         let executor = deterministic::Runner::default();
@@ -1072,6 +1076,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
@@ -1080,6 +1085,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
@@ -1088,6 +1094,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_multiple_commits_delete_replayed() {
         let executor = deterministic::Runner::default();
@@ -1096,6 +1103,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_non_empty_recovery() {
         let executor = deterministic::Runner::default();
@@ -1104,6 +1112,7 @@ pub(crate) mod test {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_empty_recovery() {
         let executor = deterministic::Runner::default();
