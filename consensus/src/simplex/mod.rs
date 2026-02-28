@@ -487,9 +487,7 @@ mod tests {
         _phantom: std::marker::PhantomData<S>,
     }
 
-    impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S>
-        for FixedElectorInner<S>
-    {
+    impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S> for FixedElectorInner<S> {
         fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
             if round.view() <= self.through {
                 self.leader
@@ -5090,9 +5088,15 @@ mod tests {
             through: View::new(3),
         };
         split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>, elector.clone());
-        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            elector.clone(),
+        );
         split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>, elector.clone());
-        split_views_no_lockup(bls12381_threshold_std::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            elector.clone(),
+        );
         split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>, elector.clone());
         split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>, elector.clone());
         split_views_no_lockup(ed25519::fixture, elector.clone());
