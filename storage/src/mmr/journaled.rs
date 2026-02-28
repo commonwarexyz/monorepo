@@ -881,6 +881,33 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         verification::historical_range_proof(self, leaves, range).await
     }
 
+    /// Compute dirty node digests up to `target_size` while remaining in Dirty state.
+    ///
+    /// Only dirty nodes with position < `target_size` are computed. The write lock on
+    /// the internal state is held for the duration, but the work is bounded by the number
+    /// of dirty nodes below `target_size`.
+    ///
+    /// Returns [Error::TargetExceedsSize] if `target_size` exceeds the current MMR size.
+    pub fn merkleize_to(
+        &self,
+        h: &mut impl Hasher<Digest = D>,
+        target_size: Position,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.write();
+        let size = inner.mem_mmr.size();
+        if target_size > size {
+            return Err(Error::TargetExceedsSize(target_size, size));
+        }
+        if target_size <= inner.merkleized_size {
+            return Ok(());
+        }
+        inner
+            .mem_mmr
+            .merkleize_to(h, self.pool.clone(), target_size);
+        inner.merkleized_size = target_size;
+        Ok(())
+    }
+
     /// Merkleize the MMR and compute the root digest.
     pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();

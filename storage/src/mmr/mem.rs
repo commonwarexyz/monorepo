@@ -511,13 +511,21 @@ impl<D: Digest> DirtyMmr<D> {
         Ok(self.size())
     }
 
-    /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
-    /// [CleanMmr].
-    pub fn merkleize(
-        mut self,
+    /// Compute dirty node digests for all nodes with position < `target_size`, leaving the
+    /// remaining dirty nodes for later. This does not consume or convert the MMR.
+    pub fn merkleize_to(
+        &mut self,
         hasher: &mut impl Hasher<Digest = D>,
         #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
-    ) -> CleanMmr<D> {
+        target_size: Position,
+    ) {
+        // Partition: keep dirty nodes at or beyond target_size for later.
+        let remaining = self.state.dirty_nodes.split_off(&(target_size, 0));
+        if self.state.dirty_nodes.is_empty() {
+            self.state.dirty_nodes = remaining;
+            return;
+        }
+
         #[cfg(feature = "std")]
         match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
             (Some(pool), true) => self.merkleize_parallel(hasher, pool, MIN_TO_PARALLELIZE),
@@ -526,6 +534,20 @@ impl<D: Digest> DirtyMmr<D> {
 
         #[cfg(not(feature = "std"))]
         self.merkleize_serial(hasher);
+
+        // Restore dirty nodes beyond the target.
+        self.state.dirty_nodes = remaining;
+    }
+
+    /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
+    /// [CleanMmr].
+    pub fn merkleize(
+        mut self,
+        hasher: &mut impl Hasher<Digest = D>,
+        pool: Option<ThreadPool>,
+    ) -> CleanMmr<D> {
+        let target = self.size();
+        self.merkleize_to(hasher, pool, target);
 
         // Compute root
         let peaks = self

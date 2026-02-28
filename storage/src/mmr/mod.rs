@@ -141,6 +141,8 @@ pub enum Error {
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
+    #[error("merkleize_to target {0} exceeds MMR size {1}")]
+    TargetExceedsSize(Position, Position),
 }
 
 impl From<LocationError> for Error {

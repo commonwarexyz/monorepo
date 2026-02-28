@@ -263,3 +263,10 @@ path = "fuzz_targets/current_crash_recovery.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "qmdb_concurrent_ordered"
+path = "fuzz_targets/qmdb_concurrent_ordered.rs"
+test = false
+doc = false
+bench = false
