@@ -380,6 +380,10 @@ impl Sink {
             };
 
             // Create an operation to do the writev.
+            //
+            // For this payload send path, `writev` is sufficient since we don't need
+            // per-send flags, destination addresses, or cmsgs. This keeps the operation
+            // simpler and avoids building an `msghdr` that's required for `sendmsg`.
             let op =
                 opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _).build();
 
