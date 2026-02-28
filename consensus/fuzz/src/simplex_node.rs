@@ -1,0 +1,1359 @@
+use crate::{
+    simplex_protocol,
+    strategy::{SmallScope, Strategy},
+    utils::Partition,
+    FuzzInput, PublicKeyOf, StrategyChoice, MAX_REQUIRED_CONTAINERS, N4F3C1,
+};
+use arbitrary::Arbitrary;
+use bytes::Bytes;
+use commonware_codec::{Encode, Read, ReadExt};
+use commonware_consensus::{
+    simplex::{
+        scheme::Scheme as SimplexScheme,
+        types::{
+            Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            Proposal, Vote,
+        },
+    },
+    types::{Epoch, Round, View},
+    Monitor, Viewable,
+};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
+use commonware_parallel::Sequential;
+use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use commonware_utils::channel::mpsc::Receiver;
+use futures::FutureExt;
+use rand::Rng;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+const MIN_EVENTS: usize = 10;
+const MAX_EVENTS: usize = 50;
+const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
+const PROPOSAL_CACHE_LIMIT: usize = 64;
+
+/// Number of Byzantine nodes in the N4F3C1 configuration.
+pub(crate) const BYZANTINE_COUNT: usize = 3;
+/// Index of the single honest node in the N4F3C1 configuration.
+pub(crate) const HONEST_ID: usize = BYZANTINE_COUNT;
+/// All Byzantine signer indices, used to build quorum certificates.
+const BYZANTINE_IDS: [usize; BYZANTINE_COUNT] = [0, 1, 2];
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum Event {
+    OnBroadcastPayload,
+    OnBroadcastAndNotarize,
+    OnNotarize,
+    OnNullify,
+    OnFinalize,
+    OnNotarization,
+    OnNullification,
+    OnFinalization,
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub struct NodeEvent {
+    pub from_node_idx: u8,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeFuzzInput {
+    pub raw_bytes: Vec<u8>,
+    pub events: Vec<NodeEvent>,
+}
+
+impl Arbitrary<'_> for NodeFuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
+
+        let mut events = Vec::with_capacity(event_count);
+        for _ in 0..event_count {
+            events.push(NodeEvent::arbitrary(u)?);
+        }
+
+        let remaining = u.len().min(crate::MAX_RAW_BYTES);
+        let raw_bytes = if remaining == 0 {
+            vec![0]
+        } else {
+            u.bytes(remaining)?.to_vec()
+        };
+
+        Ok(Self { raw_bytes, events })
+    }
+}
+
+pub struct WithoutRecovery;
+
+pub struct WithRecovery;
+
+struct NodeDriver<S>
+where
+    S: SimplexScheme<Sha256Digest>,
+    S::PublicKey: Send,
+{
+    context: deterministic::Context,
+    honest: S::PublicKey,
+    relay: std::sync::Arc<
+        commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, S::PublicKey>,
+    >,
+    byzantine_participants: Vec<S::PublicKey>,
+    schemes: Vec<S>,
+    vote_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    certificate_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    resolver_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    strategy: SmallScope,
+
+    last_vote_view: u64,
+    last_finalized_view: u64,
+    last_notarized_view: u64,
+    last_nullified_view: u64,
+
+    latest_proposals: VecDeque<Proposal<Sha256Digest>>,
+    proposal_by_view: HashMap<u64, Proposal<Sha256Digest>>,
+
+    honest_notarize_votes: HashMap<Proposal<Sha256Digest>, Notarize<S, Sha256Digest>>,
+    honest_finalize_votes: HashMap<Proposal<Sha256Digest>, Finalize<S, Sha256Digest>>,
+    injected_finalize_views: HashSet<u64>,
+
+    notarized_by_view: HashMap<u64, Sha256Digest>,
+    finalized_by_view: HashMap<u64, Sha256Digest>,
+}
+
+impl<S> NodeDriver<S>
+where
+    S: SimplexScheme<Sha256Digest>,
+    S::PublicKey: Send,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        context: deterministic::Context,
+        honest: S::PublicKey,
+        relay: std::sync::Arc<
+            commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, S::PublicKey>,
+        >,
+        byzantine_participants: Vec<S::PublicKey>,
+        schemes: Vec<S>,
+        vote_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        certificate_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        resolver_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+        certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+        resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    ) -> Self {
+        Self {
+            context,
+            honest,
+            relay,
+            byzantine_participants,
+            schemes,
+            vote_senders,
+            certificate_senders,
+            resolver_senders,
+            vote_receivers,
+            certificate_receivers,
+            resolver_receivers,
+            strategy: SmallScope {
+                fault_rounds: 1,
+                fault_rounds_bound: 1,
+            },
+            last_vote_view: 1,
+            last_finalized_view: 0,
+            last_notarized_view: 0,
+            last_nullified_view: 0,
+            latest_proposals: VecDeque::new(),
+            proposal_by_view: HashMap::new(),
+            honest_notarize_votes: HashMap::new(),
+            honest_finalize_votes: HashMap::new(),
+            injected_finalize_views: HashSet::new(),
+            notarized_by_view: HashMap::new(),
+            finalized_by_view: HashMap::new(),
+        }
+    }
+
+    fn signer_index(&self, node_idx: u8) -> usize {
+        usize::from(node_idx) % self.schemes.len()
+    }
+
+    fn is_round_robin_leader(&self, signer_idx: usize, view: u64) -> bool {
+        let participant_count = self.byzantine_participants.len() + 1;
+        let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
+        leader_idx == signer_idx
+    }
+
+    fn is_honest_round_robin_leader(&self, view: u64) -> bool {
+        let participant_count = self.byzantine_participants.len() + 1;
+        let honest_idx = self.byzantine_participants.len();
+        let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
+        leader_idx == honest_idx
+    }
+
+    // Picks a proposal for the next fuzz event. It may reuse a recent proposal
+    // or mutate one to create nearby variants.
+    fn select_event_proposal(&mut self) -> Proposal<Sha256Digest> {
+        let base = self
+            .strategy
+            .repeated_proposal_index(&mut self.context, self.latest_proposals.len())
+            .and_then(|idx| self.latest_proposals.get(idx).cloned())
+            .unwrap_or_else(|| {
+                self.strategy.random_proposal(
+                    &mut self.context,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                )
+            });
+
+        let proposal = self.strategy.mutate_proposal(
+            &mut self.context,
+            &base,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+
+        self.proposal_by_view
+            .insert(proposal.view().get(), proposal.clone());
+        self.latest_proposals.push_back(proposal.clone());
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+
+        proposal
+    }
+
+    // Returns a proposal anchored to a specific view, reusing the existing one
+    // for that view when present.
+    fn get_or_build_proposal_for_view(&mut self, view: u64) -> Proposal<Sha256Digest> {
+        if let Some(existing) = self.proposal_by_view.get(&view) {
+            return existing.clone();
+        }
+
+        let proposal = self.strategy.random_proposal(
+            &mut self.context,
+            view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+
+        self.proposal_by_view.insert(view, proposal.clone());
+        self.latest_proposals.push_back(proposal.clone());
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+
+        proposal
+    }
+
+    fn build_notarization_from_byz(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        signers: &[usize],
+    ) -> Option<Notarization<S, Sha256Digest>> {
+        let votes: Vec<_> = signers
+            .iter()
+            .map(|idx| Notarize::sign(&self.schemes[*idx], proposal.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        Notarization::from_notarizes(&self.schemes[signers[0]], &votes, &Sequential)
+    }
+
+    fn build_nullification_from_byz(
+        &self,
+        round: Round,
+        signers: &[usize],
+    ) -> Option<Nullification<S>> {
+        let votes: Vec<_> = signers
+            .iter()
+            .map(|idx| Nullify::<S>::sign::<Sha256Digest>(&self.schemes[*idx], round))
+            .collect::<Option<Vec<_>>>()?;
+        Nullification::from_nullifies(&self.schemes[signers[0]], &votes, &Sequential)
+    }
+
+    fn build_finalization_from_byz(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        signers: &[usize],
+    ) -> Option<Finalization<S, Sha256Digest>> {
+        let votes: Vec<_> = signers
+            .iter()
+            .map(|idx| Finalize::sign(&self.schemes[*idx], proposal.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        Finalization::from_finalizes(&self.schemes[signers[0]], &votes, &Sequential)
+    }
+
+    fn notarization_with_optional_honest_vote(
+        &mut self,
+        proposal: &Proposal<Sha256Digest>,
+        prefer_honest_vote: bool,
+    ) -> Option<(Notarization<S, Sha256Digest>, bool)> {
+        if prefer_honest_vote {
+            if let Some(honest_vote) = self.honest_notarize_votes.get(proposal).cloned() {
+                let byz_vote_0 = Notarize::sign(&self.schemes[0], proposal.clone())?;
+                let byz_vote_1 = Notarize::sign(&self.schemes[1], proposal.clone())?;
+                let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
+                let cert = Notarization::from_notarizes(&self.schemes[0], &votes, &Sequential)?;
+                return Some((cert, true));
+            }
+        }
+
+        let cert = self.build_notarization_from_byz(proposal, &BYZANTINE_IDS)?;
+        Some((cert, false))
+    }
+
+    fn finalization_with_optional_honest_vote(
+        &mut self,
+        proposal: &Proposal<Sha256Digest>,
+        prefer_honest_vote: bool,
+    ) -> Option<(Finalization<S, Sha256Digest>, bool)> {
+        if prefer_honest_vote {
+            if let Some(honest_vote) = self.honest_finalize_votes.get(proposal).cloned() {
+                let byz_vote_0 = Finalize::sign(&self.schemes[0], proposal.clone())?;
+                let byz_vote_1 = Finalize::sign(&self.schemes[1], proposal.clone())?;
+                let votes = vec![honest_vote, byz_vote_0, byz_vote_1];
+                let cert = Finalization::from_finalizes(&self.schemes[0], &votes, &Sequential)?;
+                return Some((cert, true));
+            }
+        }
+
+        let cert = self.build_finalization_from_byz(proposal, &BYZANTINE_IDS)?;
+        Some((cert, false))
+    }
+
+    fn build_invalid_notarization_for_view(
+        &mut self,
+        view: u64,
+    ) -> Option<Notarization<S, Sha256Digest>> {
+        let base = self.get_or_build_proposal_for_view(view);
+        let mut conflicting = self.strategy.mutate_proposal(
+            &mut self.context,
+            &base,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+        conflicting = self
+            .strategy
+            .proposal_with_view(&conflicting, base.view().get());
+        if conflicting.payload == base.payload {
+            conflicting = Proposal::new(
+                conflicting.round,
+                conflicting.parent,
+                self.strategy.random_payload(&mut self.context),
+            );
+        }
+
+        let votes = [
+            Notarize::sign(&self.schemes[0], base.clone())?,
+            Notarize::sign(&self.schemes[1], base.clone())?,
+            Notarize::sign(&self.schemes[2], conflicting)?,
+        ];
+        Notarization::from_notarizes(&self.schemes[0], votes.iter(), &Sequential)
+    }
+
+    fn build_invalid_nullification_for_view(&mut self, view: u64) -> Option<Nullification<S>> {
+        let mut conflicting_view = self.strategy.mutate_nullify_view(
+            &mut self.context,
+            view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+        conflicting_view = conflicting_view.clamp(1, MAX_SAFE_VIEW);
+        if conflicting_view == view {
+            conflicting_view = view.saturating_add(1).min(MAX_SAFE_VIEW);
+            if conflicting_view == view {
+                conflicting_view = view.saturating_sub(1).max(1);
+            }
+        }
+
+        let base_round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
+        let conflicting_round = Round::new(Epoch::new(crate::EPOCH), View::new(conflicting_view));
+        let votes = [
+            Nullify::<S>::sign::<Sha256Digest>(&self.schemes[0], base_round)?,
+            Nullify::<S>::sign::<Sha256Digest>(&self.schemes[1], base_round)?,
+            Nullify::<S>::sign::<Sha256Digest>(&self.schemes[2], conflicting_round)?,
+        ];
+        Nullification::from_nullifies(&self.schemes[0], votes.iter(), &Sequential)
+    }
+
+    fn decode_resolver_request(msg: &[u8]) -> Option<(u64, u64)> {
+        if msg.len() < 17 {
+            return None;
+        }
+        let id = u64::from_be_bytes(msg.get(0..8)?.try_into().ok()?);
+        if msg[8] != 0 {
+            return None;
+        }
+        let requested_view = u64::from_be_bytes(msg.get(9..17)?.try_into().ok()?);
+        Some((id, requested_view))
+    }
+
+    fn encode_resolver_response(id: u64, data: Vec<u8>) -> Vec<u8> {
+        let mut out = Vec::with_capacity(9 + data.len() + 2);
+        out.extend_from_slice(&id.to_be_bytes());
+        out.push(1); // response payload
+        out.extend_from_slice(&data.encode()); // length-prefixed bytes
+        out
+    }
+
+    fn certificate_for_requested_view(
+        &mut self,
+        view: u64,
+    ) -> Option<Certificate<S, Sha256Digest>> {
+        let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
+        let base = self.get_or_build_proposal_for_view(view);
+
+        match self.context.gen_range(0..=3u8) {
+            0 => {
+                let cert = if self.context.gen_bool(0.8) {
+                    self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?
+                } else {
+                    let wrong = Proposal::new(
+                        Round::new(wrong_epoch, base.view()),
+                        base.parent,
+                        base.payload,
+                    );
+                    self.build_notarization_from_byz(&wrong, &BYZANTINE_IDS)?
+                };
+                Some(Certificate::Notarization(cert))
+            }
+            1 => {
+                let proposal = self.strategy.proposal_with_parent_view(
+                    &self.strategy.proposal_with_view(&base, view),
+                    view.saturating_sub(1),
+                );
+                let cert = if self.context.gen_bool(0.8) {
+                    self.build_finalization_from_byz(&proposal, &BYZANTINE_IDS)?
+                } else {
+                    let wrong = Proposal::new(
+                        Round::new(wrong_epoch, proposal.view()),
+                        proposal.parent,
+                        proposal.payload,
+                    );
+                    self.build_finalization_from_byz(&wrong, &BYZANTINE_IDS)?
+                };
+                Some(Certificate::Finalization(cert))
+            }
+            2 => {
+                let view = self.strategy.mutate_nullify_view(
+                    &mut self.context,
+                    view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
+                let round = if self.context.gen_bool(0.8) {
+                    Round::new(Epoch::new(crate::EPOCH), View::new(view))
+                } else {
+                    Round::new(wrong_epoch, View::new(view.max(1)))
+                };
+                let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
+                Some(Certificate::Nullification(cert))
+            }
+            // Default: valid responses.
+            _ => match self.context.gen_range(0..3usize) {
+                0 => {
+                    let cert = self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?;
+                    Some(Certificate::Notarization(cert))
+                }
+                1 => {
+                    let cert = self.build_finalization_from_byz(&base, &BYZANTINE_IDS)?;
+                    Some(Certificate::Finalization(cert))
+                }
+                _ => {
+                    let round = Round::new(Epoch::new(crate::EPOCH), View::new(base.view().get()));
+                    let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
+                    Some(Certificate::Nullification(cert))
+                }
+            },
+        }
+    }
+
+    fn handle_honest_votes(&mut self, sender: &S::PublicKey, bytes: Vec<u8>) {
+        if sender != &self.honest {
+            return;
+        }
+        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut bytes.as_slice()) else {
+            return;
+        };
+
+        self.last_vote_view = self.last_vote_view.max(vote.view().get());
+
+        match vote {
+            Vote::Notarize(notarize) => {
+                let view = notarize.view().get();
+                self.honest_notarize_votes
+                    .insert(notarize.proposal.clone(), notarize.clone());
+                self.proposal_by_view
+                    .insert(view, notarize.proposal.clone());
+                self.latest_proposals.push_back(notarize.proposal);
+            }
+            Vote::Nullify(nullify) => {
+                self.last_nullified_view = self.last_nullified_view.max(nullify.view().get());
+            }
+            Vote::Finalize(finalize) => {
+                let view = finalize.view().get();
+                self.honest_finalize_votes
+                    .insert(finalize.proposal.clone(), finalize.clone());
+                self.proposal_by_view
+                    .insert(view, finalize.proposal.clone());
+                self.latest_proposals.push_back(finalize.proposal);
+            }
+        }
+
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+    }
+
+    async fn handle_resolvers(&mut self, idx: usize, bytes: Vec<u8>) {
+        let default_response = self
+            .strategy
+            .mutate_resolver_bytes(&mut self.context, &bytes);
+        let response = if let Some((id, requested_view)) = Self::decode_resolver_request(&bytes) {
+            if self.context.gen_bool(0.8) {
+                if let Some(certificate) = self.certificate_for_requested_view(requested_view) {
+                    let mut cert_bytes = certificate.encode().to_vec();
+                    if self.context.gen_bool(0.2) {
+                        cert_bytes = self
+                            .strategy
+                            .mutate_certificate_bytes(&mut self.context, &cert_bytes);
+                    }
+                    Self::encode_resolver_response(id, cert_bytes)
+                } else {
+                    default_response
+                }
+            } else {
+                default_response
+            }
+        } else {
+            default_response
+        };
+        let _ = self.resolver_senders[idx]
+            .send(Recipients::One(self.honest.clone()), response, true)
+            .await;
+    }
+
+    fn handle_certificates(&mut self, bytes: Vec<u8>) {
+        let cfg = self.schemes[0].certificate_codec_config();
+        let Ok(certificate) = Certificate::<S, Sha256Digest>::read_cfg(&mut bytes.as_slice(), &cfg)
+        else {
+            return;
+        };
+
+        match certificate {
+            Certificate::Notarization(notarization) => {
+                let view = notarization.view().get();
+                self.last_vote_view = self.last_vote_view.max(view);
+                self.last_notarized_view = self.last_notarized_view.max(view);
+                self.notarized_by_view
+                    .insert(view, notarization.proposal.payload);
+                self.proposal_by_view
+                    .insert(view, notarization.proposal.clone());
+                self.latest_proposals.push_back(notarization.proposal);
+            }
+            Certificate::Nullification(nullification) => {
+                let view = nullification.view().get();
+                self.last_nullified_view = self.last_nullified_view.max(view);
+                self.last_vote_view = self.last_vote_view.max(view);
+            }
+            Certificate::Finalization(finalization) => {
+                let view = finalization.view().get();
+                self.last_vote_view = self.last_vote_view.max(view);
+                self.last_finalized_view = self.last_finalized_view.max(view);
+                self.finalized_by_view
+                    .insert(view, finalization.proposal.payload);
+                self.proposal_by_view
+                    .insert(view, finalization.proposal.clone());
+                self.latest_proposals.push_back(finalization.proposal);
+            }
+        }
+
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+    }
+
+    async fn handle_receivers(&mut self) {
+        for idx in 0..self.vote_receivers.len() {
+            while let Some(Ok((sender, msg))) = self.vote_receivers[idx].recv().now_or_never() {
+                let bytes: Vec<u8> = msg.into();
+                self.handle_honest_votes(&sender, bytes);
+            }
+        }
+
+        for idx in 0..self.certificate_receivers.len() {
+            while let Some(Ok((_, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
+                let bytes: Vec<u8> = msg.into();
+                self.handle_certificates(bytes);
+            }
+        }
+
+        for idx in 0..self.resolver_receivers.len() {
+            while let Some(Ok((_, msg))) = self.resolver_receivers[idx].recv().now_or_never() {
+                let bytes: Vec<u8> = msg.into();
+                self.handle_resolvers(idx, bytes).await;
+            }
+        }
+    }
+
+    fn check_finalization(&mut self, latest: &mut View, monitor: &mut Receiver<View>) -> bool {
+        let mut progressed = false;
+        while let Ok(update) = monitor.try_recv() {
+            if update.get() > latest.get() {
+                *latest = update;
+                self.last_finalized_view = self.last_finalized_view.max(update.get());
+                progressed = true;
+            }
+        }
+        progressed
+    }
+
+    async fn apply_event(&mut self, event: NodeEvent) {
+        let signer_idx = self.signer_index(event.from_node_idx);
+        match event.event {
+            Event::OnBroadcastPayload => self.broadcast_payload_event(signer_idx).await,
+            Event::OnBroadcastAndNotarize => self.send_broadcast_and_notarize(signer_idx).await,
+            Event::OnNotarize => self.send_notarize_vote(signer_idx).await,
+            Event::OnNullify => self.send_nullify_vote(signer_idx).await,
+            Event::OnFinalize => self.send_finalize_vote(signer_idx).await,
+            Event::OnNotarization => self.send_notarization_certificate(signer_idx).await,
+            Event::OnNullification => self.send_nullification_certificate(signer_idx).await,
+            Event::OnFinalization => self.send_finalization_certificate(signer_idx).await,
+        }
+    }
+
+    async fn broadcast_payload_event(&mut self, signer_idx: usize) {
+        let proposal = self.select_event_proposal();
+        let view = proposal.view().get();
+        if !self.is_round_robin_leader(signer_idx, view) {
+            return;
+        }
+        self.broadcast_payload_for_verify(signer_idx, &proposal)
+            .await;
+    }
+
+    async fn broadcast_payload_for_verify(
+        &mut self,
+        signer_idx: usize,
+        proposal: &Proposal<Sha256Digest>,
+    ) {
+        let Some(sender) = self.byzantine_participants.get(signer_idx).cloned() else {
+            return;
+        };
+        // Mirror equivocator behavior: make payload bytes available to the mock app so
+        // verify requests can resolve through relay delivery.
+        let contents = self
+            .strategy
+            .mutate_resolver_bytes(&mut self.context, &[0u8]);
+        self.relay
+            .broadcast(&sender, (proposal.payload, contents.into()))
+    }
+
+    async fn send_notarize_vote(&mut self, signer_idx: usize) {
+        let proposal = self.select_event_proposal();
+        self.send_notarize_vote_with_policy(signer_idx, proposal)
+            .await;
+    }
+
+    async fn send_notarize_vote_with_policy(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        match self.context.gen_range(0..100u8) {
+            // normal notarize vote
+            0..=93 => {
+                self.send_notarize_vote_for_proposal(signer_idx, proposal)
+                    .await;
+            }
+            // malformed vote bytes
+            94..=96 => {
+                self.send_malformed_vote(signer_idx).await;
+            }
+            // validly encoded notarize with wrong epoch
+            97..=99 => {
+                self.send_wrong_epoch_notarize_vote_for_proposal(signer_idx, proposal)
+                    .await;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn send_broadcast_and_notarize(&mut self, signer_idx: usize) {
+        // create a valid verify path so the honest node can complete peer verification
+        // and perform `verify` flow.
+        if self.context.gen_range(0..100u8) < 3
+            && self.send_valid_broadcast_and_notarize(signer_idx).await
+        {
+            return;
+        }
+
+        let proposal = self.select_event_proposal();
+        let view = proposal.view().get();
+        if self.is_round_robin_leader(signer_idx, view) {
+            self.broadcast_payload_for_verify(signer_idx, &proposal)
+                .await;
+        }
+        self.send_notarize_vote_with_policy(signer_idx, proposal)
+            .await;
+    }
+
+    async fn send_valid_broadcast_and_notarize(&mut self, signer_idx: usize) -> bool {
+        let mut view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
+        if !self.is_round_robin_leader(signer_idx, view) {
+            let next = view.saturating_add(1).min(MAX_SAFE_VIEW);
+            if !self.is_round_robin_leader(signer_idx, next) {
+                return false;
+            }
+            view = next;
+        }
+
+        let parent_view = self
+            .finalized_by_view
+            .keys()
+            .copied()
+            .filter(|v| *v > 0 && *v < view)
+            .max();
+        let Some(parent_view) = parent_view else {
+            return false;
+        };
+        let Some(parent_payload) = self.finalized_by_view.get(&parent_view).copied() else {
+            return false;
+        };
+
+        let mut proposal = self.get_or_build_proposal_for_view(view);
+        proposal = self.strategy.proposal_with_view(&proposal, view);
+        proposal.parent = View::new(parent_view);
+        self.proposal_by_view.insert(view, proposal.clone());
+        self.latest_proposals.push_back(proposal.clone());
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+
+        let Some(sender) = self.byzantine_participants.get(signer_idx).cloned() else {
+            return false;
+        };
+        let rand = self.context.gen::<u64>();
+        let contents = (proposal.round, parent_payload, rand).encode();
+        self.relay.broadcast(&sender, (proposal.payload, contents));
+
+        self.send_notarize_vote_for_proposal(signer_idx, proposal)
+            .await;
+        true
+    }
+
+    async fn send_notarize_vote_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        let Some(vote) = Notarize::sign(&self.schemes[signer_idx], proposal) else {
+            return;
+        };
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_nullify_vote(&mut self, signer_idx: usize) {
+        let view = self.strategy.mutate_nullify_view(
+            &mut self.context,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+        self.send_nullify_vote_for_view(signer_idx, view).await;
+    }
+
+    async fn send_nullify_vote_for_view(&mut self, signer_idx: usize, view: u64) {
+        let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
+        let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.schemes[signer_idx], round)
+        else {
+            return;
+        };
+
+        let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_finalize_vote(&mut self, signer_idx: usize) {
+        let proposal = self.select_event_proposal();
+        self.send_finalize_vote_for_proposal(signer_idx, proposal)
+            .await;
+    }
+
+    async fn send_finalize_vote_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        let Some(vote) = Finalize::sign(&self.schemes[signer_idx], proposal) else {
+            return;
+        };
+
+        let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Bytes) {
+        let _ = self.vote_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
+    async fn send_malformed_vote(&mut self, signer_idx: usize) {
+        let msg = self
+            .strategy
+            .mutate_resolver_bytes(&mut self.context, &[0u8]);
+        self.send_vote_bytes(signer_idx, msg.into()).await;
+    }
+
+    async fn send_wrong_epoch_notarize_vote_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
+        let wrong_proposal = Proposal::new(
+            Round::new(wrong_epoch, proposal.view()),
+            proposal.parent,
+            proposal.payload,
+        );
+        let Some(vote) = Notarize::sign(&self.schemes[signer_idx], wrong_proposal) else {
+            return;
+        };
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_certificate_bytes(&mut self, signer_idx: usize, msg: Bytes) {
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
+    async fn send_malformed_certificate(&mut self, signer_idx: usize) {
+        let msg = self
+            .strategy
+            .mutate_certificate_bytes(&mut self.context, &[0u8]);
+        self.send_certificate_bytes(signer_idx, msg.into()).await;
+    }
+
+    async fn send_wrong_epoch_nullification_certificate(&mut self, signer_idx: usize) {
+        let view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
+        let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
+        let round = Round::new(wrong_epoch, View::new(view));
+        let Some(cert) = self.build_nullification_from_byz(round, &BYZANTINE_IDS) else {
+            return;
+        };
+
+        let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
+        self.send_certificate_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_invalid_notarization_certificate(&mut self, signer_idx: usize) {
+        let view = self
+            .last_vote_view
+            .max(self.last_notarized_view)
+            .max(self.last_finalized_view)
+            .clamp(1, MAX_SAFE_VIEW);
+        let Some(cert) = self.build_invalid_notarization_for_view(view) else {
+            return;
+        };
+
+        let msg = Certificate::<S, Sha256Digest>::Notarization(cert).encode();
+        self.send_certificate_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_invalid_nullification_certificate(&mut self, signer_idx: usize) {
+        let view = self
+            .last_vote_view
+            .max(self.last_nullified_view)
+            .max(self.last_finalized_view)
+            .clamp(1, MAX_SAFE_VIEW);
+        let Some(cert) = self.build_invalid_nullification_for_view(view) else {
+            return;
+        };
+
+        let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
+        self.send_certificate_bytes(signer_idx, msg).await;
+    }
+
+    // Boost progress after an honest notarize by injecting byzantine support for that
+    // proposal, and sometimes fast-forwarding with notarization/finalization certificates.
+    async fn inject_finalize_quorum_for_honest_notarize_views(&mut self) {
+        let notarized: Vec<_> = self
+            .honest_notarize_votes
+            .iter()
+            .filter(|(proposal, _)| {
+                !self
+                    .injected_finalize_views
+                    .contains(&proposal.view().get())
+            })
+            .map(|(proposal, _)| (proposal.view().get(), proposal.clone()))
+            .collect();
+
+        if notarized.is_empty() {
+            return;
+        }
+
+        for (view, proposal) in notarized {
+            // Intuition: if we observe an honest notarize, quickly add byzantine nodes support so the
+            // honest node can make progress as in the real protocol and keep advancing height under heavy load.
+            for signer_idx in 0..self.schemes.len() {
+                self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                    .await;
+            }
+
+            if !self.schemes.is_empty() && self.context.gen_bool(0.4) {
+                self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                    .await;
+            }
+            if !self.schemes.is_empty() && self.context.gen_bool(0.2) {
+                self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                    .await;
+            }
+
+            // Keep existing one-shot-per-view behavior.
+            self.injected_finalize_views.insert(view);
+        }
+    }
+
+    async fn send_notarization_certificate_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+        prefer_honest_vote: bool,
+    ) {
+        let view = proposal.view().get();
+        let payload = proposal.payload;
+
+        let cert = self.notarization_with_optional_honest_vote(&proposal, prefer_honest_vote);
+
+        let Some((certificate, _)) = cert else {
+            return;
+        };
+
+        self.notarized_by_view.insert(view, payload);
+        self.last_notarized_view = self.last_notarized_view.max(view);
+
+        let msg = Certificate::<S, Sha256Digest>::Notarization(certificate).encode();
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
+    async fn send_notarization_certificate(&mut self, signer_idx: usize) {
+        let proposal = self.select_event_proposal();
+        let prefer_honest_vote = self.context.gen_bool(0.5);
+
+        match self.context.gen_range(0..100u8) {
+            // normal notarization (the primary path)
+            0..=89 => {
+                self.send_notarization_certificate_for_proposal(
+                    signer_idx,
+                    proposal,
+                    prefer_honest_vote,
+                )
+                .await;
+            }
+            // malformed bytes on the wire
+            90..=93 => {
+                self.send_malformed_certificate(signer_idx).await;
+            }
+            // wrong epoch nullification
+            94..=96 => {
+                self.send_wrong_epoch_nullification_certificate(signer_idx)
+                    .await;
+            }
+            // structurally valid but cryptographically invalid notarization
+            97..=99 => {
+                self.send_invalid_notarization_certificate(signer_idx).await;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn send_nullification_certificate_for_view(&mut self, signer_idx: usize, view: u64) {
+        let view = view.max(1);
+
+        let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
+        let cert = self
+            .build_nullification_from_byz(round, &BYZANTINE_IDS)
+            .expect("byzantine nullification should build");
+
+        self.last_nullified_view = self.last_nullified_view.max(view);
+
+        let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
+    // Force the honest node to assemble and broadcast a local nullification for
+    // an honest-led view so voter::actor can emit the floor certificate branch.
+    async fn try_trigger_local_nullification_floor(&mut self) {
+        let Some(proposal) = self
+            .honest_notarize_votes
+            .keys()
+            .filter(|proposal| {
+                let view = proposal.view().get();
+                self.is_honest_round_robin_leader(view) && proposal.parent.get() > 0
+            })
+            .max_by_key(|proposal| proposal.view().get())
+            .cloned()
+        else {
+            return;
+        };
+
+        let view = proposal.view().get();
+        let parent_view = proposal.parent.get();
+
+        if !self.notarized_by_view.contains_key(&parent_view)
+            && !self.finalized_by_view.contains_key(&parent_view)
+        {
+            let Some(parent_proposal) = self.proposal_by_view.get(&parent_view).cloned() else {
+                return;
+            };
+            self.send_notarization_certificate_for_proposal(0, parent_proposal, true)
+                .await;
+        }
+
+        for signer_idx in 0..self.schemes.len() {
+            self.send_nullify_vote_for_view(signer_idx, view).await;
+        }
+    }
+
+    async fn send_nullification_certificate(&mut self, signer_idx: usize) {
+        let view = self.strategy.mutate_nullify_view(
+            &mut self.context,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+
+        match self.context.gen_range(0..100u8) {
+            // normal nullification
+            0..=86 => {
+                self.send_nullification_certificate_for_view(signer_idx, view)
+                    .await;
+            }
+            // drive local nullification assembly to hit floor-broadcast path
+            87..=89 => {
+                self.try_trigger_local_nullification_floor().await;
+            }
+            // malformed bytes
+            90..=93 => {
+                self.send_malformed_certificate(signer_idx).await;
+            }
+            // wrong epoch nullification
+            94..=96 => {
+                self.send_wrong_epoch_nullification_certificate(signer_idx)
+                    .await;
+            }
+            // structurally valid but cryptographically invalid nullification
+            97..=99 => {
+                self.send_invalid_nullification_certificate(signer_idx)
+                    .await;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn send_finalization_certificate_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        let view = proposal.view().get();
+        let payload = proposal.payload;
+
+        if self
+            .notarized_by_view
+            .get(&view)
+            .is_none_or(|d| *d != payload)
+        {
+            self.send_notarization_certificate_for_proposal(signer_idx, proposal.clone(), true)
+                .await;
+        }
+
+        let prefer_honest_vote = self.context.gen_bool(0.5);
+        let cert = self.finalization_with_optional_honest_vote(&proposal, prefer_honest_vote);
+
+        let Some((certificate, _)) = cert else {
+            return;
+        };
+
+        self.finalized_by_view.insert(view, payload);
+        self.last_finalized_view = self.last_finalized_view.max(view);
+
+        let msg = Certificate::<S, Sha256Digest>::Finalization(certificate).encode();
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
+    fn build_invalid_finalization_for_view(
+        &mut self,
+        view: u64,
+    ) -> Option<Finalization<S, Sha256Digest>> {
+        let base = self.get_or_build_proposal_for_view(view);
+        let valid = self.build_finalization_from_byz(&base, &BYZANTINE_IDS)?;
+
+        let mut conflicting = self.strategy.mutate_proposal(
+            &mut self.context,
+            &base,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+        conflicting = self
+            .strategy
+            .proposal_with_view(&conflicting, base.view().get());
+        if conflicting == base {
+            conflicting = Proposal::new(
+                conflicting.round,
+                conflicting.parent,
+                self.strategy.random_payload(&mut self.context),
+            );
+        }
+        Some(Finalization {
+            proposal: conflicting,
+            certificate: valid.certificate,
+        })
+    }
+
+    async fn send_invalid_finalization_certificate(&mut self, signer_idx: usize) -> bool {
+        let view = self
+            .last_vote_view
+            .max(self.last_notarized_view)
+            .max(self.last_finalized_view);
+        let Some(cert) = self.build_invalid_finalization_for_view(view) else {
+            return false;
+        };
+
+        let msg = Certificate::<S, Sha256Digest>::Finalization(cert).encode();
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+        true
+    }
+
+    async fn send_finalization_certificate(&mut self, signer_idx: usize) {
+        let proposal = self.select_event_proposal();
+
+        match self.context.gen_range(0..100u8) {
+            // normal finalization
+            0..=95 => {
+                self.send_finalization_certificate_for_proposal(signer_idx, proposal)
+                    .await;
+            }
+            // malformed bytes
+            96..=99 => {
+                self.send_invalid_finalization_certificate(signer_idx).await;
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+pub(crate) async fn run<P: simplex_protocol::Simplex>(
+    context: &mut deterministic::Context,
+    input: &NodeFuzzInput,
+) -> (Vec<PublicKeyOf<P>>, Vec<P::Scheme>)
+where
+    PublicKeyOf<P>: Send,
+{
+    let base = FuzzInput {
+        raw_bytes: input.raw_bytes.clone(),
+        required_containers: MAX_REQUIRED_CONTAINERS,
+        degraded_network: false,
+        configuration: N4F3C1,
+        partition: Partition::Connected,
+        strategy: StrategyChoice::SmallScope {
+            fault_rounds: 1,
+            fault_rounds_bound: 1,
+        },
+        honest_messages_drop_percent: 0,
+    };
+
+    let (oracle, participants, schemes, mut registrations) =
+        crate::setup_network::<P>(context, &base).await;
+
+    let (fuzzer_schemes, honest_schemes) = schemes.split_at(BYZANTINE_COUNT);
+    let honest_scheme = honest_schemes[0].clone();
+
+    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+    let byzantine_participants: Vec<_> =
+        participants.iter().take(BYZANTINE_COUNT).cloned().collect();
+
+    let mut vote_senders = Vec::new();
+    let mut certificate_senders = Vec::new();
+    let mut resolver_senders = Vec::new();
+    let mut vote_receivers = Vec::new();
+    let mut certificate_receivers = Vec::new();
+    let mut resolver_receivers = Vec::new();
+
+    for byz in participants.iter().take(BYZANTINE_COUNT) {
+        let (
+            (vote_sender, vote_receiver),
+            (cert_sender, cert_receiver),
+            (resolver_sender, resolver_receiver),
+        ) = registrations
+            .remove(byz)
+            .expect("byzantine participant must exist");
+
+        vote_senders.push(vote_sender);
+        certificate_senders.push(cert_sender);
+        resolver_senders.push(resolver_sender);
+        vote_receivers.push(vote_receiver);
+        certificate_receivers.push(cert_receiver);
+        resolver_receivers.push(resolver_receiver);
+    }
+
+    let honest = participants[HONEST_ID].clone();
+    let honest_channels = registrations
+        .remove(&honest)
+        .expect("honest participant must exist");
+    let mut reporter = crate::spawn_honest_validator::<P>(
+        context.with_label("honest_validator"),
+        &oracle,
+        &participants,
+        honest_scheme,
+        honest.clone(),
+        relay.clone(),
+        honest_channels,
+    )
+    .with_strict(false);
+
+    let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+
+    let mut driver = NodeDriver::<P::Scheme>::new(
+        context.with_label("simplex_node_driver"),
+        honest,
+        relay,
+        byzantine_participants,
+        fuzzer_schemes.to_vec(),
+        vote_senders,
+        certificate_senders,
+        resolver_senders,
+        vote_receivers,
+        certificate_receivers,
+        resolver_receivers,
+    );
+
+    for event in input.events.iter() {
+        driver.check_finalization(&mut latest, &mut monitor);
+        driver.handle_receivers().await;
+        driver
+            .inject_finalize_quorum_for_honest_notarize_views()
+            .await;
+        driver.apply_event(*event).await;
+    }
+
+    (participants, schemes)
+}
+
+pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
+    checkpoint: deterministic::Checkpoint,
+    participants: Vec<PublicKeyOf<P>>,
+    schemes: Vec<P::Scheme>,
+) where
+    PublicKeyOf<P>: Send,
+{
+    deterministic::Runner::from(checkpoint).start(|context: deterministic::Context| async move {
+        let (network, mut oracle) = simulated::Network::new(
+            context.with_label("network_recovery"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: false,
+                tracked_peer_sets: None,
+            },
+        );
+        network.start();
+
+        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+        let honest = participants[HONEST_ID].clone();
+        let mut registrations =
+            crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
+        let honest_channels = registrations
+            .remove(&honest)
+            .expect("honest participant must exist in recovery");
+        let mut reporter = crate::spawn_honest_validator::<P>(
+            context.with_label("honest_validator_recovery"),
+            &oracle,
+            &participants,
+            schemes[HONEST_ID].clone(),
+            honest,
+            relay,
+            honest_channels,
+        )
+        .with_strict(false);
+
+        let _ = reporter.subscribe().await;
+        context.sleep(std::time::Duration::from_millis(50)).await;
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fuzz_node;
+    use commonware_macros::test_group;
+
+    #[test_group("slow")]
+    #[test]
+    fn test_simplex_node_smoke() {
+        let input = NodeFuzzInput {
+            raw_bytes: vec![1, 2, 3, 4, 5],
+            events: vec![
+                NodeEvent {
+                    from_node_idx: 0,
+                    event: Event::OnNotarize,
+                },
+                NodeEvent {
+                    from_node_idx: 1,
+                    event: Event::OnNotarization,
+                },
+                NodeEvent {
+                    from_node_idx: 2,
+                    event: Event::OnFinalization,
+                },
+            ],
+        };
+        fuzz_node::<simplex_protocol::SimplexEd25519, WithoutRecovery>(input);
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn test_simplex_node_recovery_smoke() {
+        let input = NodeFuzzInput {
+            raw_bytes: vec![9, 8, 7, 6, 5],
+            events: vec![
+                NodeEvent {
+                    from_node_idx: 0,
+                    event: Event::OnBroadcastAndNotarize,
+                },
+                NodeEvent {
+                    from_node_idx: 1,
+                    event: Event::OnNotarization,
+                },
+                NodeEvent {
+                    from_node_idx: 2,
+                    event: Event::OnFinalization,
+                },
+            ],
+        };
+        fuzz_node::<simplex_protocol::SimplexEd25519, WithRecovery>(input);
+    }
+}

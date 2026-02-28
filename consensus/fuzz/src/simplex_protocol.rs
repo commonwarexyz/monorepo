@@ -1,0 +1,395 @@
+use crate::scheme as id;
+use commonware_codec::Read;
+use commonware_consensus::simplex::{
+    elector::{Config as ElectorConfig, Random, RoundRobin},
+    scheme::{
+        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
+        Scheme,
+    },
+};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinPk, MinSig, Variant},
+    certificate,
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    PublicKey, Sha256,
+};
+use commonware_runtime::deterministic;
+
+#[derive(Clone)]
+pub struct CustomRoundRobinShuffled;
+
+impl Default for CustomRoundRobinShuffled {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
+    type Elector = <RoundRobin<Sha256> as ElectorConfig<S>>::Elector;
+
+    fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
+        let seed = b"fuzz_shuffled_seed_round_robin";
+        RoundRobin::<Sha256>::shuffled(seed).build(participants)
+    }
+}
+
+#[derive(Clone)]
+pub struct CustomRandomSelected;
+
+impl Default for CustomRandomSelected {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<P: PublicKey, V: Variant> ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>
+    for CustomRandomSelected
+{
+    type Elector = <Random as ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>>::Elector;
+
+    fn build(self, participants: &commonware_utils::ordered::Set<P>) -> Self::Elector {
+        Random.build(participants)
+    }
+}
+
+pub trait Simplex: 'static
+where
+    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
+{
+    type Scheme: Scheme<Sha256Digest>;
+    type Elector: ElectorConfig<Self::Scheme> + Default;
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    );
+}
+
+pub struct SimplexEd25519;
+
+impl Simplex for SimplexEd25519 {
+    type Scheme = ed25519::Scheme;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexId;
+
+impl Simplex for SimplexId {
+    type Scheme = id::Scheme;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        id::fixture(context, namespace, n)
+    }
+}
+
+pub struct SimplexEd25519CustomRoundRobin;
+
+impl Simplex for SimplexEd25519CustomRoundRobin {
+    type Scheme = ed25519::Scheme;
+    type Elector = CustomRoundRobinShuffled;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexBls12381MultisigMinPk;
+
+impl Simplex for SimplexBls12381MultisigMinPk {
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_multisig::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexBls12381MultisigMinSig;
+
+impl Simplex for SimplexBls12381MultisigMinSig {
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_multisig::fixture::<MinSig, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexBls12381MinPk;
+
+impl Simplex for SimplexBls12381MinPk {
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexBls12381MinPkCustomRandom;
+
+impl Simplex for SimplexBls12381MinPkCustomRandom {
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = CustomRandomSelected;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexBls12381MinSig;
+
+impl Simplex for SimplexBls12381MinSig {
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
+    type Elector = Random;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+pub struct SimplexSecp256r1;
+
+impl Simplex for SimplexSecp256r1 {
+    type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = secp256r1::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        fuzz, strategy::StrategyChoice, utils::Partition, AdversarialNetwork, FuzzInput, Standard,
+        Twinable, N4F1C3,
+    };
+    use commonware_macros::{test_group, test_traced};
+    use proptest::prelude::*;
+
+    const TEST_CONTAINERS: u64 = 1000;
+    const PROPERTY_TEST_CONTAINERS: u64 = 30;
+    const SEED: u64 = 0;
+
+    fn test_input(seed: u64, containers: u64) -> FuzzInput {
+        FuzzInput {
+            raw_bytes: seed.to_be_bytes().to_vec(),
+            partition: Partition::Connected,
+            configuration: N4F1C3,
+            required_containers: containers,
+            degraded_network: false,
+            strategy: StrategyChoice::AnyScope,
+            honest_messages_drop_percent: 0,
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_connected() {
+        fuzz::<SimplexEd25519, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_adv_connected() {
+        fuzz::<SimplexEd25519, AdversarialNetwork>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_twin_connected() {
+        fuzz::<SimplexEd25519, Twinable>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_shuffled_connected() {
+        fuzz::<SimplexEd25519CustomRoundRobin, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_secp256r1_connected() {
+        fuzz::<SimplexSecp256r1, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_multisig_minpk_connected() {
+        fuzz::<SimplexBls12381MultisigMinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_multisig_minsig_connected() {
+        fuzz::<SimplexBls12381MultisigMinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_threshold_minpk_connected() {
+        fuzz::<SimplexBls12381MinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_threshold_selected_minpk_connected() {
+        fuzz::<SimplexBls12381MinPkCustomRandom, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_threshold_minsig_connected() {
+        fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
+        any::<u64>().prop_map(move |seed| test_input(seed, PROPERTY_TEST_CONTAINERS))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_ed25519_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_ed25519_adv_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519, AdversarialNetwork>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_ed25519_twin_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519, Twinable>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_ed25519_shuffled_twin_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519CustomRoundRobin, Twinable>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_secp256r1_connected(input in property_test_strategy()) {
+            fuzz::<SimplexSecp256r1, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_multisig_minpk_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MultisigMinPk, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_multisig_minsig_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MultisigMinSig, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_threshold_minpk_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MinPk, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_threshold_selected_minpk_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MinPkCustomRandom, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_threshold_minsig_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MinSig, Standard>(input);
+        }
+    }
+}
