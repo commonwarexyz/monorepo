@@ -455,8 +455,8 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                self.tracked_peers = tracked_peers.clone();
                 self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
+                self.tracked_peers = tracked_peers;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
@@ -766,14 +766,9 @@ where
         }
 
         let my_index = me.get() as usize;
-        let Some(leader_shard) = block.shard(my_index as u16) else {
-            warn!(
-                %commitment,
-                index = my_index,
-                "cannot broadcast shards: missing leader shard"
-            );
-            return;
-        };
+        let leader_shard = block
+            .shard(my_index as u16)
+            .expect("proposer's shard must exist");
 
         // Broadcast each participant their corresponding shard.
         for (index, peer) in participants.iter().enumerate() {
@@ -795,14 +790,15 @@ where
         }
 
         // Send the leader's strong shard to tracked peers outside the participant set.
-        for peer in self.tracked_peers.iter() {
-            if participants.index(peer).is_some() {
-                continue;
-            }
-            let _ = sender
-                .send(Recipients::One(peer.clone()), leader_shard.clone(), true)
-                .await;
-        }
+        let non_participants = self
+            .tracked_peers
+            .iter()
+            .filter(|peer| participants.index(peer).is_none())
+            .cloned()
+            .collect();
+        let _ = sender
+            .send(Recipients::Some(non_participants), leader_shard, true)
+            .await;
 
         // Cache the block so we don't have to reconstruct it again.
         let block = Arc::new(block);
@@ -839,20 +835,14 @@ where
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
     ) {
-        let should_broadcast_weak = self
-            .state
-            .get(&commitment)
-            .and_then(|state| self.scheme_provider.scoped(state.round().epoch()))
-            .is_some_and(|scheme| scheme.me().is_some());
-        if let Some(weak_shard) = self
-            .state
-            .get_mut(&commitment)
-            .and_then(|s| s.take_weak_shard())
-        {
-            if should_broadcast_weak {
-                self.broadcast_weak_shard(sender, weak_shard).await;
+        if let Some(state) = self.state.get_mut(&commitment) {
+            let should_broadcast_weak = state.broadcast_our_weak();
+            if let Some(weak_shard) = state.take_weak_shard() {
+                if should_broadcast_weak {
+                    self.broadcast_weak_shard(sender, weak_shard).await;
+                }
+                self.notify_shard_subscribers(commitment);
             }
-            self.notify_shard_subscribers(commitment);
         }
 
         match self.try_reconstruct(commitment) {
@@ -1042,6 +1032,8 @@ where
     leader: P,
     /// Our validated weak shard, ready to broadcast to other participants.
     our_weak_shard: Option<Shard<C, H>>,
+    /// Whether we should gossip our weak shard for this commitment.
+    broadcast_our_weak: bool,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a valid shard.
@@ -1113,6 +1105,7 @@ where
         Self {
             leader,
             our_weak_shard: None,
+            broadcast_our_weak: false,
             checked_shards: Vec::new(),
             contributed: BitMap::zeroes(participants_len),
             round,
@@ -1136,6 +1129,7 @@ where
         &mut self,
         sender: P,
         shard: StrongShard<C>,
+        broadcast_our_weak: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let StrongShard {
@@ -1161,6 +1155,7 @@ where
             index,
             DistributionShard::Weak(weak_shard_data),
         ));
+        self.common.broadcast_our_weak = broadcast_our_weak;
         self.checking_data = Some(checking_data);
         true
     }
@@ -1316,6 +1311,11 @@ where
         self.common_mut().our_weak_shard.take()
     }
 
+    /// Returns whether this node should gossip its weak shard for this commitment.
+    const fn broadcast_our_weak(&self) -> bool {
+        self.common().broadcast_our_weak
+    }
+
     /// Inserts a [`Shard`] into the state.
     ///
     /// ## Peer Blocking Rules
@@ -1454,7 +1454,11 @@ where
         }
 
         match self {
-            Self::AwaitingQuorum(state) => state.verify_strong_shard(sender, shard, blocker).await,
+            Self::AwaitingQuorum(state) => {
+                state
+                    .verify_strong_shard(sender, shard, me.is_some(), blocker)
+                    .await
+            }
             Self::Ready(_) => false,
         }
     }
@@ -1538,7 +1542,13 @@ mod tests {
     use commonware_utils::{
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
-    use std::{future::Future, marker::PhantomData, num::NonZeroU32, time::Duration};
+    use std::{
+        future::Future,
+        marker::PhantomData,
+        num::NonZeroU32,
+        sync::atomic::{AtomicIsize, Ordering},
+        time::Duration,
+    };
 
     #[derive(Clone, Debug)]
     pub struct TestSubject {
@@ -1609,6 +1619,38 @@ mod tests {
         }
     }
 
+    /// A one-epoch scheme provider that churns to `None` after a fixed number
+    /// of successful scope lookups.
+    #[derive(Clone)]
+    struct ChurningProvider {
+        scheme: Arc<Scheme>,
+        remaining_successes: Arc<AtomicIsize>,
+    }
+
+    impl ChurningProvider {
+        fn new(scheme: Scheme, successes: isize) -> Self {
+            Self {
+                scheme: Arc::new(scheme),
+                remaining_successes: Arc::new(AtomicIsize::new(successes)),
+            }
+        }
+    }
+
+    impl Provider for ChurningProvider {
+        type Scope = Epoch;
+        type Scheme = Scheme;
+
+        fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
+            if scope != Epoch::zero() {
+                return None;
+            }
+            if self.remaining_successes.fetch_sub(1, Ordering::AcqRel) <= 0 {
+                return None;
+            }
+            Some(Arc::clone(&self.scheme))
+        }
+    }
+
     // Type aliases for test convenience.
     type B = MockBlock<Sha256Digest, ()>;
     type H = Sha256;
@@ -1619,6 +1661,8 @@ mod tests {
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type ShardEngine<S> = Engine<deterministic::Context, Prov, X, S, H, B, P, Sequential>;
+    type ChurningShardEngine<S> =
+        Engine<deterministic::Context, ChurningProvider, X, S, H, B, P, Sequential>;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -3794,6 +3838,165 @@ mod tests {
             assert!(
                 blocked.is_empty(),
                 "future-epoch participant should not be blocked: {blocked:?}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_weak_shard_broadcast_survives_provider_churn() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+
+            let leader_idx = 0usize;
+            let broadcaster_idx = 1usize;
+            let receiver_idx = 2usize;
+
+            let leader_pk = peer_keys[leader_idx].clone();
+            let broadcaster_pk = peer_keys[broadcaster_idx].clone();
+            let receiver_pk = peer_keys[receiver_idx].clone();
+
+            let mut registrations = BTreeMap::new();
+            for key in &peer_keys {
+                let control = oracle.control(key.clone());
+                let (sender, receiver) = control
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .expect("registration should succeed");
+                registrations.insert(key.clone(), (control, sender, receiver));
+            }
+
+            for src in &peer_keys {
+                for dst in &peer_keys {
+                    if src == dst {
+                        continue;
+                    }
+                    oracle
+                        .add_link(src.clone(), dst.clone(), DEFAULT_LINK)
+                        .await
+                        .expect("link should be added");
+                }
+            }
+
+            let (_leader_control, mut leader_sender, _leader_receiver) = registrations
+                .remove(&leader_pk)
+                .expect("leader should be registered");
+            let (broadcaster_control, broadcaster_sender, broadcaster_receiver) = registrations
+                .remove(&broadcaster_pk)
+                .expect("broadcaster should be registered");
+            let (receiver_control, receiver_sender, receiver_receiver) = registrations
+                .remove(&receiver_pk)
+                .expect("receiver should be registered");
+
+            let broadcaster_scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[broadcaster_idx].clone(),
+            )
+            .expect("signer scheme should be created");
+            // `discovered` performs two scoped lookups (`handle_external_proposal`
+            // and `ingest_buffered_shards`). Strong-shard validation is the third.
+            // Any additional lookup for epoch 0 churns to `None`.
+            let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
+            let broadcaster_config: Config<_, _, _, C, _, _, _> = Config {
+                scheme_provider: broadcaster_provider,
+                blocker: broadcaster_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_set_subscription: oracle.manager().subscribe().await,
+            };
+            let (broadcaster_engine, broadcaster_mailbox) =
+                ChurningShardEngine::new(context.with_label("broadcaster"), broadcaster_config);
+            broadcaster_engine.start((broadcaster_sender, broadcaster_receiver));
+
+            let receiver_scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[receiver_idx].clone(),
+            )
+            .expect("signer scheme should be created");
+            let receiver_config: Config<_, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(receiver_scheme),
+                blocker: receiver_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_set_subscription: oracle.manager().subscribe().await,
+            };
+            let (receiver_engine, receiver_mailbox) =
+                ShardEngine::new(context.with_label("receiver"), receiver_config);
+            receiver_engine.start((receiver_sender, receiver_receiver));
+
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            broadcaster_mailbox
+                .discovered(commitment, leader_pk.clone(), round)
+                .await;
+            receiver_mailbox
+                .discovered(commitment, leader_pk.clone(), round)
+                .await;
+            context.sleep(DEFAULT_LINK.latency).await;
+
+            let broadcaster_index = participants
+                .index(&broadcaster_pk)
+                .expect("broadcaster must be a participant")
+                .get() as u16;
+            let broadcaster_strong = coded_block
+                .shard(broadcaster_index)
+                .expect("missing shard")
+                .encode();
+            leader_sender
+                .send(Recipients::One(broadcaster_pk), broadcaster_strong, true)
+                .await
+                .expect("send failed");
+
+            let receiver_index = participants
+                .index(&receiver_pk)
+                .expect("receiver must be a participant")
+                .get() as u16;
+            let receiver_strong = coded_block
+                .shard(receiver_index)
+                .expect("missing shard")
+                .encode();
+            leader_sender
+                .send(Recipients::One(receiver_pk.clone()), receiver_strong, true)
+                .await
+                .expect("send failed");
+
+            context.sleep(DEFAULT_LINK.latency * 3).await;
+
+            let reconstructed = receiver_mailbox.get(commitment).await;
+            assert!(
+                reconstructed.is_some(),
+                "receiver should reconstruct after broadcaster validates and gossips weak shard"
             );
         });
     }
