@@ -2,7 +2,9 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use std::borrow::Cow;
     } else {
+        extern crate alloc;
         use alloc::borrow::Cow;
+        use alloc::vec::Vec;
     }
 }
 use super::common::{
@@ -18,7 +20,19 @@ use core::{
     ops::Deref,
 };
 use ecdsa::RecoveryId;
-use p256::{ecdsa::VerifyingKey, elliptic_curve::scalar::IsHigh};
+use p256::{
+    ecdsa::VerifyingKey,
+    elliptic_curve::{
+        bigint::Encoding as _,
+        ops::{MulByGenerator, Reduce},
+        scalar::IsHigh,
+        sec1::FromEncodedPoint,
+        Field,
+    },
+    AffinePoint, EncodedPoint, ProjectivePoint, Scalar, U256,
+};
+use rand_core::CryptoRngCore;
+use sha2::{Digest as Sha2Digest, Sha256};
 
 const BASE_SIGNATURE_LENGTH: usize = 64; // R || S
 const SIGNATURE_LENGTH: usize = 1 + BASE_SIGNATURE_LENGTH; // RecoveryId || R || S
@@ -224,6 +238,220 @@ impl Display for Signature {
     }
 }
 
+/// Secp256r1 Recoverable Batch Verifier.
+///
+/// Accumulates signature verification items and verifies them when [`crate::BatchVerifier::verify`]
+/// is called.
+///
+/// # Batch Verification Algorithm
+///
+/// This implementation uses algebraic batch verification with random coefficients to prevent
+/// attacks where invalid signatures combine to appear valid when verified together.
+///
+/// For each signature (r, s) on message m with public key P:
+/// 1. Hash the message: e = SHA256(m)
+/// 2. Compute w = s^-1 mod n
+/// 3. Compute u1 = e * w mod n, u2 = r * w mod n
+/// 4. Recover the signature point R from (r, recovery_id)
+/// 5. Generate a random coefficient z for this item
+///
+/// The batch verification checks:
+/// sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O (identity point)
+pub struct Batch {
+    items: Vec<(PublicKey, Signature, Vec<u8>)>,
+}
+
+impl Batch {
+    #[inline(always)]
+    fn add_inner(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        let payload = namespace.map_or(message.to_vec(), |namespace| {
+            union_unique(namespace, message)
+        });
+        self.items
+            .push((public_key.clone(), signature.clone(), payload));
+        true
+    }
+}
+
+impl crate::BatchVerifier<PublicKey> for Batch {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    fn add(
+        &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.add_inner(Some(namespace), message, public_key, signature)
+    }
+
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
+        if self.items.is_empty() {
+            return true;
+        }
+
+        let n = self.items.len();
+
+        // Phase 1: Validate signatures, collect s values, compute hashes, recover R points
+        let mut s_values = Vec::with_capacity(n);
+        let mut e_values = Vec::with_capacity(n);
+        let mut r_scalars = Vec::with_capacity(n);
+        let mut r_points = Vec::with_capacity(n);
+        let mut pk_points = Vec::with_capacity(n);
+
+        for (public_key, signature, payload) in &self.items {
+            // Reject malleable signatures (high-s)
+            if signature.signature.s().is_high().into() {
+                return false;
+            }
+
+            // Hash the message to get e
+            let e_bytes: [u8; 32] = Sha256::digest(payload).into();
+            let e = <Scalar as Reduce<U256>>::reduce_bytes(&e_bytes.into());
+
+            // Get r and s from signature
+            let r_scalar: Scalar = *signature.signature.r();
+            let s: Scalar = *signature.signature.s();
+
+            // Recover R point
+            let r_point = match recover_r_point(&signature.raw, signature.recovery_id) {
+                Some(p) => p,
+                None => return false,
+            };
+
+            s_values.push(s);
+            e_values.push(e);
+            r_scalars.push(r_scalar);
+            r_points.push(r_point);
+            pk_points.push(ProjectivePoint::from(*public_key.0.key.as_affine()));
+        }
+
+        // Phase 2: Batch invert all s values using Montgomery's trick
+        // This converts n inversions into 1 inversion + 3(n-1) multiplications
+        let s_inverses = match batch_invert(&s_values) {
+            Some(inv) => inv,
+            None => return false,
+        };
+
+        // Phase 3: Accumulate the batch verification equation
+        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O
+        let mut agg_u1 = Scalar::ZERO;
+        let mut agg_point = ProjectivePoint::IDENTITY;
+
+        for i in 0..n {
+            let z = Scalar::random(&mut *rng);
+            let w = s_inverses[i];
+
+            // u1 = e * w, u2 = r * w
+            let u1 = e_values[i] * w;
+            let u2 = r_scalars[i] * w;
+
+            // Accumulate: z * u1 for the generator term
+            agg_u1 += z * u1;
+
+            // Accumulate: z * u2 * P - z * R
+            agg_point += pk_points[i] * (z * u2);
+            agg_point -= r_points[i] * z;
+        }
+
+        // Final check: agg_u1 * G + agg_point = O
+        // Equivalently: agg_u1 * G = -agg_point
+        let lhs = ProjectivePoint::mul_by_generator(&agg_u1);
+        let rhs = -agg_point;
+
+        lhs == rhs
+    }
+}
+
+/// Batch invert scalars using Montgomery's trick.
+///
+/// Given n scalars to invert, this computes all inverses using only 1 field
+/// inversion plus 3(n-1) field multiplications, instead of n inversions.
+///
+/// Returns `None` if any scalar is zero (non-invertible).
+fn batch_invert(scalars: &[Scalar]) -> Option<Vec<Scalar>> {
+    if scalars.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let n = scalars.len();
+
+    // Step 1: Compute prefix products
+    // products[i] = scalars[0] * scalars[1] * ... * scalars[i]
+    let mut products = Vec::with_capacity(n);
+    products.push(scalars[0]);
+    for i in 1..n {
+        products.push(products[i - 1] * scalars[i]);
+    }
+
+    // Step 2: Invert the final product (single inversion)
+    let final_inv = products[n - 1].invert();
+    if final_inv.is_none().into() {
+        return None;
+    }
+    let mut acc = final_inv.unwrap();
+
+    // Step 3: Compute individual inverses by "unwinding" the product chain
+    // scalars[i]^-1 = products[i-1] * acc, then update acc = acc * scalars[i]
+    let mut inverses = vec![Scalar::ZERO; n];
+    for i in (1..n).rev() {
+        inverses[i] = products[i - 1] * acc;
+        acc *= scalars[i];
+    }
+    inverses[0] = acc;
+
+    Some(inverses)
+}
+
+/// P-256 curve order n.
+/// n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+const CURVE_ORDER: U256 =
+    U256::from_be_hex("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551");
+
+/// Recover the signature point R from the raw signature bytes and recovery ID.
+fn recover_r_point(
+    raw: &[u8; SIGNATURE_LENGTH],
+    recovery_id: RecoveryId,
+) -> Option<ProjectivePoint> {
+    // Raw format: [recovery_id (1 byte), r (32 bytes), s (32 bytes)]
+    // Extract r from bytes 1..33
+    let r_bytes: &[u8; 32] = raw[1..33].try_into().ok()?;
+
+    // The x-coordinate might be r or r + n (if is_x_reduced)
+    let x_bytes: [u8; 32] = if recovery_id.is_x_reduced() {
+        // x = r + n case (rare for P-256, but valid)
+        let r = U256::from_be_slice(r_bytes);
+        let x = r.wrapping_add(&CURVE_ORDER);
+        x.to_be_bytes()
+    } else {
+        *r_bytes
+    };
+
+    // Use SEC1 point decompression: compressed point is [02|03 || x]
+    // 02 = even y, 03 = odd y
+    let mut encoded = [0u8; 33];
+    encoded[0] = if recovery_id.is_y_odd() { 0x03 } else { 0x02 };
+    encoded[1..].copy_from_slice(&x_bytes);
+
+    let encoded_point = EncodedPoint::from_bytes(encoded).ok()?;
+    let affine = AffinePoint::from_encoded_point(&encoded_point);
+
+    if affine.is_some().into() {
+        Some(ProjectivePoint::from(affine.unwrap()))
+    } else {
+        None
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -246,11 +474,14 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{secp256r1::common::tests::*, Recoverable, Signer as _, Verifier as _};
+    use crate::{
+        secp256r1::common::tests::*, BatchVerifier, Recoverable, Signer as _, Verifier as _,
+    };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
     use ecdsa::RecoveryId;
-    use p256::elliptic_curve::scalar::IsHigh;
+    use p256::elliptic_curve::{ops::Neg, scalar::IsHigh, sec1::ToEncodedPoint};
     use rstest::rstest;
 
     const NAMESPACE: &[u8] = b"test-namespace";
@@ -687,6 +918,225 @@ mod tests {
             }
         };
         assert!(expected);
+    }
+
+    #[test]
+    fn batch_verify_valid() {
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let sig2 = signer2.sign(NAMESPACE, msg2);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig2));
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_invalid() {
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let _sig2 = signer2.sign(NAMESPACE, msg2);
+
+        // Use wrong signature for second message
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig1)); // wrong sig
+        assert!(!batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_empty() {
+        let batch = Batch::new();
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_single() {
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"single message";
+        let sig = signer.sign(NAMESPACE, msg);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg, &signer.public_key(), &sig));
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_wrong_namespace() {
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"message";
+        let sig = signer.sign(NAMESPACE, msg);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(b"wrong-namespace", msg, &signer.public_key(), &sig));
+        assert!(!batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_rejects_malleable_signature() {
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"malleable test message";
+        let valid_sig = signer.sign(NAMESPACE, msg);
+
+        // Verify the original signature is valid
+        assert!(signer.public_key().verify(NAMESPACE, msg, &valid_sig));
+
+        // Create a malleable signature by negating s and flipping the recovery ID
+        // In ECDSA, (r, s) and (r, n-s) are both mathematically valid signatures
+        let s_negated = valid_sig.signature.s().neg();
+        let malleable_ecdsa_sig =
+            p256::ecdsa::Signature::from_scalars(*valid_sig.signature.r(), s_negated)
+                .expect("valid signature components");
+
+        // The recovery ID must be flipped to point to -R
+        let malleable_recovery_id = RecoveryId::new(
+            !valid_sig.recovery_id.is_y_odd(),
+            valid_sig.recovery_id.is_x_reduced(),
+        );
+
+        // Construct the malleable signature (bypassing normal signing which normalizes s)
+        let malleable_sig = Signature::new(malleable_ecdsa_sig, malleable_recovery_id);
+
+        // Verify the malleable signature has high-s
+        assert!(
+            bool::from(malleable_sig.signature.s().is_high()),
+            "malleable signature should have high-s"
+        );
+
+        // Batch verification must reject the malleable signature
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg, &signer.public_key(), &malleable_sig));
+        assert!(
+            !batch.verify(&mut rand::thread_rng()),
+            "batch verification must reject malleable (high-s) signatures"
+        );
+    }
+
+    #[test]
+    fn batch_verify_rejects_cancelling_forgeries() {
+        // This test verifies that random coefficients prevent the "cancelling forgery"
+        // attack where an attacker creates two invalid signatures whose errors cancel
+        // out when summed, causing naive batch verification to pass.
+        //
+        // Attack: Modify R1 to R1+delta and R2 to R2-delta. Without random coefficients:
+        //   (... - R1 - delta) + (... - R2 + delta) = (... - R1) + (... - R2)
+        // The deltas cancel! With random coefficients z1, z2:
+        //   z1*(... - R1 - delta) + z2*(... - R2 + delta) includes delta*(z2 - z1) ≠ 0
+
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let sig2 = signer2.sign(NAMESPACE, msg2);
+
+        // Verify both original signatures are valid individually
+        assert!(signer1.public_key().verify(NAMESPACE, msg1, &sig1));
+        assert!(signer2.public_key().verify(NAMESPACE, msg2, &sig2));
+
+        // Recover the R points from both signatures
+        let r1_point = recover_r_point(&sig1.raw, sig1.recovery_id)
+            .expect("valid signature should have recoverable R");
+        let r2_point = recover_r_point(&sig2.raw, sig2.recovery_id)
+            .expect("valid signature should have recoverable R");
+
+        // Create a random non-identity delta point
+        let delta_scalar = Scalar::random(&mut rand::thread_rng());
+        let delta = ProjectivePoint::mul_by_generator(&delta_scalar);
+
+        // Forge R points: R1' = R1 + delta, R2' = R2 - delta
+        let r1_forged = r1_point + delta;
+        let r2_forged = r2_point - delta;
+
+        // Helper to create forged signature from modified R point
+        fn forge_signature_with_r(
+            original: &Signature,
+            forged_r: ProjectivePoint,
+        ) -> Option<Signature> {
+            let forged_affine = forged_r.to_affine();
+            // Get compressed encoding: [02|03 || x] where 02=even y, 03=odd y
+            let encoded = forged_affine.to_encoded_point(true);
+            let compressed_bytes = encoded.as_bytes();
+            let y_is_odd = compressed_bytes[0] == 0x03;
+            let x_bytes = &compressed_bytes[1..33];
+
+            let forged_recovery_id = RecoveryId::new(y_is_odd, false);
+
+            // Create new ECDSA signature with forged r value but original s
+            let forged_ecdsa = p256::ecdsa::Signature::from_scalars(
+                *p256::FieldBytes::from_slice(x_bytes),
+                original.signature.s().to_bytes(),
+            )
+            .ok()?;
+
+            Some(Signature::new(forged_ecdsa, forged_recovery_id))
+        }
+
+        let forged_sig1 =
+            forge_signature_with_r(&sig1, r1_forged).expect("should create forged signature");
+        let forged_sig2 =
+            forge_signature_with_r(&sig2, r2_forged).expect("should create forged signature");
+
+        // Both forged signatures should fail individual verification
+        assert!(
+            !signer1.public_key().verify(NAMESPACE, msg1, &forged_sig1),
+            "forged sig1 should fail individual verification"
+        );
+        assert!(
+            !signer2.public_key().verify(NAMESPACE, msg2, &forged_sig2),
+            "forged sig2 should fail individual verification"
+        );
+
+        // Batch verification must also reject the cancelling forgeries
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &forged_sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &forged_sig2));
+        assert!(
+            !batch.verify(&mut rand::thread_rng()),
+            "batch verification must reject cancelling forgeries"
+        );
+    }
+
+    #[test]
+    fn test_batch_invert() {
+        let scalars: Vec<Scalar> = (1..=10)
+            .map(|i| Scalar::random(&mut rand::thread_rng()) + Scalar::from(i as u64))
+            .collect();
+
+        let inverses = batch_invert(&scalars).expect("all scalars should be invertible");
+
+        for (s, inv) in scalars.iter().zip(inverses.iter()) {
+            let product = *s * *inv;
+            assert_eq!(product, Scalar::ONE, "s * s^-1 should equal 1");
+        }
+    }
+
+    #[test]
+    fn test_batch_invert_empty() {
+        let scalars: Vec<Scalar> = vec![];
+        let inverses = batch_invert(&scalars).expect("empty input should succeed");
+        assert!(inverses.is_empty());
+    }
+
+    #[test]
+    fn test_batch_invert_single() {
+        let s = Scalar::random(&mut rand::thread_rng()) + Scalar::ONE;
+        let inverses = batch_invert(&[s]).expect("single scalar should be invertible");
+        assert_eq!(inverses.len(), 1);
+        assert_eq!(s * inverses[0], Scalar::ONE);
     }
 
     #[cfg(feature = "arbitrary")]
