@@ -16,7 +16,7 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 
 #[cfg(test)]
 mod tests {
-    use crate::{IoBuf, Listener, Sink, Stream};
+    use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use futures::join;
     use std::net::SocketAddr;
 
@@ -29,6 +29,7 @@ mod tests {
         N: crate::Network,
     {
         test_network_bind_and_dial(new_network()).await;
+        test_network_vectored_send(new_network()).await;
         test_network_multiple_clients(new_network()).await;
         test_network_large_data(new_network()).await;
         test_network_connection_errors(new_network()).await;
@@ -79,6 +80,57 @@ mod tests {
                 .await
                 .expect("Failed to receive data");
             assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        assert!(server_result.is_ok());
+        assert!(client_result.is_ok());
+    }
+
+    // Test sending a multi-buffer payload.
+    async fn test_network_vectored_send<N: crate::Network>(network: N) {
+        // Start a server
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+
+        // Get the local address of the listener
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        let runtime = tokio::runtime::Handle::current();
+
+        // Build one logical message from multiple chunks so this test exercises
+        // the `IoBufs` send path (instead of the single-buffer fast path).
+        let message = IoBufs::from(vec![
+            IoBuf::from(b"client_".to_vec()),
+            IoBuf::from(b"vectored_".to_vec()),
+            IoBuf::from(b"send".to_vec()),
+        ]);
+        let expected = message.clone().coalesce();
+
+        // Spawn a server and read exactly the logical message size. The receive
+        // side should observe the same byte stream regardless of send chunking.
+        let server = runtime.spawn(async move {
+            let (_, _sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let received = stream
+                .recv(expected.len())
+                .await
+                .expect("Failed to receive");
+            assert_eq!(received.coalesce(), expected.as_ref());
+        });
+
+        // Spawn client
+        let client = runtime.spawn(async move {
+            // Connect to the server
+            let (mut sink, _stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            // Send the pre-built vectored message.
+            sink.send(message).await.expect("Failed to send data");
         });
 
         // Wait for both tasks to complete
