@@ -196,10 +196,7 @@ mod tests {
         where
             S: Scheme<PublicKey, Sha256Digest>,
         {
-            let context = AckSubject {
-                chunk: &chunk,
-                epoch,
-            };
+            let context = AckSubject { chunk: &chunk };
             let attestation = scheme
                 .sign::<Sha256Digest>(context)
                 .expect("Failed to sign vote");
