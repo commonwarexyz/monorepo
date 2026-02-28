@@ -353,6 +353,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -562,6 +563,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_byzantine_shutdown() {
         unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -766,6 +768,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(f2);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_shutdown_with_unsigned_height() {
         unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinPk, _>);
@@ -824,6 +827,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -934,6 +938,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_one_offline() {
         one_offline(bls12381_threshold::fixture::<MinPk, _>);

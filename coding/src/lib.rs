@@ -256,6 +256,7 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
+    use commonware_macros::test_group;
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
@@ -398,6 +399,7 @@ mod test {
             });
     }
 
+    #[test_group("slow")]
     #[test]
     fn minifuzz_roundtrip_zoda() {
         minifuzz::Builder::default()

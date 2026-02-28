@@ -193,7 +193,7 @@ mod tests {
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
     };
-    use commonware_macros::select;
+    use commonware_macros::{select, test_group};
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
     };
@@ -325,6 +325,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_determinism() {
         compare_outputs(25, 25);
