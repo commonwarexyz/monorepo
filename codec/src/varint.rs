@@ -133,7 +133,10 @@ impl<U: UPrim> Decoder<U> {
         // If we have reached what must be the last byte, this check prevents continuing to read
         // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
         // always evaluates to true.
-        let remaining_bits = max_bits.checked_sub(self.bits_read).unwrap();
+        // Reject excess continuation bytes (would overflow the type) instead of panicking.
+        let remaining_bits = max_bits
+            .checked_sub(self.bits_read)
+            .ok_or(Error::InvalidVarint(U::SIZE))?;
         if remaining_bits <= DATA_BITS_PER_BYTE {
             let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
             if relevant_bits > remaining_bits {
@@ -776,6 +779,18 @@ mod tests {
 
         write(u128::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
+    }
+
+    #[test]
+    fn decoder_rejects_excess_continuation_bytes() {
+        // u32 varint uses at most 5 bytes. Feeding 6 bytes with continuation bit set
+        // must return InvalidVarint instead of panicking.
+        let mut decoder = Decoder::<u32>::new();
+        for _ in 0..5 {
+            let _ = decoder.feed(0x80);
+        }
+        let err = decoder.feed(0x80).unwrap_err();
+        assert!(matches!(err, Error::InvalidVarint(4)));
     }
 
     #[cfg(feature = "arbitrary")]
