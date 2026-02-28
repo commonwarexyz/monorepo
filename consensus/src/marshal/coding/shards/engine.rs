@@ -455,7 +455,8 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                self.peer_buffers.retain(|peer, _| tracked_peers.as_ref().contains(peer));
+                self.peer_buffers
+                    .retain(|peer, _| tracked_peers.as_ref().contains(peer));
                 self.tracked_peers = tracked_peers;
             },
             Some(message) = self.mailbox.recv() else {
@@ -545,7 +546,7 @@ where
                 } else {
                     self.buffer_peer_shard(peer, shard);
                 }
-            }
+            },
         }
     }
 
