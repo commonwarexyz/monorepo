@@ -62,7 +62,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 ### Key Design Principles
 
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
-2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly in the repository to drive tests.
+2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly used throughout the repository to drive tests.
 3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
 4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
 5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
