@@ -304,10 +304,10 @@ impl Blob {
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = match got_buf.unwrap() {
-                OpBuffer::Write(b) => b,
-                _ => unreachable!(),
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = match return_buf {
+                Some(OpBuffer::Write(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
             if should_retry(return_value) {
                 continue;
@@ -386,10 +386,10 @@ impl Blob {
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            bufs = match got_bufs.unwrap() {
-                OpBuffer::WriteVectored(b) => b,
-                _ => unreachable!(),
+            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            bufs = match return_bufs {
+                Some(OpBuffer::WriteVectored(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
             if should_retry(return_value) {
                 continue;
@@ -469,17 +469,17 @@ impl crate::Blob for Blob {
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            io_buf = match got_buf.unwrap() {
-                OpBuffer::Read(b) => b,
-                _ => unreachable!(),
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            io_buf = match return_buf {
+                Some(OpBuffer::Read(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
-            if should_retry(result) {
+            if should_retry(return_value) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            let op_bytes_read: usize = return_value.try_into().map_err(|_| Error::ReadFailed)?;
             if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.

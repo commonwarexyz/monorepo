@@ -305,11 +305,11 @@ impl Sink {
             let op = opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
 
             // Submit the operation to the io_uring event loop
-            let (tx, rx) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
             self.submitter
                 .send(iouring::Op {
                     work: op,
-                    sender: tx,
+                    sender,
                     buffer: Some(OpBuffer::Write(buf)),
                     fd: Some(OpFd::Fd(self.fd.clone())),
                     iovecs: None,
@@ -318,17 +318,17 @@ impl Sink {
                 .map_err(|_| Error::SendFailed)?;
 
             // Wait for the operation to complete and get the buffer back
-            let (result, returned_buf) = rx.await.map_err(|_| Error::SendFailed)?;
-            buf = match returned_buf.unwrap() {
-                OpBuffer::Write(b) => b,
-                _ => unreachable!(),
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::SendFailed)?;
+            buf = match return_buf {
+                Some(OpBuffer::Write(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
-            if should_retry(result) {
+            if should_retry(return_value) {
                 continue;
             }
 
             // Non-positive result indicates an error or EOF.
-            let op_bytes_sent: usize = result.try_into().map_err(|_| Error::SendFailed)?;
+            let op_bytes_sent: usize = return_value.try_into().map_err(|_| Error::SendFailed)?;
             if op_bytes_sent == 0 {
                 return Err(Error::SendFailed);
             }
@@ -397,10 +397,10 @@ impl Sink {
                 .map_err(|_| Error::SendFailed)?;
 
             // Wait for the result.
-            let (return_value, got_bufs) = receiver.await.map_err(|_| Error::SendFailed)?;
-            bufs = match got_bufs.unwrap() {
-                OpBuffer::WriteVectored(b) => b,
-                _ => unreachable!(),
+            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::SendFailed)?;
+            bufs = match return_bufs {
+                Some(OpBuffer::WriteVectored(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
             if should_retry(return_value) {
                 continue;
@@ -488,12 +488,12 @@ impl Stream {
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
             let op = opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
 
-            let (tx, rx) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
             if self
                 .submitter
                 .send(iouring::Op {
                     work: op,
-                    sender: tx,
+                    sender,
                     buffer: Some(OpBuffer::Read(buffer)),
                     fd: Some(OpFd::Fd(self.fd.clone())),
                     iovecs: None,
@@ -505,21 +505,21 @@ impl Stream {
                 return (IoBufMut::default(), Err(Error::RecvFailed));
             }
 
-            let Ok((result, returned_buf)) = rx.await else {
+            let Ok((return_value, return_buf)) = receiver.await else {
                 // Channel closed - io_uring thread died, buffer is lost
                 return (IoBufMut::default(), Err(Error::RecvFailed));
             };
-            buffer = match returned_buf.unwrap() {
-                OpBuffer::Read(b) => b,
-                _ => unreachable!(),
+            buffer = match return_buf {
+                Some(OpBuffer::Read(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
 
-            if should_retry(result) {
+            if should_retry(return_value) {
                 continue;
             }
 
-            if result <= 0 {
-                let err = if result == -libc::ETIMEDOUT {
+            if return_value <= 0 {
+                let err = if return_value == -libc::ETIMEDOUT {
                     Error::Timeout
                 } else {
                     Error::RecvFailed
@@ -527,7 +527,7 @@ impl Stream {
                 return (buffer, Err(err));
             }
 
-            return (buffer, Ok(result as usize));
+            return (buffer, Ok(return_value as usize));
         }
     }
 
