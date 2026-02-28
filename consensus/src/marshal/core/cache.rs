@@ -1,10 +1,9 @@
 use crate::{
-    marshal::core::Variant,
-    simplex::types::{Finalization, Notarization},
+    marshal::core::{ConsensusEngine, Variant},
     types::{Epoch, Round, View},
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
@@ -35,11 +34,10 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 #[allow(clippy::type_complexity)]
-struct Cache<R, V, S>
+struct Cache<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
     _scope: R,
@@ -53,22 +51,21 @@ where
         TwoCap,
         R,
         <V::Block as Digestible>::Digest,
-        Notarization<S, V::Commitment>,
+        <V::Consensus as ConsensusEngine>::Notarization,
     >,
     /// Finalizations stored by view
     finalizations: prunable::Archive<
         TwoCap,
         R,
         <V::Block as Digestible>::Digest,
-        Finalization<S, V::Commitment>,
+        <V::Consensus as ConsensusEngine>::Finalization,
     >,
 }
 
-impl<R, V, S> Cache<R, V, S>
+impl<R, V> Cache<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
@@ -85,11 +82,10 @@ where
 }
 
 /// Manages prunable caches and their metadata.
-pub(crate) struct Manager<R, V, S>
+pub(crate) struct Manager<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Context
     context: R,
@@ -105,14 +101,13 @@ where
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, V, S>>,
+    caches: BTreeMap<Epoch, Cache<R, V>>,
 }
 
-impl<R, V, S> Manager<R, V, S>
+impl<R, V> Manager<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(
@@ -163,7 +158,7 @@ where
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, V, S>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, V>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -212,14 +207,14 @@ where
                 &self.cfg,
                 epoch,
                 "notarizations",
-                S::certificate_codec_config_unbounded(),
+                <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
                 &scope,
                 &self.cfg,
                 epoch,
                 "finalizations",
-                S::certificate_codec_config_unbounded(),
+                <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::certificate_codec_config_unbounded(),
             ),
         );
         let existing = self.caches.insert(
@@ -302,7 +297,7 @@ where
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        notarization: Notarization<S, V::Commitment>,
+        notarization: <V::Consensus as ConsensusEngine>::Notarization,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -319,7 +314,7 @@ where
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        finalization: Finalization<S, V::Commitment>,
+        finalization: <V::Consensus as ConsensusEngine>::Finalization,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -350,7 +345,7 @@ where
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<S, V::Commitment>> {
+    ) -> Option<<V::Consensus as ConsensusEngine>::Notarization> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -367,7 +362,7 @@ where
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Finalization<S, V::Commitment>> {
+    ) -> Option<<V::Consensus as ConsensusEngine>::Finalization> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&digest)).await {
                 Ok(Some(finalization)) => return Some(finalization),

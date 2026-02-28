@@ -1,7 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
-    Buffer, IntoBlock, Variant,
+    Buffer, ConsensusEngine, IntoBlock, Variant,
 };
 use crate::{
     marshal::{
@@ -9,18 +9,14 @@ use crate::{
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
-    simplex::{
-        scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
-    },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Epochable, Heightable, Reporter,
+    Block, Epochable, Heightable, Reporter, Roundable,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Digestible,
+    Committable, Digestible,
 };
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
@@ -57,14 +53,14 @@ use tracing::{debug, error, info, warn};
 const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
-enum PendingVerification<S: CertificateScheme, V: Variant> {
+enum PendingVerification<V: Variant> {
     Notarized {
-        notarization: Notarization<S, V::Commitment>,
+        notarization: <V::Consensus as ConsensusEngine>::Notarization,
         block: V::Block,
         response: oneshot::Sender<bool>,
     },
     Finalized {
-        finalization: Finalization<S, V::Commitment>,
+        finalization: <V::Consensus as ConsensusEngine>::Finalization,
         block: V::Block,
         response: oneshot::Sender<bool>,
     },
@@ -201,11 +197,10 @@ pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme = <V::Consensus as ConsensusEngine>::Scheme>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
+        Finalization = <V::Consensus as ConsensusEngine>::Finalization,
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
@@ -217,7 +212,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
+    mailbox: mpsc::Receiver<Message<V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -247,7 +242,7 @@ where
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, V, P::Scheme>,
+    cache: cache::Manager<E, V>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
@@ -266,11 +261,10 @@ impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    P: Provider<Scope = Epoch, Scheme = <V::Consensus as ConsensusEngine>::Scheme>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
+        Finalization = <V::Consensus as ConsensusEngine>::Finalization,
     >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
@@ -283,7 +277,7 @@ where
         finalizations_by_height: FC,
         finalized_blocks: FB,
         config: Config<V::Block, P, ES, T>,
-    ) -> (Self, Mailbox<P::Scheme, V>, Height) {
+    ) -> (Self, Mailbox<V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix),
@@ -369,7 +363,7 @@ where
     where
         R: Resolver<
             Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V>,
     {
@@ -385,7 +379,7 @@ where
     ) where
         R: Resolver<
             Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V>,
     {
@@ -508,7 +502,12 @@ where
                                 .await
                                 .ok()
                                 .flatten()
-                                .map(|f| (height, V::commitment_to_inner(f.proposal.payload))),
+                                .map(|f| {
+                                    (
+                                        height,
+                                        V::commitment_to_inner(f.commitment()),
+                                    )
+                                }),
                             BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                         };
                         response.send_lossy(info);
@@ -523,7 +522,7 @@ where
                     }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
-                        let commitment = notarization.proposal.payload;
+                        let commitment = notarization.commitment();
                         let digest = V::commitment_to_inner(commitment);
 
                         // Store notarization by view
@@ -547,7 +546,7 @@ where
                     Message::Finalization { finalization } => {
                         // Cache finalization by round
                         let round = finalization.round();
-                        let commitment = finalization.proposal.payload;
+                        let commitment = finalization.commitment();
                         let digest = V::commitment_to_inner(commitment);
                         self.cache
                             .put_finalization(round, digest, finalization.clone())
@@ -801,7 +800,7 @@ where
                     debug!(?round, "notarization missing on request");
                     return;
                 };
-                let commitment = notarization.proposal.payload;
+                let commitment = notarization.commitment();
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
@@ -904,7 +903,7 @@ where
         key: Request<V::Commitment>,
         value: Bytes,
         response: oneshot::Sender<bool>,
-        delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
+        delivers: &mut Vec<PendingVerification<V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
     ) -> bool {
@@ -942,7 +941,7 @@ where
                 };
 
                 let Ok((finalization, block)) =
-                    <(Finalization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
+                    <(<V::Consensus as ConsensusEngine>::Finalization, V::Block)>::decode_cfg(
                         value,
                         &(
                             scheme.certificate_codec_config(),
@@ -954,7 +953,7 @@ where
                     return false;
                 };
 
-                let commitment = finalization.proposal.payload;
+                let commitment = finalization.commitment();
                 if block.height() != height
                     || V::commitment(&block) != commitment
                     || finalization.epoch() != bounds.epoch()
@@ -976,7 +975,7 @@ where
                 };
 
                 let Ok((notarization, block)) =
-                    <(Notarization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
+                    <(<V::Consensus as ConsensusEngine>::Notarization, V::Block)>::decode_cfg(
                         value,
                         &(
                             scheme.certificate_codec_config(),
@@ -989,7 +988,7 @@ where
                 };
 
                 if notarization.round() != round
-                    || V::commitment(&block) != notarization.proposal.payload
+                    || V::commitment(&block) != notarization.commitment()
                 {
                     response.send_lossy(false);
                     return false;
@@ -1008,7 +1007,7 @@ where
     /// if finalization archives were written and need syncing.
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
-        mut delivers: Vec<PendingVerification<P::Scheme, V>>,
+        mut delivers: Vec<PendingVerification<V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
     ) -> bool {
@@ -1016,55 +1015,12 @@ where
             return false;
         }
 
-        // Extract (subject, certificate) pairs for batch verification.
-        let certs: Vec<_> = delivers
-            .iter()
-            .map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.proposal,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ),
-            })
-            .collect();
-
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(&mut self.context, scheme.as_ref(), &certs, &self.strategy)
+            self.batch_verify_all(scheme.as_ref(), &delivers)
         } else {
-            let mut verified = vec![false; delivers.len()];
-
-            // Group indices by epoch.
-            let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
-            }
-
-            // Batch verify each epoch group.
-            for (epoch, indices) in &by_epoch {
-                let Some(scheme) = self.provider.scoped(*epoch) else {
-                    continue;
-                };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results =
-                    verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
-                for (j, &idx) in indices.iter().enumerate() {
-                    verified[idx] = results[j];
-                }
-            }
-            verified
+            self.batch_verify_by_epoch(&delivers)
         };
 
         // Process each verified item, rejecting unverified ones.
@@ -1111,7 +1067,7 @@ where
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
-                    let commitment = notarization.proposal.payload;
+                    let commitment = notarization.commitment();
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
@@ -1153,6 +1109,94 @@ where
     /// to the scheme for the given epoch.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
         self.provider.all().or_else(|| self.provider.scoped(epoch))
+    }
+
+    /// Batch-verifies a group of delivered items against a single scheme, writing
+    /// results into `verified` at the original deliver indices.
+    fn batch_verify_group(
+        &mut self,
+        scheme: &P::Scheme,
+        delivers: &[PendingVerification<V>],
+        indices: impl Iterator<Item = usize>,
+        verified: &mut [bool],
+    ) {
+        type Notarization<V> = <<V as Variant>::Consensus as ConsensusEngine>::Notarization;
+        type Finalization<V> = <<V as Variant>::Consensus as ConsensusEngine>::Finalization;
+
+        let mut notarizations: Vec<(&Notarization<V>, usize)> = Vec::new();
+        let mut finalizations: Vec<(&Finalization<V>, usize)> = Vec::new();
+
+        for i in indices {
+            match &delivers[i] {
+                PendingVerification::Notarized { notarization, .. } => {
+                    notarizations.push((notarization, i));
+                }
+                PendingVerification::Finalized { finalization, .. } => {
+                    finalizations.push((finalization, i));
+                }
+            }
+        }
+
+        let results = V::Consensus::verify_notarizations(
+            &mut self.context,
+            scheme,
+            notarizations.iter().map(|(n, _)| *n),
+            &self.strategy,
+        );
+        for (j, &(_, idx)) in notarizations.iter().enumerate() {
+            verified[idx] = results[j];
+        }
+
+        let results = V::Consensus::verify_finalizations(
+            &mut self.context,
+            scheme,
+            finalizations.iter().map(|(f, _)| *f),
+            &self.strategy,
+        );
+        for (j, &(_, idx)) in finalizations.iter().enumerate() {
+            verified[idx] = results[j];
+        }
+    }
+
+    /// Batch-verifies all delivered items using a single scheme (all-epoch verifier).
+    fn batch_verify_all(
+        &mut self,
+        scheme: &P::Scheme,
+        delivers: &[PendingVerification<V>],
+    ) -> Vec<bool> {
+        let mut verified = vec![false; delivers.len()];
+        self.batch_verify_group(scheme, delivers, 0..delivers.len(), &mut verified);
+        verified
+    }
+
+    /// Batch-verifies delivered items grouped by epoch using scoped verifiers.
+    fn batch_verify_by_epoch(&mut self, delivers: &[PendingVerification<V>]) -> Vec<bool> {
+        let mut verified = vec![false; delivers.len()];
+
+        // Group indices by epoch.
+        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+        for (i, item) in delivers.iter().enumerate() {
+            let epoch = match item {
+                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
+            };
+            by_epoch.entry(epoch).or_default().push(i);
+        }
+
+        // Batch verify each epoch group.
+        for (epoch, indices) in by_epoch {
+            let Some(scheme) = self.provider.scoped(epoch) else {
+                continue;
+            };
+            self.batch_verify_group(
+                scheme.as_ref(),
+                delivers,
+                indices.into_iter(),
+                &mut verified,
+            );
+        }
+
+        verified
     }
 
     // -------------------- Waiters --------------------
@@ -1346,7 +1390,7 @@ where
     async fn get_finalization_by_height(
         &self,
         height: Height,
-    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
+    ) -> Option<<V::Consensus as ConsensusEngine>::Finalization> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height.get()))
@@ -1371,7 +1415,7 @@ where
         height: Height,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
-        finalization: Option<Finalization<P::Scheme, V::Commitment>>,
+        finalization: Option<<V::Consensus as ConsensusEngine>::Finalization>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
     ) -> bool {
@@ -1392,7 +1436,7 @@ where
         // Convert block to storage format
         let commitment = V::commitment(&block);
         let stored: V::StoredBlock = block.into();
-        let round = finalization.as_ref().map(|f| f.round());
+        let round = finalization.as_ref().map(Roundable::round);
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
@@ -1447,7 +1491,7 @@ where
             .expect("finalization missing");
         Some((
             height,
-            V::commitment_to_inner(finalization.proposal.payload),
+            V::commitment_to_inner(finalization.commitment()),
             finalization.round(),
         ))
     }

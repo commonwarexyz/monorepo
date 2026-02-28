@@ -1,1466 +1,23 @@
-//! Test harness for marshal variants.
-//!
-//! This module provides a trait-based abstraction that allows writing tests once
-//! and running them against both the standard and coding marshal variants.
-
+use super::harnesses::*;
 use crate::{
-    marshal::{
-        coding::{
-            shards,
-            types::{coding_config_for_participants, CodedBlock},
-            Coding,
-        },
-        config::Config,
-        core::{Actor, Mailbox},
-        mocks::{application::Application, block::Block},
-        resolver::p2p as resolver,
-        standard::Standard,
-        Identifier,
-    },
-    simplex::{
-        scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-        types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
-    },
-    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    marshal::{mocks::application::Application, Identifier},
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
+    Heightable,
 };
-use commonware_broadcast::buffered;
-use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
-    ed25519::{PrivateKey, PublicKey},
-    sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
+    certificate::{mocks::Fixture, ConstantProvider},
+    sha256::Sha256,
+    Digestible, Hasher as _,
 };
-use commonware_p2p::{
-    simulated::{self, Link, Network, Oracle},
-    Manager, Provider,
-};
-use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner};
-use commonware_storage::{
-    archive::{immutable, prunable},
-    translator::EightCap,
-};
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_p2p::{simulated::Link, Manager};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
+use commonware_utils::{vec::NonEmptyVec, NZUsize};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
 };
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
-    time::{Duration, Instant},
-};
-use tracing::info;
-
-// Common type aliases
-pub type D = Sha256Digest;
-pub type K = PublicKey;
-pub type Ctx = Context<D, K>;
-pub type B = Block<D, Ctx>;
-pub type V = MinPk;
-pub type S = bls12381_threshold_vrf::Scheme<K, V>;
-pub type P = ConstantProvider<S, Epoch>;
-
-// Coding variant type aliases (uses Commitment in context)
-pub type CodingCtx = Context<Commitment, K>;
-pub type CodingB = Block<D, CodingCtx>;
-
-// Common test constants
-pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
-pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-pub const NAMESPACE: &[u8] = b"test";
-pub const NUM_VALIDATORS: u32 = 4;
-pub const QUORUM: u32 = 3;
-pub const NUM_BLOCKS: u64 = 160;
-pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
-pub const LINK: Link = Link {
-    latency: Duration::from_millis(100),
-    jitter: Duration::from_millis(1),
-    success_rate: 1.0,
-};
-pub const UNRELIABLE_LINK: Link = Link {
-    latency: Duration::from_millis(200),
-    jitter: Duration::from_millis(50),
-    success_rate: 0.7,
-};
-pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-/// Default leader key for tests.
-pub fn default_leader() -> K {
-    PrivateKey::from_seed(0).public_key()
-}
-
-/// Create a raw test block with a derived context.
-pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
-    let parent_view = height
-        .previous()
-        .map(|h| View::new(h.get()))
-        .unwrap_or(View::zero());
-    let context = Ctx {
-        round: Round::new(Epoch::zero(), View::new(height.get())),
-        leader: default_leader(),
-        parent: (parent_view, parent),
-    };
-    B::new::<Sha256>(context, parent, height, timestamp)
-}
-
-/// Setup network for tests.
-pub fn setup_network(
-    context: deterministic::Context,
-    tracked_peer_sets: Option<usize>,
-) -> Oracle<K, deterministic::Context> {
-    let (network, oracle) = Network::new(
-        context.with_label("network"),
-        simulated::Config {
-            max_size: 1024 * 1024,
-            disconnect_on_block: true,
-            tracked_peer_sets,
-        },
-    );
-    network.start();
-    oracle
-}
-
-/// Setup network links between peers.
-pub async fn setup_network_links(
-    oracle: &mut Oracle<K, deterministic::Context>,
-    peers: &[K],
-    link: Link,
-) {
-    for p1 in peers.iter() {
-        for p2 in peers.iter() {
-            if p2 == p1 {
-                continue;
-            }
-            let _ = oracle.add_link(p1.clone(), p2.clone(), link.clone()).await;
-        }
-    }
-}
-
-/// Result of setting up a validator.
-pub struct ValidatorSetup<H: TestHarness> {
-    pub application: Application<H::ApplicationBlock>,
-    pub mailbox: Mailbox<S, H::Variant>,
-    pub extra: H::ValidatorExtra,
-    pub height: Height,
-}
-
-/// Per-validator handle for test operations.
-pub struct ValidatorHandle<H: TestHarness> {
-    pub mailbox: Mailbox<S, H::Variant>,
-    pub extra: H::ValidatorExtra,
-}
-
-impl<H: TestHarness> Clone for ValidatorHandle<H> {
-    fn clone(&self) -> Self {
-        Self {
-            mailbox: self.mailbox.clone(),
-            extra: self.extra.clone(),
-        }
-    }
-}
-
-/// A test harness that abstracts over marshal variant differences.
-pub trait TestHarness: 'static + Sized {
-    /// The application block type.
-    /// Note: We require `Digestible<Digest = D>` so generic test functions can use
-    /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
-
-    /// The marshal variant type.
-    type Variant: crate::marshal::core::Variant<
-        ApplicationBlock = Self::ApplicationBlock,
-        Commitment = Self::Commitment,
-    >;
-
-    /// The block type used in test operations.
-    type TestBlock: Heightable + Clone + Send;
-
-    /// Additional per-validator state (e.g., shards mailbox for coding).
-    type ValidatorExtra: Clone + Send;
-
-    /// The commitment type for consensus certificates.
-    type Commitment: DigestTrait;
-
-    /// Setup a single validator with all necessary infrastructure.
-    fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
-
-    /// Setup a single validator with custom acknowledgement pipeline settings.
-    fn setup_validator_with(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
-    ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
-
-    /// Create a test block from parent and height.
-    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment;
-
-    /// Create a test block from parent and height.
-    fn make_test_block(
-        parent: D,
-        parent_commitment: Self::Commitment,
-        height: Height,
-        timestamp: u64,
-        num_participants: u16,
-    ) -> Self::TestBlock;
-
-    /// Get the commitment from a test block.
-    fn commitment(block: &Self::TestBlock) -> Self::Commitment;
-
-    /// Get the digest from a test block.
-    fn digest(block: &Self::TestBlock) -> D;
-
-    /// Get the height from a test block.
-    fn height(block: &Self::TestBlock) -> Height;
-
-    /// Propose a block (broadcast to network).
-    fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Mark a block as verified.
-    fn verify(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-        all_handles: &mut [ValidatorHandle<Self>],
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Create a finalization certificate.
-    fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Finalization<S, Self::Commitment>;
-
-    /// Create a notarization certificate.
-    fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Notarization<S, Self::Commitment>;
-
-    /// Report a finalization to the mailbox.
-    fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Report a notarization to the mailbox.
-    fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Get the timeout duration for the finalize test.
-    fn finalize_timeout() -> Duration;
-
-    /// Setup validator for pruning test with prunable archives.
-    #[allow(clippy::type_complexity)]
-    fn setup_prunable_validator(
-        context: deterministic::Context,
-        oracle: &Oracle<K, deterministic::Context>,
-        validator: K,
-        schemes: &[S],
-        partition_prefix: &str,
-        page_cache: CacheRef,
-    ) -> impl Future<
-        Output = (
-            Mailbox<S, Self::Variant>,
-            Self::ValidatorExtra,
-            Application<Self::ApplicationBlock>,
-        ),
-    > + Send;
-
-    /// Verify a block for the pruning test (simpler than full verify).
-    fn verify_for_prune(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
-}
-
-// =============================================================================
-// Standard Harness Implementation
-// =============================================================================
-
-/// Standard variant test harness.
-pub struct StandardHarness;
-
-impl TestHarness for StandardHarness {
-    type ApplicationBlock = B;
-    type Variant = Standard<B>;
-    type TestBlock = B;
-    type ValidatorExtra = ();
-    type Commitment = D;
-
-    async fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> ValidatorSetup<Self> {
-        Self::setup_validator_with(
-            context,
-            oracle,
-            validator,
-            provider,
-            NZUsize!(1),
-            Application::default(),
-        )
-        .await
-    }
-
-    async fn setup_validator_with(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
-    ) -> ValidatorSetup<Self> {
-        let config = Config {
-            provider,
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks,
-            block_codec_config: (),
-            partition_prefix: format!("validator-{}", validator.clone()),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
-        };
-
-        let control = oracle.control(validator.clone());
-        let backfill = control.register(1, TEST_QUOTA).await.unwrap();
-        let resolver_cfg = resolver::Config {
-            public_key: validator.clone(),
-            provider: oracle.manager(),
-            blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
-            peer_set_subscription: oracle.manager().subscribe().await,
-        };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
-
-        let start = Instant::now();
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalizations-by-height-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalizations-by-height-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
-
-        let start = Instant::now();
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalized_blocks-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: NZU64!(10),
-                codec_config: config.block_codec_config,
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
-
-        let (actor, mailbox, height) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        actor.start(application.clone(), buffer, resolver);
-
-        ValidatorSetup {
-            application,
-            mailbox,
-            extra: (),
-            height,
-        }
-    }
-
-    fn genesis_parent_commitment(_num_participants: u16) -> D {
-        Sha256::hash(b"")
-    }
-
-    fn make_test_block(
-        parent: D,
-        _parent_commitment: D,
-        height: Height,
-        timestamp: u64,
-        _num_participants: u16,
-    ) -> B {
-        make_raw_block(parent, height, timestamp)
-    }
-
-    fn commitment(block: &B) -> D {
-        block.digest()
-    }
-
-    fn digest(block: &B) -> D {
-        block.digest()
-    }
-
-    fn height(block: &B) -> Height {
-        block.height()
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        handle.mailbox.proposed(round, block.clone()).await;
-    }
-
-    async fn verify(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &B,
-        _all_handles: &mut [ValidatorHandle<Self>],
-    ) {
-        handle.mailbox.verified(round, block.clone()).await;
-    }
-
-    fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
-        let finalizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
-    }
-
-    fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
-        let notarizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
-    }
-
-    async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, D>,
-    ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
-    }
-
-    async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, D>,
-    ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
-    }
-
-    fn finalize_timeout() -> Duration {
-        Duration::from_secs(600)
-    }
-
-    async fn setup_prunable_validator(
-        context: deterministic::Context,
-        oracle: &Oracle<K, deterministic::Context>,
-        validator: K,
-        schemes: &[S],
-        partition_prefix: &str,
-        page_cache: CacheRef,
-    ) -> (
-        Mailbox<S, Self::Variant>,
-        Self::ValidatorExtra,
-        Application<B>,
-    ) {
-        let control = oracle.control(validator.clone());
-        let provider = ConstantProvider::new(schemes[0].clone());
-        let config = Config {
-            provider,
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
-            block_codec_config: (),
-            partition_prefix: partition_prefix.to_string(),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: page_cache.clone(),
-            strategy: Sequential,
-        };
-
-        let backfill = control.register(0, TEST_QUOTA).await.unwrap();
-        let resolver_cfg = resolver::Config {
-            public_key: validator.clone(),
-            provider: oracle.manager(),
-            blocker: control.clone(),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
-            peer_set_subscription: oracle.manager().subscribe().await,
-        };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(1, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
-
-        let finalizations_by_height = prunable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            prunable::Config {
-                translator: EightCap,
-                key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
-                key_page_cache: page_cache.clone(),
-                value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
-                compression: None,
-                codec_config: S::certificate_codec_config_unbounded(),
-                items_per_section: NZU64!(10),
-                key_write_buffer: config.key_write_buffer,
-                value_write_buffer: config.value_write_buffer,
-                replay_buffer: config.replay_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-
-        let finalized_blocks = prunable::Archive::init(
-            context.with_label("finalized_blocks"),
-            prunable::Config {
-                translator: EightCap,
-                key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                key_page_cache: page_cache.clone(),
-                value_partition: format!("{}-finalized-blocks-value", partition_prefix),
-                compression: None,
-                codec_config: config.block_codec_config,
-                items_per_section: NZU64!(10),
-                key_write_buffer: config.key_write_buffer,
-                value_write_buffer: config.value_write_buffer,
-                replay_buffer: config.replay_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-
-        let (actor, mailbox, _) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        let application = Application::<B>::default();
-        actor.start(application.clone(), buffer, resolver);
-
-        (mailbox, (), application)
-    }
-
-    async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        handle.mailbox.verified(round, block.clone()).await;
-    }
-}
-
-/// Inline wrapper test harness for standard marshal behavior.
-pub struct InlineHarness;
-
-impl TestHarness for InlineHarness {
-    type ApplicationBlock = <StandardHarness as TestHarness>::ApplicationBlock;
-    type Variant = <StandardHarness as TestHarness>::Variant;
-    type TestBlock = <StandardHarness as TestHarness>::TestBlock;
-    type ValidatorExtra = <StandardHarness as TestHarness>::ValidatorExtra;
-    type Commitment = <StandardHarness as TestHarness>::Commitment;
-
-    async fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> ValidatorSetup<Self> {
-        let setup = StandardHarness::setup_validator(context, oracle, validator, provider).await;
-        ValidatorSetup {
-            application: setup.application,
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-            height: setup.height,
-        }
-    }
-
-    async fn setup_validator_with(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
-    ) -> ValidatorSetup<Self> {
-        let setup = StandardHarness::setup_validator_with(
-            context,
-            oracle,
-            validator,
-            provider,
-            max_pending_acks,
-            application,
-        )
-        .await;
-        ValidatorSetup {
-            application: setup.application,
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-            height: setup.height,
-        }
-    }
-
-    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment {
-        StandardHarness::genesis_parent_commitment(num_participants)
-    }
-
-    fn make_test_block(
-        parent: D,
-        parent_commitment: Self::Commitment,
-        height: Height,
-        timestamp: u64,
-        num_participants: u16,
-    ) -> Self::TestBlock {
-        StandardHarness::make_test_block(
-            parent,
-            parent_commitment,
-            height,
-            timestamp,
-            num_participants,
-        )
-    }
-
-    fn commitment(block: &Self::TestBlock) -> Self::Commitment {
-        StandardHarness::commitment(block)
-    }
-
-    fn digest(block: &Self::TestBlock) -> D {
-        StandardHarness::digest(block)
-    }
-
-    fn height(block: &Self::TestBlock) -> Height {
-        StandardHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
-    async fn verify(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-        _all_handles: &mut [ValidatorHandle<Self>],
-    ) {
-        StandardHarness::verify(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-            &mut [],
-        )
-        .await;
-    }
-
-    fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Finalization<S, Self::Commitment> {
-        StandardHarness::make_finalization(proposal, schemes, quorum)
-    }
-
-    fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Notarization<S, Self::Commitment> {
-        StandardHarness::make_notarization(proposal, schemes, quorum)
-    }
-
-    async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
-    ) {
-        StandardHarness::report_finalization(mailbox, finalization).await;
-    }
-
-    async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
-    ) {
-        StandardHarness::report_notarization(mailbox, notarization).await;
-    }
-
-    fn finalize_timeout() -> Duration {
-        StandardHarness::finalize_timeout()
-    }
-
-    async fn setup_prunable_validator(
-        context: deterministic::Context,
-        oracle: &Oracle<K, deterministic::Context>,
-        validator: K,
-        schemes: &[S],
-        partition_prefix: &str,
-        page_cache: CacheRef,
-    ) -> (
-        Mailbox<S, Self::Variant>,
-        Self::ValidatorExtra,
-        Application<Self::ApplicationBlock>,
-    ) {
-        StandardHarness::setup_prunable_validator(
-            context,
-            oracle,
-            validator,
-            schemes,
-            partition_prefix,
-            page_cache,
-        )
-        .await
-    }
-
-    async fn verify_for_prune(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-    ) {
-        StandardHarness::verify_for_prune(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-}
-
-/// Deferred wrapper test harness for standard marshal behavior.
-pub struct DeferredHarness;
-
-impl TestHarness for DeferredHarness {
-    type ApplicationBlock = <InlineHarness as TestHarness>::ApplicationBlock;
-    type Variant = <InlineHarness as TestHarness>::Variant;
-    type TestBlock = <InlineHarness as TestHarness>::TestBlock;
-    type ValidatorExtra = <InlineHarness as TestHarness>::ValidatorExtra;
-    type Commitment = <InlineHarness as TestHarness>::Commitment;
-
-    async fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> ValidatorSetup<Self> {
-        let setup = InlineHarness::setup_validator(context, oracle, validator, provider).await;
-        ValidatorSetup {
-            application: setup.application,
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-            height: setup.height,
-        }
-    }
-
-    async fn setup_validator_with(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
-    ) -> ValidatorSetup<Self> {
-        let setup = InlineHarness::setup_validator_with(
-            context,
-            oracle,
-            validator,
-            provider,
-            max_pending_acks,
-            application,
-        )
-        .await;
-        ValidatorSetup {
-            application: setup.application,
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-            height: setup.height,
-        }
-    }
-
-    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment {
-        InlineHarness::genesis_parent_commitment(num_participants)
-    }
-
-    fn make_test_block(
-        parent: D,
-        parent_commitment: Self::Commitment,
-        height: Height,
-        timestamp: u64,
-        num_participants: u16,
-    ) -> Self::TestBlock {
-        InlineHarness::make_test_block(
-            parent,
-            parent_commitment,
-            height,
-            timestamp,
-            num_participants,
-        )
-    }
-
-    fn commitment(block: &Self::TestBlock) -> Self::Commitment {
-        InlineHarness::commitment(block)
-    }
-
-    fn digest(block: &Self::TestBlock) -> D {
-        InlineHarness::digest(block)
-    }
-
-    fn height(block: &Self::TestBlock) -> Height {
-        InlineHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
-    async fn verify(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-        _all_handles: &mut [ValidatorHandle<Self>],
-    ) {
-        InlineHarness::verify(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-            &mut [],
-        )
-        .await;
-    }
-
-    fn make_finalization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Finalization<S, Self::Commitment> {
-        InlineHarness::make_finalization(proposal, schemes, quorum)
-    }
-
-    fn make_notarization(
-        proposal: Proposal<Self::Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Notarization<S, Self::Commitment> {
-        InlineHarness::make_notarization(proposal, schemes, quorum)
-    }
-
-    async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Self::Commitment>,
-    ) {
-        InlineHarness::report_finalization(mailbox, finalization).await;
-    }
-
-    async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Self::Commitment>,
-    ) {
-        InlineHarness::report_notarization(mailbox, notarization).await;
-    }
-
-    fn finalize_timeout() -> Duration {
-        InlineHarness::finalize_timeout()
-    }
-
-    async fn setup_prunable_validator(
-        context: deterministic::Context,
-        oracle: &Oracle<K, deterministic::Context>,
-        validator: K,
-        schemes: &[S],
-        partition_prefix: &str,
-        page_cache: CacheRef,
-    ) -> (
-        Mailbox<S, Self::Variant>,
-        Self::ValidatorExtra,
-        Application<Self::ApplicationBlock>,
-    ) {
-        InlineHarness::setup_prunable_validator(
-            context,
-            oracle,
-            validator,
-            schemes,
-            partition_prefix,
-            page_cache,
-        )
-        .await
-    }
-
-    async fn verify_for_prune(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &Self::TestBlock,
-    ) {
-        InlineHarness::verify_for_prune(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra,
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-}
-
-// =============================================================================
-// Coding Harness Implementation
-// =============================================================================
-
-/// Coding variant test harness.
-pub struct CodingHarness;
-
-type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-
-/// Genesis blocks use a special coding config that doesn't actually encode.
-pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
-    minimum_shards: NZU16!(1),
-    extra_shards: NZU16!(1),
-};
-
-/// Create a genesis Commitment (all zeros for digests, genesis config).
-pub fn genesis_commitment() -> Commitment {
-    Commitment::from((
-        D::EMPTY,
-        D::EMPTY,
-        Sha256Digest::EMPTY,
-        GENESIS_CODING_CONFIG,
-    ))
-}
-
-/// Create a test block with a Commitment-based context.
-pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
-    CodingB::new::<Sha256>(context, parent, height, timestamp)
-}
-
-impl TestHarness for CodingHarness {
-    type ApplicationBlock = CodingB;
-    type Variant = CodingVariant;
-    type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type ValidatorExtra = ShardsMailbox;
-    type Commitment = Commitment;
-
-    async fn setup_validator(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-    ) -> ValidatorSetup<Self> {
-        Self::setup_validator_with(
-            context,
-            oracle,
-            validator,
-            provider,
-            NZUsize!(1),
-            Application::default(),
-        )
-        .await
-    }
-
-    async fn setup_validator_with(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
-    ) -> ValidatorSetup<Self> {
-        let config = Config {
-            provider: provider.clone(),
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks,
-            block_codec_config: (),
-            partition_prefix: format!("validator-{}", validator.clone()),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
-        };
-
-        let control = oracle.control(validator.clone());
-        let backfill = control.register(1, TEST_QUOTA).await.unwrap();
-        let resolver_cfg = resolver::Config {
-            public_key: validator.clone(),
-            provider: oracle.manager(),
-            blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        let start = Instant::now();
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalizations-by-height-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalizations-by-height-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
-
-        let start = Instant::now();
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: 64,
-                freezer_table_resize_frequency: 10,
-                freezer_table_resize_chunk_size: 10,
-                freezer_key_partition: format!(
-                    "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: config.page_cache.clone(),
-                freezer_value_partition: format!(
-                    "{}-finalized_blocks-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_target_size: 1024,
-                freezer_value_compression: None,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: NZU64!(10),
-                codec_config: config.block_codec_config,
-                replay_buffer: config.replay_buffer,
-                freezer_key_write_buffer: config.key_write_buffer,
-                freezer_value_write_buffer: config.value_write_buffer,
-                ordinal_write_buffer: config.key_write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
-
-        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
-            scheme_provider: provider.clone(),
-            blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
-            block_codec_cfg: (),
-            strategy: Sequential,
-            mailbox_size: 10,
-            peer_buffer_size: NZUsize!(64),
-            background_channel_capacity: 1024,
-            peer_set_subscription: oracle.manager().subscribe().await,
-        };
-        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
-        let network = control.register(2, TEST_QUOTA).await.unwrap();
-        shard_engine.start(network);
-
-        let (actor, mailbox, height) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        actor.start(application.clone(), shard_mailbox.clone(), resolver);
-
-        ValidatorSetup {
-            application,
-            mailbox,
-            extra: shard_mailbox,
-            height,
-        }
-    }
-
-    fn make_test_block(
-        parent: D,
-        parent_commitment: Commitment,
-        height: Height,
-        timestamp: u64,
-        num_participants: u16,
-    ) -> CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256> {
-        let parent_view = height
-            .previous()
-            .map(|h| View::new(h.get()))
-            .unwrap_or(View::zero());
-        let context = CodingCtx {
-            round: Round::new(Epoch::zero(), View::new(height.get())),
-            leader: default_leader(),
-            parent: (parent_view, parent_commitment),
-        };
-        let raw = CodingB::new::<Sha256>(context, parent, height, timestamp);
-        let coding_config = coding_config_for_participants(num_participants);
-        CodedBlock::new(raw, coding_config, &Sequential)
-    }
-
-    fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
-        genesis_commitment()
-    }
-
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
-        block.commitment()
-    }
-
-    fn digest(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> D {
-        block.digest()
-    }
-
-    fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
-        block.height()
-    }
-
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        handle.mailbox.proposed(round, block.clone()).await;
-    }
-
-    async fn verify(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-        _all_handles: &mut [ValidatorHandle<Self>],
-    ) {
-        handle.mailbox.verified(round, block.clone()).await;
-    }
-
-    fn make_finalization(
-        proposal: Proposal<Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Finalization<S, Commitment> {
-        let finalizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
-    }
-
-    fn make_notarization(
-        proposal: Proposal<Commitment>,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Notarization<S, Commitment> {
-        let notarizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
-    }
-
-    async fn report_finalization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Commitment>,
-    ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
-    }
-
-    async fn report_notarization(
-        mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Commitment>,
-    ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
-    }
-
-    fn finalize_timeout() -> Duration {
-        Duration::from_secs(900)
-    }
-
-    async fn setup_prunable_validator(
-        context: deterministic::Context,
-        oracle: &Oracle<K, deterministic::Context>,
-        validator: K,
-        schemes: &[S],
-        partition_prefix: &str,
-        page_cache: CacheRef,
-    ) -> (
-        Mailbox<S, Self::Variant>,
-        Self::ValidatorExtra,
-        Application<CodingB>,
-    ) {
-        let control = oracle.control(validator.clone());
-        let provider = ConstantProvider::new(schemes[0].clone());
-        let config = Config {
-            provider: provider.clone(),
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
-            view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
-            block_codec_config: (),
-            partition_prefix: partition_prefix.to_string(),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: page_cache.clone(),
-            strategy: Sequential,
-        };
-
-        let backfill = control.register(0, TEST_QUOTA).await.unwrap();
-        let resolver_cfg = resolver::Config {
-            public_key: validator.clone(),
-            provider: oracle.manager(),
-            blocker: control.clone(),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        };
-        let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
-            scheme_provider: provider.clone(),
-            blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
-            block_codec_cfg: (),
-            strategy: Sequential,
-            mailbox_size: 10,
-            peer_buffer_size: NZUsize!(64),
-            background_channel_capacity: 1024,
-            peer_set_subscription: oracle.manager().subscribe().await,
-        };
-        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
-        let network = control.register(1, TEST_QUOTA).await.unwrap();
-        shard_engine.start(network);
-
-        let finalizations_by_height = prunable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            prunable::Config {
-                translator: EightCap,
-                key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
-                key_page_cache: page_cache.clone(),
-                value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
-                compression: None,
-                codec_config: S::certificate_codec_config_unbounded(),
-                items_per_section: NZU64!(10),
-                key_write_buffer: config.key_write_buffer,
-                value_write_buffer: config.value_write_buffer,
-                replay_buffer: config.replay_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-
-        let finalized_blocks = prunable::Archive::init(
-            context.with_label("finalized_blocks"),
-            prunable::Config {
-                translator: EightCap,
-                key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                key_page_cache: page_cache.clone(),
-                value_partition: format!("{}-finalized-blocks-value", partition_prefix),
-                compression: None,
-                codec_config: config.block_codec_config,
-                items_per_section: NZU64!(10),
-                key_write_buffer: config.key_write_buffer,
-                value_write_buffer: config.value_write_buffer,
-                replay_buffer: config.replay_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-
-        let (actor, mailbox, _) = Actor::init(
-            context.clone(),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        let application = Application::<CodingB>::default();
-        actor.start(application.clone(), shard_mailbox.clone(), resolver);
-
-        (mailbox, shard_mailbox, application)
-    }
-
-    async fn verify_for_prune(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        handle.mailbox.verified(round, block.clone()).await;
-    }
-}
+use std::{collections::BTreeMap, time::Duration};
 
 // =============================================================================
 // Generic Test Functions
@@ -1479,7 +36,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
@@ -1508,7 +65,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         let mut blocks = Vec::new();
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent,
@@ -1535,31 +92,32 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             let bounds = epocher.containing(height).unwrap();
             let round = Round::new(bounds.epoch(), View::new(height.get()));
 
-            let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
+            let actor_index: usize = (height.get() % (H::num_validators() as u64)) as usize;
             let mut handle = handles[actor_index].clone();
             H::propose(&mut handle, round, block).await;
-            H::verify(&mut handle, round, block, &mut handles).await;
+            H::verify(&mut handle, round, block).await;
 
             context.sleep(link.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(height.previous().unwrap().get()),
-                payload: H::commitment(block),
-            };
-            let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+                View::new(height.previous().unwrap().get()),
+                H::parent_commitment(block),
+                H::commitment(block),
+            );
+            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let fin = H::make_finalization(proposal, &schemes, QUORUM);
+            let fin = H::make_finalization(proposal, &schemes, H::quorum());
             if quorum_sees_finalization {
                 let do_finalize = context.gen_bool(0.2);
                 for (i, h) in handles
                     .iter_mut()
-                    .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                    .choose_multiple(&mut context, H::num_validators() as usize)
                     .iter_mut()
                     .enumerate()
                 {
-                    if (do_finalize && i < QUORUM as usize)
+                    if (do_finalize && i < H::quorum() as usize)
                         || height.get() == NUM_BLOCKS
                         || height == bounds.last()
                     {
@@ -1581,7 +139,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
         let mut finished = false;
         while !finished {
             context.sleep(Duration::from_secs(1)).await;
-            if applications.len() != NUM_VALIDATORS as usize {
+            if applications.len() != H::num_validators() as usize {
                 continue;
             }
             finished = true;
@@ -1618,7 +176,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
@@ -1632,7 +190,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
         )
         .await;
         let application = setup.application;
-        let mut handles = vec![ValidatorHandle {
+        let handles = [ValidatorHandle {
             mailbox: setup.mailbox,
             extra: setup.extra,
         }];
@@ -1640,14 +198,14 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=5 {
             let block = H::make_test_block(
                 parent,
                 parent_commitment,
                 Height::new(i),
                 i,
-                NUM_VALIDATORS as u16,
+                H::num_validators() as u16,
             );
             let commitment = H::commitment(&block);
             parent = H::digest(&block);
@@ -1656,13 +214,14 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
                 epocher.containing(H::height(&block)).unwrap().epoch(),
                 View::new(i),
             );
-            H::verify(&mut handle, round, &block, &mut handles).await;
-            let proposal = Proposal {
+            H::verify(&mut handle, round, &block).await;
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i.saturating_sub(1)),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i.saturating_sub(1)),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -1709,7 +268,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let validator = participants[0].clone();
         let application = Application::<H::ApplicationBlock>::manual_ack();
@@ -1723,7 +282,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         )
         .await;
         let application = setup.application;
-        let mut handles = vec![ValidatorHandle {
+        let handles = [ValidatorHandle {
             mailbox: setup.mailbox,
             extra: setup.extra,
         }];
@@ -1731,14 +290,14 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=3 {
             let block = H::make_test_block(
                 parent,
                 parent_commitment,
                 Height::new(i),
                 i,
-                NUM_VALIDATORS as u16,
+                H::num_validators() as u16,
             );
             let commitment = H::commitment(&block);
             parent = H::digest(&block);
@@ -1747,13 +306,14 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
                 epocher.containing(H::height(&block)).unwrap().epoch(),
                 View::new(i),
             );
-            H::verify(&mut handle, round, &block, &mut handles).await;
-            let proposal = Proposal {
+            H::verify(&mut handle, round, &block).await;
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i.saturating_sub(1)),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i.saturating_sub(1)),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -1807,7 +367,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
@@ -1837,7 +397,7 @@ pub fn sync_height_floor<H: TestHarness>() {
 
         let mut blocks = Vec::new();
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent,
@@ -1866,19 +426,20 @@ pub fn sync_height_floor<H: TestHarness>() {
             let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
             let mut handle = handles[actor_index].clone();
             H::propose(&mut handle, round, block).await;
-            H::verify(&mut handle, round, block, &mut handles).await;
+            H::verify(&mut handle, round, block).await;
 
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(height.previous().unwrap().get()),
-                payload: H::commitment(block),
-            };
-            let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+                View::new(height.previous().unwrap().get()),
+                H::parent_commitment(block),
+                H::commitment(block),
+            );
+            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let fin = H::make_finalization(proposal, &schemes, QUORUM);
+            let fin = H::make_finalization(proposal, &schemes, H::quorum());
             for h in handles.iter_mut() {
                 H::report_finalization(&mut h.mailbox, fin.clone()).await;
             }
@@ -1971,7 +532,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let validator = participants[0].clone();
         let partition_prefix = format!("prune-test-{}", validator.clone());
@@ -2000,7 +561,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         let _ = extra; // Used by CodingHarness, silence warning for StandardHarness
 
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         for i in 1..=20u64 {
             let block = H::make_test_block(
@@ -2008,7 +569,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
                 parent_commitment,
                 Height::new(i),
                 i,
-                NUM_VALIDATORS as u16,
+                H::num_validators() as u16,
             );
             let commitment = H::commitment(&block);
             parent = H::digest(&block);
@@ -2020,15 +581,16 @@ pub fn prune_finalized_archives<H: TestHarness>() {
                 mailbox: mailbox.clone(),
                 extra: extra.clone(),
             };
-            H::verify_for_prune(&mut handle, round, &block).await;
+            H::verify(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut mailbox, finalization).await;
         }
 
@@ -2145,7 +707,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
@@ -2187,10 +749,10 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let round = Round::new(Epoch::zero(), View::new(stale_height.get()));
         let stale_block = H::make_test_block(
             Sha256::hash(b"stale-parent"),
-            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            H::genesis_parent_commitment(),
             stale_height,
             stale_height.get(),
-            NUM_VALIDATORS as u16,
+            H::num_validators() as u16,
         );
         let commitment = H::commitment(&stale_block);
         let mut attacker_handle = ValidatorHandle {
@@ -2198,22 +760,16 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             extra: attacker_extra,
         };
         H::propose(&mut attacker_handle, round, &stale_block).await;
-        let mut no_handles: Vec<ValidatorHandle<H>> = Vec::new();
-        H::verify(
-            &mut attacker_handle,
-            round,
-            &stale_block,
-            no_handles.as_mut_slice(),
-        )
-        .await;
+        H::verify(&mut attacker_handle, round, &stale_block).await;
 
         // Trigger victim fetch for this block via finalization report.
-        let proposal = Proposal {
+        let proposal = H::make_proposal(
             round,
-            parent: View::new(stale_height.get() - 1),
-            payload: commitment,
-        };
-        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            View::new(stale_height.get() - 1),
+            H::parent_commitment(&stale_block),
+            commitment,
+        );
+        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
         H::report_finalization(&mut victim_mailbox, finalization).await;
 
         // Let block requests get issued while responses are still blocked.
@@ -2265,7 +821,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2286,7 +842,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block = H::make_test_block(
             parent,
             parent_commitment,
@@ -2303,23 +859,18 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             .await;
 
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
-        H::verify(
-            &mut handle,
-            Round::new(Epoch::zero(), View::new(1)),
-            &block,
-            &mut handles,
-        )
-        .await;
+        H::verify(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
 
-        let proposal = Proposal {
-            round: Round::new(Epoch::zero(), View::new(1)),
-            parent: View::zero(),
-            payload: commitment,
-        };
-        let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+        let proposal = H::make_proposal(
+            Round::new(Epoch::zero(), View::new(1)),
+            View::zero(),
+            H::parent_commitment(&block),
+            commitment,
+        );
+        let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
         H::report_notarization(&mut handle.mailbox, notarization).await;
 
-        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         let received_block = subscription_rx.await.unwrap();
@@ -2337,7 +888,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2358,7 +909,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block1 = H::make_test_block(
             parent,
             parent_commitment,
@@ -2392,17 +943,18 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
-            H::verify(&mut handle, round, block, &mut handles).await;
+            H::verify(&mut handle, round, block).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(view.checked_sub(1).unwrap()),
-                payload: H::commitment(block),
-            };
-            let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+                View::new(view.checked_sub(1).unwrap()),
+                H::parent_commitment(block),
+                H::commitment(block),
+            );
+            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -2428,7 +980,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2449,7 +1001,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block1 = H::make_test_block(
             parent,
             parent_commitment,
@@ -2481,17 +1033,18 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
-            H::verify(&mut handle, round, block, &mut handles).await;
+            H::verify(&mut handle, round, block).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(view.checked_sub(1).unwrap()),
-                payload: H::commitment(block),
-            };
-            let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+                View::new(view.checked_sub(1).unwrap()),
+                H::parent_commitment(block),
+                H::commitment(block),
+            );
+            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -2510,7 +1063,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let mut handles = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
@@ -2532,13 +1085,8 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let parent = Sha256::hash(b"");
         let n = participants.len() as u16;
-        let block1 = H::make_test_block(
-            parent,
-            H::genesis_parent_commitment(n),
-            Height::new(1),
-            1,
-            n,
-        );
+        let block1 =
+            H::make_test_block(parent, H::genesis_parent_commitment(), Height::new(1), 1, n);
         let block2 = H::make_test_block(
             H::digest(&block1),
             H::commitment(&block1),
@@ -2613,7 +1161,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(2)),
             &block2,
-            &mut handles,
         )
         .await;
 
@@ -2622,12 +1169,13 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
         assert_eq!(received2.height().get(), 2);
 
         // Block3: Notarized by the actor
-        let proposal3 = Proposal {
-            round: Round::new(Epoch::zero(), View::new(3)),
-            parent: View::new(2),
-            payload: H::commitment(&block3),
-        };
-        let notarization3 = H::make_notarization(proposal3.clone(), &schemes, QUORUM);
+        let proposal3 = H::make_proposal(
+            Round::new(Epoch::zero(), View::new(3)),
+            View::new(2),
+            H::parent_commitment(&block3),
+            H::commitment(&block3),
+        );
+        let notarization3 = H::make_notarization(proposal3.clone(), &schemes, H::quorum());
         H::report_notarization(&mut handle.mailbox, notarization3).await;
         H::propose(
             &mut handle,
@@ -2639,7 +1187,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(3)),
             &block3,
-            &mut handles,
         )
         .await;
 
@@ -2649,13 +1196,14 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         // Block4: Finalized by the actor
         let finalization4 = H::make_finalization(
-            Proposal {
-                round: Round::new(Epoch::zero(), View::new(4)),
-                parent: View::new(3),
-                payload: H::commitment(&block4),
-            },
+            H::make_proposal(
+                Round::new(Epoch::zero(), View::new(4)),
+                View::new(3),
+                H::parent_commitment(&block4),
+                H::commitment(&block4),
+            ),
             &schemes,
-            QUORUM,
+            H::quorum(),
         );
         H::report_finalization(&mut handle.mailbox, finalization4).await;
         H::propose(
@@ -2668,7 +1216,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(4)),
             &block4,
-            &mut handles,
         )
         .await;
 
@@ -2677,14 +1224,15 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
         assert_eq!(received4.height().get(), 4);
 
         // Block5: Finalized by the actor with notarization
-        let proposal5 = Proposal {
-            round: Round::new(Epoch::zero(), View::new(5)),
-            parent: View::new(4),
-            payload: H::commitment(&block5),
-        };
-        let notarization5 = H::make_notarization(proposal5.clone(), &schemes, QUORUM);
+        let proposal5 = H::make_proposal(
+            Round::new(Epoch::zero(), View::new(5)),
+            View::new(4),
+            H::parent_commitment(&block5),
+            H::commitment(&block5),
+        );
+        let notarization5 = H::make_notarization(proposal5.clone(), &schemes, H::quorum());
         H::report_notarization(&mut handle.mailbox, notarization5).await;
-        let finalization5 = H::make_finalization(proposal5, &schemes, QUORUM);
+        let finalization5 = H::make_finalization(proposal5, &schemes, H::quorum());
         H::report_finalization(&mut handle.mailbox, finalization5).await;
         H::propose(
             &mut handle,
@@ -2696,7 +1244,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(5)),
             &block5,
-            &mut handles,
         )
         .await;
 
@@ -2715,7 +1262,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2738,7 +1285,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         // Create and verify a block, then finalize it
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block = H::make_test_block(
             parent,
             parent_commitment,
@@ -2753,12 +1300,13 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         H::propose(&mut handle, round, &block).await;
         context.sleep(LINK.latency).await;
 
-        let proposal = Proposal {
+        let proposal = H::make_proposal(
             round,
-            parent: View::zero(),
-            payload: commitment,
-        };
-        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            View::zero(),
+            H::parent_commitment(&block),
+            commitment,
+        );
+        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Latest should now be the finalized block
@@ -2797,7 +1345,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2813,7 +1361,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
         };
 
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         let mut digests = Vec::new();
 
         for i in 1..=5u64 {
@@ -2831,12 +1379,13 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             // Latest should always point to most recently finalized
@@ -2870,7 +1419,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2894,7 +1443,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         let mut blocks = Vec::new();
 
         for i in 1..=3u64 {
@@ -2912,12 +1461,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -2960,7 +1510,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -2977,7 +1527,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
 
         // Create and finalize a block
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block = H::make_test_block(
             parent,
             parent_commitment,
@@ -2992,12 +1542,13 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         H::propose(&mut handle, round, &block).await;
         context.sleep(LINK.latency).await;
 
-        let proposal = Proposal {
+        let proposal = H::make_proposal(
             round,
-            parent: View::zero(),
-            payload: commitment,
-        };
-        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            View::zero(),
+            H::parent_commitment(&block),
+            commitment,
+        );
+        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Get by commitment
@@ -3020,7 +1571,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -3043,7 +1594,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             .is_none());
 
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
 
         for i in 1..=3u64 {
             let block = H::make_test_block(
@@ -3060,12 +1611,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal.clone(), &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal.clone(), &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             // Verify finalization is retrievable
@@ -3074,8 +1626,8 @@ pub fn get_finalization_by_height<H: TestHarness>() {
                 .get_finalization(Height::new(i))
                 .await
                 .unwrap();
-            assert_eq!(fin.proposal.payload, commitment);
-            assert_eq!(fin.round().view(), View::new(i));
+            assert_eq!(H::finalization_payload(&fin), commitment);
+            assert_eq!(H::finalization_round(&fin).view(), View::new(i));
 
             parent = digest;
             parent_commitment = commitment;
@@ -3103,7 +1655,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         // Register the initial peer set
         let mut manager = oracle.manager();
@@ -3142,7 +1694,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 
         // Validator 0: Create and finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=5u64 {
             let block = H::make_test_block(
                 parent,
@@ -3158,12 +1710,13 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             H::propose(&mut handle0, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle0.mailbox, finalization).await;
 
             parent = digest;
@@ -3204,7 +1757,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .get_finalization(Height::new(5))
             .await
             .expect("finalization should be fetched");
-        assert_eq!(finalization.proposal.round.view(), View::new(5));
+        assert_eq!(H::finalization_round(&finalization).view(), View::new(5));
     })
 }
 
@@ -3217,7 +1770,7 @@ pub fn ancestry_stream<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let me = participants[0].clone();
         let setup = H::setup_validator(
@@ -3234,7 +1787,7 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         // Finalize blocks at heights 1-5
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=5u64 {
             let block = H::make_test_block(
                 parent,
@@ -3250,12 +1803,13 @@ pub fn ancestry_stream<H: TestHarness>() {
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -3284,7 +1838,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         // Set up two validators
         let mut handles = Vec::new();
@@ -3304,7 +1858,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Create block at height 1
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block = H::make_test_block(
             parent,
             parent_commitment,
@@ -3322,24 +1876,26 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         context.sleep(LINK.latency).await;
 
         // Validator 0: Finalize with view 1
-        let proposal_v1 = Proposal {
-            round: Round::new(Epoch::new(0), View::new(1)),
-            parent: View::new(0),
-            payload: commitment,
-        };
-        let notarization_v1 = H::make_notarization(proposal_v1.clone(), &schemes, QUORUM);
-        let finalization_v1 = H::make_finalization(proposal_v1.clone(), &schemes, QUORUM);
+        let proposal_v1 = H::make_proposal(
+            Round::new(Epoch::new(0), View::new(1)),
+            View::new(0),
+            H::parent_commitment(&block),
+            commitment,
+        );
+        let notarization_v1 = H::make_notarization(proposal_v1.clone(), &schemes, H::quorum());
+        let finalization_v1 = H::make_finalization(proposal_v1.clone(), &schemes, H::quorum());
         H::report_notarization(&mut handles[0].mailbox, notarization_v1.clone()).await;
         H::report_finalization(&mut handles[0].mailbox, finalization_v1.clone()).await;
 
         // Validator 1: Finalize with view 2 (simulates receiving finalization from different view)
-        let proposal_v2 = Proposal {
-            round: Round::new(Epoch::new(0), View::new(2)), // Different view
-            parent: View::new(0),
-            payload: commitment, // Same block
-        };
-        let notarization_v2 = H::make_notarization(proposal_v2.clone(), &schemes, QUORUM);
-        let finalization_v2 = H::make_finalization(proposal_v2.clone(), &schemes, QUORUM);
+        let proposal_v2 = H::make_proposal(
+            Round::new(Epoch::new(0), View::new(2)),
+            View::new(0),
+            H::parent_commitment(&block),
+            commitment,
+        );
+        let notarization_v2 = H::make_notarization(proposal_v2.clone(), &schemes, H::quorum());
+        let finalization_v2 = H::make_finalization(proposal_v2.clone(), &schemes, H::quorum());
         H::report_notarization(&mut handles[1].mailbox, notarization_v2.clone()).await;
         H::report_finalization(&mut handles[1].mailbox, finalization_v2.clone()).await;
 
@@ -3365,10 +1921,10 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .unwrap();
 
         // Verify the finalizations have the expected different views
-        assert_eq!(fin0.proposal.payload, commitment);
-        assert_eq!(fin0.round().view(), View::new(1));
-        assert_eq!(fin1.proposal.payload, commitment);
-        assert_eq!(fin1.round().view(), View::new(2));
+        assert_eq!(H::finalization_payload(&fin0), commitment);
+        assert_eq!(H::finalization_round(&fin0).view(), View::new(1));
+        assert_eq!(H::finalization_payload(&fin1), commitment);
+        assert_eq!(H::finalization_round(&fin1).view(), View::new(2));
 
         // Both validators can retrieve block by height
         assert_eq!(
@@ -3391,7 +1947,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .get_finalization(Height::new(1))
             .await
             .unwrap();
-        assert_eq!(fin0_after.round().view(), View::new(1));
+        assert_eq!(H::finalization_round(&fin0_after).view(), View::new(1));
 
         // Validator 1 should still have the original finalization (v2)
         let fin1_after = handles[1]
@@ -3399,7 +1955,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .get_finalization(Height::new(1))
             .await
             .unwrap();
-        assert_eq!(fin1_after.round().view(), View::new(2));
+        assert_eq!(H::finalization_round(&fin1_after).view(), View::new(2));
     })
 }
 
@@ -3412,7 +1968,7 @@ pub fn init_processed_height<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         let validator = participants[0].clone();
 
@@ -3436,7 +1992,7 @@ pub fn init_processed_height<H: TestHarness>() {
 
         // Finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut parent_commitment = H::genesis_parent_commitment();
         for i in 1..=5u64 {
             let block = H::make_test_block(
                 parent,
@@ -3452,12 +2008,13 @@ pub fn init_processed_height<H: TestHarness>() {
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
-            let proposal = Proposal {
+            let proposal = H::make_proposal(
                 round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                View::new(i - 1),
+                H::parent_commitment(&block),
+                commitment,
+            );
+            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -3496,7 +2053,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
 
         // Set up one validator
         let validator = participants[0].clone();
@@ -3514,7 +2071,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
 
         // Create block at height 1
         let parent = Sha256::hash(b"");
-        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment();
         let block = H::make_test_block(
             parent,
             parent_commitment,
@@ -3551,13 +2108,14 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         // Put a notarization into the cache to re-initialize the ephemeral cache for the
         // first epoch.
         let notarization = H::make_notarization(
-            Proposal {
-                round: Round::new(Epoch::new(0), View::new(1)),
-                parent: View::new(0),
-                payload: commitment,
-            },
+            H::make_proposal(
+                Round::new(Epoch::new(0), View::new(1)),
+                View::new(0),
+                H::parent_commitment(&block),
+                commitment,
+            ),
             &schemes,
-            QUORUM,
+            H::quorum(),
         );
         H::report_notarization(&mut handle2.mailbox, notarization).await;
 
