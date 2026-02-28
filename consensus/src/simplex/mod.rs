@@ -2939,6 +2939,13 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                // Byzantine node uses a short timeout so its invalid nullify
+                // arrives while view 1 is still within the activity window.
+                let (leader_timeout, certification_timeout) = if idx_scheme == 0 {
+                    (Duration::from_millis(100), Duration::from_millis(200))
+                } else {
+                    (Duration::from_secs(1), Duration::from_secs(2))
+                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2950,8 +2957,8 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
+                    leader_timeout,
+                    certification_timeout,
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
@@ -4724,6 +4731,11 @@ mod tests {
 
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
+            // Use epoch 7 so the leader for view 1 is a Byzantine node
+            // (Random: (7+1)%10=8, RoundRobin: (7+0)%10=7), preventing
+            // honest voters from proposing before injected certificates arrive.
+            let epoch = Epoch::new(7);
+
             // Create engines: 7 honest engines, 3 byzantine
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -4785,7 +4797,7 @@ mod tests {
                         strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: Epoch::new(333),
+                        epoch,
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
                         timeout_retry: Duration::from_secs(10),
@@ -4830,18 +4842,18 @@ mod tests {
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
-            let round_f = Round::new(Epoch::new(333), View::new(f_view));
+            let round_f = Round::new(epoch, View::new(f_view));
             let payload_b0 = Sha256::hash(b"B_F");
             let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
             let payload_b1a = Sha256::hash(b"B_G1");
             let proposal_b1a = Proposal::new(
-                Round::new(Epoch::new(333), View::new(f_view + 1)),
+                Round::new(epoch, View::new(f_view + 1)),
                 View::new(f_view),
                 payload_b1a,
             );
             let payload_b1b = Sha256::hash(b"B_G2");
             let proposal_b1b = Proposal::new(
-                Round::new(Epoch::new(333), View::new(f_view + 2)),
+                Round::new(epoch, View::new(f_view + 2)),
                 View::new(f_view),
                 payload_b1b,
             );
@@ -4853,8 +4865,8 @@ mod tests {
             let b1a_notarization = build_notarization(&proposal_b1a);
             let b1b_notarization = build_notarization(&proposal_b1b);
             // Build nullifications for F+1 and F+2
-            let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
-            let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
+            let null_a = build_nullification(Round::new(epoch, View::new(f_view + 1)));
+            let null_b = build_nullification(Round::new(epoch, View::new(f_view + 2)));
 
             // Create an 11th non-participant injector and obtain senders
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
@@ -4878,10 +4890,6 @@ mod tests {
             }
 
             // ========== Broadcast certificates over recovered network. ==========
-
-            // Broadcasts are in reverse order of views to make the tests easier by preventing the
-            // proposer from making a proposal in F+1 or F+2, as it may panic when it proposes
-            // something but generates a certificate for a different proposal.
 
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
