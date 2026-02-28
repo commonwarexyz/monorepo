@@ -407,7 +407,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Round},
+        types::{Epoch, Participant, Round},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -444,6 +444,59 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    /// Elector pre-populated with a fixed leader for views up to `through`,
+    /// falling back to round-robin for all later views.
+    #[derive(Clone, Debug)]
+    struct FixedElector {
+        leader: Participant,
+        through: View,
+    }
+
+    impl Default for FixedElector {
+        fn default() -> Self {
+            Self {
+                leader: Participant::new(0),
+                through: View::new(1),
+            }
+        }
+    }
+
+    impl<S: commonware_cryptography::certificate::Scheme> Elector<S> for FixedElector {
+        type Elector = FixedElectorInner<S>;
+
+        fn build(
+            self,
+            participants: &commonware_utils::ordered::Set<S::PublicKey>,
+        ) -> Self::Elector {
+            assert!(!participants.is_empty(), "no participants");
+            FixedElectorInner {
+                leader: self.leader,
+                through: self.through,
+                n: participants.len() as u32,
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedElectorInner<S> {
+        leader: Participant,
+        through: View,
+        n: u32,
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S> for FixedElectorInner<S> {
+        fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+            if round.view() <= self.through {
+                self.leader
+            } else {
+                let idx = (round.epoch().get().wrapping_add(round.view().get())) as u32 % self.n;
+                Participant::new(idx)
+            }
+        }
+    }
 
     #[test]
     fn test_interesting() {
@@ -2939,6 +2992,15 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                // The Byzantine node's batcher blocks all honest peers as
+                // unknown, so its only vote is a nullify on leader timeout.
+                // A short timeout ensures that nullify reaches honest nodes
+                // before they advance past the activity window for view 1.
+                let (leader_timeout, certification_timeout) = if idx_scheme == 0 {
+                    (Duration::from_millis(100), Duration::from_millis(200))
+                } else {
+                    (Duration::from_secs(1), Duration::from_secs(2))
+                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2950,8 +3012,8 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
+                    leader_timeout,
+                    certification_timeout,
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
@@ -4658,7 +4720,7 @@ mod tests {
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector_cfg: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4725,7 +4787,7 @@ mod tests {
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
             // Create engines: 7 honest engines, 3 byzantine
-            let elector = L::default();
+            let elector = elector_cfg;
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4879,10 +4941,6 @@ mod tests {
 
             // ========== Broadcast certificates over recovered network. ==========
 
-            // Broadcasts are in reverse order of views to make the tests easier by preventing the
-            // proposer from making a proposal in F+1 or F+2, as it may panic when it proposes
-            // something but generates a certificate for a different proposal.
-
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
             let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
@@ -5022,14 +5080,27 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
-        split_views_no_lockup::<_, _, RoundRobin>(secp256r1::fixture);
+        // Elect a Byzantine node (index 9) as leader for views 1-3 so that
+        // honest voters do not propose before the injected certificates
+        // (F=1, F+1=2, F+2=3) arrive.
+        let elector = FixedElector {
+            leader: Participant::new(9),
+            through: View::new(3),
+        };
+        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            elector.clone(),
+        );
+        split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            elector.clone(),
+        );
+        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>, elector.clone());
+        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>, elector.clone());
+        split_views_no_lockup(ed25519::fixture, elector.clone());
+        split_views_no_lockup(secp256r1::fixture, elector);
     }
 
     fn tle<V, L>()
