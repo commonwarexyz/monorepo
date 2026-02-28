@@ -24,11 +24,11 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd},
-    BufferPool, IoBufMut, IoBufs,
+    iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
+    Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
-use io_uring::types::Fd;
+use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
@@ -41,6 +41,9 @@ use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+/// Cap iovec batch size: larger iovecs reduce syscall count but increase
+/// per-write kernel setup overhead.
+const IOVEC_BATCH_SIZE: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -107,7 +110,7 @@ impl Network {
         mut cfg: Config,
         registry: &mut Registry,
         pool: BufferPool,
-    ) -> Result<Self, crate::Error> {
+    ) -> Result<Self, Error> {
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
@@ -140,10 +143,10 @@ impl Network {
 impl crate::Network for Network {
     type Listener = Listener;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         let listener = TcpListener::bind(socket)
             .await
-            .map_err(|_| crate::Error::BindFailed)?;
+            .map_err(|_| Error::BindFailed)?;
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
             so_linger: self.so_linger,
@@ -158,10 +161,10 @@ impl crate::Network for Network {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
+    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
         let stream = TcpStream::connect(socket)
             .await
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+            .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
@@ -178,18 +181,16 @@ impl crate::Network for Network {
         }
 
         // Convert the stream to a std::net::TcpStream
-        let stream = stream
-            .into_std()
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
             .set_nonblocking(true)
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+            .map_err(|_| Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
         Ok((
-            Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
+            Sink::new(fd.clone(), self.send_submitter.clone()),
             Stream::new(
                 fd,
                 self.recv_submitter.clone(),
@@ -222,12 +223,12 @@ impl crate::Listener for Listener {
     type Stream = Stream;
     type Sink = Sink;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (stream, remote_addr) = self
             .inner
             .accept()
             .await
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+            .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
@@ -244,20 +245,18 @@ impl crate::Listener for Listener {
         }
 
         // Convert the stream to a std::net::TcpStream
-        let stream = stream
-            .into_std()
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
             .set_nonblocking(true)
-            .map_err(|_| crate::Error::ConnectionFailed)?;
+            .map_err(|_| Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
 
         Ok((
             remote_addr,
-            Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
+            Sink::new(fd.clone(), self.send_submitter.clone()),
             Stream::new(
                 fd,
                 self.recv_submitter.clone(),
@@ -277,30 +276,18 @@ pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
     submitter: iouring::Submitter,
-    /// Buffer pool for send allocations.
-    pool: BufferPool,
 }
 
 impl Sink {
-    const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter, pool: BufferPool) -> Self {
-        Self {
-            fd,
-            submitter,
-            pool,
-        }
+    const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter) -> Self {
+        Self { fd, submitter }
     }
 
     fn as_raw_fd(&self) -> Fd {
         Fd(self.fd.as_raw_fd())
     }
-}
 
-impl crate::Sink for Sink {
-    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
-        // Convert to contiguous IoBuf for io_uring send
-        // (zero-copy if single buffer, copies if multiple)
-        // TODO(#2705): Use writev to avoid this copy.
-        let mut buf = bufs.into().coalesce_with_pool(&self.pool);
+    async fn send_single(&self, mut buf: IoBuf) -> Result<(), Error> {
         let mut bytes_sent = 0;
         let buf_len = buf.len();
 
@@ -315,8 +302,7 @@ impl crate::Sink for Sink {
             let remaining_len = buf_len - bytes_sent;
 
             // Create the io_uring send operation
-            let op =
-                io_uring::opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
+            let op = opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
 
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
@@ -329,10 +315,10 @@ impl crate::Sink for Sink {
                     iovecs: None,
                 })
                 .await
-                .map_err(|_| crate::Error::SendFailed)?;
+                .map_err(|_| Error::SendFailed)?;
 
             // Wait for the operation to complete and get the buffer back
-            let (result, returned_buf) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            let (result, returned_buf) = rx.await.map_err(|_| Error::SendFailed)?;
             buf = match returned_buf.unwrap() {
                 OpBuffer::Write(b) => b,
                 _ => unreachable!(),
@@ -342,14 +328,103 @@ impl crate::Sink for Sink {
             }
 
             // Non-positive result indicates an error or EOF.
-            if result <= 0 {
-                return Err(crate::Error::SendFailed);
+            let op_bytes_sent: usize = result.try_into().map_err(|_| Error::SendFailed)?;
+            if op_bytes_sent == 0 {
+                return Err(Error::SendFailed);
             }
 
             // Mark bytes as sent.
-            bytes_sent += result as usize;
+            bytes_sent += op_bytes_sent;
         }
+
         Ok(())
+    }
+
+    async fn send_vectored(&self, mut bufs: IoBufs) -> Result<(), Error> {
+        while bufs.has_remaining() {
+            let (iovecs, iovecs_len) = {
+                // Figure out how much is left to send and where to send from.
+                //
+                // Use one pre-initialized `libc::iovec` array as scratch space and
+                // view it as `IoSlice` to fill via `chunks_vectored`, since
+                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
+                assert!(
+                    max_iovecs > 0,
+                    "chunk_count should be > 0 if bufs.has_remaining() is true"
+                );
+                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
+                    libc::iovec {
+                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+                        iov_len: 0,
+                    },
+                    max_iovecs,
+                )
+                .collect();
+
+                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                // `iovecs` is initialized with valid empty entries, so `io_slices`
+                // starts in a valid state for `chunks_vectored` to overwrite.
+                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                        iovecs.len(),
+                    )
+                };
+                let io_slices_len = bufs.chunks_vectored(io_slices);
+                assert!(
+                    io_slices_len > 0,
+                    "chunks_vectored should produce at least one slice when bufs has remaining"
+                );
+                (OpIovecs::new(iovecs), io_slices_len)
+            };
+
+            // Create an operation to do the writev.
+            let op =
+                opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _).build();
+
+            // Submit the operation.
+            let (sender, receiver) = oneshot::channel();
+            self.submitter
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(OpBuffer::WriteVectored(bufs)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
+                    iovecs: Some(iovecs),
+                })
+                .await
+                .map_err(|_| Error::SendFailed)?;
+
+            // Wait for the result.
+            let (return_value, got_bufs) = receiver.await.map_err(|_| Error::SendFailed)?;
+            bufs = match got_bufs.unwrap() {
+                OpBuffer::WriteVectored(b) => b,
+                _ => unreachable!(),
+            };
+            if should_retry(return_value) {
+                continue;
+            }
+
+            // A negative or zero return value indicates an error.
+            let op_bytes_sent: usize = return_value.try_into().map_err(|_| Error::SendFailed)?;
+            if op_bytes_sent == 0 {
+                return Err(Error::SendFailed);
+            }
+
+            bufs.advance(op_bytes_sent);
+        }
+
+        Ok(())
+    }
+}
+
+impl crate::Sink for Sink {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        match bufs.into().try_into_single() {
+            Ok(buf) => self.send_single(buf).await,
+            Err(bufs) => self.send_vectored(bufs).await,
+        }
     }
 }
 
@@ -406,12 +481,12 @@ impl Stream {
         mut buffer: IoBufMut,
         offset: usize,
         len: usize,
-    ) -> (IoBufMut, Result<usize, crate::Error>) {
+    ) -> (IoBufMut, Result<usize, Error>) {
         loop {
             // SAFETY: offset + len <= buffer.capacity() as guaranteed by callers.
             // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
-            let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
+            let op = opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
 
             let (tx, rx) = oneshot::channel();
             if self
@@ -427,12 +502,12 @@ impl Stream {
                 .is_err()
             {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
+                return (IoBufMut::default(), Err(Error::RecvFailed));
             }
 
             let Ok((result, returned_buf)) = rx.await else {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
+                return (IoBufMut::default(), Err(Error::RecvFailed));
             };
             buffer = match returned_buf.unwrap() {
                 OpBuffer::Read(b) => b,
@@ -445,9 +520,9 @@ impl Stream {
 
             if result <= 0 {
                 let err = if result == -libc::ETIMEDOUT {
-                    crate::Error::Timeout
+                    Error::Timeout
                 } else {
-                    crate::Error::RecvFailed
+                    Error::RecvFailed
                 };
                 return (buffer, Err(err));
             }
@@ -457,7 +532,7 @@ impl Stream {
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
-    async fn fill_buffer(&mut self) -> Result<usize, crate::Error> {
+    async fn fill_buffer(&mut self) -> Result<usize, Error> {
         self.buffer_pos = 0;
         self.buffer_len = 0;
 
@@ -476,7 +551,7 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         // SAFETY: `len` bytes are written by the recv loop below.
         let mut owned_buf = unsafe { self.pool.alloc_len(len) };
         let mut bytes_received = 0;
@@ -528,7 +603,7 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
@@ -637,7 +712,7 @@ mod tests {
 
         // Wait for the reader to complete
         let (result, elapsed) = reader.await.unwrap();
-        assert!(matches!(result, Err(crate::Error::Timeout)));
+        assert!(matches!(result, Err(Error::Timeout)));
 
         // Verify the timeout occurred around the expected time
         assert!(elapsed >= op_timeout);

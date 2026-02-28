@@ -166,9 +166,7 @@ pub enum OpBuffer {
     /// Buffer for write operations - kernel reads from this.
     Write(IoBuf),
     /// Buffers for vectored write operations - kernel reads from these.
-    ///
-    /// NOTE: currently this is only used by the storage backend, hence the allow dead code.
-    WriteVectored(#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))] IoBufs),
+    WriteVectored(IoBufs),
 }
 
 impl From<IoBufMut> for OpBuffer {
@@ -220,9 +218,6 @@ pub enum OpFd {
 /// alive until operation completion.
 pub struct OpIovecs(#[allow(dead_code)] Box<[libc::iovec]>);
 
-/// NOTE: this is currently only used by the storage backend, hence the allow
-/// dead code.
-#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
 impl OpIovecs {
     pub const fn new(iovecs: Box<[libc::iovec]>) -> Self {
         Self(iovecs)
