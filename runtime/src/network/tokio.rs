@@ -16,17 +16,37 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
+impl Sink {
+    async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
+        self.sink
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+
+    async fn send_vectored(&mut self, bufs: &mut IoBufs) -> Result<(), Error> {
+        self.sink
+            .write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+}
+
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let write_timeout = self.write_timeout;
+        let bufs = bufs.into();
+        let send = async {
+            match bufs.try_into_single() {
+                Ok(buf) => self.send_single(buf.as_ref()).await,
+                Err(mut bufs) => self.send_vectored(&mut bufs).await,
+            }
+        };
+
         // Time out if we take too long to write
-        timeout(
-            self.write_timeout,
-            self.sink.write_all_buf(&mut bufs.into()),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
-        Ok(())
+        timeout(write_timeout, send)
+            .await
+            .map_err(|_| Error::Timeout)?
     }
 }
 
