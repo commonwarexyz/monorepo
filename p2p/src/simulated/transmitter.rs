@@ -680,9 +680,7 @@ impl<P: PublicKey> State<P> {
             "sending message",
         );
 
-        let completions = self.rebalance(now);
-        self.schedule(now);
-        completions
+        self.rebalance(now)
     }
 
     /// Returns the next sequence identifier used to preserve FIFO delivery per link.
