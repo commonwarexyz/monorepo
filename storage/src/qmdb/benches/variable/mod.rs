@@ -100,7 +100,7 @@ fn any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -130,7 +130,7 @@ fn current_cfg(
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

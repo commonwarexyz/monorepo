@@ -151,7 +151,7 @@ fn test_config(
         log_codec_config: ((), ((0..=100000).into(), ())),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 

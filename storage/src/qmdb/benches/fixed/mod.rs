@@ -117,7 +117,7 @@ fn any_cfg(context: &(impl BufferPooler + ThreadPooler)) -> AConfig<EightCap> {
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -134,7 +134,7 @@ fn current_cfg(context: &(impl BufferPooler + ThreadPooler)) -> CConfig<EightCap
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -153,7 +153,7 @@ fn variable_any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -174,7 +174,7 @@ fn variable_current_cfg(
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

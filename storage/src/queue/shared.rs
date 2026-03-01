@@ -264,7 +264,7 @@ mod tests {
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
         }
     }

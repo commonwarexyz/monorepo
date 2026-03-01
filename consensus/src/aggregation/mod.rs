@@ -250,7 +250,11 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     strategy: Sequential,
                 },
             );
@@ -494,7 +498,7 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache: CacheRef::from_pooler(
+                                journal_page_cache: CacheRef::from_pooler_physical(
                                     &context,
                                     PAGE_SIZE,
                                     PAGE_CACHE_SIZE,
@@ -647,7 +651,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
+                            journal_page_cache: CacheRef::from_pooler_physical(
                                 &context,
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
@@ -734,7 +738,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
+                            journal_page_cache: CacheRef::from_pooler_physical(
                                 &context,
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
@@ -1079,7 +1083,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
+                        journal_page_cache: CacheRef::from_pooler_physical(
                             &context,
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,

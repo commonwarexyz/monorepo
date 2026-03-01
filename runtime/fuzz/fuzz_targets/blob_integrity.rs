@@ -91,17 +91,17 @@ impl<'a> Arbitrary<'a> for ReadOp {
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let page_size = input.page_size as u64;
-        let physical_page_size = page_size + CRC_SIZE;
+        let logical_page_size = input.page_size as u64;
+        let physical_page_size = logical_page_size + CRC_SIZE;
         let cache_capacity = input.cache_capacity as usize;
-        let cache_ref = CacheRef::from_pooler(
+        let cache_ref = CacheRef::from_pooler_physical(
             &context,
-            NZU16!(page_size as u16),
+            NZU16!(physical_page_size as u16),
             NZUsize!(cache_capacity),
         );
 
         // Compute logical size from number of pages.
-        let logical_size = input.num_pages as u64 * page_size;
+        let logical_size = input.num_pages as u64 * logical_page_size;
 
         // Generate deterministic data based on seed.
         let expected_data: Vec<u8> = (0..logical_size)
@@ -127,8 +127,8 @@ fn fuzz(input: FuzzInput) {
 
         // Step 2: Corrupt a single bit in the blob.
         // Calculate physical size: full pages + partial page (if any).
-        let full_pages = logical_size / page_size;
-        let partial_bytes = logical_size % page_size;
+        let full_pages = logical_size / logical_page_size;
+        let partial_bytes = logical_size % logical_page_size;
         let physical_size = if partial_bytes > 0 {
             (full_pages + 1) * physical_page_size
         } else {
@@ -184,8 +184,8 @@ fn fuzz(input: FuzzInput) {
             let len = len.min((reported_size - offset) as usize);
 
             // Determine which pages this read spans.
-            let start_page = offset / page_size;
-            let end_page = (offset + len as u64 + READER_BUFFER_CAPACITY as u64) / page_size;
+            let start_page = offset / logical_page_size;
+            let end_page = (offset + len as u64 + READER_BUFFER_CAPACITY as u64) / logical_page_size;
             let read_touches_corrupted_page =
                 start_page <= corrupted_page && corrupted_page <= end_page;
 
@@ -206,7 +206,7 @@ fn fuzz(input: FuzzInput) {
                         Err(_) => {
                             // Error during skip - acceptable if corruption is involved
                             assert!(
-                                read_touches_corrupted_page || offset / page_size >= corrupted_page,
+                                read_touches_corrupted_page || offset / logical_page_size >= corrupted_page,
                                 "Replay skip failed but didn't touch corrupted page"
                             );
                             continue;
