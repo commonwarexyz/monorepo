@@ -267,7 +267,11 @@ impl Metrics {
 /// Configuration for an io_uring instance.
 /// See `man io_uring`.
 pub struct Config {
-    /// Size of the ring.
+    /// Requested size of the ring.
+    ///
+    /// This value is rounded up to the next power of two when constructing
+    /// [IoUringLoop], so the configured in-flight waiter capacity matches the
+    /// effective ring sizing behavior.
     pub size: u32,
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
@@ -712,7 +716,11 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, operation channel, and internal `eventfd` wake source.
-    pub(crate) fn new(cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+        cfg.size = cfg
+            .size
+            .checked_next_power_of_two()
+            .expect("ring size rounds beyond u32");
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
@@ -1100,6 +1108,28 @@ mod tests {
         os::{fd::AsRawFd, unix::net::UnixStream},
         time::Duration,
     };
+
+    #[test]
+    fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
+        let mut registry = Registry::default();
+        let cfg = Config {
+            size: 1_000,
+            ..Default::default()
+        };
+        let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        assert_eq!(iouring.cfg.size, 1_024);
+        assert_eq!(iouring.waiters.entries.len(), 1_024);
+
+        let cfg = Config {
+            size: 1_024,
+            ..Default::default()
+        };
+        let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        assert_eq!(iouring.cfg.size, 1_024);
+        assert_eq!(iouring.waiters.entries.len(), 1_024);
+    }
 
     #[test]
     fn test_waiters() {
