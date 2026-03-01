@@ -50,9 +50,15 @@ use tracing::{info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_SIZE: u32 = 1024;
-#[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_FORCE_POLL: Duration = Duration::from_millis(100);
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        // Use a smaller ring in tests to reduce `io_uring_setup` failures
+        // under parallel test load due to mlock/resource limits.
+        const IOURING_NETWORK_SIZE: u32 = 128;
+    } else {
+        const IOURING_NETWORK_SIZE: u32 = 1024;
+    }
+}
 
 #[derive(Debug)]
 struct Metrics {
@@ -382,7 +388,6 @@ impl crate::Runner for Runner {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
                         op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
-                        force_poll: IOURING_NETWORK_FORCE_POLL,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },

@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Application, Block, EpochProvider, Provider},
-    dkg::{self, UpdateCallBack},
+    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
@@ -150,6 +150,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                max_supported_mode: MAX_SUPPORTED_MODE,
             },
         );
 

@@ -348,6 +348,11 @@ impl<
         self.verifier.verify_finalizes(rng, strategy)
     }
 
+    /// Returns true if `signer` has a nullify vote in this round.
+    pub fn has_nullify(&self, signer: Participant) -> bool {
+        self.pending_votes.has_nullify(signer)
+    }
+
     /// Returns true if the leader was active in this round.
     ///
     /// We use pending votes to determine activeness because we only verify the first

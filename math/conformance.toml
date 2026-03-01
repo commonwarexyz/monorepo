@@ -2,7 +2,7 @@
 n_cases = 65536
 hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 
-["commonware_math::ntt::test::conformance::CodecConformance<Matrix>"]
+["commonware_math::ntt::test::conformance::CodecConformance<Matrix<F>>"]
 n_cases = 65536
 hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
 
