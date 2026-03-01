@@ -1002,28 +1002,31 @@ impl IoUringLoop {
         self.metrics.pending_operations.set(self.waiters.len() as _);
     }
 
-    /// Submits pending operations and waits for completions.
+    /// Submits pending SQEs and waits for completions.
     ///
-    /// This submits all pending SQEs to the kernel and waits for at least
-    /// `want` completions to arrive. It can optionally use a timeout to bound
-    /// the wait time.
+    /// Attempts to wait for at least `want` completions but may return early on
+    /// timeout or transient errors.
     ///
     /// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
     /// feature to implement a bounded wait without injecting a timeout SQE
     /// (available since kernel 5.11+). Without a timeout, it falls back to the
     /// standard `submit_and_wait`.
     ///
+    /// Transient `io_uring_enter(2)` errors (`EINTR`, `EAGAIN`, `EBUSY`) return
+    /// `Ok(true)` so the caller can drain CQEs and re-enter through its event
+    /// loop.
+    ///
     /// # Returns
-    /// * `Ok(true)` - Successfully received `want` completions
+    /// * `Ok(true)` - Completions may be available (caller should drain CQEs)
     /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
-    /// * `Err(e)` - An error occurred during submission or waiting
+    /// * `Err(e)` - An unrecoverable error occurred during submission or waiting
     fn submit_and_wait(
         &self,
         ring: &mut IoUring,
         want: usize,
         timeout: Option<Duration>,
     ) -> Result<bool, std::io::Error> {
-        timeout.map_or_else(
+        let result = timeout.map_or_else(
             || ring.submit_and_wait(want).map(|_| true),
             |timeout| {
                 let ts = Timespec::new()
@@ -1038,7 +1041,17 @@ impl IoUringLoop {
                     Err(err) => Err(err),
                 }
             },
-        )
+        );
+
+        match result {
+            Ok(v) => Ok(v),
+            Err(err) => match err.raw_os_error() {
+                // Transient errors: return so the caller can drain
+                // CQEs and re-enter through its event loop.
+                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => Ok(true),
+                _ => Err(err),
+            },
+        }
     }
 }
 
@@ -1083,8 +1096,11 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 /// Errors considered transient:
 /// * EAGAIN: There is no data ready. Try again later.
 /// * EWOULDBLOCK: Operation would block.
+/// * EINTR: A signal interrupted the operation before any data was transferred.
 pub const fn should_retry(return_value: i32) -> bool {
-    return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
+    return_value == -libc::EAGAIN
+        || return_value == -libc::EWOULDBLOCK
+        || return_value == -libc::EINTR
 }
 
 #[cfg(test)]
