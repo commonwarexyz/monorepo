@@ -445,7 +445,11 @@ impl<
                     // Block invalid signers
                     for invalid in failed {
                         if let Some(signer) = self.participants.key(invalid) {
-                            commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                            commonware_p2p::block!(
+                                self.blocker,
+                                signer.clone(),
+                                "invalid signature"
+                            );
                         }
                     }
 

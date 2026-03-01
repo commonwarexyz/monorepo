@@ -390,7 +390,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(
                 blob.clone(),
                 blob_size,
@@ -432,7 +433,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let logical_page_size = cache_ref.logical_page_size() as usize;
             let append = Append::new(
                 blob.clone(),
@@ -466,7 +468,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(
                 blob.clone(),
                 blob_size,
@@ -525,7 +528,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(
                 blob.clone(),
                 blob_size,
@@ -568,7 +572,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(
                 blob.clone(),
                 blob_size,

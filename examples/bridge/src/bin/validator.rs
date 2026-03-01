@@ -258,7 +258,11 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::from_pooler_physical(
+                    &context,
+                    NZU16!(16_384),
+                    NZUsize!(10_000),
+                ),
                 strategy,
             },
         );

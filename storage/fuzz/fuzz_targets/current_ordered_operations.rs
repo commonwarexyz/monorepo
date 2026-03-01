@@ -98,7 +98,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
-            page_cache: CacheRef::from_pooler(
+            page_cache: CacheRef::from_pooler_physical(
                 &context,
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),

@@ -53,7 +53,7 @@ fn fuzz(input: FuzzInput) {
         let cfg = Config {
             key_partition: "fuzz-key".into(),
             key_write_buffer: NZUsize!(1024 * 1024),
-            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::from_pooler_physical(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "fuzz-value".into(),
             value_compression: None,
             value_write_buffer: NZUsize!(1024 * 1024),

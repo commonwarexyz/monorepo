@@ -175,7 +175,7 @@ fn fuzz(input: FuzzInput) {
                     if cache_ref.is_none() {
                         let logical_page_size = cache_page_size.clamp(1, u16::MAX - CHECKSUM_SIZE);
                         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-                        cache_ref = Some(CacheRef::from_pooler(
+                        cache_ref = Some(CacheRef::from_pooler_physical(
                             &context,
                             NZU16!(physical_page_size),
                             cache_capacity,

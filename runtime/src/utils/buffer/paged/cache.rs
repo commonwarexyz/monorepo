@@ -2,9 +2,21 @@
 //!
 //! # Logical vs Physical Page Sizes
 //!
-//! [CacheRef::new] is configured with a physical page size (logical bytes plus CRC record bytes).
-//! The logical page size is derived as:
-//! `physical_page_size - CHECKSUM_SIZE`.
+//! [CacheRef::new_physical] is configured with a physical page size (logical bytes plus CRC
+//! record bytes). The logical page size is derived as: `physical_page_size - CHECKSUM_SIZE`.
+//!
+//! [CacheRef::new_logical] and [CacheRef::from_pooler_logical] preserve the old constructor
+//! behavior where the provided page size is interpreted as logical bytes and physical size is
+//! derived as `logical_page_size + CHECKSUM_SIZE`.
+//!
+//! Prefer physical-size constructors for new deployments, i.e. [CacheRef::new_physical] and
+//! [CacheRef::from_pooler_physical]. This allows choosing cache slot allocation size directly in
+//! terms of physical I/O size and pool/system page alignment.
+//!
+//! Switching an existing deployment from logical-size construction to physical-size construction is
+//! a format-breaking change for existing blobs, because page boundaries and CRC placement differ.
+//! More generally, changing either logical page size or physical page size for existing data is a
+//! format-breaking change.
 //!
 //! Reads from this cache always return only logical bytes. Internally, slot backing allocations are
 //! physical-page sized so fetch paths can reuse slot memory directly for blob I/O.
@@ -174,7 +186,7 @@ pub struct CacheRef {
 }
 
 impl CacheRef {
-    /// Create a shared page-cache handle backed by `pool`.
+    /// Create a shared page-cache handle backed by `pool`, configured with physical page size.
     ///
     /// `physical_page_size` is the on-disk page size, including checksum record bytes.
     ///
@@ -184,7 +196,11 @@ impl CacheRef {
     ///
     /// Capacity bounds the number of resident slots in this cache. Read results may outlive
     /// eviction and retain memory until dropped by readers.
-    pub fn new(pool: BufferPool, physical_page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    pub fn new_physical(
+        pool: BufferPool,
+        physical_page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
         let physical_page_size = physical_page_size.get() as u64;
         assert!(
             physical_page_size > CHECKSUM_SIZE,
@@ -206,16 +222,67 @@ impl CacheRef {
         }
     }
 
-    /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
-    /// [BufferPooler].
-    pub fn from_pooler(
+    /// Create a shared page-cache handle backed by `pool`, configured with logical page size.
+    ///
+    /// This constructor preserves the behavior of the old `CacheRef::new` API where the provided
+    /// page size represented logical bytes per page and physical size was derived as
+    /// `logical_page_size + CHECKSUM_SIZE`.
+    ///
+    /// Prefer [Self::new_physical] for new deployments so cache slot size can be selected directly
+    /// in terms of physical I/O and pool allocation size.
+    ///
+    /// # Migration
+    ///
+    /// Migrating from logical to physical sizing changes page layout on disk and is therefore a
+    /// format-breaking change for existing blobs.
+    pub fn new_logical(
+        pool: BufferPool,
+        logical_page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        let logical_page_size_u16 = logical_page_size.get();
+        let checksum_size_u16 = CHECKSUM_SIZE as u16;
+        let physical_page_size = logical_page_size_u16
+            .checked_add(checksum_size_u16)
+            .expect("logical page size + checksum size must fit in u16");
+        let physical_page_size = NonZeroU16::new(physical_page_size).unwrap();
+        Self::new_physical(pool, physical_page_size, capacity)
+    }
+
+    /// Create a shared page-cache handle from a [BufferPooler], configured with physical page size.
+    pub fn from_pooler_physical(
         pooler: &impl BufferPooler,
         physical_page_size: NonZeroU16,
         capacity: NonZeroUsize,
     ) -> Self {
-        Self::new(
+        Self::new_physical(
             pooler.storage_buffer_pool().clone(),
             physical_page_size,
+            capacity,
+        )
+    }
+
+    /// Create a shared page-cache handle from a [BufferPooler], configured with logical page size.
+    ///
+    /// This constructor preserves the behavior of the old `CacheRef::from_pooler` API where the
+    /// provided page size represented logical bytes per page and physical size was derived as
+    /// `logical_page_size + CHECKSUM_SIZE`.
+    ///
+    /// Prefer [Self::from_pooler_physical] for new deployments so cache slot size can be selected
+    /// directly in terms of physical I/O and pool allocation size.
+    ///
+    /// # Migration
+    ///
+    /// Migrating from logical to physical sizing changes page layout on disk and is therefore a
+    /// format-breaking change for existing blobs.
+    pub fn from_pooler_logical(
+        pooler: &impl BufferPooler,
+        logical_page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self::new_logical(
+            pooler.storage_buffer_pool().clone(),
+            logical_page_size,
             capacity,
         )
     }
@@ -1151,6 +1218,24 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_from_pooler_logical_derives_physical_page_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let logical_page_size = PAGE_SIZE;
+            let cache_ref = CacheRef::from_pooler_logical(&context, logical_page_size, NZUsize!(1));
+
+            assert_eq!(
+                cache_ref.logical_page_size(),
+                logical_page_size.get() as u64
+            );
+            assert_eq!(
+                cache_ref.physical_page_size(),
+                logical_page_size.get() as u64 + CHECKSUM_SIZE
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_cache_basic() {
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
@@ -1239,7 +1324,8 @@ mod tests {
     fn test_read_cached_returns_prefix_on_miss() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let page = vec![3u8; PAGE_SIZE.get() as usize];
             cache_pages(&cache_ref, 0, vec![page.clone().into()], 0);
 
@@ -1277,7 +1363,8 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(10));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
             for i in 0..11 {
@@ -1312,7 +1399,8 @@ mod tests {
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -1338,7 +1426,7 @@ mod tests {
         executor.start(|context| async move {
             // Use a very small logical page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref = CacheRef::from_pooler(
+            let cache_ref = CacheRef::from_pooler_physical(
                 &context,
                 NZU16!((MIN_PAGE_SIZE + CHECKSUM_SIZE) as u16),
                 NZUsize!(2),
@@ -1382,8 +1470,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Smallest logical page size is 1, so physical must be 1 + CHECKSUM_SIZE.
-            let cache_ref =
-                CacheRef::from_pooler(&context, NZU16!((CHECKSUM_SIZE as u16) + 1), NZUsize!(1));
+            let cache_ref = CacheRef::from_pooler_physical(
+                &context,
+                NZU16!((CHECKSUM_SIZE as u16) + 1),
+                NZUsize!(1),
+            );
             assert_eq!(cache_ref.logical_page_size(), 1);
 
             // Caching one page at the maximum offset should succeed without overflow panic.
@@ -1401,7 +1492,8 @@ mod tests {
     fn test_stale_fetch_entry_success_is_scavenged() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let (blob, _) = context.open("test", b"stale_success").await.unwrap();
 
             let stale: PageFetchFut = ready(Ok::<IoBuf, Arc<Error>>(physical_page(9)))
@@ -1423,7 +1515,8 @@ mod tests {
     fn test_stale_fetch_entry_error_is_scavenged_and_refetched() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
             let (blob, size) = context.open("test", b"stale_error").await.unwrap();
             assert_eq!(size, 0);
 
@@ -1458,7 +1551,8 @@ mod tests {
     fn test_stale_fetch_entry_for_other_key_is_reclaimed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blob, size) = context.open("test", b"stale_other_key").await.unwrap();
             assert_eq!(size, 0);
 
@@ -1488,7 +1582,8 @@ mod tests {
     fn test_stale_fetch_success_for_other_key_does_not_overwrite_ready_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(3));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(3));
             let newer = vec![6u8; PAGE_SIZE.get() as usize];
             cache_pages(&cache_ref, 0, vec![newer.clone().into()], 0);
 
@@ -1519,7 +1614,8 @@ mod tests {
     fn test_failed_fetch_does_not_leave_placeholder_and_retry_succeeds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blob, size) = context.open("test", b"failed_fetch_retry").await.unwrap();
             assert_eq!(size, 0);
 
@@ -1567,7 +1663,8 @@ mod tests {
             let logical_page_size = 4096usize;
             let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
             let physical_page_size = NonZeroU16::new(physical_page_size as u16).unwrap();
-            let cache_ref = CacheRef::from_pooler(&context, physical_page_size, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, physical_page_size, NZUsize!(1));
 
             let (blob, size) = context
                 .open("test", b"fetch_buffer_physical_size")
@@ -1593,7 +1690,8 @@ mod tests {
     fn test_misses_with_single_slot_do_not_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blob, size) = context.open("test", b"concurrent_misses").await.unwrap();
             assert_eq!(size, 0);
 
@@ -1633,7 +1731,8 @@ mod tests {
     fn test_cancelled_first_fetcher_unresolved_entry_persists_until_completion() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (pending_blob, started_rx) = PendingBlob::new();
 
             let cache_ref_for_task = cache_ref.clone();
@@ -1654,7 +1753,8 @@ mod tests {
     fn test_cancelled_first_fetcher_cleanup_is_taken_over_by_waiter() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blocking_blob, started_rx, release_tx) =
                 BlockingBlob::new(PAGE_SIZE.get() as usize, 3);
 
@@ -1691,7 +1791,8 @@ mod tests {
     fn test_stranded_unresolved_fetch_entry_is_reclaimed_for_other_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
 
             let stranded: PageFetchFut = async {
                 pending::<()>().await;
@@ -1718,7 +1819,8 @@ mod tests {
     fn test_reserved_fetch_with_live_waiter_is_not_reclaimed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
 
             let pending_fut: PageFetchFut = async {
                 pending::<()>().await;
@@ -1748,7 +1850,8 @@ mod tests {
     fn test_first_fetcher_result_does_not_overwrite_newer_ready_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blob, started_rx, release_tx) = BlockingBlob::new(PAGE_SIZE.get() as usize, 1);
 
             let cache_ref_for_task = cache_ref.clone();
@@ -1782,7 +1885,8 @@ mod tests {
         // should fall back to an uncached fetch and still return correct data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(1));
             let (blob, size) = context
                 .open("test", b"all_reserved_fallback")
                 .await
@@ -1836,7 +1940,8 @@ mod tests {
         // the insert should overwrite the slot with Filled state.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PHYSICAL_PAGE_SIZE, NZUsize!(2));
 
             // Install a Reserved slot for key (0, 0).
             let pending_fut: PageFetchFut = async {

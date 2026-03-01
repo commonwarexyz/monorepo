@@ -20,7 +20,7 @@ fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),

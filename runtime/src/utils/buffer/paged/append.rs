@@ -987,7 +987,8 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             // Create a page cache reference.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
@@ -1021,7 +1022,8 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             // Create a page cache reference.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
@@ -1141,7 +1143,8 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             // Create a page cache reference.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper and write some data.
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
@@ -1164,7 +1167,8 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1188,7 +1192,8 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1219,7 +1224,8 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1243,7 +1249,8 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1274,7 +1281,8 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1378,7 +1386,8 @@ mod tests {
     fn test_crc_slot1_protected() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
             let slot0_offset = LOGICAL_PAGE_SIZE.get() as u64;
             let slot1_offset = LOGICAL_PAGE_SIZE.get() as u64 + 6;
@@ -1504,7 +1513,8 @@ mod tests {
     fn test_crc_slot0_protected() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
             let slot0_offset = LOGICAL_PAGE_SIZE.get() as u64;
             let slot1_offset = LOGICAL_PAGE_SIZE.get() as u64 + 6;
@@ -1642,7 +1652,8 @@ mod tests {
     fn test_data_prefix_not_overwritten() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
 
             // === Step 1: Write 20 bytes ===
@@ -1729,7 +1740,8 @@ mod tests {
     fn test_crc_slot_protection_across_page_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
             let slot0_offset = LOGICAL_PAGE_SIZE.get() as u64;
             let slot1_offset = LOGICAL_PAGE_SIZE.get() as u64 + 6;
@@ -1857,7 +1869,8 @@ mod tests {
     fn test_crc_fallback_on_corrupted_primary() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
             // crc2 is at offset: PAGE_SIZE + 6 (for len2) + 2 (skip len2 bytes) = PAGE_SIZE + 8
             let crc2_offset = LOGICAL_PAGE_SIZE.get() as u64 + 8;
@@ -1979,7 +1992,8 @@ mod tests {
     fn test_non_last_page_rejects_partial_fallback() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
             // crc2 for page 0 is at offset: PAGE_SIZE + 8
             let page0_crc2_offset = LOGICAL_PAGE_SIZE.get() as u64 + 8;
@@ -2136,7 +2150,8 @@ mod tests {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
 
             let (blob, size) = context
@@ -2196,7 +2211,7 @@ mod tests {
         executor.start(|context| async move {
             const BUFFER_SIZE: usize = 256;
 
-            let cache_ref = CacheRef::from_pooler(&context, NZU16!(76), NZUsize!(4));
+            let cache_ref = CacheRef::from_pooler_physical(&context, NZU16!(76), NZUsize!(4));
 
             let (blob, size) = context
                 .open("test_partition", b"immutable_test")
@@ -2251,7 +2266,8 @@ mod tests {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize;
 
             // Step 1: Create blob with valid data
@@ -2322,7 +2338,8 @@ mod tests {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Step 1: Create blob with valid data
             let (blob, size) = context

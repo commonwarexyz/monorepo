@@ -269,7 +269,7 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -289,7 +289,7 @@ pub(crate) mod test {
             log_codec_config: ((), ()),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

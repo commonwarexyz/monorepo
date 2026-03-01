@@ -100,7 +100,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 

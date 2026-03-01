@@ -379,7 +379,7 @@ mod tests {
     fn test_cfg(pooler: &impl BufferPooler) -> Config {
         Config {
             partition: "test-partition".into(),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1106,7 +1106,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut cfg = test_cfg(&context);
-            cfg.page_cache = CacheRef::from_pooler(&context, NZU16!(56), PAGE_CACHE_SIZE);
+            cfg.page_cache = CacheRef::from_pooler_physical(&context, NZU16!(56), PAGE_CACHE_SIZE);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1173,7 +1173,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler_physical(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

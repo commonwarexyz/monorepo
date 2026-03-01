@@ -534,7 +534,7 @@ mod tests {
         Config {
             index_partition: "test-index".into(),
             value_partition: "test-values".into(),
-            index_page_cache: CacheRef::from_pooler(
+            index_page_cache: CacheRef::from_pooler_physical(
                 pooler,
                 NZU16!(64 + CHECKSUM_SIZE as u16),
                 NZUsize!(8),
@@ -929,7 +929,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
+                index_page_cache: CacheRef::from_pooler_physical(
                     &context,
                     NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
                     NZUsize!(8),
@@ -1467,7 +1467,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
+                index_page_cache: CacheRef::from_pooler_physical(
                     &context,
                     NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
                     NZUsize!(8),
@@ -1750,7 +1750,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
+                index_page_cache: CacheRef::from_pooler_physical(
                     &context,
                     NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
                     NZUsize!(8),
@@ -2475,7 +2475,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
+                index_page_cache: CacheRef::from_pooler_physical(
                     &context,
                     NZU16!(ENTRY_PHYSICAL_PAGE_SIZE),
                     NZUsize!(8),

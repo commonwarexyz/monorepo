@@ -1216,7 +1216,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler_physical(
+                    &context,
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1271,7 +1275,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler_physical(
+                    &context,
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

@@ -585,7 +585,7 @@ mod tests {
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -595,7 +595,7 @@ mod tests {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

@@ -1090,7 +1090,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1818,7 +1818,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -1871,7 +1875,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -1898,7 +1906,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -2277,7 +2289,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(64),
                 thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler_physical(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create MMR with enough elements to span multiple sections.
