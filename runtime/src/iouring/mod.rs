@@ -1013,32 +1013,53 @@ impl IoUringLoop {
     /// (available since kernel 5.11+). Without a timeout, it falls back to the
     /// standard `submit_and_wait`.
     ///
+    /// Transient `io_uring_enter(2)` errors are handled internally:
+    /// * `EINTR`: Signal interrupted the syscall. Retried immediately.
+    /// * `EAGAIN`/`EBUSY`: Kernel resources temporarily unavailable or prior
+    ///   submissions still in flight. Returns without blocking so the caller
+    ///   can drain CQEs and re-enter naturally through its event loop.
+    ///
     /// # Returns
-    /// * `Ok(true)` - Successfully received `want` completions
+    /// * `Ok(true)` - Completions may be available (caller should drain CQEs)
     /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
-    /// * `Err(e)` - An error occurred during submission or waiting
+    /// * `Err(e)` - An unrecoverable error occurred during submission or waiting
     fn submit_and_wait(
         &self,
         ring: &mut IoUring,
         want: usize,
         timeout: Option<Duration>,
     ) -> Result<bool, std::io::Error> {
-        timeout.map_or_else(
-            || ring.submit_and_wait(want).map(|_| true),
-            |timeout| {
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
+        loop {
+            let result = timeout.map_or_else(
+                || ring.submit_and_wait(want).map(|_| true),
+                |timeout| {
+                    let ts = Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos());
 
-                let args = SubmitArgs::new().timespec(&ts);
+                    let args = SubmitArgs::new().timespec(&ts);
 
-                match ring.submitter().submit_with_args(want, &args) {
-                    Ok(_) => Ok(true),
-                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
-                    Err(err) => Err(err),
-                }
-            },
-        )
+                    match ring.submitter().submit_with_args(want, &args) {
+                        Ok(_) => Ok(true),
+                        Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
+                        Err(err) => Err(err),
+                    }
+                },
+            );
+
+            match result {
+                Ok(v) => return Ok(v),
+                Err(err) => match err.raw_os_error() {
+                    // Signal interrupted the syscall, retry immediately.
+                    Some(libc::EINTR) => continue,
+                    // Kernel needs us to drain completions before it can
+                    // accept more work. Return so the caller can process
+                    // CQEs and re-enter through its event loop.
+                    Some(libc::EAGAIN | libc::EBUSY) => return Ok(true),
+                    _ => return Err(err),
+                },
+            }
+        }
     }
 }
 
@@ -1083,8 +1104,11 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 /// Errors considered transient:
 /// * EAGAIN: There is no data ready. Try again later.
 /// * EWOULDBLOCK: Operation would block.
+/// * EINTR: A signal interrupted the operation before any data was transferred.
 pub const fn should_retry(return_value: i32) -> bool {
-    return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
+    return_value == -libc::EAGAIN
+        || return_value == -libc::EWOULDBLOCK
+        || return_value == -libc::EINTR
 }
 
 #[cfg(test)]
