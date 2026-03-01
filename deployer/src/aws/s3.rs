@@ -93,7 +93,7 @@ pub const WGET: &str =
 /// Creates an S3 client for the specified AWS region
 pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(u32::MAX)
+        .with_max_attempts(5)
         .with_initial_backoff(Duration::from_millis(500))
         .with_max_backoff(Duration::from_secs(30))
         .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
@@ -201,58 +201,34 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
     }
 }
 
-/// Uploads a ByteStream to S3 with unlimited retries for transient failures.
-/// Takes a closure that produces the ByteStream, allowing re-creation on retry.
-async fn upload_with_retry<F, Fut>(client: &S3Client, bucket: &str, key: &str, make_body: F)
+/// Uploads a ByteStream to S3.
+///
+/// Retries are handled by the AWS SDK retry strategy configured on the client.
+async fn upload_with_retry<F, Fut>(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    make_body: F,
+) -> Result<(), Error>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<ByteStream, Error>>,
 {
-    let mut attempt = 0u32;
-    loop {
-        let body = match make_body().await {
-            Ok(b) => b,
-            Err(e) => {
-                debug!(
-                    bucket = bucket,
-                    key = key,
-                    attempt = attempt + 1,
-                    error = %e,
-                    "failed to create body, retrying"
-                );
-                attempt = attempt.saturating_add(1);
-                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
-                tokio::time::sleep(backoff).await;
-                continue;
-            }
-        };
-
-        match client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(_) => {
-                debug!(bucket = bucket, key = key, "uploaded to S3");
-                return;
-            }
-            Err(e) => {
-                debug!(
-                    bucket = bucket,
-                    key = key,
-                    attempt = attempt + 1,
-                    error = %e,
-                    "upload failed, retrying"
-                );
-                attempt = attempt.saturating_add(1);
-                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
-                tokio::time::sleep(backoff).await;
-            }
-        }
-    }
+    let body = make_body().await?;
+    client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::HeadObject,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
+    debug!(bucket = bucket, key = key, "uploaded to S3");
+    Ok(())
 }
 
 /// Source for S3 upload
@@ -283,13 +259,13 @@ pub async fn cache_and_presign(
                             .map_err(|e| Error::Io(std::io::Error::other(e)))
                     }
                 })
-                .await;
+                .await?;
             }
             UploadSource::Static(content) => {
                 upload_with_retry(client, bucket, key, || async {
                     Ok(ByteStream::from_static(content))
                 })
-                .await;
+                .await?;
             }
         }
     }
