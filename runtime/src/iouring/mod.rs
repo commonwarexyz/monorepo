@@ -1002,11 +1002,10 @@ impl IoUringLoop {
         self.metrics.pending_operations.set(self.waiters.len() as _);
     }
 
-    /// Submits pending operations and waits for completions.
+    /// Submits pending SQEs and waits for completions.
     ///
-    /// This submits all pending SQEs to the kernel and waits for at least
-    /// `want` completions to arrive. It can optionally use a timeout to bound
-    /// the wait time.
+    /// Attempts to wait for at least `want` completions but may return early on
+    /// timeout or transient errors.
     ///
     /// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
     /// feature to implement a bounded wait without injecting a timeout SQE
