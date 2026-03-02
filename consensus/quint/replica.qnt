@@ -207,7 +207,7 @@ module replica {
     }
 
     pure def has_notarized(r: ReplicaState): bool = {
-        r.notarized.get(r.view) != EMPTY_BLOCK
+        is_some(r.notarized.get(r.view))
     }
 
     pure def has_notarized_view(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): bool = {
@@ -321,7 +321,7 @@ module replica {
             is_block_finalized(parent_view, parent_block, certificates),
             and {
                 is_block_notarized(parent_view, parent_block, certificates),
-                self.certified.get(parent_view) == parent_block,
+                self.certified.get(parent_view) == Some(parent_block),
             }
         }
     }
@@ -414,8 +414,8 @@ module replica {
             view: FIRST_VIEW,
             ghost_last_seen_notarization: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
-            notarized: VIEWS.mapBy(_ => EMPTY_BLOCK),
-            certified: VIEWS.mapBy(_ => EMPTY_BLOCK),
+            notarized: VIEWS.mapBy(_ => None),
+            certified: VIEWS.mapBy(_ => None),
             propose_sent: false,
             nullified: false,
             leader_timeout_cancelled: false,
@@ -537,7 +537,7 @@ module replica {
                             ...self,
                             propose_sent: true,
                             leader_timeout_cancelled: true,
-                            notarized: self.notarized.put(self.view, new_block),
+                            notarized: self.notarized.put(self.view, Some(new_block)),
                             ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                         }),
                         ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
@@ -612,7 +612,7 @@ module replica {
                     replica_state' = replica_state.set(id, {
                         ...self,
                         leader_timeout_cancelled: true,
-                        notarized: self.notarized.put(self.view, proposal.block),
+                        notarized: self.notarized.put(self.view, Some(proposal.block)),
                         ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                     }),
                 },
@@ -892,7 +892,7 @@ module replica {
                     val can_send_finalize = and {
                         can_certify(id, cert_block_val),
                         not(parent_conflicted),
-                        self.certified.get(cert_view_num) == EMPTY_BLOCK,
+                        self.certified.get(cert_view_num) == None,
                         not(has_sent_finalize(id, cert_view_num)),
                         not(has_sent_nullify(id, cert_view_num)),
                     }
@@ -912,7 +912,7 @@ module replica {
                                     ...self,
                                     advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
                                     ghost_last_seen_notarization: seen_notarization,
-                                    certified: self.certified.put(cert_view_num, cert_block_val),
+                                    certified: self.certified.put(cert_view_num, Some(cert_block_val)),
                                     ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
                                 }, cert_view_num + 1)
                             ),
@@ -1270,7 +1270,7 @@ module replica {
 
     val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
-        VIEWS.forall(v => self.notarized.get(v) != EMPTY_BLOCK iff has_notarized_view(id, v, sent_vote))
+        VIEWS.forall(v => is_some(self.notarized.get(v)) iff has_notarized_view(id, v, sent_vote))
     })
 
     // Learned parent references must always point to an older view.

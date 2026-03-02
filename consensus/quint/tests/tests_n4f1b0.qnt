@@ -19,7 +19,6 @@ module tests {
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
     pure val CERTIFY_FAIL_INV_B3_BLOCK = Map(
-        EMPTY_BLOCK -> true,
         GENESIS_BLOCK -> true,
         "val_b0" -> true,
         "val_b1" -> true,
@@ -152,7 +151,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n2"))
             .then(all {
                 assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("inv_b3"))),
-                assert(replica_state.get("n0").certified.get(FIRST_VIEW) == EMPTY_BLOCK),
+                assert(replica_state.get("n0").certified.get(FIRST_VIEW) == None),
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
                 assert(not(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v)))),
                 assert(replica_state.get("n0").view == FIRST_VIEW),

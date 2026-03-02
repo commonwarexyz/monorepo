@@ -21,7 +21,6 @@ module types {
     type ReplicaKey = str
 
     pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
-    pure val EMPTY_BLOCK = "EMPTY_BLOCK"
 
     pure val GENESIS_VIEW = 0
     pure val FIRST_VIEW = 1
@@ -187,8 +186,8 @@ module types {
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
         // block this replica has notarized per view
-        notarized: ViewNumber -> Block,
+        notarized: ViewNumber -> Option[Block],
         // block this replica has certified per view
-        certified: ViewNumber -> Block
+        certified: ViewNumber -> Option[Block]
     }
 }
