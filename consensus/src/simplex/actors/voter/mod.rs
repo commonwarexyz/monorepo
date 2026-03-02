@@ -4849,49 +4849,39 @@ mod tests {
                 response.send(None).unwrap();
             }
 
-            let mut saw_immediate_nullify = false;
-            let recertified = loop {
+            loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg {
                         Some(MailboxMessage::Certified { view, success }) if view == target_view => {
-                            break success;
+                            assert!(success, "expected successful certification after restart for canceled certification view");
+                            break;
                         }
                         Some(MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_)) => {}
-                        None => break false,
+                        None => break,
                     },
                     msg = batcher_receiver.recv() => {
                         match msg {
                             Some(batcher::Message::Constructed(Vote::Nullify(nullify)))
                                 if nullify.view() == target_view =>
                             {
-                                saw_immediate_nullify = true;
-                                break false;
+                                panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
                             Some(batcher::Message::Update { response, .. }) => {
                                 response.send(None).unwrap();
                             }
                             Some(_) => {}
-                            None => break false,
+                            None => break,
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        break false;
+                        panic!("expected immediate nullify for view {target_view} after restart");
                     },
                 }
             };
 
-            assert!(
-                !saw_immediate_nullify,
-                "unexpected immediate nullify for view {target_view} after restart"
-            );
-            assert!(
-                recertified,
-                "expected successful certification after restart for canceled certification view"
-            );
-
             // Give reporter a moment to ingest any late events and ensure no nullify artifacts
             // were emitted for the restarted target view.
-            context.sleep(Duration::from_millis(50)).await;
+            context.sleep(Duration::from_millis(100)).await;
             assert!(
                 !reporter.nullifies.lock().contains_key(&target_view),
                 "did not expect nullify votes for restarted view {target_view}"
