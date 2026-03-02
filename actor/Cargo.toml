@@ -24,7 +24,6 @@ tracing.workspace = true
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async"] }
