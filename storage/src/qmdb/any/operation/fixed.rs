@@ -108,13 +108,13 @@ where
                     ensure_zeros(buf, V::SIZE)?;
                     None
                 };
-                let floor_loc = u64::read(buf)?;
-                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
-                    CodecError::Invalid(
+                let floor_loc = Location::new(u64::read(buf)?);
+                if !floor_loc.is_valid() {
+                    return Err(CodecError::Invalid(
                         "storage::qmdb::any::operation::fixed::Operation",
                         "commit floor location overflow",
-                    )
-                })?;
+                    ));
+                }
                 ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
                 Ok(Self::CommitFloor(metadata, floor_loc))
             }

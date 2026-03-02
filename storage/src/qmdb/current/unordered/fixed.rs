@@ -339,7 +339,7 @@ pub mod test {
             assert!(!CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &[],
                 &[],
                 &root,
@@ -364,7 +364,7 @@ pub mod test {
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
-                let loc = Location::new_unchecked(loc);
+                let loc = Location::new(loc);
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
@@ -425,8 +425,7 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
-                {
+                let (key, value) = match db.any.log.read(Location::new(i)).await.unwrap() {
                     Operation::Update(UnorderedUpdate(key, value)) => (key, value),
                     Operation::CommitFloor(_, _) => continue,
                     Operation::Delete(_) => {

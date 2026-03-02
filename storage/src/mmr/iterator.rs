@@ -270,10 +270,7 @@ mod tests {
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
             let leaf_loc_got = Location::try_from(leaf_pos).unwrap();
-            assert_eq!(
-                leaf_loc_got,
-                Location::new_unchecked(leaf_loc_expected as u64)
-            );
+            assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = Position::try_from(leaf_loc_got).unwrap();
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..*leaf_pos {

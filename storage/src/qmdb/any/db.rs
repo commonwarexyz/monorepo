@@ -235,7 +235,7 @@ where
                 build_snapshot_from_log(inactivity_floor_loc, &reader, &mut index, callback)
                     .await?;
             (
-                Location::new_unchecked(last_commit_loc),
+                Location::new(last_commit_loc),
                 inactivity_floor_loc,
                 active_keys,
             )
@@ -442,7 +442,7 @@ where
         on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error> {
         let reader = self.log.reader().await;
-        let tip = Location::new_unchecked(reader.bounds().end);
+        let tip = Location::new(reader.bounds().end);
         let steps_to_take = self.durable_state.steps + 1;
         self.durable_state.steps = 0;
 
@@ -480,7 +480,7 @@ where
                 helper.move_op_if_active(op, loc).await?,
                 "op should be active based on status bitmap"
             );
-            let new_loc = Location::new_unchecked(status.len());
+            let new_loc = Location::new(status.len());
             status.push(true);
             on_move(loc, new_loc);
         }
@@ -574,7 +574,7 @@ where
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
-        Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
+        Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {

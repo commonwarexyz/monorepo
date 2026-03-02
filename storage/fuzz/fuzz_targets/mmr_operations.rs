@@ -301,7 +301,7 @@ fn fuzz(input: FuzzInput) {
                     }
                     let location_idx = (*location as usize) % reference.leaf_positions.len();
                     let test_element_pos = reference.leaf_positions[location_idx];
-                    let loc = Location::new(location_idx as u64).unwrap();
+                    let loc = Location::new(location_idx as u64);
                     if test_element_pos >= mmr.size() || test_element_pos < mmr.bounds().start {
                         continue;
                     }

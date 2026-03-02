@@ -41,9 +41,16 @@ impl<D: Digest> Read for Target<D> {
                 "lower_bound >= upper_bound",
             ));
         }
+        let end = Location::new(upper_bound);
+        if !end.is_valid() {
+            return Err(CodecError::Invalid(
+                "storage::qmdb::sync::Target",
+                "upper_bound exceeds MAX_LOCATION",
+            ));
+        }
         Ok(Self {
             root,
-            range: Location::new_unchecked(lower_bound)..Location::new_unchecked(upper_bound),
+            range: Location::new(lower_bound)..end,
         })
     }
 }
@@ -56,11 +63,11 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::mmr::MAX_LOCATION;
         let root = u.arbitrary()?;
-        let lower = u.int_in_range(0..=MAX_LOCATION - 1)?;
-        let upper = u.int_in_range(lower + 1..=MAX_LOCATION)?;
+        let lower = u.int_in_range(0..=*MAX_LOCATION - 1)?;
+        let upper = u.int_in_range(lower + 1..=*MAX_LOCATION)?;
         Ok(Self {
             root,
-            range: Location::new_unchecked(lower)..Location::new_unchecked(upper),
+            range: Location::new(lower)..Location::new(upper),
         })
     }
 }
@@ -110,7 +117,7 @@ mod tests {
     fn test_sync_target_serialization() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            range: Location::new_unchecked(100)..Location::new_unchecked(500),
+            range: Location::new(100)..Location::new(500),
         };
 
         // Serialize
@@ -134,7 +141,7 @@ mod tests {
     fn test_sync_target_read_invalid_bounds() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            range: Location::new_unchecked(100)..Location::new_unchecked(50), // invalid: lower > upper
+            range: Location::new(100)..Location::new(50), // invalid: lower > upper
         };
 
         let mut buffer = Vec::new();
@@ -151,32 +158,32 @@ mod tests {
 
     #[rstest]
     #[case::valid_update(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new(50)..Location::new(200) },
         Ok(())
     )]
     #[case::lower_gt_upper(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(200)..Location::new_unchecked(100) },
-        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new_unchecked(200), upper_bound_pos: Location::new_unchecked(100) }))
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new(200)..Location::new(100) },
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new(200), upper_bound_pos: Location::new(100) }))
     )]
     #[case::moves_backward(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(50) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new(0)..Location::new(50) },
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
             old: Target {
                 root: sha256::Digest::from([0; 32]),
-                range: Location::new_unchecked(0)..Location::new_unchecked(100),
+                range: Location::new(0)..Location::new(100),
             },
             new: Target {
                 root: sha256::Digest::from([1; 32]),
-                range: Location::new_unchecked(0)..Location::new_unchecked(50),
+                range: Location::new(0)..Location::new(50),
             },
         }))
     )]
     #[case::same_root(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(50)..Location::new(200) },
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged))
     )]
     fn test_validate_update(

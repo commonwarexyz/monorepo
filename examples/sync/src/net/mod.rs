@@ -149,8 +149,8 @@ mod tests {
         let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(10).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(10),
             max_ops: NZU64!(50),
         };
         assert!(request.validate().is_ok());
@@ -158,8 +158,8 @@ mod tests {
         // Invalid start_loc
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(100).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(100),
             max_ops: NZU64!(50),
         };
         assert!(matches!(
@@ -170,8 +170,8 @@ mod tests {
         // start_loc beyond size
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(150).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(150),
             max_ops: NZU64!(50),
         };
         assert!(matches!(

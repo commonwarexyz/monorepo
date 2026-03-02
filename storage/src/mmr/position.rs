@@ -169,12 +169,12 @@ impl From<Position> for u64 {
 /// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
 /// use core::convert::TryFrom;
 ///
-/// let loc = Location::new(5).unwrap();
+/// let loc = Location::new(5);
 /// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
 ///
 /// // Invalid locations return error
-/// assert!(Location::new(MAX_LOCATION + 1).is_none());
+/// assert!(!Location::new(*MAX_LOCATION + 1).is_valid());
 /// ```
 impl TryFrom<Location> for Position {
     type Error = super::Error;
@@ -346,22 +346,22 @@ mod tests {
     #[test]
     fn test_from_location() {
         const CASES: &[(Location, Position)] = &[
-            (Location::new_unchecked(0), Position::new(0)),
-            (Location::new_unchecked(1), Position::new(1)),
-            (Location::new_unchecked(2), Position::new(3)),
-            (Location::new_unchecked(3), Position::new(4)),
-            (Location::new_unchecked(4), Position::new(7)),
-            (Location::new_unchecked(5), Position::new(8)),
-            (Location::new_unchecked(6), Position::new(10)),
-            (Location::new_unchecked(7), Position::new(11)),
-            (Location::new_unchecked(8), Position::new(15)),
-            (Location::new_unchecked(9), Position::new(16)),
-            (Location::new_unchecked(10), Position::new(18)),
-            (Location::new_unchecked(11), Position::new(19)),
-            (Location::new_unchecked(12), Position::new(22)),
-            (Location::new_unchecked(13), Position::new(23)),
-            (Location::new_unchecked(14), Position::new(25)),
-            (Location::new_unchecked(15), Position::new(26)),
+            (Location::new(0), Position::new(0)),
+            (Location::new(1), Position::new(1)),
+            (Location::new(2), Position::new(3)),
+            (Location::new(3), Position::new(4)),
+            (Location::new(4), Position::new(7)),
+            (Location::new(5), Position::new(8)),
+            (Location::new(6), Position::new(10)),
+            (Location::new(7), Position::new(11)),
+            (Location::new(8), Position::new(15)),
+            (Location::new(9), Position::new(16)),
+            (Location::new(10), Position::new(18)),
+            (Location::new(11), Position::new(19)),
+            (Location::new(12), Position::new(22)),
+            (Location::new(13), Position::new(23)),
+            (Location::new(14), Position::new(25)),
+            (Location::new(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
             let pos = Position::try_from(*loc).unwrap();
@@ -500,8 +500,7 @@ mod tests {
 
         // Verify relationship with MAX_LOCATION
         // Converting MAX_LOCATION to position should give a value < MAX_POSITION
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-        let last_leaf_pos = Position::try_from(max_loc).unwrap();
+        let last_leaf_pos = Position::try_from(MAX_LOCATION).unwrap();
         assert!(*last_leaf_pos < MAX_POSITION);
     }
 

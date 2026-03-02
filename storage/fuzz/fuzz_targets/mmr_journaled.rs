@@ -222,7 +222,7 @@ fn fuzz(input: FuzzInput) {
 
                     if mmr.leaves() > 0 {
                         let location = location % mmr.leaves().as_u64();
-                        let location = Location::new(location).unwrap();
+                        let location = Location::new(location);
                         let position = Position::try_from(location).unwrap();
                         let bounds = mmr.bounds();
                         if bounds.contains(&position) {
@@ -256,7 +256,7 @@ fn fuzz(input: FuzzInput) {
 
                     if mmr.leaves() > 0 {
                         let range =
-                            Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+                            Location::new(start_loc)..Location::new(end_loc);
                         let start_pos = Position::try_from(range.start).unwrap();
 
                         if start_loc < mmr.leaves()
@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                                 assert!(proof.verify_range_inclusion(
                                     &mut hasher,
                                     &leaves[range.to_usize_range()],
-                                    Location::new(start_loc).unwrap(),
+                                    Location::new(start_loc),
                                     &root
                                 ));
                             }
@@ -281,7 +281,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = start_loc as u64;
                     let end_loc = (end_loc as u64).clamp(start_loc, u8::MAX as u64);
                     let range =
-                        Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+                        Location::new(start_loc)..Location::new(end_loc);
                     let requested_leaves = if historical_sizes.is_empty() {
                         match &mmr {
                             MmrState::Clean(m) => m.leaves(),

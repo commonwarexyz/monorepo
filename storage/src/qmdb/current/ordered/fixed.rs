@@ -348,7 +348,7 @@ pub mod test {
             assert!(!CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &[],
                 &[],
                 &root,
@@ -369,7 +369,7 @@ pub mod test {
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
-                let loc = Location::new_unchecked(loc);
+                let loc = Location::new(loc);
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
@@ -434,7 +434,7 @@ pub mod test {
             // Requesting a range proof at location 0 (in the pruned range) should return
             // OperationPruned, not panic.
             let result = db
-                .range_proof(hasher.inner(), Location::new_unchecked(0), NZU64!(1))
+                .range_proof(hasher.inner(), Location::new(0), NZU64!(1))
                 .await;
             assert!(
                 matches!(result, Err(Error::OperationPruned(_))),
@@ -473,7 +473,7 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
+                let op = db.any.log.read(Location::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
                     Operation::CommitFloor(_, _) => continue,
