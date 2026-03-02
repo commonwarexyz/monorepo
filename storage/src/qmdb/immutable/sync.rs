@@ -74,8 +74,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     page_cache: db_config.page_cache.clone(),
                 },
-                range: Position::try_from(range.start)?
-                    ..Position::try_from(range.end.saturating_add(1))?,
+                range: Position::try_from(range.start)?..Position::try_from(range.end)?,
                 pinned_nodes,
             },
             &mut hasher,

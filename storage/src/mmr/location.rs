@@ -1,7 +1,6 @@
 use super::position::Position;
-use crate::mmr::MAX_POSITION;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Read, ReadExt};
+use commonware_codec::{varint::UInt, Read, ReadExt};
 use core::{
     convert::TryFrom,
     fmt,
@@ -9,46 +8,29 @@ use core::{
 };
 use thiserror::Error;
 
-/// Maximum valid [Location] value that can exist in a valid MMR.
+/// Maximum valid [Location] value: the largest leaf count an MMR can hold.
 ///
-/// This limit exists because the total MMR size (number of nodes) must be representable in a u64
-/// with at least one leading zero bit for validity checking. The MMR size for N leaves is:
-///
-/// ```text
-/// MMR_size = 2*N - popcount(N)
-/// ```
-///
-/// where `popcount(N)` is the number of set bits in N (the number of binary trees in the MMR forest).
-///
-/// The worst case occurs when N is a power of 2 (popcount = 1), giving `MMR_size = 2*N - 1`.
-///
-/// For validity, we require `MMR_size < 2^63` (top bit clear), which gives us:
+/// An MMR with N leaves has `2*N - popcount(N)` nodes. We require `size < 2^63` (top bit clear).
+/// The worst case is `N = 2^62` (a power of two, `popcount = 1`):
 ///
 /// ```text
-/// 2*N - 1 < 2^63
-/// 2*N < 2^63 + 1
-/// N <= 2^62
+/// 2*N - 1 < 2^63  =>  N <= 2^62
 /// ```
 ///
-/// Therefore, the maximum number of leaves is `2^62`, and the maximum location (0-indexed) is `2^62 - 1`.
+/// Therefore the maximum leaf count is `2^62` and `MAX_LOCATION = 2^62`.
 ///
-/// ## Verification
-///
-/// For `N = 2^62` leaves (worst case):
-/// - `MMR_size = 2 * 2^62 - 1 = 2^63 - 1 = 0x7FFF_FFFF_FFFF_FFFF`
-/// - Leading zeros: 1
-///
-/// For `N = 2^62 + 1` leaves:
-/// - `2 * N = 2^63 + 2` (exceeds maximum valid MMR size)
-pub const MAX_LOCATION: Location = Location(0x3FFF_FFFF_FFFF_FFFF); // 2^62 - 1
+/// Leaf indices are 0-based, so valid indices satisfy `loc < MAX_LOCATION` (i.e., `0..=2^62 - 1`).
+/// Leaf counts and exclusive range-ends satisfy `loc <= MAX_LOCATION`.
+pub const MAX_LOCATION: Location = Location(0x4000_0000_0000_0000); // 2^62
 
-/// A [Location] is an index into an MMR's _leaves_.
-/// This is in contrast to a [Position], which is an index into an MMR's _nodes_.
+/// A [Location] is a leaf index or leaf count in an MMR.
+/// This is in contrast to a [Position], which is a node index or node count.
 ///
 /// # Limits
 ///
-/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
-/// can be safely converted to [Position]. Use [Location::is_valid] to check.
+/// Values up to [MAX_LOCATION] are valid (see [Location::is_valid]). As a 0-based leaf index,
+/// valid indices are `0..MAX_LOCATION - 1`. As a leaf count or exclusive range-end, the maximum
+/// is `MAX_LOCATION` itself.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
 
@@ -73,7 +55,8 @@ impl Location {
         self.0
     }
 
-    /// Returns `true` iff this location can be safely converted to a [Position].
+    /// Returns `true` iff this value is within the valid range (`<= MAX_LOCATION`).
+    /// This covers both leaf indices (`< MAX_LOCATION`) and leaf counts (`<= MAX_LOCATION`).
     #[inline]
     pub const fn is_valid(self) -> bool {
         self.0 <= MAX_LOCATION.0
@@ -159,14 +142,14 @@ impl From<Location> for u64 {
 impl commonware_codec::Write for Location {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        commonware_codec::varint::UInt(self.0).write(buf);
+        UInt(self.0).write(buf);
     }
 }
 
 impl commonware_codec::EncodeSize for Location {
     #[inline]
     fn encode_size(&self) -> usize {
-        commonware_codec::varint::UInt(self.0).encode_size()
+        UInt(self.0).encode_size()
     }
 }
 
@@ -175,7 +158,7 @@ impl Read for Location {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
+        let value: u64 = UInt::read(buf)?.into();
         let loc = Self::new(value);
         if loc.is_valid() {
             Ok(loc)
@@ -308,8 +291,8 @@ impl TryFrom<Position> for Location {
     /// This computation is O(log2(n)) in the given position.
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
-        // Reject positions beyond the valid MMR range. This ensures `pos + 1` won't overflow below.
-        if *pos > *MAX_POSITION {
+        // Reject positions beyond the valid range.
+        if !pos.is_valid() {
             return Err(LocationError::Overflow(pos));
         }
         // Position 0 is always the first leaf at location 0.
@@ -437,9 +420,9 @@ mod tests {
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
         assert_eq!(err, LocationError::Overflow(overflow_pos));
 
-        // MAX_POSITION doesn't overflow and isn't a leaf
+        // MAX_POSITION is the leaf at MAX_LOCATION
         let result = Location::try_from(MAX_POSITION);
-        assert_eq!(result, Err(LocationError::NonLeaf(MAX_POSITION)));
+        assert_eq!(result, Ok(MAX_LOCATION));
 
         let overflow_pos = MAX_POSITION + 1;
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
@@ -549,22 +532,25 @@ mod tests {
 
     #[test]
     fn test_max_location_boundary() {
-        // MAX_LOCATION should convert successfully
+        // MAX_LOCATION (2^62) is the max leaf count. It should be valid and convert to
+        // MAX_POSITION (2^63 - 1).
         assert!(MAX_LOCATION.is_valid());
         let pos = Position::try_from(MAX_LOCATION).unwrap();
-        // For MAX_LOCATION = 2^62 - 1 = 0x3FFFFFFFFFFFFFFF, popcount = 62
-        // Position = 2 * (2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
-        let expected = (1u64 << 63) - 64;
-        assert_eq!(*pos, expected);
+        assert_eq!(pos, crate::mmr::MAX_POSITION);
+        assert!(pos.is_valid());
+
+        // MAX_POSITION converts back to MAX_LOCATION (they are the same leaf).
+        let loc = Location::try_from(pos).unwrap();
+        assert_eq!(loc, MAX_LOCATION);
     }
 
     #[test]
     fn test_overflow_location_returns_error() {
-        // MAX_LOCATION + 1 should return error
+        // MAX_LOCATION + 1 exceeds the valid range
         let over_loc = Location::new(*MAX_LOCATION + 1);
+        assert!(!over_loc.is_valid());
         assert!(Position::try_from(over_loc).is_err());
 
-        // Verify the error message
         match Position::try_from(over_loc) {
             Err(crate::mmr::Error::LocationOverflow(loc)) => {
                 assert_eq!(loc, over_loc);
@@ -597,11 +583,11 @@ mod tests {
 
     #[test]
     fn test_read_cfg_invalid_values() {
-        use commonware_codec::{Encode, ReadExt};
+        use commonware_codec::{varint::UInt, Encode, ReadExt};
 
         // Encode MAX_LOCATION + 1 as a raw varint, then try to decode as Location
         let invalid_value = *MAX_LOCATION + 1;
-        let encoded = commonware_codec::varint::UInt(invalid_value).encode();
+        let encoded = UInt(invalid_value).encode();
         let result = Location::read(&mut encoded.as_ref());
         assert!(result.is_err());
         assert!(matches!(
@@ -610,7 +596,7 @@ mod tests {
         ));
 
         // Encode u64::MAX as a raw varint
-        let encoded = commonware_codec::varint::UInt(u64::MAX).encode();
+        let encoded = UInt(u64::MAX).encode();
         let result = Location::read(&mut encoded.as_ref());
         assert!(result.is_err());
         assert!(matches!(

@@ -33,24 +33,23 @@ impl<D: Digest> Read for Target<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let lower_bound = u64::read(buf)?;
-        let upper_bound = u64::read(buf)?;
-        if lower_bound >= upper_bound {
+        let start = Location::new(u64::read(buf)?);
+        let end = Location::new(u64::read(buf)?);
+        if start >= end {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
                 "lower_bound >= upper_bound",
             ));
         }
-        let end = Location::new(upper_bound);
-        if !end.is_valid() {
+        if !start.is_valid() || !end.is_valid() {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
-                "upper_bound exceeds MAX_LOCATION",
+                "range bounds out of valid range",
             ));
         }
         Ok(Self {
             root,
-            range: Location::new(lower_bound)..end,
+            range: start..end,
         })
     }
 }
