@@ -46,7 +46,7 @@ pub struct TimeoutEntry {
 }
 
 impl TimeoutEntry {
-    const fn new(waiter_id: WaiterId, target_tick: Tick) -> Self {
+    fn new(waiter_id: WaiterId, target_tick: Tick) -> Self {
         Self {
             waiter_id,
             target_tick,
@@ -88,7 +88,7 @@ impl TimeoutWheel {
     /// We keep wheel arithmetic in `u64` nanoseconds for fast integer tick math.
     /// This intentionally prefers safety over precision for very large values.
     /// Callers that require bounded precision should clamp before conversion.
-    const fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    fn duration_to_nanos_saturating(duration: Duration) -> u64 {
         duration
             .as_secs()
             .saturating_mul(1_000_000_000)
@@ -119,10 +119,6 @@ impl TimeoutWheel {
         assert!(tick_nanos > 0, "timeout wheel tick must be non-zero");
         let max_timeout = max_timeout.max(tick);
         let slots = Self::slots_for(max_timeout, tick_nanos);
-        assert!(
-            slots.is_power_of_two(),
-            "timeout wheel slots must be power of two"
-        );
 
         let mut buckets = Vec::with_capacity(slots);
         buckets.resize_with(slots, Vec::new);
@@ -168,8 +164,8 @@ impl TimeoutWheel {
     /// - Callers must eventually pair this with exactly one `remove_active_deadline`.
     pub fn schedule(&mut self, waiter_id: WaiterId, target_tick: Tick) {
         let delta = target_tick.wrapping_sub(self.current_tick);
-        debug_assert!(delta > 0, "target_tick must be in the future");
-        debug_assert!(
+        assert!(delta > 0, "target_tick must be in the future");
+        assert!(
             delta < self.buckets.len() as Tick,
             "target_tick exceeds timeout wheel horizon"
         );
@@ -230,7 +226,7 @@ impl TimeoutWheel {
     }
 
     /// Return whether any active deadline-tracked waiters exist.
-    pub const fn has_active_deadlines(&self) -> bool {
+    pub fn has_active_deadlines(&self) -> bool {
         self.active_deadlines != 0
     }
 
@@ -318,7 +314,7 @@ impl TimeoutWheel {
     /// For precise results, callers should consume entries returned by
     /// `advance` and call `remove_active_deadline` for each active expiry
     /// before querying this method.
-    pub const fn timeout_until_next_deadline(&self) -> Option<Duration> {
+    pub fn timeout_until_next_deadline(&self) -> Option<Duration> {
         if self.min_scheduled_tick == Tick::MAX {
             return None;
         }
@@ -338,7 +334,7 @@ impl TimeoutWheel {
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 let slot = word_index * 64 + bit;
-                debug_assert!(
+                assert!(
                     slot < self.buckets.len(),
                     "occupied bitset contains out-of-range slot index"
                 );
@@ -363,7 +359,7 @@ impl TimeoutWheel {
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 let slot = word_index * 64 + bit;
-                debug_assert!(
+                assert!(
                     slot < self.active_counts.len(),
                     "active bitset contains out-of-range slot index"
                 );
@@ -376,13 +372,13 @@ impl TimeoutWheel {
     }
 
     #[inline]
-    const fn slot_index(&self, tick: Tick) -> usize {
+    fn slot_index(&self, tick: Tick) -> usize {
         (tick as usize) & self.slot_mask
     }
 
     #[inline]
     fn set_occupied(&mut self, slot: usize) {
-        debug_assert_eq!(self.occupied[slot / 64] & (1u64 << (slot % 64)), 0);
+        assert_eq!(self.occupied[slot / 64] & (1u64 << (slot % 64)), 0);
         self.occupied[slot / 64] |= 1u64 << (slot % 64);
         self.occupied_slots += 1;
     }
@@ -418,9 +414,6 @@ impl TimeoutWheel {
             let word_start = word_index * 64;
             let range_start = start.max(word_start);
             let range_end = end.min(word_start + 64);
-            if range_start >= range_end {
-                continue;
-            }
 
             let lo = range_start - word_start;
             let hi = range_end - word_start;
@@ -439,7 +432,7 @@ impl TimeoutWheel {
                 let bit = word.trailing_zeros() as usize;
                 let slot = word_start + bit;
                 let bucket = &mut self.buckets[slot];
-                debug_assert!(
+                assert!(
                     !bucket.is_empty(),
                     "occupied bit set for empty timeout bucket"
                 );
@@ -501,6 +494,8 @@ impl TimeoutWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     const TICK: Duration = Duration::from_millis(5);
 
     fn wheel(max_timeout: Duration) -> TimeoutWheel {
@@ -518,63 +513,37 @@ mod tests {
     }
 
     #[test]
-    fn test_slots_for_rounds_up_to_power_of_two() {
+    fn test_tick_math_and_target_tick_cases() {
         let tick_nanos = TimeoutWheel::duration_to_nanos_saturating(TICK);
         // 60s / 5ms = 12_000 ticks, plus 1 guard tick => 12_001, next pow2 => 16_384.
         assert_eq!(
             TimeoutWheel::slots_for(Duration::from_secs(60), tick_nanos),
             16_384
         );
-    }
-
-    #[test]
-    fn test_slots_for_sub_tick_timeout_clamps_to_tick() {
-        let tick_nanos = TimeoutWheel::duration_to_nanos_saturating(TICK);
         assert_eq!(
             TimeoutWheel::slots_for(Duration::from_nanos(1), tick_nanos),
             2
         );
-    }
 
-    #[test]
-    fn test_tick_at_sanity() {
         let start = Instant::now();
-        let wheel = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
-
-        assert_eq!(wheel.tick_at(start), 0);
-        assert_eq!(wheel.tick_at(start + Duration::from_millis(4)), 0);
-        assert_eq!(wheel.tick_at(start + Duration::from_millis(5)), 1);
-        assert_eq!(wheel.tick_at(start + Duration::from_millis(12)), 2);
-    }
-
-    #[test]
-    fn test_target_tick_clamps_to_tick_and_max_timeout() {
-        let start = Instant::now();
-        let wheel = wheel(Duration::from_millis(100));
-        let now = start;
+        let mut wheel = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
+        for (at, expected) in [(0u64, 0u64), (4, 0), (5, 1), (12, 2)] {
+            assert_eq!(wheel.tick_at(start + Duration::from_millis(at)), expected);
+        }
 
         // Past deadline clamps to one tick.
         let past_deadline = start.checked_sub(Duration::from_millis(1)).unwrap_or(start);
-        let target_tick = wheel.target_tick_for_deadline(past_deadline, now);
-        assert_eq!(target_tick, 1);
+        assert_eq!(wheel.target_tick_for_deadline(past_deadline, start), 1);
 
         // Very far deadline clamps to max_timeout (100ms => 20 ticks at 5ms).
         let far_deadline = start + Duration::from_secs(10);
-        let target_tick = wheel.target_tick_for_deadline(far_deadline, now);
-        assert_eq!(target_tick, 20);
-    }
+        assert_eq!(wheel.target_tick_for_deadline(far_deadline, start), 20);
 
-    #[test]
-    fn test_target_tick_with_non_zero_current_tick() {
-        let start = Instant::now();
-        let mut wheel = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
+        // Target tick should be computed relative to current_tick after advances.
         assert!(advance(&mut wheel, 7).is_empty());
-        assert_eq!(wheel.current_tick, 7);
-
         let now = start + Duration::from_millis(35);
         let deadline = now + Duration::from_millis(12); // ceil(12/5)=3 ticks.
-        let target_tick = wheel.target_tick_for_deadline(deadline, now);
-        assert_eq!(target_tick, 10);
+        assert_eq!(wheel.target_tick_for_deadline(deadline, now), 10);
     }
 
     #[test]
@@ -673,52 +642,31 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_purge_idle_stale() {
+    fn test_idle_purge_and_alignment_paths() {
         let mut wheel = wheel(Duration::from_millis(100));
         wheel.schedule(WaiterId::from_slot(1), 2);
         wheel.remove_active_deadline(2);
-
-        // Stale entry exists but no active deadlines.
         assert_ne!(wheel.occupied_slots, 0);
         wheel.maybe_purge_idle_stale();
         assert_eq!(wheel.occupied_slots, 0);
-    }
 
-    #[test]
-    fn test_maybe_purge_idle_stale_noop_with_active_deadlines() {
-        let mut wheel = wheel(Duration::from_millis(100));
         wheel.schedule(WaiterId::from_slot(1), 2);
-
         let before = wheel.occupied_slots;
         wheel.maybe_purge_idle_stale();
         assert_eq!(wheel.occupied_slots, before);
-    }
 
-    #[test]
-    fn test_align_idle_to_now() {
         let start = Instant::now();
-        let mut wheel = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
-        assert_eq!(wheel.current_tick, 0);
+        let mut idle = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
+        assert_eq!(idle.current_tick, 0);
+        idle.align_idle_to_now(start + Duration::from_millis(50));
+        assert_eq!(idle.current_tick, 10); // 50ms / 5ms
+        idle.schedule(WaiterId::from_slot(1), 12);
+        assert_eq!(idle.min_scheduled_tick, 12);
 
-        // Simulate idle period, then align.
-        let later = start + Duration::from_millis(50);
-        wheel.align_idle_to_now(later);
-        assert_eq!(wheel.current_tick, 10); // 50ms / 5ms
-
-        // Schedule should be relative to aligned tick.
-        wheel.schedule(WaiterId::from_slot(1), 12);
-        assert_eq!(wheel.min_scheduled_tick, 12);
-    }
-
-    #[test]
-    fn test_align_idle_to_now_noop_with_active_deadlines() {
-        let start = Instant::now();
-        let mut wheel = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
-        wheel.schedule(WaiterId::from_slot(1), 2);
-
-        let later = start + Duration::from_millis(50);
-        wheel.align_idle_to_now(later);
-        assert_eq!(wheel.current_tick, 0); // unchanged
+        let mut active = TimeoutWheel::new(Duration::from_millis(100), TICK, start);
+        active.schedule(WaiterId::from_slot(1), 2);
+        active.align_idle_to_now(start + Duration::from_millis(50));
+        assert_eq!(active.current_tick, 0); // unchanged
     }
 
     #[test]
@@ -919,22 +867,177 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_set_range_across_word_boundary() {
-        let mut bits = vec![0u64; 2];
-        bits[0] |= 1u64 << 63;
-        bits[1] |= 1u64 << 0;
-        bits[1] |= 1u64 << 1;
-
-        assert_eq!(TimeoutWheel::scan_set_range(&bits, 62, 66), Some(63));
-        assert_eq!(TimeoutWheel::scan_set_range(&bits, 64, 66), Some(64));
-        assert_eq!(TimeoutWheel::scan_set_range(&bits, 65, 66), Some(65));
-        assert_eq!(TimeoutWheel::scan_set_range(&bits, 66, 66), None);
-    }
-
-    #[test]
     fn test_timeout_entry_preserves_full_target_tick() {
         let tick = (1u64 << 32) + 5;
         let entry = TimeoutEntry::new(WaiterId::from_slot(7), tick);
         assert_eq!(entry.target_tick, tick);
+    }
+
+    #[test]
+    fn test_duration_to_nanos_saturating_extremes() {
+        assert_eq!(
+            TimeoutWheel::duration_to_nanos_saturating(Duration::MAX),
+            u64::MAX
+        );
+        assert_eq!(
+            TimeoutWheel::duration_to_nanos_saturating(Duration::new(1, 42)),
+            1_000_000_042
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "max_timeout must be non-zero for timeout wheel")]
+    fn test_slots_for_zero_max_timeout_panics() {
+        let tick_nanos = TimeoutWheel::duration_to_nanos_saturating(TICK);
+        let _ = TimeoutWheel::slots_for(Duration::ZERO, tick_nanos);
+    }
+
+    #[test]
+    #[should_panic(expected = "timeout wheel tick must be non-zero")]
+    fn test_slots_for_zero_tick_panics() {
+        let _ = TimeoutWheel::slots_for(Duration::from_millis(1), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "timeout wheel tick must be non-zero")]
+    fn test_new_zero_tick_panics() {
+        let _ = TimeoutWheel::new(Duration::from_millis(100), Duration::ZERO, Instant::now());
+    }
+
+    #[test]
+    fn test_scan_and_min_helper_cases() {
+        let mut bits = vec![0u64; 2];
+        bits[0] |= 1u64 << 63;
+        bits[1] |= 1u64 << 0;
+        bits[1] |= 1u64 << 1;
+        assert_eq!(TimeoutWheel::scan_set_range(&bits, 62, 66), Some(63));
+        assert_eq!(TimeoutWheel::scan_set_range(&bits, 64, 66), Some(64));
+        assert_eq!(TimeoutWheel::scan_set_range(&bits, 65, 66), Some(65));
+        assert_eq!(TimeoutWheel::scan_set_range(&bits, 66, 66), None);
+
+        let empty_bits = vec![0u64; 2];
+        assert_eq!(TimeoutWheel::scan_set_range(&empty_bits, 1, 65), None);
+        assert_eq!(TimeoutWheel::next_set_slot_from(&empty_bits, 64, 128), None);
+        let mut wrapped_bits = empty_bits.clone();
+        wrapped_bits[0] |= 1u64 << 1;
+        assert_eq!(
+            TimeoutWheel::next_set_slot_from(&wrapped_bits, 64, 128),
+            Some(1)
+        );
+
+        let empty_wheel = wheel(Duration::from_millis(100));
+        assert_eq!(empty_wheel.compute_min_active_tick(), Tick::MAX);
+        let mut wrapped_wheel = wheel(Duration::from_millis(100));
+        assert!(advance(&mut wrapped_wheel, 30).is_empty());
+        wrapped_wheel.schedule(WaiterId::from_slot(1), 33);
+        assert_eq!(wrapped_wheel.compute_min_active_tick(), 33);
+    }
+
+    #[test]
+    fn test_drain_occupied_range_empty_interval_noop() {
+        let mut wheel = wheel(Duration::from_millis(100));
+        wheel.schedule(WaiterId::from_slot(1), 2);
+
+        let mut expired = Vec::new();
+        wheel.drain_occupied_range_into(7, 7, &mut expired);
+        assert!(expired.is_empty());
+        assert_eq!(wheel.occupied_slots, 1);
+    }
+
+    #[test]
+    fn test_invariant_assertion_paths() {
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.schedule(WaiterId::from_slot(1), 0);
+            }));
+            assert!(
+                err.is_err(),
+                "schedule should reject non-future target_tick"
+            );
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            let too_far = wheel.buckets.len() as Tick;
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.schedule(WaiterId::from_slot(1), too_far);
+            }));
+            assert!(err.is_err(), "schedule should reject horizon overflow");
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.remove_active_deadline(1);
+            }));
+            assert!(
+                err.is_err(),
+                "remove_active_deadline should reject active_deadlines underflow"
+            );
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            wheel.active_deadlines = 1;
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.remove_active_deadline(1);
+            }));
+            assert!(
+                err.is_err(),
+                "remove_active_deadline should reject missing active slot count"
+            );
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            wheel.occupied[0] |= 1;
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.set_occupied(0);
+            }));
+            assert!(err.is_err(), "set_occupied should reject duplicate set");
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            wheel.occupied[0] |= 1;
+            wheel.occupied_slots = 1;
+            let mut expired = Vec::new();
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.drain_occupied_range_into(0, 1, &mut expired);
+            }));
+            assert!(
+                err.is_err(),
+                "drain_occupied_range_into should reject empty occupied bucket"
+            );
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            let invalid_slot = wheel.buckets.len();
+            wheel.occupied[invalid_slot / 64] |= 1u64 << (invalid_slot % 64);
+            wheel.occupied_slots = 1;
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.drain_occupied_buckets(|_| {});
+            }));
+            assert!(
+                err.is_err(),
+                "drain_occupied_buckets should reject out-of-range occupied bit"
+            );
+        }
+
+        {
+            let mut wheel = wheel(Duration::from_millis(100));
+            let invalid_slot = wheel.active_counts.len();
+            wheel.active_occupied[invalid_slot / 64] |= 1u64 << (invalid_slot % 64);
+            wheel.active_deadlines = 1;
+            let err = catch_unwind(AssertUnwindSafe(|| {
+                wheel.clear_all_active();
+            }));
+            assert!(
+                err.is_err(),
+                "clear_all_active should reject out-of-range active bit"
+            );
+        }
     }
 }

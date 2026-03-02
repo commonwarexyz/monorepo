@@ -114,21 +114,22 @@ impl Waker {
             if ret == size_of::<u64>() as isize {
                 return;
             }
-            if ret == -1 {
-                match std::io::Error::last_os_error().raw_os_error() {
-                    // Retry if interrupted by a signal before completion.
-                    Some(libc::EINTR) => continue,
-                    // Non-blocking write would block because the eventfd
-                    // counter is saturated. A wake is already queued, so no
-                    // retry is needed.
-                    Some(libc::EAGAIN) => return,
-                    _ => {
-                        warn!("eventfd write failed");
-                        return;
-                    }
+            assert_eq!(
+                ret, -1,
+                "eventfd write returned unexpected byte count: {ret}"
+            );
+            match std::io::Error::last_os_error().raw_os_error() {
+                // Retry if interrupted by a signal before completion.
+                Some(libc::EINTR) => continue,
+                // Non-blocking write would block because the eventfd
+                // counter is saturated. A wake is already queued, so no
+                // retry is needed.
+                Some(libc::EAGAIN) => return,
+                _ => {
+                    warn!("eventfd write failed");
+                    return;
                 }
             }
-            return;
         }
     }
 
@@ -213,20 +214,21 @@ impl Waker {
                 // resets it to zero in one read.
                 return;
             }
-            if ret == -1 {
-                match std::io::Error::last_os_error().raw_os_error() {
-                    // Retry if interrupted by a signal before completion.
-                    Some(libc::EINTR) => continue,
-                    // Non-blocking read would block because the counter is zero,
-                    // there is nothing left to drain right now.
-                    Some(libc::EAGAIN) => return,
-                    _ => {
-                        tracing::warn!("eventfd read failed");
-                        return;
-                    }
+            assert_eq!(
+                ret, -1,
+                "eventfd read returned unexpected byte count: {ret}"
+            );
+            match std::io::Error::last_os_error().raw_os_error() {
+                // Retry if interrupted by a signal before completion.
+                Some(libc::EINTR) => continue,
+                // Non-blocking read would block because the counter is zero,
+                // there is nothing left to drain right now.
+                Some(libc::EAGAIN) => return,
+                _ => {
+                    tracing::warn!("eventfd read failed");
+                    return;
                 }
             }
-            return;
         }
     }
 
@@ -246,5 +248,118 @@ impl Waker {
                 .push(&wake_poll)
                 .expect("wake poll SQE should always fit in the ring");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use io_uring::IoUring;
+    use std::os::fd::FromRawFd;
+
+    #[test]
+    fn test_publish_arm_disarm_and_submitted() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+        assert_eq!(waker.submitted(), 0);
+
+        // Publish without sleep intent only advances sequence.
+        waker.publish();
+        assert_eq!(waker.submitted(), 1);
+
+        // Arm and publish should trigger a ring; acknowledge drains it.
+        let snapshot = waker.arm();
+        assert_eq!(snapshot, 1);
+        waker.publish();
+        assert_eq!(waker.submitted(), 2);
+        waker.acknowledge();
+        waker.disarm();
+    }
+
+    #[test]
+    fn test_ring_and_acknowledge_noop_when_empty() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        waker.ring();
+        waker.acknowledge();
+        // Second acknowledge should take the non-blocking empty path.
+        waker.acknowledge();
+    }
+
+    #[test]
+    fn test_reinstall_pushes_wake_poll() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+        let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
+
+        let mut sq = ring.submission();
+        let before = sq.len();
+        waker.reinstall(&mut sq);
+        assert_eq!(sq.len(), before + 1);
+    }
+
+    #[test]
+    fn test_ring_and_acknowledge_error_branches() {
+        let mut waker = Waker::new().expect("eventfd creation should succeed");
+
+        // Saturate counter near max so `ring` hits the non-blocking EAGAIN path.
+        let fd = waker.inner.wake_fd.as_raw_fd();
+        let value = u64::MAX - 1;
+        // SAFETY: `fd` is a valid eventfd and `value` points to initialized memory.
+        let wrote = unsafe {
+            libc::write(
+                fd,
+                &value as *const u64 as *const libc::c_void,
+                size_of::<u64>(),
+            )
+        };
+        assert_eq!(wrote, size_of::<u64>() as isize);
+        waker.ring();
+        waker.acknowledge();
+
+        // Close the wake fd so `ring`/`acknowledge` hit the generic error branch.
+        // SAFETY: closing a valid fd is safe.
+        let closed = unsafe { libc::close(fd) };
+        assert_eq!(closed, 0);
+        waker.ring();
+        waker.acknowledge();
+
+        // Replace with a known-good fd so drop doesn't accidentally close a reused
+        // descriptor number from the manually closed one.
+        // SAFETY: `dup` returns a new owned fd on success.
+        let replacement = unsafe { libc::dup(libc::STDIN_FILENO) };
+        assert!(replacement >= 0);
+        let old = {
+            let inner = std::sync::Arc::get_mut(&mut waker.inner).expect("unique waker in test");
+            std::mem::replace(&mut inner.wake_fd, unsafe {
+                std::os::fd::OwnedFd::from_raw_fd(replacement)
+            })
+        };
+        std::mem::forget(old);
+    }
+
+    #[test]
+    fn test_new_error_when_fd_table_exhausted() {
+        let mut held_fds = Vec::new();
+        let devnull = b"/dev/null\0";
+        // SAFETY: `devnull` is a valid nul-terminated path.
+        let base = unsafe { libc::open(devnull.as_ptr().cast(), libc::O_RDONLY) };
+        assert!(base >= 0);
+        // SAFETY: `open` returned an owned descriptor.
+        held_fds.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(base) });
+
+        loop {
+            // SAFETY: source fd is valid while held in `held_fds`.
+            let duped = unsafe { libc::dup(held_fds[0].as_raw_fd()) };
+            if duped >= 0 {
+                // SAFETY: `dup` returned an owned descriptor.
+                held_fds.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(duped) });
+                continue;
+            }
+
+            let err = std::io::Error::last_os_error().raw_os_error();
+            assert_eq!(err, Some(libc::EMFILE));
+            break;
+        }
+
+        assert!(Waker::new().is_err());
     }
 }

@@ -421,7 +421,7 @@ impl IoUringLoop {
         let timeout_wheel =
             TimeoutWheel::new(cfg.max_op_timeout, cfg.timeout_wheel_tick, Instant::now());
         let waiters = Waiters::new(size);
-        debug_assert_eq!(waiters.capacity(), size);
+        assert_eq!(waiters.capacity(), size);
 
         let submitter = Submitter {
             inner: Arc::new(SubmitterInner {
@@ -690,7 +690,7 @@ impl IoUringLoop {
         let active_bulk_cleared = self.timeout_wheel.advance(now_tick, &mut expired);
         for timeout in expired.drain(..) {
             if let Some(cancel_user_data) = self.waiters.cancel(timeout.waiter_id) {
-                debug_assert_eq!(cancel_user_data, timeout.waiter_id.cancel_user_data());
+                assert_eq!(cancel_user_data, timeout.waiter_id.cancel_user_data());
                 if !active_bulk_cleared {
                     self.timeout_wheel
                         .remove_active_deadline(timeout.target_tick);
@@ -701,7 +701,7 @@ impl IoUringLoop {
         self.expired_timeouts = expired;
     }
 
-    const fn earliest_deadline(&self) -> Option<Duration> {
+    fn earliest_deadline(&self) -> Option<Duration> {
         if !self.timeout_wheel.has_active_deadlines() {
             return None;
         }
@@ -862,6 +862,7 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::{
         os::{fd::AsRawFd, unix::net::UnixStream},
+        sync::Arc,
         time::Duration,
     };
 
@@ -919,9 +920,34 @@ mod tests {
         let index2 = waiters.insert(tx2, None, None, None, None);
         assert_eq!(index2.index(), index1.index());
 
-        // Complete remaining waiters and return to empty state.
+        // Complete remaining waiters.
         let _ = waiters.on_completion(index0.op_user_data(), 1);
         let _ = waiters.on_completion(index2.op_user_data(), 2);
+
+        // Also cover vectored buffers and owned iovec lifetimes.
+        let (tx3, _rx3) = oneshot::channel();
+        let vectored = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let iovecs = OpIovecs::new(
+            vec![libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            }]
+            .into_boxed_slice(),
+        );
+        assert!(!iovecs.as_ptr().is_null());
+        let (sock_left, _sock_right) =
+            UnixStream::pair().expect("failed to create unix socket pair");
+        let index3 = waiters.insert(
+            tx3,
+            Some(vectored.into()),
+            Some(OpFd::Fd(Arc::new(sock_left.into()))),
+            Some(iovecs),
+            None,
+        );
+        let waiter = waiters
+            .on_completion(index3.op_user_data(), 9)
+            .expect("missing vectored completion");
+        assert!(matches!(waiter.buffer, Some(OpBuffer::WriteVectored(_))));
         assert!(waiters.is_empty());
     }
 
@@ -959,13 +985,16 @@ mod tests {
         let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
-        // Some kernels accept very large `want` values and simply return success
-        // when there are no CQEs. If this does error, it must not be treated as ETIME.
-        if let Err(err) =
-            iouring.submit_and_wait(&mut ring, usize::MAX, Some(Duration::from_millis(1)))
-        {
-            assert_ne!(err.raw_os_error(), Some(libc::ETIME));
-        }
+        // Force a deterministic kernel error path by closing the ring FD first.
+        let close_result = unsafe { libc::close(ring.as_raw_fd()) };
+        assert_eq!(close_result, 0, "failed to close ring fd in test");
+        let err = iouring
+            .submit_and_wait(&mut ring, 1, Some(Duration::from_millis(1)))
+            .expect_err("submit_and_wait should fail on closed ring fd");
+        assert_ne!(err.raw_os_error(), Some(libc::ETIME));
+
+        // Ring fd is already closed above; avoid running Drop cleanup on invalid fd.
+        std::mem::forget(ring);
     }
 
     #[test]
