@@ -12,6 +12,7 @@ typecheck:
 	quint typecheck main_n4f1b0.qnt
 	quint typecheck main_n4f1b1.qnt
 	quint typecheck main_n5f1b1.qnt
+	quint typecheck twins_n4f1b1.qnt
 
 test:
 	cd tests && quint test tests_n4f1b0.qnt

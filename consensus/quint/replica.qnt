@@ -995,9 +995,14 @@ module replica {
     // On leader timeout or advance timeout firing, broadcast nullify(v).
     action on_timeout(id: ReplicaId): bool = all {
         val self = replica_state.get(id)
+        val leader_mode = not(self.leader_timeout_cancelled)
+        val advance_mode = and { self.leader_timeout_cancelled, not(self.advance_timeout_cancelled) }
         all {
             not(self.nullified),
-
+            or {
+                leader_mode,
+                advance_mode
+            },
             sent_vote' = sent_vote.union(Set(nullify(self.view, id))),
             replica_state' = replica_state.set(id, {
                 ...self,
