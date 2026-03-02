@@ -28,7 +28,7 @@ module replica {
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
-    pure val AllBlocks = VALID_BLOCKS.union(Set(GENESIS_BLOCK, EMPTY_BLOCK)).union(INVALID_BLOCKS)
+    pure val AllBlocks = VALID_BLOCKS.union(Set(GENESIS_BLOCK)).union(INVALID_BLOCKS)
     pure val ParentTrackedBlocks = AllBlocks
     pure val ByzantineSigs = BYZANTINE.map(id => sig_of(id))
     pure val LEADER_INACTIVITY_WINDOW = 2
@@ -76,11 +76,11 @@ module replica {
         }
     }
 
-    pure def vote_block(v: Vote): Block = {
+    pure def vote_block(v: Vote): Option[Block] = {
         match (v) {
-            | Notarize(n) => n.block
-            | Nullify(_) => EMPTY_BLOCK
-            | Finalize(f) => f.block
+            | Notarize(n) => Some(n.block)
+            | Nullify(_) => None
+            | Finalize(f) => Some(f.block)
         }
     }
 
@@ -137,11 +137,11 @@ module replica {
         }
     }
 
-    pure def cert_block(c: Certificate): Block = {
+    pure def cert_block(c: Certificate): Option[Block] = {
         match (c) {
-            | Notarization(n) => n.block
-            | Nullification(_) => EMPTY_BLOCK
-            | Finalization(f) => f.block
+            | Notarization(n) => Some(n.block)
+            | Nullification(_) => None
+            | Finalization(f) => Some(f.block)
         }
     }
 
@@ -224,7 +224,7 @@ module replica {
     pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
         view == GENESIS_VIEW and block == GENESIS_BLOCK,
         select_votes(view, NotarizeKind, votes)
-            .filter(v => vote_block(v) == block)
+            .filter(v => vote_block(v) == Some(block))
             .map(v => vote_sig(v))
             .size() >= Q
     }
@@ -237,7 +237,7 @@ module replica {
     pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
         view == GENESIS_VIEW and block == GENESIS_BLOCK,
         select_votes(view, FinalizeKind, votes)
-            .filter(v => vote_block(v) == block)
+            .filter(v => vote_block(v) == Some(block))
             .map(v => vote_sig(v))
             .size() >= Q
     }
@@ -258,7 +258,7 @@ module replica {
         view == GENESIS_VIEW and block == GENESIS_BLOCK,
         certificates.exists(c => and {
             cert_view(c) == view,
-            cert_block(c) == block,
+            cert_block(c) == Some(block),
             is_notarization_cert(c) or is_finalization_cert(c),
         })
     }
@@ -267,7 +267,7 @@ module replica {
         view == GENESIS_VIEW and block == GENESIS_BLOCK,
         certificates.exists(c => and {
             cert_view(c) == view,
-            cert_block(c) == block,
+            cert_block(c) == Some(block),
             is_finalization_cert(c),
         })
     }
@@ -370,7 +370,7 @@ module replica {
         val similar_votes: Set[Vote] = votes.filter(v => and {
             vote_view(v) == view,
             is_notarize(v),
-            vote_block(v) == block
+            vote_block(v) == Some(block)
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
@@ -384,7 +384,7 @@ module replica {
         val similar_votes: Set[Vote] = votes.filter(v => and {
             vote_view(v) == view,
             is_finalize(v),
-            vote_block(v) == block
+            vote_block(v) == Some(block)
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
@@ -401,7 +401,7 @@ module replica {
     }
 
     action initWithLeader(l: ViewNumber -> ReplicaId): bool = {
-        val default_block_policy = AllBlocks.union(Set(GENESIS_BLOCK, EMPTY_BLOCK)).mapBy(_ => true)
+        val default_block_policy = AllBlocks.mapBy(_ => true)
         val default_certify_policy = Replicas.mapBy(_ => default_block_policy)
         initWithLeaderAndCertify(l, default_certify_policy)
     }
@@ -658,7 +658,7 @@ module replica {
             votes.forall(v => and {
                 vote_view(v) == view,
                 is_notarize(v),
-                vote_block(v) == block,
+                vote_block(v) == Some(block),
             }),
 
             val new_store = store.union(votes)
@@ -666,7 +666,7 @@ module replica {
             val had_notarization = certs.exists(c => and {
                 is_notarization_cert(c),
                 cert_view(c) == view,
-                cert_block(c) == block,
+                cert_block(c) == Some(block),
             })
             val now_notarized = is_view_notarized_votes(view, new_store, block)
 
@@ -707,7 +707,7 @@ module replica {
             votes.forall(v => and {
                 vote_view(v) == view,
                 is_finalize(v),
-                vote_block(v) == block,
+                vote_block(v) == Some(block),
             }),
 
             val new_store = store.union(votes)
@@ -715,7 +715,7 @@ module replica {
             val had_finalization = certs.exists(c => and {
                 is_finalization_cert(c),
                 cert_view(c) == view,
-                cert_block(c) == block,
+                cert_block(c) == Some(block),
             })
             val now_finalized = is_view_finalized_votes(view, new_store, block)
 
@@ -885,60 +885,69 @@ module replica {
             },
 
             val cert_view_num = cert_view(cert)
-            val cert_block_val = cert_block(cert)
-            val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-            val parent_conflicted = has_parent_conflict(cert_view_num, cert_block_val)
-            val can_send_finalize = and {
-                can_certify(id, cert_block_val),
-                not(parent_conflicted),
-                self.certified.get(cert_view_num) == EMPTY_BLOCK,
-                not(has_sent_finalize(id, cert_view_num)),
-                not(has_sent_nullify(id, cert_view_num)),
-            }
-            val can_send_nullify = and {
-                or {
-                    not(can_certify(id, cert_block_val)),
-                    parent_conflicted,
-                },
-                not(has_sent_nullify(id, cert_view_num)),
-            }
+            match (cert_block(cert)) {
+                | Some(cert_block_val) => all {
+                    val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
+                    val parent_conflicted = has_parent_conflict(cert_view_num, cert_block_val)
+                    val can_send_finalize = and {
+                        can_certify(id, cert_block_val),
+                        not(parent_conflicted),
+                        self.certified.get(cert_view_num) == EMPTY_BLOCK,
+                        not(has_sent_finalize(id, cert_view_num)),
+                        not(has_sent_nullify(id, cert_view_num)),
+                    }
+                    val can_send_nullify = and {
+                        or {
+                            not(can_certify(id, cert_block_val)),
+                            parent_conflicted,
+                        },
+                        not(has_sent_nullify(id, cert_view_num)),
+                    }
 
-            if (can_send_finalize)
-                all {
-                    sent_vote' = sent_vote.union(Set(finalize(cert_view_num, id, cert_block_val))),
-                    replica_state' = replica_state.set(id,
-                        enter_view({
-                            ...self,
-                            advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
-                            ghost_last_seen_notarization: seen_notarization,
-                            certified: self.certified.put(cert_view_num, cert_block_val),
-                            ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
-                        }, cert_view_num + 1)
-                    ),
-                    ghost_committed_blocks' = ghost_committed_blocks,
+                    if (can_send_finalize)
+                        all {
+                            sent_vote' = sent_vote.union(Set(finalize(cert_view_num, id, cert_block_val))),
+                            replica_state' = replica_state.set(id,
+                                enter_view({
+                                    ...self,
+                                    advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
+                                    ghost_last_seen_notarization: seen_notarization,
+                                    certified: self.certified.put(cert_view_num, cert_block_val),
+                                    ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
+                                }, cert_view_num + 1)
+                            ),
+                            ghost_committed_blocks' = ghost_committed_blocks,
+                        }
+                    else if (can_send_nullify)
+                        all {
+                            sent_vote' = sent_vote.union(Set(nullify(cert_view_num, id))),
+                            replica_state' = replica_state.set(id, {
+                                ...self,
+                                nullified: if (self.view == cert_view_num) true else self.nullified,
+                                advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
+                                ghost_last_seen_notarization: seen_notarization,
+                                ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(NullifyKind))
+                            }),
+                            ghost_committed_blocks' = ghost_committed_blocks,
+                        }
+                    else
+                        all {
+                            sent_vote' = sent_vote,
+                            replica_state' = replica_state.set(id, {
+                                ...self,
+                                advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
+                                ghost_last_seen_notarization: seen_notarization
+                            }),
+                            ghost_committed_blocks' = ghost_committed_blocks,
+                        }
                 }
-            else if (can_send_nullify)
-                all {
-                    sent_vote' = sent_vote.union(Set(nullify(cert_view_num, id))),
-                    replica_state' = replica_state.set(id, {
-                        ...self,
-                        nullified: if (self.view == cert_view_num) true else self.nullified,
-                        advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
-                        ghost_last_seen_notarization: seen_notarization,
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(NullifyKind))
-                    }),
-                    ghost_committed_blocks' = ghost_committed_blocks,
-                }
-            else
-                all {
+                | None => all {
+                    false,
                     sent_vote' = sent_vote,
-                    replica_state' = replica_state.set(id, {
-                        ...self,
-                        advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
-                        ghost_last_seen_notarization: seen_notarization
-                    }),
+                    replica_state' = replica_state,
                     ghost_committed_blocks' = ghost_committed_blocks,
                 }
+            }
         }
     }
 
@@ -977,67 +986,76 @@ module replica {
             },
 
             val cert_view_num = cert_view(cert)
-            val cert_block_val = cert_block(cert)
-            val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-            val newer = cert_view_num > self.last_finalized
-            val walk_result = VIEWS.fold({
-                current_view: cert_view_num,
-                current_block: cert_block_val,
-                done: false,
-                acc: List(),
-            }, (st, _v) => {
-                if (st.done)
-                    st
-                else {
-                    val refs = learned_parents(st.current_view, st.current_block)
-                    if (refs.size() != 1)
-                        {
-                            ...st,
-                            done: true
-                        }
-                    else
-                        match (refs.fold(None, (_acc, p) => Some(p))) {
-                            | Some(parent) => {
-                                val include_parent = and {
-                                    parent.parent_block != GENESIS_BLOCK,
-                                    parent.parent_view > self.last_finalized,
+            match (cert_block(cert)) {
+                | Some(cert_block_val) => all {
+                    val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
+                    val newer = cert_view_num > self.last_finalized
+                    val walk_result = VIEWS.fold({
+                        current_view: cert_view_num,
+                        current_block: cert_block_val,
+                        done: false,
+                        acc: List(),
+                    }, (st, _v) => {
+                        if (st.done)
+                            st
+                        else {
+                            val refs = learned_parents(st.current_view, st.current_block)
+                            if (refs.size() != 1)
+                                {
+                                    ...st,
+                                    done: true
                                 }
-                                if (include_parent)
-                                    {
-                                        current_view: parent.parent_view,
-                                        current_block: parent.parent_block,
-                                        done: false,
-                                        acc: List(parent.parent_block).concat(st.acc),
+                            else
+                                match (refs.fold(None, (_acc, p) => Some(p))) {
+                                    | Some(parent) => {
+                                        val include_parent = and {
+                                            parent.parent_block != GENESIS_BLOCK,
+                                            parent.parent_view > self.last_finalized,
+                                        }
+                                        if (include_parent)
+                                            {
+                                                current_view: parent.parent_view,
+                                                current_block: parent.parent_block,
+                                                done: false,
+                                                acc: List(parent.parent_block).concat(st.acc),
+                                            }
+                                        else
+                                            {
+                                                ...st,
+                                                done: true
+                                            }
                                     }
-                                else
-                                    {
+                                    | None => {
                                         ...st,
                                         done: true
                                     }
-                            }
-                            | None => {
-                                ...st,
-                                done: true
-                            }
+                                }
                         }
+                    })
+                    val committed_chain = walk_result.acc.append(cert_block_val)
+
+                    all {
+                        if (is_new_cert and newer)
+                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.concat(committed_chain))
+                        else
+                            ghost_committed_blocks' = ghost_committed_blocks,
+
+                        sent_vote' = sent_vote,
+                        replica_state' = replica_state.set(id,
+                            enter_view({
+                                ...self,
+                                last_finalized: if (newer) cert_view_num else self.last_finalized,
+                                ghost_last_seen_notarization: seen_notarization
+                            }, cert_view_num + 1)
+                        )
+                    }
                 }
-            })
-            val committed_chain = walk_result.acc.append(cert_block_val)
-
-            all {
-                if (is_new_cert and newer)
-                    ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.concat(committed_chain))
-                else
+                | None => all {
+                    false,
+                    sent_vote' = sent_vote,
+                    replica_state' = replica_state,
                     ghost_committed_blocks' = ghost_committed_blocks,
-
-                sent_vote' = sent_vote,
-                replica_state' = replica_state.set(id,
-                    enter_view({
-                        ...self,
-                        last_finalized: if (newer) cert_view_num else self.last_finalized,
-                        ghost_last_seen_notarization: seen_notarization
-                    }, cert_view_num + 1)
-                )
+                }
             }
         }
     }
@@ -1105,7 +1123,7 @@ module replica {
                 sent_vote.filter(v => and {
                     vote_view(v) == view,
                     is_notarize(v),
-                    vote_block(v) == block
+                    vote_block(v) == Some(block)
                 })
             } else if (kind == NullificationKind) {
                 sent_vote.filter(v => and {
@@ -1116,7 +1134,7 @@ module replica {
                 sent_vote.filter(v => and {
                     vote_view(v) == view,
                     is_finalize(v),
-                    vote_block(v) == block
+                    vote_block(v) == Some(block)
                 })
             }
             nondet agg_sig = votes.map(v => vote_sig(v)).union(BYZANTINE).powerset().oneOf()
@@ -1245,7 +1263,7 @@ module replica {
             if (is_nullification_cert(cert)) {
                 true
             } else {
-                VALID_BLOCKS.contains(cert_block(cert)) or INVALID_BLOCKS.contains(cert_block(cert)) or cert_block(cert) == GENESIS_BLOCK
+                option_has(cert_block(cert), b => VALID_BLOCKS.contains(b) or INVALID_BLOCKS.contains(b) or b == GENESIS_BLOCK)
             }
         })
     })
@@ -1291,8 +1309,8 @@ module replica {
     val no_notarization_in_finalized_view = tuples(CORRECT, VIEWS).forall(((id, v)) => {
         val certs = store_certificate.get(id)
         AllBlocks.forall(b => or {
-            not(certs.exists(c => is_finalization_cert(c) and cert_view(c) == v and cert_block(c) == b)),
-            not(certs.exists(c => is_notarization_cert(c) and cert_view(c) == v and cert_block(c) != b)),
+            not(certs.exists(c => is_finalization_cert(c) and cert_view(c) == v and cert_block(c) == Some(b))),
+            not(certs.exists(c => is_notarization_cert(c) and cert_view(c) == v and cert_block(c) != Some(b))),
         })
     })
 
@@ -1300,7 +1318,7 @@ module replica {
         val certs = store_certificate.get(id)
         sent_vote
             .filter(v => vote_sig(v) == id and is_finalize(v))
-            .forall(v => is_block_notarized(vote_view(v), vote_block(v), certs))
+            .forall(v => option_has(vote_block(v), b => is_block_notarized(vote_view(v), b, certs)))
     })
 
     // A finalized (view, block) must not have conflicting parent references.
@@ -1308,7 +1326,7 @@ module replica {
         val certs = store_certificate.get(id)
         certs
             .filter(c => is_finalization_cert(c))
-            .forall(c => learned_parents(cert_view(c), cert_block(c)).size() <= 1)
+            .forall(c => option_has(cert_block(c), b => learned_parents(cert_view(c), b).size() <= 1))
     })
 
     // Upon finalization, the finalized block must appear in the committed chain.
@@ -1318,7 +1336,7 @@ module replica {
         val certs = store_certificate.get(id)
         certs
             .filter(c => is_finalization_cert(c) and cert_view(c) <= self.last_finalized)
-            .forall(c => list_contains_block(chain, cert_block(c)))
+            .forall(c => option_has(cert_block(c), b => list_contains_block(chain, b)))
     })
 
     // Committed chains must be recursively parent-linked: each committed block

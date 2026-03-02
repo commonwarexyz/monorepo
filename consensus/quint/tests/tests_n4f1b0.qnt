@@ -66,8 +66,8 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "val_b0")),
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == "val_b0")),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
@@ -76,7 +76,7 @@ module tests {
             .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
             .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "val_b0")),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
                 assert(replica_state.get("n0").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n0").length() == 1),
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
@@ -94,8 +94,8 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "inv_b3")),
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == "inv_b3")),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("inv_b3"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("inv_b3"))),
                 assert(not(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
@@ -151,7 +151,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "inv_b3")),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("inv_b3"))),
                 assert(replica_state.get("n0").certified.get(FIRST_VIEW) == EMPTY_BLOCK),
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
                 assert(not(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v)))),

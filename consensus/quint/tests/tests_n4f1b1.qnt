@@ -60,7 +60,7 @@ module tests {
         )
             .then(on_certificate("n2", cert))
             .then(all {
-                assert(store_certificate.get("n2").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "val_b0")),
+                assert(store_certificate.get("n2").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
                 assert(replica_state.get("n2").view == 2),
                 assert(replica_state.get("n2").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n2").length() == 1),

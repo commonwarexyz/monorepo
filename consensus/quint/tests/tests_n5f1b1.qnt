@@ -28,8 +28,8 @@ module tests {
         )
             .then(on_certificate("n3", cert))
             .then(all {
-                assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == "val_b1")),
-                assert(sent_vote.exists(v => vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == "val_b1")),
+                assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b1"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b1"))),
                 assert(replica_state.get("n3").certified.get(FIRST_VIEW) == "val_b1"),
                 assert(replica_state.get("n3").view == 2),
                 unchanged_all,
