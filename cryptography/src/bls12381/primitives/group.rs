@@ -1750,6 +1750,7 @@ mod tests {
     use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_invariants::minifuzz;
+    use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
@@ -1758,31 +1759,37 @@ mod tests {
         num::NonZeroUsize,
     };
 
+    #[test_group("slow")]
     #[test]
     fn test_scalar_as_field() {
         minifuzz::test(test_suites::fuzz_field::<Scalar>);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_scalar_as_field_ntt() {
         minifuzz::test(test_suites::fuzz_field_ntt::<Scalar>);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_g1_as_space() {
         minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G1>);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_g2_as_space() {
         minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G2>);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_hash_to_g1() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G1>);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_hash_to_g2() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G2>);
@@ -1938,6 +1945,7 @@ mod tests {
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_g2_msm() {
         let mut rng = test_rng();
@@ -2186,6 +2194,7 @@ mod tests {
         assert_eq!(G::msm(&pts, &scalars, &par), single_point * &single_scalar);
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_msm_parallel_g1() {
         minifuzz::test(|u| {
@@ -2201,6 +2210,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_msm_parallel_g2() {
         minifuzz::test(|u| {
@@ -2216,6 +2226,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_msm_parallel_edge_cases_g1() {
         minifuzz::test(|u| {
@@ -2233,6 +2244,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_msm_parallel_edge_cases_g2() {
         minifuzz::test(|u| {

@@ -754,6 +754,7 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
+        #[commonware_macros::test_group("slow")]
         #[test]
         fn test_fuzz() {
             commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));

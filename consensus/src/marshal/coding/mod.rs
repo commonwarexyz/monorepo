@@ -90,13 +90,14 @@ mod tests {
         sha256::Sha256,
         Committable, Digestible, Hasher as _,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU16;
     use std::time::Duration;
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_good_links() {
         for seed in 0..5 {
@@ -106,6 +107,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_bad_links() {
         for seed in 0..5 {
@@ -115,6 +117,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_good_links_quorum_sees_finalization() {
         for seed in 0..5 {
@@ -124,6 +127,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_bad_links_quorum_sees_finalization() {
         for seed in 0..5 {
