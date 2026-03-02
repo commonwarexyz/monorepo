@@ -352,7 +352,7 @@ fn fuzz(input: FuzzInput) {
                         let size_before = mmr.size();
                         let pruned_to_pos_before = mmr.bounds().start;
 
-                        mmr.prune_to_pos(pos);
+                        mmr.prune_to_pos(pos).unwrap();
                         reference.prune_to_pos(pos);
 
                         // Size should remain the same

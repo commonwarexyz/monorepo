@@ -599,7 +599,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // mem_mmr.
         {
             let mut inner = self.inner.write();
-            inner.mem_mmr.prune_to_pos(size);
+            inner.mem_mmr.prune_to_pos(size)?;
             inner.mem_mmr.add_pinned_nodes(pinned_nodes);
         }
 
