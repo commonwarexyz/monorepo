@@ -15,6 +15,7 @@ module twins {
     BYZANTINE = Set(),
     N = 4,
     F = 1,
+    Q = 3,
     VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
     INVALID_BLOCKS = Set("inval_0", "inval_1"),
     VIEWS = 0.to(6),

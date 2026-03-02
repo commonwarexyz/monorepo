@@ -11,6 +11,7 @@ module tests {
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4"->"n4"),
         N = 5,
         F = 1,
+        Q = 3,
         VIEWS = 0.to(6),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")

@@ -7,6 +7,8 @@ module replica {
     const N: int
     // Maximum number of byzantine(faulty) replicas.
     const F: int
+    // Quorum value according to the utils/src/faults.rs.
+    const Q: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
     // Identities of the byzantine replicas.
@@ -22,10 +24,6 @@ module replica {
     // The keys of the replicas, normally, one unique key per replica.
     // For modeling byzantine behaviour via twin replicas use the same keys.
     const REPLICA_KEYS: ReplicaId -> ReplicaKey
-
-    // Quorums:
-    pure val L = N - F;
-    pure val M = 2*F + 1;
 
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
@@ -228,7 +226,7 @@ module replica {
         select_votes(view, NotarizeKind, votes)
             .filter(v => vote_block(v) == block)
             .map(v => vote_sig(v))
-            .size() >= M
+            .size() >= Q
     }
 
     pure def is_view_finalized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
@@ -241,7 +239,7 @@ module replica {
         select_votes(view, FinalizeKind, votes)
             .filter(v => vote_block(v) == block)
             .map(v => vote_sig(v))
-            .size() >= M
+            .size() >= Q
     }
 
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
@@ -253,7 +251,7 @@ module replica {
         select_votes(view, NullifyKind, votes)
             .filter(v => is_nullify(v))
             .map(v => vote_sig(v))
-            .size() >= M
+            .size() >= Q
     }
 
     pure def is_block_notarized(view: ViewNumber, block: Block, certificates: Set[Certificate]): bool = or {
@@ -362,7 +360,7 @@ module replica {
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
-        if (signers.size() < M)
+        if (signers.size() < Q)
             None
         else
             Some(nullification(view, signers, id))
@@ -376,7 +374,7 @@ module replica {
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
-        if (signers.size() < M)
+        if (signers.size() < Q)
             None
         else
             Some(notarization(view, block, signers, id))
@@ -390,7 +388,7 @@ module replica {
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
-        if (signers.size() < M)
+        if (signers.size() < Q)
             None
         else
             Some(finalization(view, block, signers, id))
@@ -849,9 +847,9 @@ module replica {
         all {
             not(cert.in(certs)),
             or {
-                is_notarization_cert(cert) and cert_signatures(cert).size() >= M,
-                is_nullification_cert(cert) and cert_signatures(cert).size() >= M,
-                is_finalization_cert(cert) and cert_signatures(cert).size() >= M,
+                is_notarization_cert(cert) and cert_signatures(cert).size() >= Q,
+                is_nullification_cert(cert) and cert_signatures(cert).size() >= Q,
+                is_finalization_cert(cert) and cert_signatures(cert).size() >= Q,
             },
 
             if (is_notarization_cert(cert)) {
@@ -876,7 +874,7 @@ module replica {
         val self = replica_state.get(id)
         all {
             is_notarization_cert(cert),
-            cert_signatures(cert).size() >= M,
+            cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
                 store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
@@ -948,7 +946,7 @@ module replica {
         val self = replica_state.get(id)
         all {
             is_nullification_cert(cert),
-            cert_signatures(cert).size() >= M,
+            cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
                 store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
@@ -968,7 +966,7 @@ module replica {
         val self = replica_state.get(id)
         all {
             is_finalization_cert(cert),
-            cert_signatures(cert).size() >= M,
+            cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
                 store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
@@ -1153,8 +1151,7 @@ module replica {
         CORRECT.size() + BYZANTINE.size() == N,
         CORRECT.intersect(BYZANTINE) == Set(),
         N >= 3*F + 1,
-        M == 2*F + 1,
-        M <= N,
+        Q == N - F,
     }
 
     // No two correct replicas disagree on finalized chains (prefix agreement).
@@ -1225,7 +1222,7 @@ module replica {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert_view(cert) > GENESIS_VIEW,
-            cert_signatures(cert).size() >= M,
+            cert_signatures(cert).size() >= Q,
             cert_kind(cert) == NotarizationKind or cert_kind(cert) == NullificationKind or cert_kind(cert) == FinalizationKind,
             if (is_nullification_cert(cert)) {
                 true
@@ -1346,11 +1343,11 @@ module replica {
 
     val correct_nodes_sent_certificates_valid = sent_certificate
         .filter(cert => cert_ghost_sender(cert).in(CORRECT))
-        .forall(cert => cert_signatures(cert).size() >= M)
+        .forall(cert => cert_signatures(cert).size() >= Q)
 
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert_signatures(cert).size() >= M)
+        certs.forall(cert => cert_signatures(cert).size() >= Q)
     })
 
     val certificates_are_valid = and {
@@ -1384,12 +1381,12 @@ module replica {
 
     // Check this invariant to see an example of having a subquorum of votes.
     val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= M
+        store_vote.get(id).size() <= Q
     })
 
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= M
+        store_vote.get(id).size() <= Q
     })
 
     // Check this invariant to see an example of having a certificate.
