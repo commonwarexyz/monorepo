@@ -47,22 +47,23 @@
 //!
 //! ## Work Tracking
 //!
-//! Each submitted operation is assigned a waiter slot index that serves as the
+//! Each submitted operation is assigned a waiter id that serves as the
 //! `user_data` field in the SQE. The event loop maintains a flat `Waiters` store where
 //! each slot maps to:
 //! - A oneshot sender for returning results to the caller
 //! - An optional buffer that must be kept alive for the duration of the operation
 //! - An optional FD handle to prevent descriptor reuse while the operation is in flight
-//! - An optional timespec, if operation timeouts are enabled, that must be kept
-//!   alive for the duration of the operation
+//! - Timeout lifecycle state for deadline tracking and cancellation
 //!
 //! ## Timeout Handling
 //!
-//! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
-//! - Each operation is linked to a timeout using io_uring's `IOSQE_IO_LINK` flag
-//! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
-//! - Reserved `user_data` values distinguish internal timeout/wake completions from
-//!   regular operations
+//! Operations can optionally carry an absolute deadline via [Op::deadline]. When present:
+//! - The loop tracks deadline ticks in a userspace timing wheel
+//! - Expired operations submit an async-cancel SQE
+//! - A timed-out waiter is removed only after both original-op and cancel CQEs arrive
+//! - If the original op CQE result is `ECANCELED`, the caller sees `ETIMEDOUT`
+//! - If the original op CQE result arrives before cancel completion, that original
+//!   result is returned
 //!
 //! ## Wake Handling
 //!
@@ -116,6 +117,9 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight operations never depend on
 //!   later queued operations, otherwise the loop can deadlock.
 
+mod timeout;
+mod waiter;
+
 use crate::{IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
@@ -123,13 +127,14 @@ use commonware_utils::channel::{
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
-    opcode::{LinkTimeout, PollAdd},
+    opcode::{AsyncCancel, PollAdd},
     squeue::{Entry as SqueueEntry, SubmissionQueue},
     types::{Fd, SubmitArgs, Timespec},
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{
+    collections::VecDeque,
     fs::File,
     mem::size_of,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -139,12 +144,14 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use timeout::{Tick, TimeoutEntry, TimeoutWheel};
 use tracing::warn;
+use waiter::{CompletedWaiter, WaiterId, Waiters};
 
-/// Reserved `user_data` value for a CQE that indicates an operation timed out.
-const TIMEOUT_USER_DATA: u64 = u64::MAX;
 /// Reserved `user_data` value for internal wake poll completions.
-const WAKE_USER_DATA: u64 = u64::MAX - 1;
+const WAKE_USER_DATA: u64 = u64::MAX;
+/// Packed `io_uring` `user_data` value.
+pub type UserData = u64;
 
 /// Bit used to mark that the loop is armed for sleep.
 const SLEEP_INTENT_BIT: u64 = 1;
@@ -279,18 +286,22 @@ pub struct Config {
     /// `single_issuer` when `run` is executed on a dedicated thread.
     /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
-    /// If None, operations submitted to the io_uring will not time out.
-    /// In this case, the caller should be careful to ensure that the
-    /// operations submitted to the io_uring will eventually complete.
-    /// If Some, each submitted operation will time out after this duration.
-    /// If an operation times out, its result will be -[libc::ETIMEDOUT].
-    pub op_timeout: Option<Duration>,
+    /// Maximum operation timeout supported by the userspace timeout wheel.
+    ///
+    /// Deadlines are clamped to this horizon. This value should be set to the
+    /// largest expected per-operation deadline budget.
+    pub max_op_timeout: Duration,
     /// The maximum time the io_uring event loop will wait for in-flight operations
     /// to complete before abandoning them during shutdown.
     /// If None, the event loop will wait indefinitely for in-flight operations
     /// to complete before shutting down. In this case, the caller should be careful
     /// to ensure that the operations submitted to the io_uring will eventually complete.
     pub shutdown_timeout: Option<Duration>,
+    /// Tick granularity used by the userspace timeout wheel.
+    ///
+    /// Smaller values increase timing precision but increase wakeup and wheel
+    /// processing frequency.
+    pub timeout_wheel_tick: Duration,
 }
 
 impl Default for Config {
@@ -299,8 +310,9 @@ impl Default for Config {
             size: 128,
             io_poll: false,
             single_issuer: false,
-            op_timeout: None,
+            max_op_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
+            timeout_wheel_tick: Duration::from_millis(5),
         }
     }
 }
@@ -312,6 +324,11 @@ pub struct Op {
     pub work: SqueueEntry,
     /// Sends the result of the operation and `buffer`.
     pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
+    /// Absolute deadline for this operation, if any.
+    ///
+    /// If present and the operation has not completed by this deadline, the
+    /// loop issues an async cancel SQE.
+    pub deadline: Option<Instant>,
     /// The buffer used for the operation, if any.
     /// - For reads: `OpBuffer::Read(IoBufMut)` - kernel writes into this
     /// - For writes: `OpBuffer::Write(IoBuf)` - kernel reads from this
@@ -592,116 +609,16 @@ impl Submitter {
     }
 }
 
-/// State for one in-flight operation.
-///
-/// Holds the sender used for completion delivery and resources that must remain alive
-/// until CQE delivery.
-struct Waiter {
-    /// The oneshot sender used to deliver the operation result and buffer back to the
-    /// caller.
-    sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// The buffer associated with this operation, if any.
-    buffer: Option<OpBuffer>,
-    /// The file descriptor associated with this operation, if any. Used to keep the file
-    /// descriptor alive and prevent reuse while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep the FD alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    fd: Option<OpFd>,
-    /// The iovec array associated with this operation, if any. Used to keep iovec
-    /// storage alive and prevent use-after-free while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep iovecs alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    iovecs: Option<OpIovecs>,
-    /// The linked timeout timespec associated with this operation, if any. Used to keep
-    /// the timespec alive and prevent use-after-free while the operation is in-flight.
-    timespec: Option<Timespec>,
-}
-
-/// Tracks in-flight operations and the state needed to complete them.
-struct Waiters {
-    /// Waiters indexed by slot index.
-    ///
-    /// Free slots have no waiter (`None`).
-    entries: Vec<Option<Waiter>>,
-    /// Stack of reusable free slot indices.
-    free: Vec<usize>,
-    /// Number of active waiters currently stored in `entries`.
-    len: usize,
-}
-
-impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` in-flight operations
-    /// at once.
-    fn new(capacity: usize) -> Self {
-        let mut entries = Vec::with_capacity(capacity);
-        entries.resize_with(capacity, || None);
-
-        let mut free = Vec::with_capacity(capacity);
-        free.extend((0..capacity).rev());
-
-        Self {
-            entries,
-            free,
-            len: 0,
-        }
-    }
-
-    /// Return the number of currently in-flight waiters.
-    const fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Return whether there are no in-flight waiters.
-    const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Return the waiter for `slot_index`.
-    ///
-    /// Panics if `slot_index` is out of range or not currently in use.
-    fn get(&self, slot_index: u64) -> &Waiter {
-        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
-        let slot = self.entries.get(index).expect("missing waiter");
-        slot.as_ref().expect("missing waiter")
-    }
-
-    /// Store a waiter and return its slot index.
-    ///
-    /// Panics if no free slot is available.
-    fn insert(&mut self, waiter: Waiter) -> u64 {
-        let index = self
-            .free
-            .pop()
-            .expect("waiters should not exceed configured capacity");
-        let replaced = self.entries[index].replace(waiter);
-        assert!(replaced.is_none(), "free slot should not contain waiter");
-        self.len += 1;
-        index as u64
-    }
-
-    /// Remove and return the waiter for `slot_index`.
-    ///
-    /// Panics if `slot_index` is out of range or not currently in use.
-    fn remove(&mut self, slot_index: u64) -> Waiter {
-        let index = usize::try_from(slot_index).expect("slot index should fit in usize");
-        let slot = self.entries.get_mut(index).expect("missing waiter");
-        let waiter = slot.take().expect("missing waiter");
-        self.free.push(index);
-        self.len -= 1;
-        waiter
-    }
-}
-
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
     cfg: Config,
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Op>,
     waiters: Waiters,
+    timeout_wheel: TimeoutWheel,
+    expired_timeouts: Vec<TimeoutEntry>,
+    pending_cancels: VecDeque<WaiterId>,
+    now: Option<Instant>,
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u64,
@@ -712,6 +629,14 @@ impl IoUringLoop {
     ///
     /// The loop allocates its own metrics, operation channel, and internal `eventfd` wake source.
     pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+        assert!(
+            !cfg.max_op_timeout.is_zero(),
+            "max_op_timeout must be non-zero for timeout wheel"
+        );
+        assert!(
+            !cfg.timeout_wheel_tick.is_zero(),
+            "timeout_wheel_tick must be non-zero for timeout wheel"
+        );
         cfg.size = cfg
             .size
             .checked_next_power_of_two()
@@ -720,6 +645,8 @@ impl IoUringLoop {
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
         let waker = Waker::new().expect("unable to create wake eventfd");
+        let timeout_wheel =
+            TimeoutWheel::new(cfg.max_op_timeout, cfg.timeout_wheel_tick, Instant::now());
 
         let submitter = Submitter {
             inner: Arc::new(SubmitterInner {
@@ -735,11 +662,24 @@ impl IoUringLoop {
                 metrics,
                 receiver,
                 waiters: Waiters::new(size),
+                timeout_wheel,
+                expired_timeouts: Vec::with_capacity(size),
+                pending_cancels: VecDeque::with_capacity(size),
+                now: None,
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
             },
         )
+    }
+
+    /// Return this iteration's cached wall-clock snapshot.
+    ///
+    /// The cache is reset at the top of each `run` loop iteration and populated
+    /// lazily on first use to avoid unnecessary clock reads on no-timeout paths.
+    #[inline]
+    fn now(&mut self) -> Instant {
+        *self.now.get_or_insert_with(Instant::now)
     }
 
     /// Runs the io_uring event loop until all submitters are dropped and in-flight work drains.
@@ -748,10 +688,19 @@ impl IoUringLoop {
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
         loop {
+            // Reset per-iteration lazy clock snapshot. `self.now()` captures
+            // at most once per iteration and shares that value across timeout
+            // advancement and deadline scheduling.
+            self.now = None;
+
             // Process available completions.
             for cqe in ring.completion() {
                 self.handle_cqe(cqe);
             }
+
+            // Process due deadlines before staging new submissions so timed-out
+            // waiters move to cancellation promptly and free capacity sooner.
+            self.advance_timeouts();
 
             // Stage as much inbound work as capacity allows.
             let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
@@ -775,7 +724,7 @@ impl IoUringLoop {
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
                     // least one completion so capacity can open up.
-                    self.submit_and_wait(&mut ring, 1, None)
+                    self.submit_and_wait(&mut ring, 1, self.earliest_deadline())
                         .expect("unable to submit to ring");
                 }
 
@@ -789,7 +738,7 @@ impl IoUringLoop {
             // arrives after `arm()` observes sleep intent and rings eventfd, so the
             // loop is woken instead of sleeping through newly published work.
             if self.waker.arm() == self.processed_seq {
-                self.submit_and_wait(&mut ring, 1, None)
+                self.submit_and_wait(&mut ring, 1, self.earliest_deadline())
                     .expect("unable to submit to ring");
             }
             // Disarm sleep intent as soon as we resume running. While disarmed,
@@ -808,23 +757,22 @@ impl IoUringLoop {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
         let mut at_sq_capacity = false;
-
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
         if std::mem::take(&mut self.wake_rearm_needed) {
             self.waker.reinstall(&mut submission_queue);
         }
 
+        // Stage pending cancel SQEs first so timed-out operations are canceled promptly.
+        if self.stage_pending_cancels(&mut submission_queue) {
+            at_sq_capacity = true;
+        }
+
         // Stage until we either run out of channel work or hit waiter capacity.
-        //
-        // Capacity is bounded by `cfg.size` active waiters. This remains correct
-        // when `op_timeout` is enabled because each operation consumes 2 SQEs
-        // (`op + linked timeout`) and staging is budgeted by SQ entries.
+        // Capacity is bounded by `cfg.size` active waiters.
         while self.waiters.len() < self.cfg.size as usize {
             // Check SQ capacity before staging each operation.
-            let available = submission_queue.capacity() - submission_queue.len();
-            let needed = if self.cfg.op_timeout.is_some() { 2 } else { 1 };
-            if available < needed {
+            if submission_queue.capacity() == submission_queue.len() {
                 at_sq_capacity = true;
                 break;
             }
@@ -847,70 +795,37 @@ impl IoUringLoop {
                 buffer,
                 fd,
                 iovecs,
+                deadline,
             } = op;
 
-            // Prepare op timeout timespec. We build the linked timeout SQE later, after
-            // waiter insertion, so its pointer comes from stable waiter-backed storage.
-            let timespec = self.cfg.op_timeout.map(|timeout| {
-                Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos())
-            });
+            let target_tick = if let Some(deadline) = deadline {
+                let now = self.now();
+                self.timeout_wheel.align_idle_to_now(now);
+                Some(self.timeout_wheel.target_tick_for_deadline(deadline, now))
+            } else {
+                None
+            };
 
             // Store in-flight operation state before submission.
-            let slot_index = self.waiters.insert(Waiter {
-                sender,
-                buffer,
-                fd,
-                iovecs,
-                timespec,
-            });
+            let waiter_id = self.waiters.insert(sender, buffer, fd, iovecs, target_tick);
 
-            // Tag SQE with waiter slot index for completion matching.
-            work = work.user_data(slot_index);
-
-            if self.cfg.op_timeout.is_some() {
-                // Link this operation to the timeout SQE that will be pushed afterwards.
-                work = work.flags(io_uring::squeue::Flags::IO_LINK);
-            }
+            // Tag SQE with waiter id for completion matching.
+            work = work.user_data(waiter_id.op_user_data());
 
             // Submit the operation.
             //
             // SAFETY:
-            // - `buffer`, `fd` and `iovecs` are stored in `self.waiters` until CQE
-            //   processing, so SQE pointers remain valid and FD numbers cannot be reused
-            //   early.
-            // - `IO_LINK` is set on `work` before pushing it, so the following timeout
-            //   SQE applies to this operation.
-            // - `available >= needed` was checked above, so this push fits.
+            // - `buffer` and `fd` are stored in `self.waiters` until CQE processing, so
+            //   SQE pointers remain valid and FD numbers cannot be reused early.
+            // - SQ capacity was checked above, so this push fits.
             unsafe {
                 submission_queue
                     .push(&work)
                     .expect("unable to push to queue");
             }
 
-            if self.cfg.op_timeout.is_some() {
-                // Build linked timeout op from waiter-owned timespec storage.
-                let timeout = LinkTimeout::new(
-                    self.waiters
-                        .get(slot_index)
-                        .timespec
-                        .as_ref()
-                        .expect("missing timespec"),
-                )
-                .build()
-                .user_data(TIMEOUT_USER_DATA);
-
-                // SAFETY:
-                // - `timeout` was built from the waiter's stored `timespec`, and that
-                //   waiter entry stays alive until CQE handling, so the kernel `Timespec`
-                //   pointer remains valid.
-                // - `available >= needed` was checked above, so this push fits.
-                unsafe {
-                    submission_queue
-                        .push(&timeout)
-                        .expect("unable to push timeout to queue");
-                }
+            if let Some(target_tick) = target_tick {
+                self.timeout_wheel.schedule(waiter_id, target_tick);
             }
         }
 
@@ -918,54 +833,104 @@ impl IoUringLoop {
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-        Some(at_waiter_capacity || at_sq_capacity)
+        Some(at_waiter_capacity || at_sq_capacity || !self.pending_cancels.is_empty())
+    }
+
+    /// Stage queued cancel SQEs.
+    ///
+    /// Returns true if staging stopped at SQ capacity.
+    fn stage_pending_cancels(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        while let Some(waiter_id) = self.pending_cancels.pop_front() {
+            if submission_queue.capacity() == submission_queue.len() {
+                self.pending_cancels.push_front(waiter_id);
+                return true;
+            }
+            let cancel = AsyncCancel::new(u64::from(waiter_id.index()))
+                .build()
+                .user_data(waiter_id.cancel_user_data());
+
+            // SAFETY: AsyncCancel SQE uses stable user_data only.
+            unsafe {
+                submission_queue
+                    .push(&cancel)
+                    .expect("unable to push cancel to queue");
+            }
+        }
+        false
     }
 
     /// Handle a single CQE from the ring.
     ///
-    /// Internal wake and timeout CQEs are handled in-place, normal operation
-    /// CQEs are matched to `waiters` and forwarded to the original requester.
+    /// Internal wake CQEs are handled in-place. Normal operation and cancel
+    /// CQEs are matched to waiter slots.
     fn handle_cqe(&mut self, cqe: CqueueEntry) {
         let user_data = cqe.user_data();
-        match user_data {
-            WAKE_USER_DATA => {
-                assert!(
-                    cqe.result() >= 0,
-                    "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
-                );
+        if user_data == WAKE_USER_DATA {
+            assert!(
+                cqe.result() >= 0,
+                "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
+            );
 
-                // Drain wake readiness from eventfd for this wake CQE.
-                self.waker.acknowledge();
+            // Drain wake readiness from eventfd for this wake CQE.
+            self.waker.acknowledge();
 
-                // Multishot can terminate, so we must re-arm to keep the wake
-                // path live.
-                if !io_uring::cqueue::more(cqe.flags()) {
-                    self.wake_rearm_needed = true;
+            // Multishot can terminate, so we must re-arm to keep the wake
+            // path live.
+            if !io_uring::cqueue::more(cqe.flags()) {
+                self.wake_rearm_needed = true;
+            }
+            return;
+        }
+
+        if let Some(completed) = self.waiters.on_completion(user_data, cqe.result()) {
+            self.deliver_completion(completed);
+        }
+    }
+
+    fn deliver_completion(&mut self, completed: CompletedWaiter) {
+        let CompletedWaiter {
+            sender,
+            buffer,
+            mut result,
+            cancelled,
+            target_tick,
+        } = completed;
+        if let Some(target_tick) = target_tick {
+            self.timeout_wheel.remove_active_deadline(target_tick);
+        }
+        if cancelled && result == -libc::ECANCELED {
+            result = -libc::ETIMEDOUT;
+        }
+        let _ = sender.send((result, buffer));
+    }
+
+    fn advance_timeouts(&mut self) {
+        if !self.timeout_wheel.has_active_deadlines() {
+            self.timeout_wheel.maybe_purge_idle_stale();
+            return;
+        }
+        let now = self.now();
+        let now_tick = self.timeout_wheel.tick_at(now);
+        let mut expired = std::mem::take(&mut self.expired_timeouts);
+        let active_bulk_cleared = self.timeout_wheel.advance(now_tick, &mut expired);
+        for timeout in expired.drain(..) {
+            if let Some(cancel_user_data) = self.waiters.cancel(timeout.waiter_id) {
+                debug_assert_eq!(cancel_user_data, timeout.waiter_id.cancel_user_data());
+                if !active_bulk_cleared {
+                    self.timeout_wheel
+                        .remove_active_deadline(timeout.target_tick);
                 }
-            }
-            TIMEOUT_USER_DATA => {
-                assert!(
-                    self.cfg.op_timeout.is_some(),
-                    "received TIMEOUT_USER_DATA with op_timeout disabled"
-                );
-            }
-            _ => {
-                let result = cqe.result();
-                let result = if result == -libc::ECANCELED && self.cfg.op_timeout.is_some() {
-                    // This operation timed out.
-                    -libc::ETIMEDOUT
-                } else {
-                    result
-                };
-
-                let Waiter {
-                    sender: result_sender,
-                    buffer,
-                    ..
-                } = self.waiters.remove(user_data);
-                let _ = result_sender.send((result, buffer));
+                self.pending_cancels.push_back(timeout.waiter_id);
             }
         }
+        self.expired_timeouts = expired;
+    }
+
+    const fn earliest_deadline(&self) -> Option<Duration> {
+        if !self.timeout_wheel.has_active_deadlines() {
+            return None;
+        }
+        self.timeout_wheel.timeout_until_next_deadline()
     }
 
     /// Drain in-flight operations during shutdown.
@@ -981,9 +946,21 @@ impl IoUringLoop {
                 break;
             }
 
+            self.advance_timeouts();
+            {
+                let mut submission_queue = ring.submission();
+                let _ = self.stage_pending_cancels(&mut submission_queue);
+            }
+
             let start = Instant::now();
+            let timeout = match (remaining, self.earliest_deadline()) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
             let got_completion = self
-                .submit_and_wait(ring, 1, remaining)
+                .submit_and_wait(ring, 1, timeout)
                 .expect("unable to submit to ring");
 
             // Always drain CQEs, even after timeout: completions can race with
@@ -993,8 +970,10 @@ impl IoUringLoop {
             }
 
             if !got_completion {
-                // Shutdown timeout elapsed before all in-flight work completed.
-                break;
+                if let Some(remaining) = remaining.as_mut() {
+                    *remaining = remaining.saturating_sub(start.elapsed());
+                }
+                continue;
             }
 
             if let Some(remaining) = remaining.as_mut() {
@@ -1082,16 +1061,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
         builder = builder.setup_defer_taskrun();
     }
 
-    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
-    // timeout). We double the ring size to ensure users get the number of
-    // concurrent operations they configured.
-    let ring_size = if cfg.op_timeout.is_some() {
-        cfg.size.checked_mul(2).expect("ring size overflow")
-    } else {
-        cfg.size
-    };
-
-    builder.build(ring_size)
+    builder.build(cfg.size)
 }
 
 /// Returns whether some result should be retried due to a transient error.
@@ -1149,63 +1119,42 @@ mod tests {
         assert_eq!(waiters.len(), 0);
         assert!(waiters.is_empty());
 
-        // Insert two waiters.
+        // Create two waiters.
         let (tx0, _rx0) = oneshot::channel();
         let (tx1, _rx1) = oneshot::channel();
-        let index0 = waiters.insert(Waiter {
-            sender: tx0,
-            buffer: Some(IoBuf::from(b"hello").into()),
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        let index1 = waiters.insert(Waiter {
-            sender: tx1,
-            buffer: Some(IoBuf::from(b"world").into()),
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
+        let index0 = waiters.insert(tx0, Some(IoBuf::from(b"hello").into()), None, None, None);
+        let index1 = waiters.insert(tx1, Some(IoBuf::from(b"world").into()), None, None, None);
         assert_eq!((index0, index1), (0, 1));
         assert_eq!(waiters.len(), 2);
         assert!(!waiters.is_empty());
 
-        // `get` returns the expected waiter state for an occupied slot.
-        match waiters.get(index0).buffer.as_ref() {
-            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"hello"),
-            _ => panic!("expected write buffer"),
-        }
-
-        // Remove the most recently inserted slot and verify we get that waiter back.
-        let waiter = waiters.remove(index1);
-        match waiter.buffer {
-            Some(OpBuffer::Write(buf)) => assert_eq!(buf.as_ref(), b"world"),
-            _ => panic!("expected write buffer"),
-        }
+        // Complete one waiter and verify returned resources.
+        let waiter = waiters
+            .on_completion(u64::from(index1), 7)
+            .expect("missing waiter completion");
+        assert_eq!(waiter.result, 7);
+        assert!(matches!(
+            waiter.buffer.as_ref(),
+            Some(OpBuffer::Write(buf)) if buf.as_ref() == b"world"
+        ));
         assert_eq!(waiters.len(), 1);
 
         // Next allocation reuses that free slot (LIFO).
         let (tx2, _rx2) = oneshot::channel();
-        let index2 = waiters.insert(Waiter {
-            sender: tx2,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
+        let index2 = waiters.insert(tx2, None, None, None, None);
         assert_eq!(index2, index1);
 
-        // Remove remaining waiters and return to empty state.
-        waiters.remove(index0);
-        waiters.remove(index2);
+        // Complete remaining waiters and return to empty state.
+        let _ = waiters.on_completion(u64::from(index0), 1);
+        let _ = waiters.on_completion(u64::from(index2), 2);
         assert!(waiters.is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "missing waiter")]
-    fn test_waiters_remove_missing_slot_panics() {
+    fn test_waiters_event_for_missing_slot_is_ignored() {
         let mut waiters = Waiters::new(1);
-        let _ = waiters.remove(0u64);
+        let completed = waiters.on_completion(0u64, 1);
+        assert!(completed.is_none());
     }
 
     #[test]
@@ -1215,20 +1164,148 @@ mod tests {
         let (tx0, _rx0) = oneshot::channel();
         let (tx1, _rx1) = oneshot::channel();
 
-        let _ = waiters.insert(Waiter {
-            sender: tx0,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
-        let _ = waiters.insert(Waiter {
-            sender: tx1,
-            buffer: None,
-            fd: None,
-            iovecs: None,
-            timespec: None,
-        });
+        let _ = waiters.insert(tx0, None, None, None, None);
+        let _ = waiters.insert(tx1, None, None, None, None);
+    }
+
+    #[test]
+    fn test_new_ring_io_poll_branch_executes() {
+        let cfg = Config {
+            io_poll: true,
+            ..Default::default()
+        };
+        let _ = new_ring(&cfg);
+    }
+
+    #[test]
+    fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Some kernels accept very large `want` values and simply return success
+        // when there are no CQEs. If this does error, it must not be treated as ETIME.
+        if let Err(err) =
+            iouring.submit_and_wait(&mut ring, usize::MAX, Some(Duration::from_millis(1)))
+        {
+            assert_ne!(err.raw_os_error(), Some(libc::ETIME));
+        }
+    }
+
+    #[test]
+    fn test_fill_submission_queue_cancel_staging_hits_sq_capacity() {
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+        iouring.wake_rearm_needed = false;
+        let (tx, _rx) = oneshot::channel();
+        let slot_index = iouring.waiters.insert(tx, None, None, None, Some(1));
+        let (cancel, _tick) = iouring
+            .waiters
+            .cancel(TimeoutEntry {
+                waiter_slot: slot_index,
+                target_tick: 1,
+            })
+            .expect("cancel should transition active waiter");
+        iouring.pending_cancels.push_back(cancel);
+
+        {
+            let mut submission_queue = ring.submission();
+            while submission_queue.len() < submission_queue.capacity() {
+                let nop = opcode::Nop::new().build();
+                // SAFETY: NOP has no borrowed pointers and SQ capacity is checked above.
+                unsafe {
+                    submission_queue.push(&nop).expect("unable to fill queue");
+                }
+            }
+        }
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("producer should still be connected");
+        assert!(at_capacity);
+        assert_eq!(iouring.pending_cancels.len(), 1);
+    }
+
+    #[test]
+    fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
+        let cfg = Config {
+            max_op_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+
+        // Schedule an old waiter at tick 1, then complete it early so the wheel
+        // retains a stale entry for this slot/tick pair.
+        let (old_tx, _old_rx) = oneshot::channel();
+        let old_slot = iouring.waiters.insert(old_tx, None, None, None, Some(1));
+        iouring.timeout_wheel.schedule(old_slot, 1);
+        let completed = iouring
+            .waiters
+            .on_completion(u64::from(old_slot), 0)
+            .expect("missing waiter completion");
+        iouring.deliver_completion(completed);
+
+        // Reuse the same slot for a new waiter with a later timeout.
+        let (tx, _rx) = oneshot::channel();
+        let slot_index = iouring.waiters.insert(tx, None, None, None, Some(3));
+        assert_eq!(slot_index, old_slot);
+        iouring.timeout_wheel.schedule(slot_index, 3);
+
+        // At tick 1, only the stale old entry should expire. The new waiter must
+        // stay active and no cancel should be queued.
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        iouring.now = None;
+        iouring.advance_timeouts();
+        assert!(iouring.pending_cancels.is_empty());
+
+        // At tick 3, the real timeout should queue cancellation.
+        std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
+        iouring.now = None;
+        iouring.advance_timeouts();
+        assert_eq!(iouring.pending_cancels.len(), 1);
+    }
+
+    #[test]
+    fn test_cancel_completion_returns_saved_op_result() {
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+        let (tx, rx) = oneshot::channel();
+        let slot_index = iouring.waiters.insert(tx, None, None, None, Some(2));
+        let (cancel, cancel_tick) = iouring
+            .waiters
+            .cancel(TimeoutEntry {
+                waiter_slot: slot_index,
+                target_tick: 2,
+            })
+            .expect("cancel should transition active waiter");
+        iouring.timeout_wheel.schedule(slot_index, cancel_tick);
+        iouring.timeout_wheel.remove_active_deadline(cancel_tick);
+        iouring.pending_cancels.push_back(cancel);
+
+        // Simulate op CQE first, then cancel CQE. Final completion should
+        // return the saved operation result, not ECANCELED.
+        let completed = iouring.waiters.on_completion(u64::from(slot_index), 123);
+        assert!(completed.is_none());
+        let completed = iouring
+            .waiters
+            .on_completion(
+                CANCEL_USER_DATA_TAG | u64::from(slot_index),
+                -libc::ECANCELED,
+            )
+            .expect("missing completion");
+        iouring.deliver_completion(completed);
+
+        let (result, _) = futures::executor::block_on(rx).expect("missing completion");
+        assert_eq!(result, 123);
+        assert_eq!(iouring.waiters.len(), 0);
     }
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
@@ -1252,6 +1329,7 @@ mod tests {
                 buffer: Some(buf.into()),
                 fd: None,
                 iovecs: None,
+                deadline: None,
             })
             .await
             .expect("failed to send work");
@@ -1267,6 +1345,7 @@ mod tests {
                 buffer: Some(msg.into()),
                 fd: None,
                 iovecs: None,
+                deadline: None,
             })
             .await
             .expect("failed to send work");
@@ -1297,11 +1376,23 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wake_path_branch_without_success_assertions() {
+        let timeout = tokio::time::timeout(
+            Duration::from_secs(2),
+            recv_then_send(Default::default(), false),
+        );
+        assert!(
+            timeout.await.is_ok(),
+            "recv_then_send timed out unexpectedly"
+        );
+    }
+
     #[tokio::test]
     async fn test_timeout() {
         // Create an io_uring instance
         let cfg = Config {
-            op_timeout: Some(std::time::Duration::from_secs(1)),
+            max_op_timeout: std::time::Duration::from_secs(1),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1318,6 +1409,7 @@ mod tests {
         )
         .build();
         let (tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + Duration::from_secs(1);
         submitter
             .send(Op {
                 work,
@@ -1325,6 +1417,7 @@ mod tests {
                 buffer: Some(buf.into()),
                 fd: None,
                 iovecs: None,
+                deadline: Some(deadline),
             })
             .await
             .expect("failed to send work");
@@ -1357,6 +1450,7 @@ mod tests {
                 buffer: None,
                 fd: None,
                 iovecs: None,
+                deadline: None,
             })
             .await
             .unwrap();
@@ -1393,6 +1487,7 @@ mod tests {
                 buffer: None,
                 fd: None,
                 iovecs: None,
+                deadline: None,
             })
             .await
             .unwrap();
@@ -1411,14 +1506,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_linked_timeout_ensure_enough_capacity() {
-        // This is a regression test for a bug where we don't reserve enough SQ
-        // space for operations with linked timeouts. Each op needs 2 SQEs (op +
-        // timeout) but the code only ensured 1 slot is available before pushing
-        // both.
+    async fn test_shutdown_timeout_with_completion() {
+        let cfg = Config {
+            shutdown_timeout: Some(Duration::from_secs(2)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Complete during shutdown drain to exercise the `got_completion` branch.
+        let timeout = Timespec::new().sec(1);
+        let timeout = opcode::Timeout::new(&timeout).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: None,
+            })
+            .await
+            .unwrap();
+
+        drop(submitter);
+        let (result, _) = rx.await.expect("missing completion");
+        assert_eq!(result, -libc::ETIME);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_deadline_timeout_ensure_enough_capacity() {
+        // Regression test: many operations with deadlines should batch without
+        // requiring linked timeout SQEs or ring-size doubling.
         let cfg = Config {
             size: 8,
-            op_timeout: Some(Duration::from_millis(5)),
+            max_op_timeout: Duration::from_millis(50),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1428,6 +1553,7 @@ mod tests {
         // Submit more operations than the SQ size to force batching.
         let total = 64usize;
         let mut rxs = Vec::with_capacity(total);
+        let deadline = Instant::now() + Duration::from_millis(50);
         for _ in 0..total {
             let nop = opcode::Nop::new().build();
             let (tx, rx) = oneshot::channel();
@@ -1438,6 +1564,7 @@ mod tests {
                     buffer: None,
                     fd: None,
                     iovecs: None,
+                    deadline: Some(deadline),
                 })
                 .await
                 .unwrap();
@@ -1478,6 +1605,7 @@ mod tests {
                 buffer: None,
                 fd: None,
                 iovecs: None,
+                deadline: None,
             })
             .await
             .unwrap();
