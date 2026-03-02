@@ -22,7 +22,7 @@ pub struct RoundScenario {
 
 impl RoundScenario {
     /// Returns the designated leader index for this round scenario.
-    pub fn leader(self) -> usize {
+    pub const fn leader(self) -> usize {
         self.leader
     }
 }
@@ -59,15 +59,32 @@ impl Scenario {
         participants: &[P],
     ) -> SplitTarget {
         let (primary, secondary) = self.partitions(view, participants);
-        let in_primary = primary.contains(sender);
-        let in_secondary = secondary.contains(sender);
-        match (in_primary, in_secondary) {
-            (true, true) => SplitTarget::Both,
-            (true, false) => SplitTarget::Primary,
-            (false, true) => SplitTarget::Secondary,
-            (false, false) => SplitTarget::None,
-        }
+        route_with_groups(sender, &primary, &secondary)
     }
+}
+
+fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
+    let in_primary = primary.contains(sender);
+    let in_secondary = secondary.contains(sender);
+    match (in_primary, in_secondary) {
+        (true, true) => SplitTarget::Both,
+        (true, false) => SplitTarget::Primary,
+        (false, true) => SplitTarget::Secondary,
+        (false, false) => SplitTarget::None,
+    }
+}
+
+/// Splits participants by `view % n` to mirror the legacy twins `View` strategy.
+pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
+    let split = (view.get() as usize) % participants.len();
+    let (primary, secondary) = participants.split_at(split);
+    (primary.to_vec(), secondary.to_vec())
+}
+
+/// Routes a sender using the legacy twins `View` strategy.
+pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
+    let (primary, secondary) = view_partitions(view, participants);
+    route_with_groups(sender, &primary, &secondary)
 }
 
 /// Framework configuration for generating Twins cases.
@@ -219,8 +236,7 @@ fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
             masks[partition_idx] |= 1u64 << participant_idx;
         }
 
-        for leader in 0..n {
-            let primary_idx = partition[leader];
+        for (leader, primary_idx) in partition.iter().copied().enumerate() {
             for secondary_idx in 0..partition_count {
                 scenarios.insert(RoundScenario {
                     leader,
@@ -456,7 +472,10 @@ mod tests {
     fn pruned_scenarios_vary_across_round_positions() {
         let scenarios = generate_scenarios(11, 5, 3, 3, 32);
         for round in 0..3 {
-            let unique: HashSet<_> = scenarios.iter().map(|scenario| scenario.rounds[round]).collect();
+            let unique: HashSet<_> = scenarios
+                .iter()
+                .map(|scenario| scenario.rounds[round])
+                .collect();
             assert!(
                 unique.len() > 1,
                 "round index {round} should vary under deterministic pruning"

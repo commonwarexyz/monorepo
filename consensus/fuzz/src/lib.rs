@@ -16,7 +16,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{application, relay, reporter, twins::Strategy},
+        mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
         Engine,
     },
@@ -459,7 +459,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
 
-        let strategy = Strategy::View;
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
@@ -479,7 +478,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -497,7 +496,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -516,7 +515,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
@@ -529,7 +528,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     ) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
