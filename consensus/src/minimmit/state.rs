@@ -69,6 +69,9 @@ pub enum Action<S: Scheme<D>, D: Digest> {
     Finalized(Finalization<S, D>),
     /// View advanced to a new value.
     Advanced(View),
+    /// Leader equivocation detected at this view (conflicting proposals
+    /// certified by quorum). The actor should block the leader.
+    Equivocated(View),
 }
 
 /// Result of handling a timeout in the consensus state machine.
@@ -795,9 +798,12 @@ where
 
         match certificate {
             Certificate::MNotarization(m_not) => {
-                let inserted = self.ancestry.add_m_notarization(m_not.clone());
+                let (inserted, equivocated) = self.ancestry.add_m_notarization(m_not.clone());
                 if inserted {
                     self.last_seen_notarization = self.last_seen_notarization.max(m_not.view());
+                }
+                if equivocated {
+                    actions.push(Action::Equivocated(view));
                 }
                 let proposal = m_not.proposal.clone();
                 let cert = m_not.certificate.clone();
@@ -958,7 +964,7 @@ where
                 self.ensure_tracker(view).insert_notarize(notarize.clone());
             }
             Artifact::MNotarization(m_notarization) => {
-                // Add to ancestry
+                // Add to ancestry (ignore equivocation during replay)
                 self.ancestry.add_m_notarization(m_notarization.clone());
                 self.last_seen_notarization = self.last_seen_notarization.max(view);
                 // Update view state to reflect we already broadcast this certificate
@@ -1003,7 +1009,7 @@ where
                 }
             }
             Artifact::Finalization(finalization) => {
-                // Add to ancestry
+                // Add to ancestry (ignore equivocation during replay)
                 self.ancestry.add_finalization(finalization.clone());
                 self.last_seen_notarization = self.last_seen_notarization.max(view);
                 if view > self.last_finalized {

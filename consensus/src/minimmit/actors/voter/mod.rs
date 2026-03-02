@@ -9,9 +9,6 @@
 //! On restart, the journal is replayed to rebuild state, ensuring we don't
 //! double-vote and can resume from where we left off.
 
-// Allow dead code until fully integrated
-#![allow(dead_code)]
-
 mod actor;
 mod egress;
 mod ingress;

@@ -53,7 +53,7 @@ use std::{
     task::{self, Poll},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 /// An outstanding request to the automaton.
 struct Request<V: Viewable, R>(V, oneshot::Receiver<R>);
@@ -334,6 +334,18 @@ where
         let start = self.proposal_starts.get(&view)?;
         let now = self.context.current();
         now.duration_since(*start).ok().map(|d| d.as_secs_f64())
+    }
+
+    /// Blocks an equivocating leader at the p2p layer.
+    async fn block_equivocator(&mut self, state: &mut State<S, D, L::Elector>, view: View) {
+        let leader = state.leader(view, None);
+        let leader_key = state
+            .scheme()
+            .participants()
+            .get(leader.into())
+            .expect("leader must exist")
+            .clone();
+        commonware_p2p::block!(self.blocker, leader_key, "leader equivocation detected");
     }
 
     /// Prunes the journal to the given view floor.
@@ -912,6 +924,10 @@ where
                     context.resolver.updated(certificate).await;
                 }
             }
+            Action::Equivocated(view) => {
+                warn!(%view, "leader equivocation detected");
+                self.block_equivocator(context.state, view).await;
+            }
             Action::Advanced(view) => {
                 trace!(%view, "view advanced (handled in main loop)");
                 // View advancement is handled in the main loop
@@ -1395,7 +1411,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mailbox) = Actor::new(context.with_label("voter"), cfg);
             let verify_calls = actor.automaton.verify_calls.clone();
             let (batcher_sender, batcher_receiver) = mpsc::channel(8);
             drop(batcher_receiver);
@@ -1506,7 +1522,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mailbox) = Actor::new(context.with_label("voter"), cfg);
             let verify_calls = actor.automaton.verify_calls.clone();
             let (batcher_sender, batcher_receiver) = mpsc::channel(8);
             drop(batcher_receiver);
@@ -1634,7 +1650,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mailbox) = Actor::new(context.with_label("voter"), cfg);
             let propose_calls = actor.automaton.propose_calls.clone();
             let (batcher_sender, batcher_receiver) = mpsc::channel(8);
             drop(batcher_receiver);
@@ -1736,7 +1752,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mailbox) = Actor::new(context.with_label("voter"), cfg);
             let verify_calls = actor.automaton.verify_calls.clone();
             let (batcher_sender, batcher_receiver) = mpsc::channel(8);
             drop(batcher_receiver);
@@ -1859,7 +1875,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (actor, mailbox) = Actor::new(context.with_label("voter"), cfg);
             let (batcher_sender, batcher_receiver) = mpsc::channel(8);
             drop(batcher_receiver);
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);

@@ -40,7 +40,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message to the batcher.
-    pub async fn update(&mut self, current: View, leader: Participant, finalized: View) -> bool {
+    pub async fn update(&self, current: View, leader: Participant, finalized: View) -> bool {
         self.sender
             .request_or(
                 |active| Message::Update {
@@ -55,7 +55,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Notify the batcher that a vote was constructed.
-    pub async fn constructed(&mut self, vote: Vote<S, D>) {
+    pub async fn constructed(&self, vote: Vote<S, D>) {
         self.sender.send_lossy(Message::Constructed(vote)).await;
     }
 
@@ -64,7 +64,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// This should be called when an MNotarization is created or recovered from
     /// the journal. It allows the batcher to batch toward L-quorum rather than
     /// re-batching toward M-quorum after crash recovery.
-    pub async fn m_notarization_exists(&mut self, view: View) {
+    pub async fn m_notarization_exists(&self, view: View) {
         self.sender
             .send_lossy(Message::MNotarizationExists(view))
             .await;

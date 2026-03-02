@@ -37,28 +37,28 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a verified notarize vote to the voter.
-    pub async fn verified_notarize(&mut self, notarize: Notarize<S, D>) {
+    pub async fn verified_notarize(&self, notarize: Notarize<S, D>) {
         self.sender
             .send_lossy(Message::VerifiedNotarize(notarize))
             .await;
     }
 
     /// Send a verified nullify vote to the voter.
-    pub async fn verified_nullify(&mut self, nullify: Nullify<S>) {
+    pub async fn verified_nullify(&self, nullify: Nullify<S>) {
         self.sender
             .send_lossy(Message::VerifiedNullify(nullify))
             .await;
     }
 
     /// Send a verified certificate to the voter.
-    pub async fn verified_certificate(&mut self, certificate: Certificate<S, D>) {
+    pub async fn verified_certificate(&self, certificate: Certificate<S, D>) {
         self.sender
             .send_lossy(Message::Verified(certificate, false))
             .await;
     }
 
     /// Send a proposal to the voter.
-    pub async fn proposal(&mut self, proposal: Proposal<D>) {
+    pub async fn proposal(&self, proposal: Proposal<D>) {
         self.sender.send_lossy(Message::Proposal(proposal)).await;
     }
 
@@ -66,7 +66,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     ///
     /// Returns `true` if the message was successfully queued, `false` if the
     /// mailbox was full (message is dropped with a warning).
-    pub fn resolved_certificate(&mut self, certificate: Certificate<S, D>) -> bool {
+    pub fn resolved_certificate(&self, certificate: Certificate<S, D>) -> bool {
         let view = certificate.view();
         if !self
             .sender

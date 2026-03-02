@@ -574,7 +574,7 @@ mod tests {
             let certificate = Certificate::Nullification(nullification);
 
             let (voter_tx, mut voter_rx) = mpsc::channel(1);
-            let mut voter = voter::Mailbox::new(voter_tx);
+            let voter = voter::Mailbox::new(voter_tx);
             let proposal = crate::minimmit::types::Proposal::new(
                 Rnd::new(Epoch::new(1), View::new(2)),
                 view,

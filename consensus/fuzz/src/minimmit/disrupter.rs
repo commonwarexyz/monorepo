@@ -1,9 +1,10 @@
-use crate::{strategy::Strategy, types::Message, EPOCH};
+use super::strategy::MinimmitStrategy;
+use crate::{simplex::types::Message, EPOCH};
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
-    simplex::{
+    minimmit::{
         scheme::Scheme,
-        types::{Certificate, Finalize, Notarize, Nullify, Proposal, Vote},
+        types::{Certificate, Notarize, Nullify, Proposal, Vote},
     },
     types::{Epoch, Participant, Round, View},
     Viewable,
@@ -20,11 +21,11 @@ const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
 const LATEST_PROPOSALS_MAX_LEN: usize = 100;
 
-/// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<
+/// Byzantine actor that disrupts minimmit consensus by sending malformed/mutated messages.
+pub struct MinimmitDisrupter<
     E: Clock + Spawner + CryptoRngCore,
     S: Scheme<Sha256Digest>,
-    St: Strategy + 'static,
+    St: MinimmitStrategy + 'static,
 > {
     context: E,
     scheme: S,
@@ -37,8 +38,11 @@ pub struct Disrupter<
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
 }
 
-impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy + 'static>
-    Disrupter<E, S, St>
+impl<
+        E: Clock + Spawner + CryptoRngCore,
+        S: Scheme<Sha256Digest>,
+        St: MinimmitStrategy + 'static,
+    > MinimmitDisrupter<E, S, St>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
@@ -58,10 +62,9 @@ where
     }
 
     fn message(&mut self) -> Message {
-        match (self.context.gen::<u8>()) % 4 {
+        match (self.context.gen::<u8>()) % 3 {
             0 => Message::Notarize,
-            1 => Message::Finalize,
-            2 => Message::Nullify,
+            1 => Message::Nullify,
             _ => Message::Random,
         }
     }
@@ -138,6 +141,7 @@ where
         let proposal = Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
             View::new(parent_view),
+            payload_source.parent_payload,
             payload_source.payload,
         );
 
@@ -297,20 +301,6 @@ where
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
-            Vote::Finalize(finalize) => {
-                let proposal = self.strategy.mutate_proposal(
-                    &mut self.context,
-                    &finalize.proposal,
-                    self.last_vote_view,
-                    self.last_finalized_view,
-                    self.last_notarized_view,
-                    self.last_nullified_view,
-                );
-                if let Some(v) = Finalize::sign(&self.scheme, proposal) {
-                    let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
-                    let _ = sender.send(Recipients::All, msg, true).await;
-                }
-            }
             Vote::Nullify(_) => {
                 let v = self.strategy.mutate_nullify_view(
                     &mut self.context,
@@ -335,7 +325,7 @@ where
         };
 
         let view = match cert {
-            Certificate::Notarization(n) => {
+            Certificate::MNotarization(n) => {
                 let view = n.view().get();
                 self.last_notarized_view = self.last_notarized_view.max(view);
                 view
@@ -474,20 +464,6 @@ where
                     let _ = sender.send(recipients, msg, true).await;
                 }
             }
-            Message::Finalize => {
-                let proposal = self.strategy.mutate_proposal(
-                    &mut self.context,
-                    &proposal,
-                    self.last_vote_view,
-                    self.last_finalized_view,
-                    self.last_notarized_view,
-                    self.last_nullified_view,
-                );
-                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
-                    let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
-                    let _ = sender.send(recipients, msg, true).await;
-                }
-            }
             Message::Nullify => {
                 let view = self.strategy.mutate_nullify_view(
                     &mut self.context,
@@ -502,7 +478,7 @@ where
                     let _ = sender.send(recipients, msg, true).await;
                 }
             }
-            Message::Random => {
+            Message::Random | Message::Finalize => {
                 let bytes = self.bytes();
                 let _ = sender.send(recipients, bytes, true).await;
             }
