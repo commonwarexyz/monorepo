@@ -7,7 +7,7 @@ use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
 use commonware_utils::channel::oneshot;
 
 /// Waiter slot index type. Capacity is bounded by the ring size (`u32`).
-type SlotIndex = u32;
+pub type SlotIndex = u32;
 
 /// Waiter generation used to prevent stale slot-identity collisions on reuse.
 ///
@@ -54,7 +54,7 @@ impl WaiterId {
 
     /// Build a waiter id from slot index and generation components.
     pub const fn from_parts(index: SlotIndex, generation: WaiterGeneration) -> Self {
-        Self((u64::from(generation.as_u32()) << Self::INDEX_BITS) | u64::from(index))
+        Self(((generation.as_u32() as UserData) << Self::INDEX_BITS) | (index as UserData))
     }
 
     /// Build a waiter id at generation zero for a slot index.
@@ -174,7 +174,7 @@ impl Waiters {
         let mut free = Vec::with_capacity(capacity);
         free.extend((0..capacity).rev().map(|index| {
             let index = SlotIndex::try_from(index).expect("slot index overflow");
-            WaiterId::from_parts(index, WaiterGeneration::new(0))
+            WaiterId::from_slot(index)
         }));
 
         Self {
@@ -190,7 +190,7 @@ impl Waiters {
     }
 
     /// Return total waiter slot capacity.
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         self.entries.len()
     }
 
@@ -232,11 +232,7 @@ impl Waiters {
     ///
     /// Returns a completed waiter when this completion reaches terminal state
     /// for the slot, otherwise returns `None`.
-    pub fn on_completion(
-        &mut self,
-        user_data: UserData,
-        result: i32,
-    ) -> Option<CompletedWaiter> {
+    pub fn on_completion(&mut self, user_data: UserData, result: i32) -> Option<CompletedWaiter> {
         let (waiter_id, is_cancel) = WaiterId::decode_user_data(user_data);
         let index = waiter_id.index() as usize;
 

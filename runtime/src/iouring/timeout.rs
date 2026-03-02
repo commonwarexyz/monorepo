@@ -800,7 +800,7 @@ mod tests {
         // slots=32 for max_timeout=100ms. Jumping by >= 32 ticks should expire all.
         let mut expired = Vec::new();
         assert!(wheel.advance(40, &mut expired));
-        expired.sort_unstable_by_key(|entry| entry.waiter_slot);
+        expired.sort_unstable_by_key(|entry| entry.waiter_id.index());
         assert_eq!(
             expired,
             vec![
@@ -932,10 +932,9 @@ mod tests {
     }
 
     #[test]
-    fn test_timeout_entry_matches_target_tick_truncation() {
-        let entry = TimeoutEntry::new(WaiterId::from_slot(7), (1u64 << 32) + 5);
-        assert!(entry.matches_target_tick((1u64 << 32) + 5));
-        assert!(entry.matches_target_tick(5));
-        assert!(!entry.matches_target_tick(6));
+    fn test_timeout_entry_preserves_full_target_tick() {
+        let tick = (1u64 << 32) + 5;
+        let entry = TimeoutEntry::new(WaiterId::from_slot(7), tick);
+        assert_eq!(entry.target_tick, tick);
     }
 }
