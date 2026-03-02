@@ -1339,20 +1339,20 @@ module replica {
     }
 
     val all_invariants = all {
-        //no_proposal_equivocation,
-        //agreement,
-        //no_vote_equivocation_inv,
+        no_proposal_equivocation,
+        agreement,
+        no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,
-        //validity,
-        //valid_last_finalized,
-        //certificates_are_valid_inv,
-        //notarized_consistency,
-        //parent_refs_well_formed,
-        //safe_finalization,
-        //finalize_requires_notarization,
-        //finalized_blocks_have_unique_parent,
-        //finalized_certificates_are_committed,
-        //committed_chain_is_parent_linked,
+        validity,
+        valid_last_finalized,
+        certificates_are_valid_inv,
+        notarized_consistency,
+        parent_refs_well_formed,
+        safe_finalization,
+        finalize_requires_notarization,
+        finalized_blocks_have_unique_parent,
+        finalized_certificates_are_committed,
+        committed_chain_is_parent_linked,
     }
 
     val safe = all_invariants
