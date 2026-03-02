@@ -377,7 +377,7 @@ where
     pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
         self.last_commit_loc = self.log.size().await;
-        self.log.append(op).await?;
+        self.log.append(&op).await?;
 
         self.log.commit().await.map_err(Into::into)
     }

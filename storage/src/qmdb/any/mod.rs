@@ -168,7 +168,7 @@ where
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
-        log.append(commit_floor).await?;
+        log.append(&commit_floor).await?;
         let log = log.merkleize();
         log.sync().await?;
         log
@@ -230,7 +230,7 @@ where
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
-        log.append(commit_floor).await?;
+        log.append(&commit_floor).await?;
         let log = log.merkleize();
         log.sync().await?;
         log

@@ -73,7 +73,7 @@
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
-//!     journal.append(1, 128).await.unwrap();
+//!     journal.append(1, &128).await.unwrap();
 //!
 //!     // Sync the journal
 //!     journal.sync_all().await.unwrap();
@@ -494,7 +494,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Appends an item to `Journal` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may now be smaller
     /// than the encoded size from the codec, if compression is enabled).
-    pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u32), Error> {
+    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         // Create buffer with item data (no checksum, no alignment)
         let (buf, item_len) = if let Some(compression) = self.compression {
             // Compressed: encode first, then compress
@@ -696,7 +696,7 @@ mod tests {
 
             // Append an item to the journal
             journal
-                .append(index, data)
+                .append(index, &data)
                 .await
                 .expect("Failed to append data");
 
@@ -761,7 +761,7 @@ mod tests {
             let data_items = vec![(1u64, 1), (1u64, 2), (2u64, 3), (3u64, 4)];
             for (index, data) in &data_items {
                 journal
-                    .append(*index, *data)
+                    .append(*index, data)
                     .await
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
@@ -832,7 +832,7 @@ mod tests {
             // Append items to multiple blobs
             for index in 1u64..=5u64 {
                 journal
-                    .append(index, index)
+                    .append(index, &index)
                     .await
                     .expect("Failed to append data");
                 journal.sync(index).await.expect("Failed to sync blob");
@@ -841,7 +841,7 @@ mod tests {
             // Add one item out-of-order
             let data = 99;
             journal
-                .append(2u64, data)
+                .append(2u64, &data)
                 .await
                 .expect("Failed to append data");
             journal.sync(2u64).await.expect("Failed to sync blob");
@@ -925,7 +925,7 @@ mod tests {
             // Append items to sections 1-5
             for section in 1u64..=5u64 {
                 journal
-                    .append(section, section as i32)
+                    .append(section, &(section as i32))
                     .await
                     .expect("Failed to append data");
                 journal.sync(section).await.expect("Failed to sync");
@@ -937,12 +937,12 @@ mod tests {
             // Test that accessing pruned sections returns the correct error
 
             // Test append on pruned section
-            match journal.append(1, 100).await {
+            match journal.append(1, &100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
-            match journal.append(2, 100).await {
+            match journal.append(2, &100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -986,7 +986,7 @@ mod tests {
 
             // Append to section at threshold should work
             journal
-                .append(3, 999)
+                .append(3, &999)
                 .await
                 .expect("Should be able to append to section 3");
 
@@ -1030,7 +1030,7 @@ mod tests {
 
                 for section in 1u64..=5u64 {
                     journal
-                        .append(section, section as i32)
+                        .append(section, &(section as i32))
                         .await
                         .expect("Failed to append data");
                     journal.sync(section).await.expect("Failed to sync");
@@ -1365,13 +1365,13 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
+            journal.append(1, &1).await.expect("Failed to append data");
 
             // Append multiple items to the second section
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
-                    .append(*index, *data)
+                    .append(*index, data)
                     .await
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
@@ -1452,7 +1452,7 @@ mod tests {
             assert_eq!(items[0].1, 1);
 
             // Append a new item to truncated partition
-            let (_offset, _) = journal.append(2, 5).await.expect("Failed to append data");
+            let (_offset, _) = journal.append(2, &5).await.expect("Failed to append data");
             journal.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item (offset is 0 since blob was truncated)
@@ -1514,13 +1514,13 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
+            journal.append(1, &1).await.expect("Failed to append data");
 
             // Append multiple items to the second index
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
-                    .append(*index, *data)
+                    .append(*index, data)
                     .await
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
@@ -1581,14 +1581,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, 42i32).await.unwrap();
+            journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
             let size = journal.size(1).await.unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, 43i32).await.unwrap();
+            journal.append(1, &43i32).await.unwrap();
             let new_size = journal.size(1).await.unwrap();
             assert!(new_size > size);
 
@@ -1597,7 +1597,7 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, 44i32).await.unwrap();
+            journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
             let size = journal.size(2).await.unwrap();
@@ -1636,14 +1636,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, 42i32).await.unwrap();
+            journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
             let size = journal.size(1).await.unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, 43i32).await.unwrap();
+            journal.append(1, &43i32).await.unwrap();
             let new_size = journal.size(1).await.unwrap();
             assert!(new_size > size);
 
@@ -1652,7 +1652,7 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, 44i32).await.unwrap();
+            journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
             let size = journal.size(2).await.unwrap();
@@ -1692,7 +1692,7 @@ mod tests {
             let mut offsets = Vec::new();
             for i in 0..num_items {
                 let (offset, size) = journal
-                    .append(1, i as u8)
+                    .append(1, &(i as u8))
                     .await
                     .expect("Failed to append data");
                 assert_eq!(size, 1, "u8 should encode to 1 byte");
@@ -1747,7 +1747,7 @@ mod tests {
 
             // Create sections 1-10 with data
             for section in 1u64..=10 {
-                journal.append(section, section as i32).await.unwrap();
+                journal.append(section, &(section as i32)).await.unwrap();
             }
             journal.sync_all().await.unwrap();
 
@@ -1811,7 +1811,7 @@ mod tests {
             // Append 5 items and record sizes after each
             let mut sizes = Vec::new();
             for i in 0..5 {
-                journal.append(1, i).await.unwrap();
+                journal.append(1, &i).await.unwrap();
                 journal.sync(1).await.unwrap();
                 sizes.push(journal.size(1).await.unwrap());
             }
@@ -1858,7 +1858,7 @@ mod tests {
 
             // Create sections 5, 6, 7 (skip 1-4)
             for section in 5u64..=7 {
-                journal.append(section, section as i32).await.unwrap();
+                journal.append(section, &(section as i32)).await.unwrap();
             }
             journal.sync_all().await.unwrap();
 
@@ -1900,7 +1900,7 @@ mod tests {
                 .await
                 .unwrap();
             for section in 1u64..=5 {
-                journal.append(section, section as i32).await.unwrap();
+                journal.append(section, &(section as i32)).await.unwrap();
             }
             journal.sync_all().await.unwrap();
 
@@ -1960,7 +1960,7 @@ mod tests {
 
             // Create sections 1, 2, 3
             for section in 1u64..=3 {
-                journal.append(section, section as i32).await.unwrap();
+                journal.append(section, &(section as i32)).await.unwrap();
             }
             journal.sync_all().await.unwrap();
 
@@ -2007,7 +2007,7 @@ mod tests {
 
             // Append several items to build up valid data
             for i in 0..5i32 {
-                journal.append(1, i).await.unwrap();
+                journal.append(1, &i).await.unwrap();
             }
             journal.sync(1).await.unwrap();
             let valid_logical_size = journal.size(1).await.unwrap();
@@ -2093,7 +2093,7 @@ mod tests {
 
             // Append the large item
             let (offset, size) = journal
-                .append(1, large_data)
+                .append(1, &large_data)
                 .await
                 .expect("Failed to append large item");
             assert_eq!(size as usize, LARGE_SIZE);
@@ -2161,7 +2161,7 @@ mod tests {
 
             for (section, data) in &sections_and_data {
                 let (offset, _) = journal
-                    .append(*section, *data)
+                    .append(*section, data)
                     .await
                     .expect("Failed to append");
                 offsets.push(offset);
@@ -2275,11 +2275,11 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append to section 1
-            journal.append(1, 100i32).await.expect("Failed to append");
+            journal.append(1, &100i32).await.expect("Failed to append");
 
             // Create section 2 but don't append anything - just sync to create the blob
             // Actually, we need to append something and then rewind to make it empty
-            journal.append(2, 200i32).await.expect("Failed to append");
+            journal.append(2, &200i32).await.expect("Failed to append");
             journal.sync(2).await.expect("Failed to sync");
             journal
                 .rewind_section(2, 0)
@@ -2287,7 +2287,7 @@ mod tests {
                 .expect("Failed to rewind");
 
             // Append to section 3
-            journal.append(3, 300i32).await.expect("Failed to append");
+            journal.append(3, &300i32).await.expect("Failed to append");
 
             journal.sync_all().await.expect("Failed to sync");
 
@@ -2375,7 +2375,7 @@ mod tests {
 
             // Append the exact-size item
             let (offset, size) = journal
-                .append(1, exact_data)
+                .append(1, &exact_data)
                 .await
                 .expect("Failed to append exact item");
             assert_eq!(size as usize, ITEM_SIZE);
@@ -2452,9 +2452,9 @@ mod tests {
 
             // Append items - each is 130 bytes (2-byte varint + 128 data)
             // spanning ceil(130/16) = 9 pages worth of logical data
-            let (offset1, _) = journal.append(1, item1).await.expect("Failed to append");
-            let (offset2, _) = journal.append(1, item2).await.expect("Failed to append");
-            let (offset3, _) = journal.append(1, item3).await.expect("Failed to append");
+            let (offset1, _) = journal.append(1, &item1).await.expect("Failed to append");
+            let (offset2, _) = journal.append(1, &item2).await.expect("Failed to append");
+            let (offset3, _) = journal.append(1, &item3).await.expect("Failed to append");
 
             journal.sync(1).await.expect("Failed to sync");
 
@@ -2518,7 +2518,7 @@ mod tests {
             for section in 0..5u64 {
                 for i in 0..10u64 {
                     journal
-                        .append(section, section * 1000 + i)
+                        .append(section, &(section * 1000 + i))
                         .await
                         .expect("Failed to append");
                 }
@@ -2543,7 +2543,7 @@ mod tests {
             // Append new data after clear
             for i in 0..5u64 {
                 journal
-                    .append(10, i * 100)
+                    .append(10, &(i * 100))
                     .await
                     .expect("Failed to append after clear");
             }

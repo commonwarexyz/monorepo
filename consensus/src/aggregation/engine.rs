@@ -931,7 +931,7 @@ impl<
         self.journal
             .as_mut()
             .expect("journal must be initialized")
-            .append(section, activity)
+            .append(section, &activity)
             .await
             .expect("unable to append to journal");
     }

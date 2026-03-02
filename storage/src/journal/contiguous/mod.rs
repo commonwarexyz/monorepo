@@ -85,7 +85,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// be encoded.
     fn append(
         &mut self,
-        item: Self::Item,
+        item: &Self::Item,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.

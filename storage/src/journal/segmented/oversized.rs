@@ -295,7 +295,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
         // Update entry with actual location and write to index
         let entry_with_location = entry.with_location(offset, size);
-        let position = self.index.append(section, entry_with_location).await?;
+        let position = self.index.append(section, &entry_with_location).await?;
 
         Ok((position, offset, size))
     }

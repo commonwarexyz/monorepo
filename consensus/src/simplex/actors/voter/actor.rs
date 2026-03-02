@@ -234,7 +234,7 @@ impl<
     async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view.get(), artifact)
+                .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
         }

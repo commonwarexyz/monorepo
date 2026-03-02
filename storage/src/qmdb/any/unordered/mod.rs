@@ -127,12 +127,12 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(Operation::Update(Update(key.clone(), value)))
+                    .append(&Operation::Update(Update(key.clone(), value)))
                     .await?;
                 callback(true, Some(old_loc));
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(Operation::Delete(key.clone())).await?;
+                self.log.append(&Operation::Delete(key.clone())).await?;
                 callback(false, Some(old_loc));
                 self.active_keys -= 1;
             }
@@ -146,7 +146,7 @@ where
             };
             self.snapshot.insert(&key, self.log.size().await);
             self.log
-                .append(Operation::Update(Update(key, value)))
+                .append(&Operation::Update(Update(key, value)))
                 .await?;
             callback(true, None);
             self.active_keys += 1;

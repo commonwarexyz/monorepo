@@ -292,7 +292,7 @@ where
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
             warn!("Log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+            log.append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await?;
         }
 
@@ -398,7 +398,7 @@ where
                     self.active_keys += 1;
                 }
                 self.log
-                    .append(Operation::Update(Update(key, value)))
+                    .append(&Operation::Update(Update(key, value)))
                     .await?;
             } else {
                 let deleted = {
@@ -406,7 +406,7 @@ where
                     delete_key(&mut self.snapshot, &reader, &key).await?
                 };
                 if deleted.is_some() {
-                    self.log.append(Operation::Delete(key)).await?;
+                    self.log.append(&Operation::Delete(key)).await?;
                     self.state.steps += 1;
                     self.active_keys -= 1;
                 }
@@ -449,7 +449,7 @@ where
         // Apply the commit operation with the new inactivity floor.
         self.last_commit_loc = Location::new_unchecked(
             self.log
-                .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+                .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
                 .await?,
         );
 

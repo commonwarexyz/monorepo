@@ -91,7 +91,7 @@ fn fuzz(input: FuzzInput) {
             match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
-                    let _pos = journal.append(digest).await.unwrap();
+                    let _pos = journal.append(&digest).await.unwrap();
                     journal_size += 1;
                 }
 
@@ -184,7 +184,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::AppendMany { count } => {
                     for _ in 0..*count {
                         let digest = Sha256::hash(&next_value.to_be_bytes());
-                        journal.append(digest).await.unwrap();
+                        journal.append(&digest).await.unwrap();
                         next_value += 1;
                         journal_size += 1;
                     }
