@@ -176,11 +176,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
         self.inner.read().mem_mmr.leaves()
     }
 
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        self.inner.read().mem_mmr.last_leaf_pos()
-    }
-
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.

@@ -12,7 +12,6 @@ enum MmrOperation {
     Pop,
     UpdateLeaf { location: u8, new_data: Vec<u8> },
     GetNode { pos: u64 },
-    GetLastLeafPos,
     GetSize,
     GetRoot,
     Proof { location: u64 },
@@ -77,10 +76,6 @@ impl ReferenceMmr {
         if idx < self.leaf_data.len() {
             self.leaf_data[idx] = new_data;
         }
-    }
-
-    fn last_leaf_pos(&self) -> Option<Position> {
-        self.leaf_positions.last().copied()
     }
 
     fn leaf_count(&self) -> usize {
@@ -169,7 +164,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     assert_eq!(
-                        mmr.last_leaf_pos(),
+                        Some(Position::try_from(mmr.leaves() - 1).unwrap()),
                         Some(mmr_pos),
                         "Operation {op_idx}: Last leaf position should be the added position"
                     );
@@ -181,6 +176,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrOperation::Pop => {
+                    let leaves_before = mmr.leaves();
                     let size_before = mmr.size();
                     let mut dirty_mmr = mmr.into_dirty();
                     let mmr_result = dirty_mmr.pop();
@@ -197,10 +193,10 @@ fn fuzz(input: FuzzInput) {
                             mmr.size() < size_before,
                             "Operation {op_idx}: Size should decrease after successful pop"
                         );
-
                         assert_eq!(
-                            mmr.last_leaf_pos(), reference.last_leaf_pos(),
-                            "Operation {op_idx}: Last leaf position mismatch after pop"
+                            mmr.leaves(),
+                            leaves_before - 1,
+                            "Operation {op_idx}: Leaves should decrease after successful pop"
                         );
                     }
                 }
@@ -262,16 +258,6 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                     }
-                }
-
-                MmrOperation::GetLastLeafPos => {
-                    let mmr_last = mmr.last_leaf_pos();
-                    let ref_last = reference.last_leaf_pos();
-
-                    assert_eq!(
-                        mmr_last, ref_last,
-                        "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}",
-                    );
                 }
 
                 MmrOperation::GetSize => {
@@ -397,22 +383,6 @@ fn fuzz(input: FuzzInput) {
                 }
             }
 
-            // Global invariants
-            if mmr.size() > 0 {
-                // Last leaf position should be valid
-                if let Some(last_pos) = mmr.last_leaf_pos() {
-                    assert!(
-                        last_pos < mmr.size(),
-                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
-                         mmr.size()
-                    );
-                }
-            } else {
-                assert!(
-                    mmr.last_leaf_pos().is_none(),
-                    "Operation {op_idx}: Empty MMR should have no last leaf"
-                );
-            }
         }
     });
 }

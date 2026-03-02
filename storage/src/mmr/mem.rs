@@ -150,15 +150,6 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         Location::try_from(self.size()).expect("invalid mmr size")
     }
 
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        if self.size() == 0 {
-            return None;
-        }
-
-        Some(PeakIterator::last_leaf_pos(self.size()))
-    }
-
     /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
     /// retained nodes respectively.
     pub fn bounds(&self) -> Range<Position> {
@@ -786,7 +777,6 @@ mod tests {
             );
             assert_eq!(mmr.size(), 0);
             assert_eq!(mmr.leaves(), Location::new(0));
-            assert_eq!(mmr.last_leaf_pos(), None);
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
@@ -929,7 +919,6 @@ mod tests {
             .unwrap();
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
-            assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.bounds().start, mmr.bounds().start);
             assert_eq!(*mmr_copy.root(), root);
         });
