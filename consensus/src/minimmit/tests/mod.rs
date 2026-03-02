@@ -2289,9 +2289,9 @@ mod engine_tests {
     }
 
     /// Enum to describe the action to take when linking validators.
-    #[allow(dead_code)]
     enum LinkAction {
         Link(Link),
+        #[allow(dead_code)]
         Unlink,
     }
 

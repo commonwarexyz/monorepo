@@ -28,7 +28,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Forward a certificate to the resolver.
-    pub async fn updated(&mut self, certificate: Certificate<S, D>) {
+    pub async fn updated(&self, certificate: Certificate<S, D>) {
         self.sender
             .send_lossy(MailboxMessage::Certificate(certificate))
             .await;

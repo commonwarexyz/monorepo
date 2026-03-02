@@ -51,16 +51,22 @@ impl<S: Scheme<D>, D: Digest> Ancestry<S, D> {
         self.genesis
     }
 
-    /// Adds an M-notarization, returning true if it was newly inserted.
-    pub fn add_m_notarization(&mut self, notarization: MNotarization<S, D>) -> bool {
+    /// Adds an M-notarization.
+    ///
+    /// Returns `(inserted, equivocated)`:
+    /// - `inserted`: true if the M-notarization was newly inserted.
+    /// - `equivocated`: true if the view already had an M-notarization for a
+    ///   *different* proposal, proving leader equivocation.
+    pub fn add_m_notarization(&mut self, notarization: MNotarization<S, D>) -> (bool, bool) {
         let view = notarization.proposal.round.view();
         let proposal = notarization.proposal.clone();
         let entry = self.m_notarizations.entry(view).or_default();
         if entry.contains_key(&proposal) {
-            return false;
+            return (false, false);
         }
+        let equivocated = !entry.is_empty();
         entry.insert(proposal, notarization);
-        true
+        (true, equivocated)
     }
 
     /// Adds a finalization, returning true if it was newly inserted.
@@ -318,9 +324,9 @@ mod tests {
         let m2_a = m_notarization_fixture(&schemes, &verifier, proposal_v2_a.clone());
         let m2_b = m_notarization_fixture(&schemes, &verifier, proposal_v2_b);
 
-        assert!(ancestry.add_m_notarization(m1));
-        assert!(ancestry.add_m_notarization(m2_a));
-        assert!(ancestry.add_m_notarization(m2_b));
+        assert_eq!(ancestry.add_m_notarization(m1), (true, false));
+        assert_eq!(ancestry.add_m_notarization(m2_a), (true, false));
+        assert_eq!(ancestry.add_m_notarization(m2_b), (true, true));
 
         let parent = ancestry.select_parent(View::new(3)).expect("parent");
         assert_eq!(parent.0, View::new(2));
@@ -346,7 +352,7 @@ mod tests {
             payload_v1,
         );
         let m1 = m_notarization_fixture(&schemes, &verifier, proposal_v1.clone());
-        assert!(ancestry.add_m_notarization(m1));
+        assert_eq!(ancestry.add_m_notarization(m1), (true, false));
 
         let proposal_v3 = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(3)),
@@ -388,7 +394,7 @@ mod tests {
             payload_v1,
         );
         let m1 = m_notarization_fixture(&schemes, &verifier, proposal_v1.clone());
-        assert!(ancestry.add_m_notarization(m1));
+        assert_eq!(ancestry.add_m_notarization(m1), (true, false));
 
         let nullification_v3 =
             nullification_fixture(&schemes, &verifier, Rnd::new(Epoch::new(1), View::new(3)));
@@ -427,7 +433,7 @@ mod tests {
             payload_v1,
         );
         let m1 = m_notarization_fixture(&schemes, &verifier, proposal_v1.clone());
-        assert!(ancestry.add_m_notarization(m1));
+        assert_eq!(ancestry.add_m_notarization(m1), (true, false));
 
         let round_v2 = Rnd::new(Epoch::new(1), View::new(2));
         let nullification = nullification_fixture(&schemes, &verifier, round_v2);
@@ -484,16 +490,28 @@ mod tests {
 
         // Validator A only has M-notarization for payload_x
         let mut ancestry_a = Ancestry::<Scheme, Sha256Digest>::new(genesis);
-        assert!(ancestry_a.add_m_notarization(m_notarization_x.clone()));
+        assert_eq!(
+            ancestry_a.add_m_notarization(m_notarization_x.clone()),
+            (true, false)
+        );
 
         // Validator B has both M-notarizations
         let mut ancestry_b = Ancestry::<Scheme, Sha256Digest>::new(genesis);
-        assert!(ancestry_b.add_m_notarization(m_notarization_x));
-        assert!(ancestry_b.add_m_notarization(m_notarization_y.clone()));
+        assert_eq!(
+            ancestry_b.add_m_notarization(m_notarization_x),
+            (true, false)
+        );
+        assert_eq!(
+            ancestry_b.add_m_notarization(m_notarization_y.clone()),
+            (true, true)
+        );
 
         // Validator C only has M-notarization for payload_y
         let mut ancestry_c = Ancestry::<Scheme, Sha256Digest>::new(genesis);
-        assert!(ancestry_c.add_m_notarization(m_notarization_y));
+        assert_eq!(
+            ancestry_c.add_m_notarization(m_notarization_y),
+            (true, false)
+        );
 
         // Proposer creates a proposal at view 2 explicitly building on payload_x
         let proposal_v2_on_x = Proposal::new(
@@ -590,9 +608,10 @@ mod tests {
         let m_notarization_a = m_notarization_fixture(&schemes, &verifier, proposal_a);
         let m_notarization_b = m_notarization_fixture(&schemes, &verifier, proposal_b);
 
-        assert!(ancestry.add_m_notarization(m_notarization_a));
-        assert!(
+        assert_eq!(ancestry.add_m_notarization(m_notarization_a), (true, false));
+        assert_eq!(
             ancestry.add_m_notarization(m_notarization_b),
+            (true, true),
             "distinct proposals must not be collapsed by payload digest"
         );
     }
