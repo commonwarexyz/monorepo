@@ -158,6 +158,12 @@ module types {
         sig: Signature
     }
 
+    // Parent pointer recorded from observed proposals.
+    type ParentRef = {
+        parent_block: Block,
+        parent_view: ViewNumber
+    }
+
     // Local state kept by each replica
     type ReplicaState = {
         // Current view. Genesis is view 0, voting starts at view 1.

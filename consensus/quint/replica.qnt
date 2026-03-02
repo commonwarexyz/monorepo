@@ -53,6 +53,8 @@ module replica {
 
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
+    // per-replica parent links learned from received proposals
+    var ghost_parent: ReplicaId -> (Block -> Option[ParentRef])
     // sequence of finalized blocks observed by each correct replica
     var ghost_committed_blocks: ReplicaId -> List[Block]
     // Replica-local deterministic certification policy from the application.
@@ -399,6 +401,7 @@ module replica {
         store_vote' = CORRECT.mapBy(_ => Set()),
         store_certificate' = CORRECT.mapBy(_ => Set()),
         ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
+        ghost_parent' = CORRECT.mapBy(_ => AllBlocks.union(Set(GENESIS_BLOCK, EMPTY_BLOCK)).mapBy(_ => None)),
         ghost_proposal' = CORRECT.mapBy(_ => Set()),
         leader' = l,
         certify_policy' = certify
@@ -518,6 +521,7 @@ module replica {
                         store_certificate' = store_certificate,
                         leader' = leader,
                         ghost_committed_blocks' = ghost_committed_blocks,
+                        ghost_parent' = ghost_parent,
                         certify_policy' = certify_policy
                     }
                 },
@@ -541,6 +545,7 @@ module replica {
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
                     ghost_committed_blocks' = ghost_committed_blocks,
+                    ghost_parent' = ghost_parent,
                     certify_policy' = certify_policy
                 }
             }
@@ -591,6 +596,10 @@ module replica {
             },
 
             ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
+            ghost_parent' = ghost_parent.setBy(id, old => old.set(proposal.block, Some({
+                parent_block: proposal.block_parent,
+                parent_view: proposal.view_parent
+            }))),
 
             // unchanged
             store_vote' = store_vote,
@@ -601,7 +610,7 @@ module replica {
             ghost_committed_blocks' = ghost_committed_blocks,
             certify_policy' = certify_policy
         }
-    }
+        }
 
     // Upon receiving votes for notarize(c, v):
     // - collect votes
@@ -646,6 +655,7 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
+                ghost_parent' = ghost_parent,
                 certify_policy' = certify_policy
             }
         }
@@ -694,6 +704,7 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
+                ghost_parent' = ghost_parent,
                 certify_policy' = certify_policy
             }
         }
@@ -788,6 +799,7 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
+                ghost_parent' = ghost_parent,
                 certify_policy' = certify_policy
             }
         }
@@ -817,6 +829,7 @@ module replica {
             store_vote' = store_vote,
             leader' = leader,
             ghost_proposal' = ghost_proposal,
+            ghost_parent' = ghost_parent,
             certify_policy' = certify_policy
         }
     }
@@ -926,10 +939,44 @@ module replica {
             val cert_block_val = cert_block(cert)
             val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
             val newer = cert_view_num > self.last_finalized
+            val parent_map = ghost_parent.get(id)
+            val walk_result = VIEWS.fold({
+                current: cert_block_val,
+                done: false,
+                acc: List(),
+            }, (st, _v) => {
+                if (st.done)
+                    st
+                else
+                    match (parent_map.get(st.current)) {
+                        | Some(parent) => {
+                            val include_parent = and {
+                                parent.parent_block != GENESIS_BLOCK,
+                                parent.parent_view > self.last_finalized,
+                            }
+                            if (include_parent)
+                                {
+                                    current: parent.parent_block,
+                                    done: false,
+                                    acc: List(parent.parent_block).concat(st.acc),
+                                }
+                            else
+                                {
+                                    ...st,
+                                    done: true
+                                }
+                        }
+                        | None => {
+                            ...st,
+                            done: true
+                        }
+                    }
+            })
+            val committed_chain = walk_result.acc.append(cert_block_val)
 
             all {
                 if (is_new_cert and newer)
-                    ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_block_val))
+                    ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.concat(committed_chain))
                 else
                     ghost_committed_blocks' = ghost_committed_blocks,
 
@@ -968,6 +1015,7 @@ module replica {
             leader' = leader,
             ghost_committed_blocks' = ghost_committed_blocks,
             ghost_proposal' = ghost_proposal,
+            ghost_parent' = ghost_parent,
             certify_policy' = certify_policy
         }
     }
@@ -1035,6 +1083,7 @@ module replica {
         store_certificate' = store_certificate,
         leader' = leader,
         ghost_proposal' = ghost_proposal,
+        ghost_parent' = ghost_parent,
         certify_policy' = certify_policy
     }
 
@@ -1118,7 +1167,7 @@ module replica {
     val certificates_are_valid_inv = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
-            cert_view(cert) >= GENESIS_VIEW,
+            cert_view(cert) > GENESIS_VIEW,
             cert_signatures(cert).size() >= M,
             cert_kind(cert) == NotarizationKind or cert_kind(cert) == NullificationKind or cert_kind(cert) == FinalizationKind,
             if (is_nullification_cert(cert)) {
