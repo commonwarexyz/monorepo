@@ -4,17 +4,19 @@
 //! It maintains a floor (highest finalization or M-notarization) and tracks nullifications
 //! for views above the floor.
 
-mod actor;
-mod ingress;
-mod state;
-
 use crate::types::Epoch;
-pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-pub use ingress::Mailbox;
 use std::time::Duration;
+
+mod actor;
+pub use actor::Actor;
+
+mod ingress;
+pub use ingress::Mailbox;
+
+mod state;
 
 /// Configuration for the resolver actor.
 pub struct Config<S, B, T>

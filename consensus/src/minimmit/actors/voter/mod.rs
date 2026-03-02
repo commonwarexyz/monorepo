@@ -9,23 +9,25 @@
 //! On restart, the journal is replayed to rebuild state, ensuring we don't
 //! double-vote and can resume from where we left off.
 
-mod actor;
-mod egress;
-mod ingress;
-
 use crate::{
     elector::Config as Elector,
     minimmit::types::Activity,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
-pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-pub use ingress::Mailbox;
 use std::{num::NonZeroUsize, time::Duration};
+
+mod actor;
+pub use actor::Actor;
+
+mod ingress;
+pub use ingress::Mailbox;
+
+mod egress;
 
 /// Configuration for the voter actor.
 pub struct Config<S, L, B, D, A, R, F, T>

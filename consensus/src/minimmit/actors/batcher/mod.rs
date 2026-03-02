@@ -8,22 +8,24 @@
 //! Finalization uses the same notarize votes as MNotarization, but with a
 //! higher quorum threshold (L-quorum vs M-quorum).
 
-mod actor;
-mod ingress;
-mod round;
-mod verifier;
-
 use crate::{
     minimmit::types::Activity,
     types::{Epoch, ViewDelta},
     Reporter,
 };
-pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
-pub use ingress::Mailbox;
 use round::Round;
 use verifier::Verifier;
+
+mod actor;
+pub use actor::Actor;
+
+mod ingress;
+pub use ingress::Mailbox;
+
+mod round;
+mod verifier;
 
 /// Configuration for the batcher actor.
 pub struct Config<S, B, D, F, T>
