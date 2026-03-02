@@ -249,6 +249,16 @@ impl CacheRef {
         Self::new_physical(pool, physical_page_size, capacity)
     }
 
+    /// Backwards-compatible alias to [Self::new_logical].
+    #[deprecated(
+        note = "ambiguous page-size constructor. Use CacheRef::new_logical(...) \
+                to preserve previous behavior, or CacheRef::new_physical(...). \
+                See module docs: Logical vs Physical Page Sizes."
+    )]
+    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+        Self::new_logical(pool, page_size, capacity)
+    }
+
     /// Create a shared page-cache handle from a [BufferPooler], configured with physical page size.
     pub fn from_pooler_physical(
         pooler: &impl BufferPooler,
@@ -285,6 +295,20 @@ impl CacheRef {
             logical_page_size,
             capacity,
         )
+    }
+
+    /// Backwards-compatible alias to [Self::from_pooler_logical].
+    #[deprecated(
+        note = "ambiguous page-size constructor. Use CacheRef::from_pooler_logical(...) \
+                to preserve previous behavior, or CacheRef::from_pooler_physical(...). \
+                See module docs: Logical vs Physical Page Sizes."
+    )]
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self::from_pooler_logical(pooler, page_size, capacity)
     }
 
     /// Returns the physical page size used by the underlying blob format.
