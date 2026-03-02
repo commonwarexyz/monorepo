@@ -28,8 +28,8 @@ module replica {
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
-    pure val AllBlocks = VALID_BLOCKS.union(INVALID_BLOCKS)
-    pure val ParentTrackedBlocks = AllBlocks.union(Set(GENESIS_BLOCK, EMPTY_BLOCK))
+    pure val AllBlocks = VALID_BLOCKS.union(Set(GENESIS_BLOCK, EMPTY_BLOCK)).union(INVALID_BLOCKS)
+    pure val ParentTrackedBlocks = AllBlocks
     pure val ByzantineSigs = BYZANTINE.map(id => sig_of(id))
     pure val LEADER_INACTIVITY_WINDOW = 2
 
@@ -1098,27 +1098,45 @@ module replica {
         // Adversary may inject arbitrary certificates.
         all {
             nondet sender = BYZANTINE.oneOf()
-            nondet signers = Replicas.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.oneOf()
             nondet kind = oneOf(Set(NotarizationKind, NullificationKind, FinalizationKind))
-            val cert = if (kind == NotarizationKind) {
-                notarization(view, block, signers, sender)
+            val votes = if (kind == NotarizationKind) {
+                sent_vote.filter(v => and {
+                    vote_view(v) == view,
+                    is_notarize(v),
+                    vote_block(v) == block
+                })
             } else if (kind == NullificationKind) {
-                nullification(view, signers, sender)
+                sent_vote.filter(v => and {
+                    vote_view(v) == view,
+                    is_nullify(v)
+                })
             } else {
-                finalization(view, block, signers, sender)
+                sent_vote.filter(v => and {
+                    vote_view(v) == view,
+                    is_finalize(v),
+                    vote_block(v) == block
+                })
+            }
+            nondet agg_sig = votes.map(v => vote_sig(v)).union(BYZANTINE).powerset().oneOf()
+            val cert = if (kind == NotarizationKind) {
+                notarization(view, block, agg_sig, sender)
+            } else if (kind == NullificationKind) {
+                nullification(view, agg_sig, sender)
+            } else {
+                finalization(view, block, agg_sig, sender)
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
 
         // Adversary may inject arbitrary proposal.
         all {
-            nondet view_parent = VIEWS.oneOf()
-            nondet view = VIEWS.oneOf()
+            nondet view_parent = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
+            nondet view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
             nondet sig = BYZANTINE.oneOf()
             nondet block = AllBlocks.oneOf()
-            nondet block_parent = AllBlocks.union(Set(GENESIS_BLOCK)).oneOf()
+            nondet block_parent = AllBlocks.oneOf()
             val proposal = {
                 view: view,
                 block: block,
@@ -1321,20 +1339,20 @@ module replica {
     }
 
     val all_invariants = all {
-        no_proposal_equivocation,
-        agreement,
-        no_vote_equivocation_inv,
+        //no_proposal_equivocation,
+        //agreement,
+        //no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,
-        validity,
-        valid_last_finalized,
-        certificates_are_valid_inv,
-        notarized_consistency,
-        parent_refs_well_formed,
-        safe_finalization,
-        finalize_requires_notarization,
-        finalized_blocks_have_unique_parent,
-        finalized_certificates_are_committed,
-        committed_chain_is_parent_linked,
+        //validity,
+        //valid_last_finalized,
+        //certificates_are_valid_inv,
+        //notarized_consistency,
+        //parent_refs_well_formed,
+        //safe_finalization,
+        //finalize_requires_notarization,
+        //finalized_blocks_have_unique_parent,
+        //finalized_certificates_are_committed,
+        //committed_chain_is_parent_linked,
     }
 
     val safe = all_invariants

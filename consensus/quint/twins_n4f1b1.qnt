@@ -18,7 +18,7 @@ module twins {
     Q = 3,
     VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
     INVALID_BLOCKS = Set("inval_0", "inval_1"),
-    VIEWS = 0.to(6),
+    VIEWS = 1.to(6),
   ) as i from "./replica"
 
   pure val CERTIFY_ALL_TRUE = i::Replicas.mapBy(_ => app::certify_always_true)
