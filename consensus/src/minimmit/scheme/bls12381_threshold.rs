@@ -58,19 +58,12 @@ enum Role<P: PublicKey, V: Variant> {
         /// Pre-computed namespace for domain separation.
         namespace: Namespace,
     },
-    CertificateVerifier {
-        /// Public identity of the committee (constant across reshares).
-        identity: V::Public,
-        /// Pre-computed namespace for domain separation.
-        namespace: Namespace,
-    },
 }
 
 /// BLS12-381 threshold implementation of the [`certificate::Scheme`] trait.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// It is possible for a node to play one of the following roles: a signer (with its share)
+/// or a verifier (with evaluated public polynomial).
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     role: Role<P, V>,
@@ -144,30 +137,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Creates a verifier that only checks recovered certificates.
-    ///
-    /// This lightweight verifier can authenticate recovered threshold certificates but cannot
-    /// verify individual votes or partial signatures.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-        Self {
-            role: Role::CertificateVerifier {
-                identity,
-                namespace: Namespace::new(namespace),
-            },
-        }
-    }
-
     /// Returns the ordered set of participant public identity keys in the committee.
-    pub fn participants(&self) -> &Set<P> {
+    pub const fn participants(&self) -> &Set<P> {
         match &self.role {
             Role::Signer { participants, .. } => participants,
             Role::Verifier { participants, .. } => participants,
-            Role::CertificateVerifier { .. } => {
-                panic!("can only be called for signer and verifier")
-            }
         }
     }
 
@@ -176,7 +150,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         match &self.role {
             Role::Signer { polynomial, .. } => polynomial.public(),
             Role::Verifier { polynomial, .. } => polynomial.public(),
-            Role::CertificateVerifier { identity, .. } => identity,
         }
     }
 
@@ -189,13 +162,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
-    pub fn polynomial(&self) -> &Sharing<V> {
+    pub const fn polynomial(&self) -> &Sharing<V> {
         match &self.role {
             Role::Signer { polynomial, .. } => polynomial,
             Role::Verifier { polynomial, .. } => polynomial,
-            Role::CertificateVerifier { .. } => {
-                panic!("can only be called for signer and verifier")
-            }
         }
     }
 
@@ -204,7 +174,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         match &self.role {
             Role::Signer { namespace, .. } => namespace,
             Role::Verifier { namespace, .. } => namespace,
-            Role::CertificateVerifier { namespace, .. } => namespace,
         }
     }
 }
@@ -1136,6 +1105,108 @@ mod tests {
     fn test_finalization_requires_l_quorum() {
         finalization_requires_l_quorum::<MinPk>();
         finalization_requires_l_quorum::<MinSig>();
+    }
+
+    fn certificate_verifier_validates_aggregated_and_threshold<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(6, 71);
+        let mut rng = test_rng();
+
+        let certificate_verifier = Scheme::<V>::verifier(
+            NAMESPACE,
+            schemes[0].participants().clone(),
+            schemes[0].polynomial().clone(),
+        );
+
+        let m_quorum = M5f1::quorum(schemes.len()) as usize;
+        let l_quorum = N5f1::quorum(schemes.len()) as usize;
+
+        let proposal_m = sample_proposal(Epoch::new(0), View::new(11), 11);
+        let m_votes: Vec<_> = schemes
+            .iter()
+            .take(m_quorum)
+            .map(|scheme| {
+                scheme
+                    .sign(Subject::Notarize {
+                        proposal: &proposal_m,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let m_certificate = schemes[0]
+            .assemble::<_, M5f1>(m_votes, &Sequential)
+            .expect("assemble M certificate");
+        assert!(
+            m_certificate.is_aggregated(),
+            "M certificate must aggregate"
+        );
+        assert!(
+            certificate_verifier.verify_certificate::<_, Sha256Digest, M5f1>(
+                &mut rng,
+                Subject::Notarize {
+                    proposal: &proposal_m,
+                },
+                &m_certificate,
+                &Sequential
+            ),
+            "certificate verifier must validate M certificates"
+        );
+
+        let proposal_l = sample_proposal(Epoch::new(0), View::new(12), 12);
+        let l_votes: Vec<_> = schemes
+            .iter()
+            .take(l_quorum)
+            .map(|scheme| {
+                scheme
+                    .sign(Subject::Notarize {
+                        proposal: &proposal_l,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let l_certificate = schemes[0]
+            .assemble::<_, N5f1>(l_votes, &Sequential)
+            .expect("assemble L certificate");
+        assert!(l_certificate.is_threshold(), "L certificate must recover");
+        assert!(
+            certificate_verifier.verify_certificate::<_, Sha256Digest, N5f1>(
+                &mut rng,
+                Subject::Notarize {
+                    proposal: &proposal_l,
+                },
+                &l_certificate,
+                &Sequential
+            ),
+            "certificate verifier must validate L certificates"
+        );
+
+        let certificates = vec![
+            (
+                Subject::Notarize {
+                    proposal: &proposal_m,
+                },
+                &m_certificate,
+            ),
+            (
+                Subject::Notarize {
+                    proposal: &proposal_l,
+                },
+                &l_certificate,
+            ),
+        ];
+        assert!(
+            certificate_verifier.verify_certificates::<_, Sha256Digest, _, M5f1>(
+                &mut rng,
+                certificates.into_iter(),
+                &Sequential
+            ),
+            "certificate verifier must batch-verify mixed certificates"
+        );
+    }
+
+    #[test]
+    fn test_certificate_verifier_validates_aggregated_and_threshold() {
+        certificate_verifier_validates_aggregated_and_threshold::<MinPk>();
+        certificate_verifier_validates_aggregated_and_threshold::<MinSig>();
     }
 
     fn certificate_codec_roundtrip_aggregated_m_quorum<V: Variant>() {
