@@ -41,6 +41,7 @@ use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+
 /// Cap iovec batch size: larger iovecs reduce syscall count but increase
 /// per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
