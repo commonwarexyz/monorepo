@@ -720,7 +720,7 @@ impl IoUringLoop {
         cfg.size = cfg
             .size
             .checked_next_power_of_two()
-            .expect("ring size rounds beyond u32");
+            .expect("ring size exceeds u32::MAX");
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
