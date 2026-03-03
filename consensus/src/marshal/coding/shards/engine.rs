@@ -795,15 +795,17 @@ where
         }
 
         // Send the leader's strong shard to tracked peers outside the participant set.
-        let non_participants = self
+        let non_participants: Vec<P> = self
             .tracked_peers
             .iter()
             .filter(|peer| participants.index(peer).is_none())
             .cloned()
             .collect();
-        let _ = sender
-            .send(Recipients::Some(non_participants), leader_shard, true)
-            .await;
+        if !non_participants.is_empty() {
+            let _ = sender
+                .send(Recipients::Some(non_participants), leader_shard, true)
+                .await;
+        }
 
         // Cache the block so we don't have to reconstruct it again.
         let block = Arc::new(block);
