@@ -298,7 +298,7 @@ where
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
-    pub fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
+    pub(crate) fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
         if operations.is_empty() {
             return;
         }
@@ -310,7 +310,7 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
+    pub(crate) async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
         let mut next_loc = self.journal.size().await;
 
         // Remove any batches of operations with stale data.
