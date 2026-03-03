@@ -407,7 +407,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Participant, Round},
+        types::{Epoch, Round},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -4658,11 +4658,10 @@ mod tests {
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector: L)
+    fn split_views_no_lockup<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -4719,88 +4718,6 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
-
-            // ========== Create engines ==========
-
-            // Do not link validators yet; we will inject certificates first, then link everyone.
-
-            // Create engines: 7 honest engines, 3 byzantine
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut honest_reporters = Vec::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                let participant_type = get_type(idx);
-                if matches!(participant_type, ParticipantType::Byzantine) {
-                    // Byzantine engines
-                    let cfg = mocks::nullify_only::Config {
-                        scheme: schemes[idx].clone(),
-                    };
-                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
-                        mocks::nullify_only::NullifyOnly::new(
-                            context.with_label(&format!("byzantine_{}", *validator)),
-                            cfg,
-                        );
-                    engine.start(pending);
-                    // Recovered/resolver channels are unused for byzantine actors.
-                    drop(recovered);
-                    drop(resolver);
-                } else {
-                    // Honest engines
-                    let reporter_config = mocks::reporter::Config {
-                        participants: participants.clone().try_into().unwrap(),
-                        scheme: schemes[idx].clone(),
-                        elector: elector.clone(),
-                    };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.with_label(&format!("reporter_{}", *validator)),
-                        reporter_config,
-                    );
-                    honest_reporters.push(reporter.clone());
-
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
-                        relay: relay.clone(),
-                        me: validator.clone(),
-                        propose_latency: (10.0, 5.0),
-                        verify_latency: (10.0, 5.0),
-                        certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
-                    };
-                    let (actor, application) = mocks::application::Application::new(
-                        context.with_label(&format!("application_{}", *validator)),
-                        application_cfg,
-                    );
-                    actor.start();
-                    let blocker = oracle.control(validator.clone());
-                    let cfg = config::Config {
-                        scheme: schemes[idx].clone(),
-                        elector: elector.clone(),
-                        blocker,
-                        automaton: application.clone(),
-                        relay: application.clone(),
-                        reporter: reporter.clone(),
-                        strategy: Sequential,
-                        partition: validator.to_string(),
-                        mailbox_size: 1024,
-                        epoch: Epoch::new(333),
-                        leader_timeout: Duration::from_secs(10),
-                        certification_timeout: Duration::from_secs(10),
-                        timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
-                        skip_timeout,
-                        fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
-                    let engine =
-                        Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
-                    engine.start(pending, recovered, resolver);
-                }
-            }
 
             // ========== Build the certificates manually ==========
 
@@ -4878,28 +4795,6 @@ mod tests {
 
             // ========== Broadcast certificates over recovered network. ==========
 
-            // View F+2:
-            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
-            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
-            for (i, participant) in participants.iter().enumerate() {
-                let recipient = Recipients::One(participant.clone());
-                let msg = match get_type(i) {
-                    ParticipantType::Group2 => notarization_msg.encode(),
-                    _ => nullification_msg.encode(),
-                };
-                injector_sender.send(recipient, msg, true).await.unwrap();
-            }
-            // View F+1:
-            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
-            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
-            for (i, participant) in participants.iter().enumerate() {
-                let recipient = Recipients::One(participant.clone());
-                let msg = match get_type(i) {
-                    ParticipantType::Group1 => notarization_msg.encode(),
-                    _ => nullification_msg.encode(),
-                };
-                injector_sender.send(recipient, msg, true).await.unwrap();
-            }
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
@@ -4911,12 +4806,113 @@ mod tests {
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
+            // View F+1:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group1 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F+2:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group2 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
 
-            // Wait for a while to let the certificates propagate, but not so long that we
-            // nullify view F+2.
-            debug!("waiting for certificates to propagate");
-            context.sleep(Duration::from_secs(5)).await;
-            debug!("certificates propagated");
+            // ========== Create engines ==========
+
+            // Engines are started after certificate preload so this test does not
+            // rely on pinning early leaders.
+            let elector = RoundRobin::<Sha256>::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut honest_reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let participant_type = get_type(idx);
+                if matches!(participant_type, ParticipantType::Byzantine) {
+                    // Byzantine engines
+                    let cfg = mocks::nullify_only::Config {
+                        scheme: schemes[idx].clone(),
+                    };
+                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
+                        mocks::nullify_only::NullifyOnly::new(
+                            context.with_label(&format!("byzantine_{}", *validator)),
+                            cfg,
+                        );
+                    engine.start(pending);
+                    // Recovered/resolver channels are unused for byzantine actors.
+                    drop(recovered);
+                    drop(resolver);
+                } else {
+                    // Honest engines
+                    let reporter_config = mocks::reporter::Config {
+                        participants: participants.clone().try_into().unwrap(),
+                        scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label(&format!("reporter_{}", *validator)),
+                        reporter_config,
+                    );
+                    honest_reporters.push(reporter.clone());
+
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label(&format!("application_{}", *validator)),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        strategy: Sequential,
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        leader_timeout: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(10),
+                        timeout_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine =
+                        Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Allow started engines to consume preloaded certificates.
+            context.sleep(Duration::from_secs(2)).await;
 
             // ========== Assert the exact certificates are seen in each view ==========
 
@@ -5011,87 +5007,20 @@ mod tests {
                 }
             }
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty());
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
         });
     }
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        /// Elector pre-populated with a fixed leader for views up to `through`,
-        /// falling back to round-robin for all later views.
-        #[derive(Clone)]
-        struct FixedElector {
-            leader: Participant,
-            through: View,
-        }
-
-        impl Default for FixedElector {
-            fn default() -> Self {
-                Self {
-                    leader: Participant::new(0),
-                    through: View::new(1),
-                }
-            }
-        }
-
-        impl<S: commonware_cryptography::certificate::Scheme> Elector<S> for FixedElector {
-            type Elector = FixedElectorInner<S>;
-
-            fn build(
-                self,
-                participants: &commonware_utils::ordered::Set<S::PublicKey>,
-            ) -> Self::Elector {
-                assert!(!participants.is_empty(), "no participants");
-                FixedElectorInner {
-                    leader: self.leader,
-                    through: self.through,
-                    n: participants.len() as u32,
-                    _phantom: std::marker::PhantomData,
-                }
-            }
-        }
-
-        #[derive(Clone)]
-        struct FixedElectorInner<S> {
-            leader: Participant,
-            through: View,
-            n: u32,
-            _phantom: std::marker::PhantomData<S>,
-        }
-
-        impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S> for FixedElectorInner<S> {
-            fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
-                if round.view() <= self.through {
-                    self.leader
-                } else {
-                    let idx =
-                        (round.epoch().get().wrapping_add(round.view().get())) as u32 % self.n;
-                    Participant::new(idx)
-                }
-            }
-        }
-
-        // Elect a Byzantine node (index 9) as leader for views 1-3 so that
-        // honest voters do not propose before the injected certificates
-        // (F=1, F+1=2, F+2=3) arrive.
-        let elector = FixedElector {
-            leader: Participant::new(9),
-            through: View::new(3),
-        };
-        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>, elector.clone());
-        split_views_no_lockup(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-            elector.clone(),
-        );
-        split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>, elector.clone());
-        split_views_no_lockup(
-            bls12381_threshold_std::fixture::<MinSig, _>,
-            elector.clone(),
-        );
-        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>, elector.clone());
-        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>, elector.clone());
-        split_views_no_lockup(ed25519::fixture, elector.clone());
-        split_views_no_lockup(secp256r1::fixture, elector);
+        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>);
+        split_views_no_lockup(bls12381_threshold_std::fixture::<MinSig, _>);
+        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>);
+        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>);
+        split_views_no_lockup(ed25519::fixture);
+        split_views_no_lockup(secp256r1::fixture);
     }
 
     fn tle<V, L>()
