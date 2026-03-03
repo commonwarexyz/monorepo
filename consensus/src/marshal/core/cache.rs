@@ -1,12 +1,13 @@
 use crate::{
     marshal::core::{ConsensusEngine, Variant},
     types::{Epoch, Round, View},
+    Roundable,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier},
+    archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
     metadata::{self, Metadata},
     translator::TwoCap,
 };
@@ -270,7 +271,7 @@ where
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_multi_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "verified");
     }
@@ -287,7 +288,7 @@ where
         };
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_multi_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -304,7 +305,7 @@ where
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), digest, notarization)
+            .put_multi_sync(round.view().get(), digest, notarization)
             .await;
         Self::handle_result(result, round, "notarization");
     }
@@ -341,17 +342,22 @@ where
         }
     }
 
-    /// Get a notarization from the prunable archive by round.
+    /// Get a notarization from the prunable archive by round and digest.
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
+        digest: <V::Block as Digestible>::Digest,
     ) -> Option<<V::Consensus as ConsensusEngine>::Notarization> {
         let cache = self.caches.get(&round.epoch())?;
-        cache
+        let notarization = cache
             .notarizations
-            .get(Identifier::Index(round.view().get()))
+            .get_multi(&digest)
             .await
-            .expect("failed to get notarization")
+            .expect("failed to get notarization")?;
+        if notarization.round() == round {
+            return Some(notarization);
+        }
+        None
     }
 
     /// Get a finalization from the prunable archive by block digest.
@@ -383,7 +389,7 @@ where
             // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
-                .get(Identifier::Key(&digest))
+                .get_multi(&digest)
                 .await
                 .expect("failed to get verified block")
             {
@@ -393,7 +399,7 @@ where
             // Check notarized blocks
             if let Some(block) = cache
                 .notarized_blocks
-                .get(Identifier::Key(&digest))
+                .get_multi(&digest)
                 .await
                 .expect("failed to get notarized block")
             {

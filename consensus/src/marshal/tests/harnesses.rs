@@ -46,7 +46,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{Faults, M5f1, N5f1, NZUsize, NZU16, NZU64};
+use commonware_utils::{Faults, M5f1, N3f1, N5f1, NZUsize, NZU16, NZU64};
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -280,19 +280,15 @@ pub trait TestHarness: 'static + Sized {
         block: &Self::TestBlock,
     ) -> impl Future<Output = ()> + Send;
 
-    /// Create a finalization certificate.
-    fn make_finalization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        quorum: u32,
-    ) -> Self::Finalization;
+    /// Create a finalization certificate from the available schemes.
+    ///
+    /// Each harness derives the correct quorum threshold internally.
+    fn make_finalization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Finalization;
 
-    /// Create a notarization certificate.
-    fn make_notarization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        quorum: u32,
-    ) -> Self::Notarization;
+    /// Create a notarization certificate from the available schemes.
+    ///
+    /// Each harness derives the correct quorum threshold internally.
+    fn make_notarization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Notarization;
 
     /// Create a consensus proposal from canonical fields.
     fn make_proposal(
@@ -586,27 +582,21 @@ impl TestHarness for StandardSimplexHarness {
         handle.mailbox.verified(round, block.clone()).await;
     }
 
-    fn make_finalization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        quorum: u32,
-    ) -> Self::Finalization {
+    fn make_finalization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Finalization {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
-    fn make_notarization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        quorum: u32,
-    ) -> Self::Notarization {
+    fn make_notarization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Notarization {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
@@ -986,11 +976,7 @@ impl TestHarness for StandardMinimmitHarness {
         handle.mailbox.verified(round, block.clone()).await;
     }
 
-    fn make_finalization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        _quorum: u32,
-    ) -> Self::Finalization {
+    fn make_finalization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Finalization {
         let l_quorum = N5f1::quorum(schemes.len()) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
@@ -1000,14 +986,11 @@ impl TestHarness for StandardMinimmitHarness {
         MinFinalization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
-    fn make_notarization(
-        proposal: Self::Proposal,
-        schemes: &[Self::Scheme],
-        quorum: u32,
-    ) -> Self::Notarization {
+    fn make_notarization(proposal: Self::Proposal, schemes: &[Self::Scheme]) -> Self::Notarization {
+        let m_quorum = M5f1::quorum(schemes.len()) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(m_quorum)
             .map(|scheme| MNotarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         MNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
@@ -1149,10 +1132,6 @@ impl TestHarness for StandardMinimmitHarness {
         (mailbox, (), application)
     }
 }
-
-// =============================================================================
-// Coding Harness Implementation
-// =============================================================================
 
 // =============================================================================
 // Coding Harness Implementation
@@ -1447,27 +1426,21 @@ impl TestHarness for CodingHarness {
         handle.mailbox.verified(round, block.clone()).await;
     }
 
-    fn make_finalization(
-        proposal: Self::Proposal,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Self::Finalization {
+    fn make_finalization(proposal: Self::Proposal, schemes: &[S]) -> Self::Finalization {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
-    fn make_notarization(
-        proposal: Self::Proposal,
-        schemes: &[S],
-        quorum: u32,
-    ) -> Self::Notarization {
+    fn make_notarization(proposal: Self::Proposal, schemes: &[S]) -> Self::Notarization {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
