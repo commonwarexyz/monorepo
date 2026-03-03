@@ -129,7 +129,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: Digest::from([1u8; 32]),
-                range: Location::new_unchecked(0)..Location::new_unchecked(10),
+                range: Location::new(0)..Location::new(10),
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -142,8 +142,8 @@ where
         let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
         // Pass empty operations vectors which should not cause panics
-        client.store_operations(Location::new_unchecked(0), vec![]);
-        client.store_operations(Location::new_unchecked(5), vec![]);
+        client.store_operations(Location::new(0), vec![]);
+        client.store_operations(Location::new(5), vec![]);
 
         // Apply operations which also shouldn't panic
         client.apply_operations().await.unwrap();
