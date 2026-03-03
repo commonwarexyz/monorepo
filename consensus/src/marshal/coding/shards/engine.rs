@@ -7,10 +7,14 @@
 //!
 //! The shard engine serves two primary functions:
 //! 1. Broadcast: When a node proposes a block, the engine broadcasts
-//!    erasure-coded shards to all participants.
+//!    erasure-coded shards to all participants and tracked non-participants.
 //! 2. Block Reconstruction: When a node receives shards from peers, the engine
 //!    validates them incrementally and reconstructs the original block once
-//!    enough valid shards are available.
+//!    enough valid shards are available. Both participants and non-participants
+//!    can reconstruct blocks: participants receive their own indexed strong
+//!    shard while non-participants receive the leader's strong shard. Both
+//!    collect weak shards gossiped by participants to reach the reconstruction
+//!    threshold.
 //!
 //! # Shard Types
 //!
@@ -89,8 +93,8 @@
 //!
 //! # Reconstruction State Machine
 //!
-//! For each [`Commitment`] with a known leader, participating nodes
-//! maintain a [`ReconstructionState`]. Before leader announcement, shards are buffered in
+//! For each [`Commitment`] with a known leader, nodes (both participants
+//! and non-participants) maintain a [`ReconstructionState`]. Before leader announcement, shards are buffered in
 //! bounded per-peer queues:
 //!
 //! ```text
