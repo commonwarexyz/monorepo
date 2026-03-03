@@ -106,15 +106,30 @@ run() {
     printf '%s\n' "${invariants_array[@]}" | nl -v1 -w2 -s'. '
     echo ""
 
-    # Export variables for parallel jobs
-    export SPEC_FILE="$spec"
-    export MAX_STEPS="$max_steps"
-    export RANDOM_TRANSITIONS="$random_transitions"
+    # Pre-compute the random transitions flag
+    local random_flag=""
+    if [ "$random_transitions" = "true" ]; then
+        random_flag="--random-transitions=true"
+    fi
 
-    # Simple approach: just pass invariants to parallel, calculate port inside
+    # Run parallel jobs with values interpolated directly (avoids env var passing issues)
+    local joblog="${QUINT_LOGS}/joblog.txt"
+    mkdir -p "${QUINT_LOGS}"
     printf '%s\n' "${invariants_array[@]}" | \
-        parallel -j ${num_invariants} --bar --progress --delay 1 --halt now,fail=1 --results ${QUINT_LOGS} \
-            'port=$((19000 + {#})); echo "Starting verification of invariant: {} on port $port"; quint verify --max-steps=$MAX_STEPS $([ "$RANDOM_TRANSITIONS" = "true" ] && echo "--random-transitions=true") --invariant={} --server-endpoint=localhost:$port $SPEC_FILE && echo "Completed verification of invariant: {}"'
+        parallel -j ${num_invariants} --bar --progress --delay 1 --halt now,fail=1 --results ${QUINT_LOGS} --joblog ${joblog} \
+            "port=\$((19000 + {#})); echo 'Starting verification of invariant: {} on port \$port'; quint verify --max-steps=${max_steps} ${random_flag} --invariant={} --server-endpoint=localhost:\$port ${spec} && echo 'Completed verification of invariant: {}'"
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "Some jobs failed. Checking stderr output..."
+        for f in $(find ${QUINT_LOGS} -name "stderr" -type f -size +0c 2>/dev/null); do
+            echo "--- $f ---"
+            cat "$f"
+        done
+        echo ""
+        echo "Job log: ${joblog}"
+    fi
+    return $exit_code
 }
 
 # Check for violations in output files

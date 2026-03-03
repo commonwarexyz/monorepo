@@ -62,11 +62,24 @@ random() {
     echo "Step: $step"
     echo ""
 
+    mkdir -p out
     seq 18001 $((18000+max_jobs)) | \
-      parallel -j ${max_jobs} --bar --progress --delay 1 --halt now,fail=1 --results out \
+      parallel -j ${max_jobs} --bar --progress --delay 1 --halt now,fail=1 --results out --joblog out/joblog.txt \
         quint verify --random-transitions=true --max-steps=${max_steps} \
           --init=${init} --step=${step} --invariant=${invariant} \
           --server-endpoint=localhost:{1} ${spec}
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "Some jobs failed. Checking stderr output..."
+        for f in $(find out -name "stderr" -type f -size +0c 2>/dev/null); do
+            echo "--- $f ---"
+            cat "$f"
+        done
+        echo ""
+        echo "Job log: out/joblog.txt"
+    fi
+    return $exit_code
 }
 
 # Run verification
@@ -96,11 +109,24 @@ all() {
     echo "Step: $step"
     echo ""
 
+    mkdir -p out
     seq 18001 $((18000+max_jobs)) | \
-      parallel -j ${max_jobs} --bar --progress --delay 1 --halt now,fail=1 --results out \
+      parallel -j ${max_jobs} --bar --progress --delay 1 --halt now,fail=1 --results out --joblog out/joblog.txt \
         quint verify --max-steps=${max_steps} \
           --init=${init} --step=${step} --invariant=${invariant} \
           --server-endpoint=localhost:{1} ${spec}
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "Some jobs failed. Checking stderr output..."
+        for f in $(find out -name "stderr" -type f -size +0c 2>/dev/null); do
+            echo "--- $f ---"
+            cat "$f"
+        done
+        echo ""
+        echo "Job log: out/joblog.txt"
+    fi
+    return $exit_code
 }
 
 # Check for violations in output files
