@@ -403,10 +403,12 @@ where
                 self.last_notarized_view,
                 self.last_nullified_view,
             );
-            let msg = proposal.encode();
-            let _ = sender
-                .send(Recipients::One(victim.clone()), msg, true)
-                .await;
+            if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
+                let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+                let _ = sender
+                    .send(Recipients::One(victim.clone()), msg, true)
+                    .await;
+            }
         }
     }
 
@@ -423,8 +425,10 @@ where
             self.last_notarized_view,
             self.last_nullified_view,
         );
-        let msg = proposal.encode();
-        let _ = sender.send(Recipients::All, msg, true).await;
+        if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
+            let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+            let _ = sender.send(Recipients::All, msg, true).await;
+        }
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
@@ -483,5 +487,160 @@ where
                 let _ = sender.send(recipients, bytes, true).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::minimmit::strategy::MinimmitAnyScope;
+    use commonware_consensus::minimmit::scheme::ed25519;
+    use commonware_cryptography::{
+        certificate::mocks::Fixture, ed25519::PublicKey as Ed25519PublicKey,
+    };
+    use commonware_p2p::{CheckedSender, LimitedSender};
+    use commonware_runtime::{deterministic, IoBufs, Metrics, Runner as _};
+    use commonware_utils::sync::Mutex;
+    use std::{sync::Arc, time::SystemTime};
+
+    const TEST_NAMESPACE: &[u8] = b"minimmit-disrupter-regression";
+    const TEST_PARTICIPANTS: u32 = 6;
+
+    #[derive(Clone, Debug)]
+    struct CapturedMessage {
+        recipients: Recipients<Ed25519PublicKey>,
+        message: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CapturingSender {
+        sent: Arc<Mutex<Vec<CapturedMessage>>>,
+    }
+
+    impl CapturingSender {
+        fn messages(&self) -> Vec<CapturedMessage> {
+            self.sent.lock().clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockSendError;
+
+    impl std::fmt::Display for MockSendError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "mock send failed")
+        }
+    }
+
+    impl std::error::Error for MockSendError {}
+
+    struct CapturingCheckedSender<'a> {
+        sender: &'a mut CapturingSender,
+        recipients: Recipients<Ed25519PublicKey>,
+    }
+
+    impl LimitedSender for CapturingSender {
+        type PublicKey = Ed25519PublicKey;
+        type Checked<'a> = CapturingCheckedSender<'a>;
+
+        async fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(CapturingCheckedSender {
+                sender: self,
+                recipients,
+            })
+        }
+    }
+
+    impl CheckedSender for CapturingCheckedSender<'_> {
+        type PublicKey = Ed25519PublicKey;
+        type Error = MockSendError;
+
+        async fn send(
+            self,
+            message: impl Into<IoBufs> + Send,
+            _priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            let message = message.into().coalesce().as_ref().to_vec();
+            self.sender.sent.lock().push(CapturedMessage {
+                recipients: self.recipients.clone(),
+                message,
+            });
+            let recipients = match self.recipients {
+                Recipients::All => Vec::new(),
+                Recipients::Some(peers) => peers,
+                Recipients::One(peer) => vec![peer],
+            };
+            Ok(recipients)
+        }
+    }
+
+    #[test]
+    fn send_proposal_emits_notarize_vote_encoding() {
+        let runner = deterministic::Runner::seeded(3);
+        runner.start(|mut context| async move {
+            let Fixture { mut schemes, .. } =
+                ed25519::fixture(&mut context, TEST_NAMESPACE, TEST_PARTICIPANTS);
+
+            let mut disrupter = MinimmitDisrupter::new(
+                context.with_label("disrupter"),
+                schemes.remove(0),
+                MinimmitAnyScope,
+            );
+            let mut sender = CapturingSender::default();
+
+            disrupter.send_proposal(&mut sender).await;
+
+            let sent = sender.messages();
+            assert_eq!(sent.len(), 1, "send_proposal should send exactly one vote");
+            let message = sent[0].message.clone();
+            let vote = Vote::<ed25519::Scheme, Sha256Digest>::read(&mut message.as_slice())
+                .expect("vote channel payload should decode as Vote");
+            assert!(
+                matches!(vote, Vote::Notarize(_)),
+                "send_proposal should emit Vote::Notarize",
+            );
+            assert!(
+                matches!(sent[0].recipients, Recipients::All),
+                "send_proposal should target all peers",
+            );
+        });
+    }
+
+    #[test]
+    fn flood_victim_emits_notarize_vote_encoding() {
+        let runner = deterministic::Runner::seeded(7);
+        runner.start(|mut context| async move {
+            let Fixture { mut schemes, .. } =
+                ed25519::fixture(&mut context, TEST_NAMESPACE, TEST_PARTICIPANTS);
+
+            let mut disrupter = MinimmitDisrupter::new(
+                context.with_label("disrupter"),
+                schemes.remove(0),
+                MinimmitAnyScope,
+            );
+            let mut sender = CapturingSender::default();
+
+            disrupter.flood_victim(&mut sender).await;
+
+            let sent = sender.messages();
+            assert_eq!(sent.len(), 10, "flood_victim should send 10 votes");
+
+            for captured in sent {
+                let mut bytes = captured.message.as_slice();
+                let vote = Vote::<ed25519::Scheme, Sha256Digest>::read(&mut bytes)
+                    .expect("vote channel payload should decode as Vote");
+                assert!(
+                    matches!(vote, Vote::Notarize(_)),
+                    "flood_victim should emit Vote::Notarize",
+                );
+                assert!(
+                    matches!(captured.recipients, Recipients::One(_)),
+                    "flood_victim should target a single victim",
+                );
+            }
+        });
     }
 }
