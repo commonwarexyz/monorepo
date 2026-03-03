@@ -4790,13 +4790,15 @@ mod tests {
             handle.abort();
 
             // Second run: certification should succeed from replayed state.
+            // Use a longer certify latency so there is a real window where an
+            // incorrect immediate nullify could fire after restart.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
+                certify_latency: (2_000.0, 0.0), // 2 seconds
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
