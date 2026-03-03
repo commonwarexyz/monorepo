@@ -9,14 +9,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
-    pub mod aggregation;
-    pub mod minimmit;
-    pub mod ordered_broadcast;
-
-    #[cfg(any(test, feature = "mocks"))]
-    pub mod mocks;
-});
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Codec, Encode};
     use commonware_cryptography::Digestible;
@@ -227,6 +219,14 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
         ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
+});
+commonware_macros::stability_scope!(ALPHA {
+    pub mod aggregation;
+    pub mod minimmit;
+    pub mod ordered_broadcast;
+
+    #[cfg(any(test, feature = "mocks"))]
+    pub mod mocks;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::{AncestorStream, BlockProvider};
