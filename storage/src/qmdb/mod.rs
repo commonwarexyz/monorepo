@@ -169,7 +169,7 @@ where
                     active_keys -= 1;
                 }
             } else if op.is_update() {
-                let new_loc = Location::new_unchecked(loc);
+                let new_loc = Location::new(loc);
                 let old_loc = update_key(snapshot, reader, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
@@ -331,7 +331,7 @@ where
             }
 
             // Update the operation's snapshot location to point to tip.
-            cursor.update(Location::new_unchecked(self.log.size().await));
+            cursor.update(Location::new(self.log.size().await));
         }
 
         // Apply the operation at tip.
@@ -353,7 +353,7 @@ where
     where
         I: Index<Value = Location>,
     {
-        let tip_loc = Location::new_unchecked(self.log.size().await);
+        let tip_loc = Location::new(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

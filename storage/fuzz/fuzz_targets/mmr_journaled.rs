@@ -52,7 +52,6 @@ enum MmrJournaledOperation {
     GetRoot,
     GetSize,
     GetLeaves,
-    GetLastLeafPos,
     GetPrunedToPos,
     GetOldestRetainedPos,
     Reinit,
@@ -156,7 +155,7 @@ fn fuzz(input: FuzzInput) {
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
-                    assert_eq!(mmr.last_leaf_pos(), Some(pos));
+                    assert_eq!(Position::try_from(mmr.leaves() - 1).unwrap(), pos);
 
                     MmrState::Dirty(mmr)
                 }
@@ -183,7 +182,7 @@ fn fuzz(input: FuzzInput) {
 
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
-                    assert_eq!(mmr.last_leaf_pos(), Some(pos));
+                    assert_eq!(Position::try_from(mmr.leaves() - 1).unwrap(), pos);
 
                     MmrState::Dirty(mmr)
                 }
@@ -222,7 +221,7 @@ fn fuzz(input: FuzzInput) {
 
                     if mmr.leaves() > 0 {
                         let location = location % mmr.leaves().as_u64();
-                        let location = Location::new(location).unwrap();
+                        let location = Location::new(location);
                         let position = Position::try_from(location).unwrap();
                         let bounds = mmr.bounds();
                         if bounds.contains(&position) {
@@ -256,7 +255,7 @@ fn fuzz(input: FuzzInput) {
 
                     if mmr.leaves() > 0 {
                         let range =
-                            Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+                            Location::new(start_loc)..Location::new(end_loc);
                         let start_pos = Position::try_from(range.start).unwrap();
 
                         if start_loc < mmr.leaves()
@@ -268,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                                 assert!(proof.verify_range_inclusion(
                                     &mut hasher,
                                     &leaves[range.to_usize_range()],
-                                    Location::new(start_loc).unwrap(),
+                                    Location::new(start_loc),
                                     &root
                                 ));
                             }
@@ -281,7 +280,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = start_loc as u64;
                     let end_loc = (end_loc as u64).clamp(start_loc, u8::MAX as u64);
                     let range =
-                        Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+                        Location::new(start_loc)..Location::new(end_loc);
                     let requested_leaves = if historical_sizes.is_empty() {
                         match &mmr {
                             MmrState::Clean(m) => m.leaves(),
@@ -450,24 +449,6 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Dirty(m) => (m.leaves().as_u64(), m.size().as_u64()),
                     };
                     assert!(leaves <= size);
-                    mmr
-                }
-
-                MmrJournaledOperation::GetLastLeafPos => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let last_pos = m.last_leaf_pos();
-                            if m.size() > 0 && m.leaves() > 0 {
-                                assert!(last_pos.is_some());
-                            }
-                        }
-                        MmrState::Dirty(m) => {
-                            let last_pos = m.last_leaf_pos();
-                            if m.size() > 0 && m.leaves() > 0 {
-                                assert!(last_pos.is_some());
-                            }
-                        }
-                    }
                     mmr
                 }
 

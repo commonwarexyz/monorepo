@@ -42,7 +42,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         let samples = elements
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()
-                            .map(|(loc, element)| (Location::new(loc as u64).unwrap(), element))
+                            .map(|(loc, element)| (Location::new(loc as u64), element))
                             .collect::<Vec<_>>();
                         samples
                     },

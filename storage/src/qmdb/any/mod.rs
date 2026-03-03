@@ -167,7 +167,7 @@ where
     } else {
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
-        let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
+        let commit_floor = Operation::CommitFloor(None, Location::new(0));
         log.append(&commit_floor).await?;
         let log = log.merkleize();
         log.sync().await?;
@@ -229,7 +229,7 @@ where
     } else {
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
-        let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
+        let commit_floor = Operation::CommitFloor(None, Location::new(0));
         log.append(&commit_floor).await?;
         let log = log.merkleize();
         log.sync().await?;
@@ -562,7 +562,7 @@ pub(crate) mod test {
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
-            let loc = Location::new_unchecked(loc);
+            let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
             assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
         }
@@ -634,7 +634,7 @@ pub(crate) mod test {
 
         // Historical proof should match "regular" proof when historical size == current database size
         let max_ops = NZU64!(10);
-        let start_loc = Location::new_unchecked(5);
+        let start_loc = Location::new(5);
         let (historical_proof, historical_ops) = db
             .historical_proof(original_op_count, start_loc, max_ops)
             .await
@@ -705,9 +705,9 @@ pub(crate) mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
 
-        let historical_op_count = Location::new_unchecked(5);
+        let historical_op_count = Location::new(5);
         let (proof, ops) = db
-            .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
+            .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
             .await
             .unwrap();
         assert_eq!(proof.leaves, historical_op_count);
@@ -723,7 +723,7 @@ pub(crate) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &ops,
                 &root_hash
             ));
@@ -737,7 +737,7 @@ pub(crate) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &ops,
                 &root_hash
             ));
@@ -753,7 +753,7 @@ pub(crate) mod test {
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
-                    Location::new_unchecked(1),
+                    Location::new(1),
                     &tampered_ops,
                     &root_hash
                 ));
@@ -768,7 +768,7 @@ pub(crate) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &tampered_ops,
                 &root_hash
             ));
@@ -780,7 +780,7 @@ pub(crate) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new_unchecked(2),
+                Location::new(2),
                 &ops,
                 &root_hash
             ));
@@ -792,7 +792,7 @@ pub(crate) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &ops,
                 &invalid_root
             ));
@@ -801,12 +801,12 @@ pub(crate) mod test {
         // Changing the proof leaves count should cause verification to fail
         {
             let mut tampered_proof = proof.clone();
-            tampered_proof.leaves = Location::new_unchecked(100);
+            tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &ops,
                 &root_hash
             ));
@@ -839,37 +839,25 @@ pub(crate) mod test {
 
         // Test singleton database (historical size = 2 means 1 op after initial commit)
         let (single_proof, single_ops) = db
-            .historical_proof(
-                Location::new_unchecked(2),
-                Location::new_unchecked(1),
-                NZU64!(1),
-            )
+            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
             .await
             .unwrap();
-        assert_eq!(single_proof.leaves, Location::new_unchecked(2));
+        assert_eq!(single_proof.leaves, Location::new(2));
         assert_eq!(single_ops.len(), 1);
 
         // Test requesting more operations than available in historical position
         let (_limited_proof, limited_ops) = db
-            .historical_proof(
-                Location::new_unchecked(11),
-                Location::new_unchecked(6),
-                NZU64!(20),
-            )
+            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
             .await
             .unwrap();
         assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
 
         // Test proof at minimum historical position
         let (min_proof, min_ops) = db
-            .historical_proof(
-                Location::new_unchecked(4),
-                Location::new_unchecked(1),
-                NZU64!(3),
-            )
+            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
             .await
             .unwrap();
-        assert_eq!(min_proof.leaves, Location::new_unchecked(4));
+        assert_eq!(min_proof.leaves, Location::new(4));
         assert_eq!(min_ops.len(), 3);
 
         db.destroy().await.unwrap();

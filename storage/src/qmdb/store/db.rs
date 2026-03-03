@@ -209,12 +209,12 @@ where
     /// retained operations respectively.
     pub async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
-        Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
+        Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Return the Location of the next operation appended to this db.
     pub async fn size(&self) -> Location {
-        Location::new_unchecked(self.log.size().await)
+        Location::new(self.log.size().await)
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -251,8 +251,8 @@ where
         }
 
         let bounds = self.log.reader().await.bounds();
-        let log_size = Location::new_unchecked(bounds.end);
-        let oldest_retained_loc = Location::new_unchecked(bounds.start);
+        let log_size = Location::new(bounds.end);
+        let oldest_retained_loc = Location::new(bounds.start);
         debug!(
             ?log_size,
             ?oldest_retained_loc,
@@ -292,7 +292,7 @@ where
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
             warn!("Log is empty, initializing new db");
-            log.append(&Operation::CommitFloor(None, Location::new_unchecked(0)))
+            log.append(&Operation::CommitFloor(None, Location::new(0)))
                 .await?;
         }
 
@@ -300,7 +300,7 @@ where
         // startup.
         log.sync().await?;
 
-        let last_commit_loc = Location::new_unchecked(
+        let last_commit_loc = Location::new(
             log.size()
                 .await
                 .checked_sub(1)
@@ -384,13 +384,7 @@ where
                 let updated = {
                     let reader = self.log.reader().await;
                     let new_loc = reader.bounds().end;
-                    update_key(
-                        &mut self.snapshot,
-                        &reader,
-                        &key,
-                        Location::new_unchecked(new_loc),
-                    )
-                    .await?
+                    update_key(&mut self.snapshot, &reader, &key, Location::new(new_loc)).await?
                 };
                 if updated.is_some() {
                     self.state.steps += 1;
@@ -447,7 +441,7 @@ where
         }
 
         // Apply the commit operation with the new inactivity floor.
-        self.last_commit_loc = Location::new_unchecked(
+        self.last_commit_loc = Location::new(
             self.log
                 .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
                 .await?,
@@ -614,7 +608,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(matches!(
-                db.prune(Location::new_unchecked(1)).await,
+                db.prune(Location::new(1)).await,
                 Err(Error::PruneBeyondMinRequired(_, _))
             ));
             assert!(db.get_metadata().await.unwrap().is_none());

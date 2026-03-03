@@ -59,13 +59,13 @@ pub mod tests {
         executor.start(|context| async move {
             let partition = "build-small".to_string();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
-            assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
+            assert_eq!(db.bounds().await.end, Location::new(1));
+            assert_eq!(db.inactivity_floor_loc().await, Location::new(0));
             assert_eq!(db.oldest_retained().await, 0);
             let root0 = db.root();
             drop(db);
             let db: C = open_db(context.with_label("second"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
+            assert_eq!(db.bounds().await.end, Location::new(1));
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
 
@@ -78,14 +78,14 @@ pub mod tests {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
+            assert_eq!(db.bounds().await.end, Location::new(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
             assert_ne!(root1, root0);
 
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(4));
+            assert_eq!(db.bounds().await.end, Location::new(4));
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail (key already exists).
@@ -99,16 +99,16 @@ pub mod tests {
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
             let (db, _) = db.commit(Some(metadata.clone())).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.bounds().await.end, Location::new(6)); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(5));
+            assert_eq!(db.inactivity_floor_loc().await, Location::new(5));
             let root2 = db.root();
 
             drop(db);
             let db: C = open_db(context.with_label("fourth"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new_unchecked(6));
+            assert_eq!(db.bounds().await.end, Location::new(6));
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(5));
+            assert_eq!(db.inactivity_floor_loc().await, Location::new(5));
             assert_eq!(db.root(), root2);
 
             // Repeated delete of same key should fail (key already deleted).

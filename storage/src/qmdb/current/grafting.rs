@@ -74,7 +74,7 @@ pub(crate) const fn height<const N: usize>() -> u32 {
 ///
 /// Inverse of [ops_pos_to_chunk_idx].
 pub(super) fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
-    let first_leaf_loc = Location::new_unchecked(chunk_idx << grafting_height);
+    let first_leaf_loc = Location::new(chunk_idx << grafting_height);
     let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
     Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2)
 }
@@ -119,7 +119,7 @@ pub(super) fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> Pos
 
     // Convert chunk index to grafted leaf position, then climb to grafted_height.
     let grafted_leaf_pos =
-        Position::try_from(Location::new_unchecked(chunk_idx)).expect("chunk index overflow");
+        Position::try_from(Location::new(chunk_idx)).expect("chunk index overflow");
     Position::new(*grafted_leaf_pos + (1u64 << (grafted_height + 1)) - 2)
 }
 
@@ -138,7 +138,7 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
     // Convert chunk index to ops leaf location, then climb to ops height.
     let ops_leaf_loc = chunk_idx << grafting_height;
     let ops_leaf_pos =
-        Position::try_from(Location::new_unchecked(ops_leaf_loc)).expect("ops leaf loc overflow");
+        Position::try_from(Location::new(ops_leaf_loc)).expect("ops leaf loc overflow");
     let ops_height = grafted_height + grafting_height;
     Position::new(*ops_leaf_pos + (1u64 << (ops_height + 1)) - 2)
 }
@@ -415,7 +415,7 @@ mod tests {
             for chunk_idx in 0..200u64 {
                 let ops_pos = chunk_idx_to_ops_pos(chunk_idx, grafting_height);
                 let grafted_pos = ops_to_grafted_pos(ops_pos, grafting_height);
-                let expected = *Position::try_from(Location::new_unchecked(chunk_idx)).unwrap();
+                let expected = *Position::try_from(Location::new(chunk_idx)).unwrap();
                 assert_eq!(
                     grafted_pos, expected,
                     "leaf mismatch: chunk_idx={chunk_idx}, gh={grafting_height}"
@@ -623,7 +623,7 @@ mod tests {
 
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
-                    let loc = Location::new_unchecked(0);
+                    let loc = Location::new(0);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
@@ -631,20 +631,20 @@ mod tests {
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
                     assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
 
-                    let loc = Location::new_unchecked(1);
+                    let loc = Location::new(1);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(&mut verifier, &b2, loc, &grafted_root));
 
-                    let loc = Location::new_unchecked(2);
+                    let loc = Location::new(2);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
                     assert!(proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
 
-                    let loc = Location::new_unchecked(3);
+                    let loc = Location::new(3);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
@@ -653,7 +653,7 @@ mod tests {
 
                 // Verify that manipulated inputs cause proof verification to fail.
                 {
-                    let loc = Location::new_unchecked(3);
+                    let loc = Location::new(3);
                     let proof = verification::range_proof(&combined, loc..loc + 1)
                         .await
                         .unwrap();
@@ -700,18 +700,16 @@ mod tests {
 
                 // Verify range proofs.
                 {
-                    let proof = verification::range_proof(
-                        &combined,
-                        Location::new_unchecked(0)..Location::new_unchecked(4),
-                    )
-                    .await
-                    .unwrap();
+                    let proof =
+                        verification::range_proof(&combined, Location::new(0)..Location::new(4))
+                            .await
+                            .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1, &c2]);
                     assert!(proof.verify_range_inclusion(
                         &mut verifier,
                         &range,
-                        Location::new_unchecked(0),
+                        Location::new(0),
                         &grafted_root
                     ));
 
@@ -720,7 +718,7 @@ mod tests {
                     assert!(!proof.verify_range_inclusion(
                         &mut verifier,
                         &range,
-                        Location::new_unchecked(0),
+                        Location::new(0),
                         &grafted_root
                     ));
                 }
@@ -753,7 +751,7 @@ mod tests {
             };
 
             // Verify inclusion proofs still work for both covered and uncovered ops leaves.
-            let loc = Location::new_unchecked(0);
+            let loc = Location::new(0);
             let proof = verification::range_proof(&combined, loc..loc + 1)
                 .await
                 .unwrap();
@@ -762,7 +760,7 @@ mod tests {
             assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
-            let loc = Location::new_unchecked(4);
+            let loc = Location::new(4);
             let proof = verification::range_proof(&combined, loc..loc + 1)
                 .await
                 .unwrap();
@@ -809,7 +807,7 @@ mod tests {
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
         let pinned_digest = Sha256::fill(0xAA);
-        let grafted_pruned_to_pos = Position::try_from(Location::new_unchecked(4)).unwrap();
+        let grafted_pruned_to_pos = Position::try_from(Location::new(4)).unwrap();
         assert_eq!(*grafted_pruned_to_pos, 7);
 
         // Build a grafted MMR from pruned components + one new leaf.

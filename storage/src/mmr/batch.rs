@@ -650,13 +650,13 @@ mod tests {
             assert_ne!(merkleized.root(), base_root);
 
             // Proof from merkleized batch should work.
-            let proof = merkleized.proof(Location::new_unchecked(55)).unwrap();
+            let proof = merkleized.proof(Location::new(55)).unwrap();
             hasher.inner().update(&55u64.to_be_bytes());
             let element = hasher.inner().finalize();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &element,
-                Location::new_unchecked(55),
+                Location::new(55),
                 &merkleized.root(),
             ));
 
@@ -769,12 +769,12 @@ mod tests {
             for i in [0u64, 25, 55, 65, 69] {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
-                let proof = merkleized_b.proof(Location::new_unchecked(i)).unwrap();
+                let proof = merkleized_b.proof(Location::new(i)).unwrap();
                 assert!(
                     proof.verify_element_inclusion(
                         &mut hasher,
                         &element,
-                        Location::new_unchecked(i),
+                        Location::new(i),
                         &merkleized_b.root(),
                     ),
                     "proof failed for element {i}"
@@ -843,17 +843,17 @@ mod tests {
             // Update leaf and verify root changes.
             let mut batch = UnmerkleizedBatch::new(&base);
             batch
-                .update_leaf_digest(Location::new_unchecked(5), updated_digest)
+                .update_leaf_digest(Location::new(5), updated_digest)
                 .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
             assert_ne!(merkleized.root(), base_root);
 
             // Restore original digest and verify root reverts.
-            let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
+            let leaf_5_pos = Position::try_from(Location::new(5)).unwrap();
             let original_digest = base.get_node(leaf_5_pos).unwrap();
             let mut batch2 = UnmerkleizedBatch::new(&base);
             batch2
-                .update_leaf_digest(Location::new_unchecked(5), original_digest)
+                .update_leaf_digest(Location::new(5), original_digest)
                 .unwrap();
             let merkleized_batch2 = batch2.merkleize(&mut hasher);
             assert_eq!(merkleized_batch2.root(), base_root);
@@ -872,7 +872,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xAA);
             let mut batch = UnmerkleizedBatch::new(&base);
             batch
-                .update_leaf_digest(Location::new_unchecked(10), updated_digest)
+                .update_leaf_digest(Location::new(10), updated_digest)
                 .unwrap();
 
             // Add more leaves.
@@ -885,17 +885,17 @@ mod tests {
             assert_ne!(merkleized.root(), base_root);
 
             // Verify the updated leaf's digest is in the batch.
-            let leaf_10_pos = Position::try_from(Location::new_unchecked(10)).unwrap();
+            let leaf_10_pos = Position::try_from(Location::new(10)).unwrap();
             assert_eq!(merkleized.get_node(leaf_10_pos), Some(updated_digest));
 
             // Verify new leaf's proof (add uses leaf_digest, so verify_element_inclusion works).
             hasher.inner().update(&52u64.to_be_bytes());
             let element = hasher.inner().finalize();
-            let proof = merkleized.proof(Location::new_unchecked(52)).unwrap();
+            let proof = merkleized.proof(Location::new(52)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &element,
-                Location::new_unchecked(52),
+                Location::new(52),
                 &merkleized.root(),
             ));
         });
@@ -913,7 +913,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xBB);
             let updates: Vec<(Location, sha256::Digest)> = [0u64, 10, 50, 99]
                 .iter()
-                .map(|&i| (Location::new_unchecked(i), updated_digest))
+                .map(|&i| (Location::new(i), updated_digest))
                 .collect();
 
             let mut batch = UnmerkleizedBatch::new(&base);
@@ -924,7 +924,7 @@ mod tests {
 
             // Verify digests were stored correctly.
             for &loc_val in &[0u64, 10, 50, 99] {
-                let pos = Position::try_from(Location::new_unchecked(loc_val)).unwrap();
+                let pos = Position::try_from(Location::new(loc_val)).unwrap();
                 assert_eq!(
                     merkleized.get_node(pos),
                     Some(updated_digest),
@@ -935,9 +935,9 @@ mod tests {
             // Verify restoring originals gives back original root.
             let mut restore_updates = Vec::new();
             for &loc_val in &[0u64, 10, 50, 99] {
-                let pos = Position::try_from(Location::new_unchecked(loc_val)).unwrap();
+                let pos = Position::try_from(Location::new(loc_val)).unwrap();
                 let original = base.get_node(pos).unwrap();
-                restore_updates.push((Location::new_unchecked(loc_val), original));
+                restore_updates.push((Location::new(loc_val), original));
             }
             let mut batch2 = UnmerkleizedBatch::new(&base);
             batch2.update_leaf_batched(&restore_updates).unwrap();
@@ -965,16 +965,16 @@ mod tests {
             // Single element proof.
             hasher.inner().update(&55u64.to_be_bytes());
             let element = hasher.inner().finalize();
-            let proof = merkleized.proof(Location::new_unchecked(55)).unwrap();
+            let proof = merkleized.proof(Location::new(55)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &element,
-                Location::new_unchecked(55),
+                Location::new(55),
                 &merkleized.root(),
             ));
 
             // Range proof.
-            let range = Location::new_unchecked(50)..Location::new_unchecked(55);
+            let range = Location::new(50)..Location::new(55);
             let range_proof = merkleized.range_proof(range.clone()).unwrap();
             let mut elements = Vec::new();
             for i in 50u64..55 {
@@ -1006,8 +1006,8 @@ mod tests {
 
             // Proofs should match.
             for loc in [0u64, 10, 49] {
-                let base_proof = base.proof(Location::new_unchecked(loc)).unwrap();
-                let batch_proof = merkleized.proof(Location::new_unchecked(loc)).unwrap();
+                let base_proof = base.proof(Location::new(loc)).unwrap();
+                let batch_proof = merkleized.proof(Location::new(loc)).unwrap();
                 assert_eq!(base_proof, batch_proof, "proof mismatch at loc {loc}");
             }
         });
@@ -1234,16 +1234,16 @@ mod tests {
             // Proof for retained element should work.
             hasher.inner().update(&80u64.to_be_bytes());
             let element = hasher.inner().finalize();
-            let proof = merkleized.proof(Location::new_unchecked(80)).unwrap();
+            let proof = merkleized.proof(Location::new(80)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &element,
-                Location::new_unchecked(80),
+                Location::new(80),
                 &merkleized.root(),
             ));
 
             // Proof for pruned element should fail.
-            let result = merkleized.proof(Location::new_unchecked(0));
+            let result = merkleized.proof(Location::new(0));
             assert!(
                 matches!(result, Err(Error::ElementPruned(_))),
                 "expected ElementPruned, got {result:?}"
@@ -1264,7 +1264,7 @@ mod tests {
             // Layer A: overwrite leaf 5.
             let mut batch_a = UnmerkleizedBatch::new(&base);
             batch_a
-                .update_leaf_digest(Location::new_unchecked(5), updated_digest)
+                .update_leaf_digest(Location::new(5), updated_digest)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
@@ -1285,7 +1285,7 @@ mod tests {
             assert_eq!(*base.root(), b_root);
 
             // Verify leaf 5 has the updated digest.
-            let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
+            let leaf_5_pos = Position::try_from(Location::new(5)).unwrap();
             assert_eq!(base.get_node(leaf_5_pos), Some(updated_digest));
         });
     }
@@ -1350,7 +1350,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xDD);
             let mut batch_a = UnmerkleizedBatch::new(&base);
             batch_a
-                .update_leaf_digest(Location::new_unchecked(5), updated_digest)
+                .update_leaf_digest(Location::new(5), updated_digest)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
@@ -1385,7 +1385,7 @@ mod tests {
             let changeset = {
                 let mut batch = UnmerkleizedBatch::new(&reference);
                 batch
-                    .update_leaf_digest(Location::new_unchecked(5), updated_digest)
+                    .update_leaf_digest(Location::new(5), updated_digest)
                     .unwrap();
                 for i in 300u64..310 {
                     hasher.inner().update(&i.to_be_bytes());
@@ -1422,14 +1422,14 @@ mod tests {
             // Layer A: overwrite leaf 5 with X.
             let mut batch_a = UnmerkleizedBatch::new(&base);
             batch_a
-                .update_leaf_digest(Location::new_unchecked(5), digest_x)
+                .update_leaf_digest(Location::new(5), digest_x)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
             // Layer B on A: overwrite leaf 5 with Y.
             let mut batch_b = merkleized_a.new_batch();
             batch_b
-                .update_leaf_digest(Location::new_unchecked(5), digest_y)
+                .update_leaf_digest(Location::new(5), digest_y)
                 .unwrap();
             let merkleized_b = batch_b.merkleize(&mut hasher);
             let b_root = merkleized_b.root();
@@ -1441,7 +1441,7 @@ mod tests {
             assert_eq!(*base.root(), b_root);
 
             // Verify leaf 5 has Y, not X.
-            let leaf_5_pos = Position::try_from(Location::new_unchecked(5)).unwrap();
+            let leaf_5_pos = Position::try_from(Location::new(5)).unwrap();
             assert_eq!(base.get_node(leaf_5_pos), Some(digest_y));
         });
     }
@@ -1463,12 +1463,12 @@ mod tests {
             }
             let updated_digest = Sha256::fill(0xEE);
             batch
-                .update_leaf_digest(Location::new_unchecked(52), updated_digest)
+                .update_leaf_digest(Location::new(52), updated_digest)
                 .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
 
             // Verify the updated leaf has the new digest.
-            let leaf_52_pos = Position::try_from(Location::new_unchecked(52)).unwrap();
+            let leaf_52_pos = Position::try_from(Location::new(52)).unwrap();
             assert_eq!(merkleized.get_node(leaf_52_pos), Some(updated_digest));
 
             // Build reference the same way: 60 elements, then update leaf 52.
@@ -1476,7 +1476,7 @@ mod tests {
             let changeset = {
                 let mut batch = UnmerkleizedBatch::new(&reference);
                 batch
-                    .update_leaf_digest(Location::new_unchecked(52), updated_digest)
+                    .update_leaf_digest(Location::new(52), updated_digest)
                     .unwrap();
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -1514,7 +1514,7 @@ mod tests {
             batch.prune_to_pos(Position::new(50)).unwrap();
 
             // Update at location 10 (position < 50) should fail.
-            let result = batch.update_leaf_digest(Location::new_unchecked(10), Sha256::fill(0xFF));
+            let result = batch.update_leaf_digest(Location::new(10), Sha256::fill(0xFF));
             assert!(
                 matches!(result, Err(Error::ElementPruned(_))),
                 "expected ElementPruned, got {result:?}"
@@ -1535,7 +1535,7 @@ mod tests {
             let element = b"updated-element";
             let mut batch = UnmerkleizedBatch::new(&base);
             batch
-                .update_leaf(&mut hasher, Location::new_unchecked(5), element)
+                .update_leaf(&mut hasher, Location::new(5), element)
                 .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
             assert_ne!(merkleized.root(), base_root);
@@ -1543,7 +1543,7 @@ mod tests {
             // Reference: same update on CleanMmr.
             let mut reference = base.clone();
             reference
-                .update_leaf(&mut hasher, Location::new_unchecked(5), element)
+                .update_leaf(&mut hasher, Location::new(5), element)
                 .unwrap();
             assert_eq!(merkleized.root(), *reference.root());
         });
@@ -1560,14 +1560,14 @@ mod tests {
             let mut batch = UnmerkleizedBatch::new(&base);
 
             // update_leaf_digest at location == leaf count.
-            let result = batch.update_leaf_digest(Location::new_unchecked(50), Sha256::fill(0xFF));
+            let result = batch.update_leaf_digest(Location::new(50), Sha256::fill(0xFF));
             assert!(
                 matches!(result, Err(Error::InvalidPosition(_))),
                 "expected InvalidPosition, got {result:?}"
             );
 
             // update_leaf_batched with one out-of-bounds location.
-            let updates = [(Location::new_unchecked(50), Sha256::fill(0xFF))];
+            let updates = [(Location::new(50), Sha256::fill(0xFF))];
             let result = batch.update_leaf_batched(&updates);
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),

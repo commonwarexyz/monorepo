@@ -234,15 +234,14 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             return false;
         }
 
-        // The chunk index should always be < MAX_LOCATION so we can use new_unchecked.
-        let chunked_leaves =
-            Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
+        // The chunk index should always be < MAX_LOCATION.
+        let chunked_leaves = Location::new(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
             digests: proof.digests.clone(),
         };
 
-        let loc = Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
+        let loc = Location::new(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
@@ -336,7 +335,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
                 state: Merkleized { root: cached_root },
             });
         }
-        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
+        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -392,8 +391,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         // Write the pinned nodes.
         // This will never panic because pruned_chunks is always less than MAX_LOCATION.
-        let mmr_size =
-            Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
+        let mmr_size = Position::try_from(Location::new(self.bitmap.pruned_chunks() as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -428,7 +426,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         self.authenticated_len = self.complete_chunks();
 
         // This will never panic because chunk is always less than MAX_LOCATION.
-        let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
+        let mmr_pos = Position::try_from(Location::new(chunk as u64)).unwrap();
         self.mmr.prune_to_pos(mmr_pos);
         Ok(())
     }
@@ -478,7 +476,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    leaves: Location::new_unchecked(self.len()),
+                    leaves: Location::new(self.len()),
                     digests: vec![*self.mmr.root()],
                 },
                 chunk,
@@ -487,7 +485,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         let range = chunk_loc..chunk_loc + 1;
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.leaves = Location::new_unchecked(self.len());
+        proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -548,12 +546,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
             .state
             .dirty_chunks
             .iter()
-            .map(|&chunk| Location::new_unchecked(chunk as u64))
+            .map(|&chunk| Location::new(chunk as u64))
             .collect();
 
         // Include complete chunks that haven't been authenticated yet
         for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new_unchecked(i as u64));
+            chunks.push(Location::new(i as u64));
         }
 
         chunks
@@ -580,7 +578,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                 .dirty_chunks
                 .iter()
                 .map(|&chunk| {
-                    let loc = Location::new_unchecked(chunk as u64);
+                    let loc = Location::new(chunk as u64);
                     (loc, self.bitmap.get_chunk(chunk))
                 })
                 .collect();
@@ -700,7 +698,7 @@ mod tests {
         executor.start(|_context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let proof = Proof {
-                leaves: Location::new_unchecked(100),
+                leaves: Location::new(100),
                 digests: Vec::new(),
             };
             assert!(

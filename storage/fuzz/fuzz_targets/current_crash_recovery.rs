@@ -286,7 +286,7 @@ fn fuzz(input: FuzzInput) {
             let floor = *db.inactivity_floor_loc();
             let size = *db.size().await;
             for i in floor..size {
-                let loc = Location::new(i).unwrap();
+                let loc = Location::new(i);
                 let (proof, ops, chunks) = db
                     .range_proof(&mut hasher, loc, NZU64!(4))
                     .await

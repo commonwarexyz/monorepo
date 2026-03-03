@@ -116,7 +116,7 @@ impl<D: Digest> Default for Proof<D> {
     /// (`leaves == 0`) MMR.
     fn default() -> Self {
         Self {
-            leaves: Location::new_unchecked(0),
+            leaves: Location::new(0),
             digests: vec![],
         }
     }
@@ -191,8 +191,8 @@ impl<D: Digest> Proof<D> {
     {
         // Empty proof is valid for an empty MMR
         if elements.is_empty() {
-            return self.leaves == Location::new_unchecked(0)
-                && *root == hasher.root(Location::new_unchecked(0), core::iter::empty());
+            return self.leaves == Location::new(0)
+                && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
         // Single pass to collect all required positions with deduplication
@@ -712,7 +712,7 @@ mod tests {
         assert!(proof.verify_range_inclusion(
             &mut hasher,
             &[] as &[Digest],
-            Location::new_unchecked(0),
+            Location::new(0),
             root
         ));
 
@@ -720,7 +720,7 @@ mod tests {
         assert!(!proof.verify_range_inclusion(
             &mut hasher,
             &[] as &[Digest],
-            Location::new_unchecked(1),
+            Location::new(1),
             root
         ));
 
@@ -729,17 +729,12 @@ mod tests {
         assert!(!proof.verify_range_inclusion(
             &mut hasher,
             &[] as &[Digest],
-            Location::new_unchecked(0),
+            Location::new(0),
             &test_digest
         ));
 
         // Non-empty elements list should fail to verify.
-        assert!(!proof.verify_range_inclusion(
-            &mut hasher,
-            &[test_digest],
-            Location::new_unchecked(0),
-            root
-        ));
+        assert!(!proof.verify_range_inclusion(&mut hasher, &[test_digest], Location::new(0), root));
     }
 
     #[test]
@@ -756,7 +751,7 @@ mod tests {
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
-            let leaf = Location::new_unchecked(leaf);
+            let leaf = Location::new(leaf);
             let proof: Proof<Digest> = mmr.proof(leaf).unwrap();
             assert!(
                 proof.verify_element_inclusion(&mut hasher, &element, leaf, root),
@@ -766,7 +761,7 @@ mod tests {
 
         // Create a valid proof, then confirm various mangling of the proof or proof args results in
         // verification failure.
-        const LEAF: Location = Location::new_unchecked(10);
+        const LEAF: Location = Location::new(10);
         let proof = mmr.proof(LEAF).unwrap();
         assert!(
             proof.verify_element_inclusion(&mut hasher, &element, LEAF, root),
@@ -796,7 +791,7 @@ mod tests {
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
-        proof2.leaves = Location::new_unchecked(10);
+        proof2.leaves = Location::new(10);
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
             "proof verification should fail with incorrect leaves"
@@ -849,7 +844,7 @@ mod tests {
 
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                let range = Location::new_unchecked(i as u64)..Location::new_unchecked(j as u64);
+                let range = Location::new(i as u64)..Location::new(j as u64);
                 let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
@@ -865,7 +860,7 @@ mod tests {
 
         // Create a proof over a range of elements, confirm it verifies successfully, then mangle
         // the proof & proof input in various ways, confirming verification fails.
-        let range = Location::new_unchecked(33)..Location::new_unchecked(40);
+        let range = Location::new(33)..Location::new(40);
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         let valid_elements = &elements[range.to_usize_range()];
         assert!(
@@ -948,7 +943,7 @@ mod tests {
         }
         // Bad start_loc should cause verification to fail.
         for loc in 0..elements.len() {
-            let loc = Location::new_unchecked(loc as u64);
+            let loc = Location::new(loc as u64);
             if loc == range.start {
                 continue;
             }
@@ -978,7 +973,7 @@ mod tests {
             let pruned_root = mmr.root();
             assert_eq!(root, *pruned_root);
             for loc in 0..elements.len() {
-                let loc = Location::new_unchecked(loc as u64);
+                let loc = Location::new(loc as u64);
                 let proof = mmr.proof(loc);
                 if Position::try_from(loc).unwrap() < Position::new(i) {
                     continue;
@@ -1014,11 +1009,11 @@ mod tests {
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root();
         for i in 0..elements.len() - 1 {
-            if Position::try_from(Location::new_unchecked(i as u64)).unwrap() < PRUNE_POS {
+            if Position::try_from(Location::new(i as u64)).unwrap() < PRUNE_POS {
                 continue;
             }
             for j in (i + 2)..elements.len() {
-                let range = Location::new_unchecked(i as u64)..Location::new_unchecked(j as u64);
+                let range = Location::new(i as u64)..Location::new(j as u64);
                 let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
@@ -1044,8 +1039,7 @@ mod tests {
         assert_eq!(mmr.bounds().start, 130);
 
         let updated_root = mmr.root();
-        let range = Location::new_unchecked(elements.len() as u64 - 10)
-            ..Location::new_unchecked(elements.len() as u64);
+        let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
@@ -1074,7 +1068,7 @@ mod tests {
         // serializes=>deserializes correctly.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                let range = Location::new_unchecked(i as u64)..Location::new_unchecked(j as u64);
+                let range = Location::new(i as u64)..Location::new(j as u64);
                 let proof = mmr.range_proof(range).unwrap();
 
                 let expected_size = proof.encode_size();
@@ -1173,7 +1167,7 @@ mod tests {
 
                 for end_loc in test_end_locs {
                     // Generate proof for the range
-                    let range = Location::new_unchecked(leaf)..Location::new_unchecked(end_loc);
+                    let range = Location::new(leaf)..Location::new(end_loc);
                     let proof_result = mmr.range_proof(range.clone());
                     let proof = proof_result.unwrap();
 
@@ -1185,7 +1179,7 @@ mod tests {
                         );
 
                     let pinned_nodes = extract_result.unwrap();
-                    let leaf_loc = Location::new_unchecked(leaf);
+                    let leaf_loc = Location::new(leaf);
                     let leaf_pos = Position::try_from(leaf_loc).unwrap();
                     let expected_pinned: Vec<Position> = nodes_to_pin(leaf_pos).collect();
 
@@ -1225,14 +1219,14 @@ mod tests {
         let mmr = mmr.merkleize(&mut hasher, None);
 
         // Generate a valid proof
-        let range = Location::new_unchecked(5)..Location::new_unchecked(8);
+        let range = Location::new(5)..Location::new(8);
         let mut proof = mmr.range_proof(range.clone()).unwrap();
 
         // Verify the proof works with valid size
         assert!(proof.extract_pinned_nodes(range.clone()).is_ok());
 
         // Test with invalid location.
-        proof.leaves = Location::new_unchecked(MAX_LOCATION + 2);
+        proof.leaves = Location::new(*MAX_LOCATION + 2);
         let result = proof.extract_pinned_nodes(range);
         assert!(matches!(result, Err(Error::LocationOverflow(_))));
     }
@@ -1253,14 +1247,12 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr
-            .range_proof(Location::new_unchecked(0)..mmr.leaves())
-            .unwrap();
+        let proof = mmr.range_proof(Location::new(0)..mmr.leaves()).unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
                 &elements,
-                Location::new_unchecked(0),
+                Location::new(0),
                 root,
             )
             .unwrap();
@@ -1276,14 +1268,14 @@ mod tests {
             proof.verify_range_inclusion_and_extract_digests(
                 &mut hasher,
                 &elements,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &wrong_root
             ),
             Err(Error::RootMismatch)
         ));
 
         // Test 2: Single element range (first element)
-        let range = Location::new_unchecked(0)..Location::new_unchecked(1);
+        let range = Location::new(0)..Location::new(1);
         let single_proof = mmr.range_proof(range.clone()).unwrap();
         let range_start = range.start;
         let single_digests = single_proof
@@ -1298,7 +1290,7 @@ mod tests {
 
         // Test 3: Single element range (middle element)
         let mid_idx = 24;
-        let range = Location::new_unchecked(mid_idx)..Location::new_unchecked(mid_idx + 1);
+        let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
         let range_start = range.start;
         let mid_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_digests = mid_proof
@@ -1313,7 +1305,7 @@ mod tests {
 
         // Test 4: Single element range (last element)
         let last_idx = elements.len() as u64 - 1;
-        let range = Location::new_unchecked(last_idx)..Location::new_unchecked(last_idx + 1);
+        let range = Location::new(last_idx)..Location::new(last_idx + 1);
         let range_start = range.start;
         let last_proof = mmr.range_proof(range.clone()).unwrap();
         let last_digests = last_proof
@@ -1327,7 +1319,7 @@ mod tests {
         assert!(last_digests.len() > 1);
 
         // Test 5: Small range at the beginning
-        let range = Location::new_unchecked(0)..Location::new_unchecked(5);
+        let range = Location::new(0)..Location::new(5);
         let range_start = range.start;
         let small_proof = mmr.range_proof(range.clone()).unwrap();
         let small_digests = small_proof
@@ -1342,7 +1334,7 @@ mod tests {
         assert!(small_digests.len() > 5);
 
         // Test 6: Medium range in the middle
-        let range = Location::new_unchecked(10)..Location::new_unchecked(31);
+        let range = Location::new(10)..Location::new(31);
         let range_start = range.start;
         let mid_range_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_range_digests = mid_range_proof
@@ -1373,11 +1365,7 @@ mod tests {
         let root = mmr.root();
 
         // Generate proof for non-contiguous single elements
-        let locations = &[
-            Location::new_unchecked(0),
-            Location::new_unchecked(5),
-            Location::new_unchecked(10),
-        ];
+        let locations = &[Location::new(0), Location::new(5), Location::new(10)];
         let nodes_for_multi_proof =
             nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
         let digests = nodes_for_multi_proof
@@ -1395,9 +1383,9 @@ mod tests {
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[5], Location::new_unchecked(5)),
-                (elements[10], Location::new_unchecked(10)),
+                (elements[0], Location::new(0)),
+                (elements[5], Location::new(5)),
+                (elements[10], Location::new(10)),
             ],
             root
         ));
@@ -1406,9 +1394,9 @@ mod tests {
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[10], Location::new_unchecked(10)),
-                (elements[5], Location::new_unchecked(5)),
-                (elements[0], Location::new_unchecked(0)),
+                (elements[10], Location::new(10)),
+                (elements[5], Location::new(5)),
+                (elements[0], Location::new(0)),
             ],
             root
         ));
@@ -1417,23 +1405,23 @@ mod tests {
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[0], Location::new_unchecked(0)),
-                (elements[10], Location::new_unchecked(10)),
-                (elements[5], Location::new_unchecked(5)),
+                (elements[0], Location::new(0)),
+                (elements[0], Location::new(0)),
+                (elements[10], Location::new(10)),
+                (elements[5], Location::new(5)),
             ],
             root
         ));
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new_unchecked(MAX_LOCATION + 2);
+        wrong_size_proof.leaves = Location::new(*MAX_LOCATION + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[5], Location::new_unchecked(5)),
-                (elements[10], Location::new_unchecked(10)),
+                (elements[0], Location::new(0)),
+                (elements[5], Location::new(5)),
+                (elements[10], Location::new(10)),
             ],
             root,
         ));
@@ -1442,9 +1430,9 @@ mod tests {
         assert!(!multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(1)),
-                (elements[5], Location::new_unchecked(6)),
-                (elements[10], Location::new_unchecked(11)),
+                (elements[0], Location::new(1)),
+                (elements[5], Location::new(6)),
+                (elements[10], Location::new(11)),
             ],
             root,
         ));
@@ -1458,9 +1446,9 @@ mod tests {
         let wrong_verification = multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (wrong_elements[0].as_slice(), Location::new_unchecked(0)),
-                (wrong_elements[1].as_slice(), Location::new_unchecked(5)),
-                (wrong_elements[2].as_slice(), Location::new_unchecked(10)),
+                (wrong_elements[0].as_slice(), Location::new(0)),
+                (wrong_elements[1].as_slice(), Location::new(5)),
+                (wrong_elements[2].as_slice(), Location::new(10)),
             ],
             root,
         );
@@ -1470,9 +1458,9 @@ mod tests {
         let wrong_verification = multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[5], Location::new_unchecked(5)),
-                (elements[10], Location::new_unchecked(1000)),
+                (elements[0], Location::new(0)),
+                (elements[5], Location::new(5)),
+                (elements[10], Location::new(1000)),
             ],
             root,
         );
@@ -1486,9 +1474,9 @@ mod tests {
         assert!(!multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[5], Location::new_unchecked(5)),
-                (elements[10], Location::new_unchecked(10)),
+                (elements[0], Location::new(0)),
+                (elements[5], Location::new(5)),
+                (elements[10], Location::new(10)),
             ],
             &wrong_root
         ));
@@ -1519,12 +1507,12 @@ mod tests {
         let mmr = dirty_mmr.merkleize(&mut hasher, None);
 
         // Get individual proofs that will share some digests (elements in same subtree)
-        let proof1 = mmr.proof(Location::new_unchecked(0)).unwrap();
-        let proof2 = mmr.proof(Location::new_unchecked(1)).unwrap();
+        let proof1 = mmr.proof(Location::new(0)).unwrap();
+        let proof2 = mmr.proof(Location::new(1)).unwrap();
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
         // Generate multi-proof for the same positions
-        let locations = &[Location::new_unchecked(0), Location::new_unchecked(1)];
+        let locations = &[Location::new(0), Location::new(1)];
         let multi_proof =
             nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
         let digests = multi_proof
@@ -1544,8 +1532,8 @@ mod tests {
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[
-                (elements[0], Location::new_unchecked(0)),
-                (elements[1], Location::new_unchecked(1))
+                (elements[0], Location::new(0)),
+                (elements[1], Location::new(1))
             ],
             root
         ));
@@ -1553,21 +1541,20 @@ mod tests {
 
     #[test]
     fn test_max_location_is_provable() {
-        // Test that the validation logic accepts MAX_LOCATION as a valid location
-        // We use the maximum valid MMR size (2^63 - 1) which can hold up to 2^62 leaves
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-        let max_loc_plus_1 = Location::new_unchecked(MAX_LOCATION + 1);
+        // Test that the validation logic accepts MAX_LOCATION as a valid leaf count.
+        // With MAX_LOCATION leaves, valid locations are 0..MAX_LOCATION-1.
+        // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
+        let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
 
-        // MAX_LOCATION should be accepted by the validation logic
-        // (The range MAX_LOCATION..MAX_LOCATION+1 proves a single element at MAX_LOCATION)
-        let result = nodes_required_for_range_proof(max_loc, max_loc - 1..max_loc);
-
-        // This should succeed - MAX_LOCATION is a valid location
-        assert!(result.is_ok(), "Should be able to prove MAX_LOCATION");
+        let result = nodes_required_for_range_proof(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
+        assert!(
+            result.is_ok(),
+            "Should be able to prove with MAX_LOCATION leaves"
+        );
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
         let result_overflow =
-            nodes_required_for_range_proof(max_loc_plus_1, max_loc..max_loc_plus_1);
+            nodes_required_for_range_proof(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1578,18 +1565,16 @@ mod tests {
     #[test]
     fn test_max_location_multi_proof() {
         // Test that multi_proof can handle MAX_LOCATION
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-
         // Should be able to generate multi-proof for MAX_LOCATION
-        let result = nodes_required_for_multi_proof(max_loc, &[max_loc - 1]);
+        let result = nodes_required_for_multi_proof(MAX_LOCATION, &[MAX_LOCATION - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LOCATION"
         );
 
         // Should reject MAX_LOCATION + 1
-        let invalid_loc = max_loc + 1;
-        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[max_loc]);
+        let invalid_loc = MAX_LOCATION + 1;
+        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[MAX_LOCATION]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION in multi-proof"
@@ -1648,7 +1633,7 @@ mod tests {
         // Test location 0 (leftmost leaf, in tallest tree of height 61)
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
-        let loc = Location::new_unchecked(0);
+        let loc = Location::new(0);
         let positions = nodes_required_for_range_proof(leaves, loc..loc + 1)
             .expect("should compute positions for location 0");
 

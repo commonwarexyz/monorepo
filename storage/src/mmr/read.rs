@@ -38,14 +38,6 @@ pub trait Readable<D: Digest>: Send + Sync {
         self.pruned_to_pos()..self.size()
     }
 
-    /// Position of the last leaf, or `None` if empty.
-    fn last_leaf_pos(&self) -> Option<Position> {
-        if self.size() == 0 {
-            return None;
-        }
-        Some(PeakIterator::last_leaf_pos(self.size()))
-    }
-
     /// Inclusion proof for the element at `loc`.
     fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
