@@ -862,7 +862,6 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::{
         os::{fd::AsRawFd, unix::net::UnixStream},
-        sync::Arc,
         time::Duration,
     };
 
@@ -886,87 +885,6 @@ mod tests {
 
         assert_eq!(iouring.cfg.size, 1_024);
         assert_eq!(iouring.waiters.capacity(), 1_024);
-    }
-
-    #[test]
-    fn test_waiters() {
-        // Start empty
-        let mut waiters = Waiters::new(3);
-        assert_eq!(waiters.len(), 0);
-        assert!(waiters.is_empty());
-
-        // Create two waiters.
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let index0 = waiters.insert(tx0, Some(IoBuf::from(b"hello").into()), None, None, None);
-        let index1 = waiters.insert(tx1, Some(IoBuf::from(b"world").into()), None, None, None);
-        assert_eq!((index0.index(), index1.index()), (0, 1));
-        assert_eq!(waiters.len(), 2);
-        assert!(!waiters.is_empty());
-
-        // Complete one waiter and verify returned resources.
-        let waiter = waiters
-            .on_completion(index1.op_user_data(), 7)
-            .expect("missing waiter completion");
-        assert_eq!(waiter.result, 7);
-        assert!(matches!(
-            waiter.buffer.as_ref(),
-            Some(OpBuffer::Write(buf)) if buf.as_ref() == b"world"
-        ));
-        assert_eq!(waiters.len(), 1);
-
-        // Next allocation reuses that free slot (LIFO).
-        let (tx2, _rx2) = oneshot::channel();
-        let index2 = waiters.insert(tx2, None, None, None, None);
-        assert_eq!(index2.index(), index1.index());
-
-        // Complete remaining waiters.
-        let _ = waiters.on_completion(index0.op_user_data(), 1);
-        let _ = waiters.on_completion(index2.op_user_data(), 2);
-
-        // Also cover vectored buffers and owned iovec lifetimes.
-        let (tx3, _rx3) = oneshot::channel();
-        let vectored = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
-        let iovecs = OpIovecs::new(
-            vec![libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            }]
-            .into_boxed_slice(),
-        );
-        assert!(!iovecs.as_ptr().is_null());
-        let (sock_left, _sock_right) =
-            UnixStream::pair().expect("failed to create unix socket pair");
-        let index3 = waiters.insert(
-            tx3,
-            Some(vectored.into()),
-            Some(OpFd::Fd(Arc::new(sock_left.into()))),
-            Some(iovecs),
-            None,
-        );
-        let waiter = waiters
-            .on_completion(index3.op_user_data(), 9)
-            .expect("missing vectored completion");
-        assert!(matches!(waiter.buffer, Some(OpBuffer::WriteVectored(_))));
-        assert!(waiters.is_empty());
-    }
-
-    #[test]
-    fn test_waiters_event_for_missing_slot_is_ignored() {
-        let mut waiters = Waiters::new(1);
-        let completed = waiters.on_completion(0u64, 1);
-        assert!(completed.is_none());
-    }
-
-    #[test]
-    #[should_panic(expected = "waiters should not exceed configured capacity")]
-    fn test_waiters_insert_full_panics() {
-        let mut waiters = Waiters::new(1);
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-
-        let _ = waiters.insert(tx0, None, None, None, None);
-        let _ = waiters.insert(tx1, None, None, None, None);
     }
 
     #[test]

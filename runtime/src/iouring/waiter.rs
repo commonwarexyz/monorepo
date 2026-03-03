@@ -6,70 +6,47 @@
 use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
 use commonware_utils::channel::oneshot;
 
-/// Waiter slot index type. Capacity is bounded by the ring size (`u32`).
-pub type SlotIndex = u32;
-
-/// Waiter generation used to prevent stale slot-identity collisions on reuse.
-///
-/// The packed waiter id reserves 31 bits for this value.
-#[derive(Clone, Copy)]
-pub struct WaiterGeneration(u32);
-
-impl WaiterGeneration {
-    /// Bitmask for the 31-bit generation field stored in [`WaiterId`].
-    const MASK: u32 = (1u32 << 31) - 1;
-
-    /// Create a generation value, truncating to the packed 31-bit domain.
-    pub const fn new(raw: u32) -> Self {
-        Self(raw & Self::MASK)
-    }
-
-    /// Return the raw generation value used in packed waiter ids.
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-
-    /// Return the next generation, wrapping in the 31-bit domain.
-    pub const fn next(self) -> Self {
-        Self::new(self.0.wrapping_add(1))
-    }
-}
-
 /// Stable waiter identity packed into SQE/CQE `user_data`.
 ///
 /// Layout:
 /// - bits 0..31: slot index
 /// - bits 32..62: generation
 /// - bit 63: reserved as cancel-tag in completion `user_data`
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WaiterId(UserData);
 
 impl WaiterId {
     /// Number of low-order bits reserved for the waiter slot index.
     const INDEX_BITS: u32 = 32;
+    /// Number of bits reserved for the generation field.
+    const GENERATION_BITS: u32 = 31;
     /// Bitmask that extracts the waiter slot index from packed user data.
-    const INDEX_MASK: UserData = u32::MAX as UserData;
+    const INDEX_MASK: UserData = (1u64 << Self::INDEX_BITS) - 1;
+    /// Bitmask that extracts the 31-bit generation from packed user data.
+    const GENERATION_MASK: UserData = (1u64 << Self::GENERATION_BITS) - 1;
     /// High-bit tag used to mark cancellation CQE user data.
     const CANCEL_TAG: UserData = 1u64 << 63;
 
     /// Build a waiter id from slot index and generation components.
-    pub const fn from_parts(index: SlotIndex, generation: WaiterGeneration) -> Self {
-        Self(((generation.as_u32() as UserData) << Self::INDEX_BITS) | (index as UserData))
+    pub const fn from_parts(index: u32, generation: u32) -> Self {
+        let index = index as UserData;
+        let generation = generation as UserData;
+        Self((generation as UserData & Self::GENERATION_MASK) << Self::INDEX_BITS | index)
     }
 
     /// Build a waiter id at generation zero for a slot index.
-    pub const fn from_slot(index: SlotIndex) -> Self {
-        Self::from_parts(index, WaiterGeneration::new(0))
+    pub const fn from_slot(index: u32) -> Self {
+        Self::from_parts(index, 0)
     }
 
     /// Return the slot index component of this waiter id.
-    pub const fn index(self) -> SlotIndex {
-        (self.0 & Self::INDEX_MASK) as SlotIndex
+    pub const fn index(self) -> u32 {
+        (self.0 & Self::INDEX_MASK) as u32
     }
 
-    /// Return the generation component of this waiter id.
-    const fn generation(self) -> WaiterGeneration {
-        WaiterGeneration::new((self.0 >> Self::INDEX_BITS) as u32)
+    /// Return the raw generation component of this waiter id.
+    const fn generation(self) -> u32 {
+        ((self.0 >> Self::INDEX_BITS) & Self::GENERATION_MASK) as u32
     }
 
     /// Return the SQE/CQE user_data value for the original operation.
@@ -90,7 +67,8 @@ impl WaiterId {
 
     /// Return the waiter id for the same slot with incremented generation.
     const fn next_generation(self) -> Self {
-        Self::from_parts(self.index(), self.generation().next())
+        let generation = ((self.generation() as UserData).wrapping_add(1)) & Self::GENERATION_MASK;
+        Self::from_parts(self.index(), generation as u32)
     }
 }
 
@@ -173,7 +151,7 @@ impl Waiters {
 
         let mut free = Vec::with_capacity(capacity);
         free.extend((0..capacity).rev().map(|index| {
-            let index = SlotIndex::try_from(index).expect("slot index overflow");
+            let index = u32::try_from(index).expect("slot index overflow");
             WaiterId::from_slot(index)
         }));
 
@@ -298,10 +276,166 @@ impl Waiters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iobuf::{IoBuf, IoBufs};
+    use std::{
+        os::unix::net::UnixStream,
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::Arc,
+    };
 
     #[test]
-    fn test_waiter_generation_wraps_at_31_bits() {
-        let max = WaiterGeneration::new(WaiterGeneration::MASK);
-        assert_eq!(max.next().as_u32(), 0);
+    fn test_waiter_id_encoding_and_generation_wrap() {
+        let wrapped = WaiterId::from_parts(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
+        assert_eq!(wrapped.generation(), 4);
+
+        let max = WaiterId::from_parts(7, WaiterId::GENERATION_MASK as u32);
+        assert_eq!(max.next_generation().generation(), 0);
+
+        let waiter_id = WaiterId::from_parts(7, 3);
+        assert_eq!(waiter_id.index(), 7);
+        assert_eq!(waiter_id.generation(), 3);
+
+        let (decoded_op, is_cancel_op) = WaiterId::decode_user_data(waiter_id.op_user_data());
+        assert_eq!(decoded_op, waiter_id);
+        assert!(!is_cancel_op);
+
+        let (decoded_cancel, is_cancel) = WaiterId::decode_user_data(waiter_id.cancel_user_data());
+        assert_eq!(decoded_cancel, waiter_id);
+        assert!(is_cancel);
+    }
+
+    #[test]
+    fn test_waiters_lifecycle_and_slot_reuse() {
+        let mut waiters = Waiters::new(3);
+        assert_eq!(waiters.capacity(), 3);
+        assert_eq!(waiters.len(), 0);
+        assert!(waiters.is_empty());
+
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+        let id0 = waiters.insert(tx0, Some(IoBuf::from(b"hello").into()), None, None, Some(5));
+        let id1 = waiters.insert(tx1, Some(IoBuf::from(b"world").into()), None, None, Some(9));
+        assert_eq!((id0.index(), id1.index()), (0, 1));
+        assert_eq!(waiters.len(), 2);
+
+        // Completion for a stale generation must be ignored.
+        let stale = WaiterId::from_parts(id1.index(), id1.generation().wrapping_add(1));
+        assert!(waiters.on_completion(stale.op_user_data(), 0).is_none());
+
+        let completed1 = waiters
+            .on_completion(id1.op_user_data(), 7)
+            .expect("missing waiter completion");
+        assert_eq!(completed1.result, 7);
+        assert!(!completed1.cancelled);
+        assert_eq!(completed1.target_tick, Some(9));
+        assert!(matches!(
+            completed1.buffer.as_ref(),
+            Some(OpBuffer::Write(buf)) if buf.as_ref() == b"world"
+        ));
+        assert_eq!(waiters.len(), 1);
+
+        // Next allocation reuses the freed slot with incremented generation.
+        let (tx2, _rx2) = oneshot::channel();
+        let id2 = waiters.insert(tx2, None, None, None, Some(11));
+        assert_eq!(id2.index(), id1.index());
+        assert_eq!(
+            id2.generation(),
+            id1.generation().wrapping_add(1) & (WaiterId::GENERATION_MASK as u32)
+        );
+
+        let _ = waiters.on_completion(id0.op_user_data(), 1);
+        let _ = waiters.on_completion(id2.op_user_data(), 2);
+
+        // Cover vectored buffers plus fd/iovec keepalive storage.
+        let (tx3, _rx3) = oneshot::channel();
+        let vectored = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
+        let iovecs = OpIovecs::new(
+            vec![libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            }]
+            .into_boxed_slice(),
+        );
+        assert!(!iovecs.as_ptr().is_null());
+        let (sock_left, _sock_right) =
+            UnixStream::pair().expect("failed to create unix socket pair");
+        let id3 = waiters.insert(
+            tx3,
+            Some(vectored.into()),
+            Some(OpFd::Fd(Arc::new(sock_left.into()))),
+            Some(iovecs),
+            None,
+        );
+        let completed3 = waiters
+            .on_completion(id3.op_user_data(), 9)
+            .expect("missing vectored completion");
+        assert!(matches!(
+            completed3.buffer,
+            Some(OpBuffer::WriteVectored(_))
+        ));
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    fn test_waiters_cancel_paths() {
+        let mut waiters = Waiters::new(3);
+
+        let (tx, _rx) = oneshot::channel();
+        let waiter_id = waiters.insert(tx, None, None, None, Some(2));
+
+        let stale = WaiterId::from_parts(waiter_id.index(), waiter_id.generation().wrapping_add(1));
+        assert!(waiters.cancel(stale).is_none());
+
+        let cancel = waiters
+            .cancel(waiter_id)
+            .expect("cancel should transition active waiter");
+        assert_eq!(cancel, waiter_id.cancel_user_data());
+
+        // Cancel CQE does not complete the waiter. The op CQE delivers the result.
+        assert!(waiters.on_completion(cancel, -libc::ECANCELED).is_none());
+        let completed = waiters
+            .on_completion(waiter_id.op_user_data(), 123)
+            .expect("missing completion");
+        assert_eq!(completed.result, 123);
+        assert!(completed.cancelled);
+        assert_eq!(completed.target_tick, None);
+        assert!(waiters.is_empty());
+
+        // Late cancel CQE for the already-completed waiter should be ignored.
+        assert!(waiters
+            .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED)
+            .is_none());
+        assert!(waiters.on_completion(0, 1).is_none());
+    }
+
+    #[test]
+    fn test_waiters_insert_and_cancel_panic_invariants() {
+        let mut waiters = Waiters::new(2);
+
+        let (tx0, _rx0) = oneshot::channel();
+        let (tx1, _rx1) = oneshot::channel();
+        let _ = waiters.insert(tx0, None, None, None, None);
+        let _ = waiters.insert(tx1, None, None, None, None);
+        let insert_overflow = catch_unwind(AssertUnwindSafe(|| {
+            let (tx2, _rx2) = oneshot::channel();
+            let _ = waiters.insert(tx2, None, None, None, None);
+        }));
+        assert!(insert_overflow.is_err());
+
+        let mut waiters = Waiters::new(2);
+        let (tx, _rx) = oneshot::channel();
+        let no_deadline = waiters.insert(tx, None, None, None, None);
+        let missing_deadline = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.cancel(no_deadline);
+        }));
+        assert!(missing_deadline.is_err());
+
+        let (tx, _rx) = oneshot::channel();
+        let active = waiters.insert(tx, None, None, None, Some(3));
+        let _ = waiters.cancel(active);
+        let second_cancel = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.cancel(active);
+        }));
+        assert!(second_cancel.is_err());
     }
 }

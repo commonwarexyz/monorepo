@@ -13,6 +13,7 @@
 //! This keeps the arm-and-recheck handshake lock-free while avoiding redundant `eventfd`
 //! writes during normal running.
 
+use super::UserData;
 use io_uring::{opcode::PollAdd, squeue::SubmissionQueue, types::Fd};
 use std::{
     mem::size_of,
@@ -25,7 +26,7 @@ use std::{
 use tracing::warn;
 
 /// Reserved `user_data` value for internal wake poll completions.
-pub const WAKE_USER_DATA: u64 = u64::MAX;
+pub const WAKE_USER_DATA: UserData = UserData::MAX;
 
 /// Bit used to mark that the loop is armed for sleep.
 const SLEEP_INTENT_BIT: u64 = 1;
