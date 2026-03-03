@@ -2,7 +2,7 @@ use crate::{
     mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use std::ops::Range;
@@ -19,13 +19,15 @@ pub struct Target<D: Digest> {
 impl<D: Digest> Write for Target<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        (*self.range.start).write(buf);
-        (*self.range.end).write(buf);
+        self.range.start.write(buf);
+        self.range.end.write(buf);
     }
 }
 
-impl<D: Digest> FixedSize for Target<D> {
-    const SIZE: usize = D::SIZE + u64::SIZE + u64::SIZE;
+impl<D: Digest> EncodeSize for Target<D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size() + self.range.start.encode_size() + self.range.end.encode_size()
+    }
 }
 
 impl<D: Digest> Read for Target<D> {
@@ -33,8 +35,8 @@ impl<D: Digest> Read for Target<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let start = Location::new(u64::read(buf)?);
-        let end = Location::new(u64::read(buf)?);
+        let start = Location::read(buf)?;
+        let end = Location::read(buf)?;
         if start >= end {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
@@ -107,7 +109,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::EncodeSize as _;
     use commonware_cryptography::sha256;
     use rstest::rstest;
     use std::io::Cursor;
