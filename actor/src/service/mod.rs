@@ -12,7 +12,7 @@ pub use driver::ActorService;
 mod types;
 pub use types::{DuplicateLaneError, Lanes};
 
-const DEFAULT_MAILBOX_CAPACITY: NonZeroUsize = NZUsize!(64);
+const DEFAULT_MAILBOX_CAPACITY: NonZeroUsize = NZUsize!(1024);
 const DEFAULT_MAX_INFLIGHT_READS: NonZeroUsize = NZUsize!(64);
 
 #[cfg(test)]
