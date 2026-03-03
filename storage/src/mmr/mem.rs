@@ -29,7 +29,7 @@ cfg_if::cfg_if! {
 
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
-const MIN_TO_PARALLELIZE: usize = 20;
+pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
 /// An MMR whose root digest has not been computed.
 pub type DirtyMmr<D> = Mmr<D, Dirty>;

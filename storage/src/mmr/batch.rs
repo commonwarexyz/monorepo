@@ -72,10 +72,6 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Minimum number of dirty nodes to trigger parallel merkleization.
-#[cfg(feature = "std")]
-const MIN_TO_PARALLELIZE: usize = 20;
-
 /// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
 pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
     /// The parent MMR.
@@ -327,6 +323,8 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
 
         #[cfg(feature = "std")]
         if let Some(pool) = self.pool.take() {
+            use crate::mmr::mem::MIN_TO_PARALLELIZE;
+
             if dirty.len() >= MIN_TO_PARALLELIZE {
                 self.merkleize_parallel(hasher, &pool, &dirty);
             } else {
@@ -384,6 +382,8 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
         pool: &ThreadPool,
         dirty: &[(Position, u32)],
     ) {
+        use crate::mmr::mem::MIN_TO_PARALLELIZE;
+
         let mut same_height = Vec::new();
         let mut current_height = 1;
         for (i, &(pos, height)) in dirty.iter().enumerate() {

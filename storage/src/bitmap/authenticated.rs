@@ -16,7 +16,7 @@ use crate::{
         batch::UnmerkleizedBatch,
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
-        mem::{CleanMmr, Config},
+        mem::{CleanMmr, Config, MIN_TO_PARALLELIZE},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -34,9 +34,6 @@ use commonware_utils::{
 use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
-
-/// Minimum number of dirty chunks to trigger parallel pre-hashing.
-const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.

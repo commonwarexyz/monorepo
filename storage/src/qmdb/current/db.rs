@@ -13,6 +13,7 @@ use crate::{
         self,
         hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
+        mem::MIN_TO_PARALLELIZE,
         storage::Storage as _,
         Location, Position, Proof, StandardHasher,
     },
@@ -850,39 +851,37 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 
     // Compute grafted leaf for each chunk.
     let zero_chunk = [0u8; N];
-    Ok(
-        match pool.filter(|_| inputs.len() >= grafting::MIN_TO_PARALLELIZE) {
-            Some(pool) => pool.install(|| {
-                inputs
-                    .into_par_iter()
-                    .map_init(
-                        || hasher.fork(),
-                        |h, (ops_pos, ops_digest, chunk)| {
-                            if chunk == zero_chunk {
-                                (ops_pos, ops_digest)
-                            } else {
-                                h.inner().update(&chunk);
-                                h.inner().update(&ops_digest);
-                                (ops_pos, h.inner().finalize())
-                            }
-                        },
-                    )
-                    .collect()
-            }),
-            None => inputs
-                .into_iter()
-                .map(|(ops_pos, ops_digest, chunk)| {
-                    if chunk == zero_chunk {
-                        (ops_pos, ops_digest)
-                    } else {
-                        hasher.inner().update(&chunk);
-                        hasher.inner().update(&ops_digest);
-                        (ops_pos, hasher.inner().finalize())
-                    }
-                })
-                .collect(),
-        },
-    )
+    Ok(match pool.filter(|_| inputs.len() >= MIN_TO_PARALLELIZE) {
+        Some(pool) => pool.install(|| {
+            inputs
+                .into_par_iter()
+                .map_init(
+                    || hasher.fork(),
+                    |h, (ops_pos, ops_digest, chunk)| {
+                        if chunk == zero_chunk {
+                            (ops_pos, ops_digest)
+                        } else {
+                            h.inner().update(&chunk);
+                            h.inner().update(&ops_digest);
+                            (ops_pos, h.inner().finalize())
+                        }
+                    },
+                )
+                .collect()
+        }),
+        None => inputs
+            .into_iter()
+            .map(|(ops_pos, ops_digest, chunk)| {
+                if chunk == zero_chunk {
+                    (ops_pos, ops_digest)
+                } else {
+                    hasher.inner().update(&chunk);
+                    hasher.inner().update(&ops_digest);
+                    (ops_pos, hasher.inner().finalize())
+                }
+            })
+            .collect(),
+    })
 }
 
 /// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.

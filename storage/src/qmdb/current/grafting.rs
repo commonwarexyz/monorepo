@@ -50,9 +50,6 @@ use commonware_utils::bitmap::BitMap;
 use core::cmp::Ordering;
 use tracing::debug;
 
-/// Minimum number of items before switching from serial to parallel computation.
-pub(super) const MIN_TO_PARALLELIZE: usize = 20;
-
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub(crate) const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
