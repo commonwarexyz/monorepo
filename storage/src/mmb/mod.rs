@@ -104,6 +104,8 @@
 pub mod hasher;
 pub mod iterator;
 pub mod mem;
+#[cfg(any(feature = "std", test))]
+pub mod proof;
 
 pub use hasher::Standard as StandardHasher;
 use thiserror::Error;
@@ -205,6 +207,9 @@ pub enum Error {
 
     #[error("location {0} > MAX_LOCATION")]
     LocationOverflow(Location),
+
+    #[error("range out of bounds: {0}")]
+    RangeOutOfBounds(Location),
 }
 
 impl From<merkle::PositionConversionError<Mmb>> for Error {

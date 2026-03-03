@@ -174,6 +174,80 @@ impl Iterator for PeakIterator {
     }
 }
 
+/// A PathIterator yields `(parent_pos, sibling_pos, sibling_is_left)` for each node along the
+/// path from a peak to a target leaf in an MMB perfect binary tree, not including the peak
+/// itself.
+///
+/// This is the MMB analog of [`crate::mmr::iterator::PathIterator`]. It uses the birth-step
+/// representation internally (via [`child_steps`] and [`step_to_pos`]) to descend from peak to
+/// leaf, matching the pattern used by `mark_dirty` in the in-memory MMB.
+///
+/// # Construction
+///
+/// Use [`PathIterator::new`] with the target leaf's location, the peak's birth step and height,
+/// and the leftmost leaf index covered by the peak (obtainable from [`PeakIterator`]).
+#[allow(dead_code)]
+pub(crate) struct PathIterator {
+    target_loc: u64,
+    step: u64,
+    height: u32,
+    leaf_start: u64,
+}
+
+impl PathIterator {
+    /// Create a new `PathIterator` that descends from a peak to the leaf at `target_loc`.
+    ///
+    /// - `target_loc`: the 0-based leaf index of the target leaf.
+    /// - `peak_step`: the birth step of the peak node.
+    /// - `height`: the height of the peak (0 for a bare leaf).
+    /// - `leaf_start`: the leftmost leaf index covered by this peak.
+    #[allow(dead_code)]
+    pub(crate) const fn new(target_loc: u64, peak_step: u64, height: u32, leaf_start: u64) -> Self {
+        Self {
+            target_loc,
+            step: peak_step,
+            height,
+            leaf_start,
+        }
+    }
+}
+
+impl Iterator for PathIterator {
+    /// `(parent_pos, sibling_pos, sibling_is_left)`.
+    ///
+    /// `sibling_is_left` is true when the sibling is the left child (i.e. the path descended
+    /// right). This is needed for range proofs to filter left-path vs right-path siblings, since
+    /// MMB positions are non-monotonic and the MMR's `parent == sibling + 1` trick does not apply.
+    type Item = (Position, Position, bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.height == 0 {
+            return None;
+        }
+
+        let parent_pos = step_to_pos(self.step, false);
+        let (left_step, right_step) = child_steps(self.step, self.height);
+        self.height -= 1;
+        let is_child_leaf = self.height == 0;
+
+        let leaves_in_half = 1u64 << self.height;
+        let mid = self.leaf_start + leaves_in_half;
+
+        if self.target_loc < mid {
+            // Target is in the left subtree; sibling is the right child.
+            let sibling_pos = step_to_pos(right_step, is_child_leaf);
+            self.step = left_step;
+            Some((parent_pos, sibling_pos, false))
+        } else {
+            // Target is in the right subtree; sibling is the left child.
+            let sibling_pos = step_to_pos(left_step, is_child_leaf);
+            self.step = right_step;
+            self.leaf_start = mid;
+            Some((parent_pos, sibling_pos, true))
+        }
+    }
+}
+
 /// Compute the birth steps of both children of a parent with the given birth step and height.
 ///
 /// Returns `(left_step, right_step)`. The left child is always the older (lower step) child.
@@ -273,9 +347,21 @@ pub(crate) fn children(pos: Position, height: u32) -> (Position, Position) {
     (left, right)
 }
 
+/// Compute the birth step of a peak from its leaf range and height.
+///
+/// For a height-0 peak (bare leaf), the birth step equals the last leaf index.
+/// For a taller peak, the birth step is `last_leaf + 2^(h-1) - 1`.
+pub(crate) const fn peak_birth_step(last_leaf: u64, height: u32) -> u64 {
+    if height == 0 {
+        last_leaf
+    } else {
+        last_leaf + (1u64 << (height - 1)) - 1
+    }
+}
+
 /// Compute the physical position of the `leaf_index`-th leaf.
 #[inline]
-const fn leaf_pos(leaf_index: u64) -> Position {
+pub(crate) const fn leaf_pos(leaf_index: u64) -> Position {
     Position::new(2 * leaf_index - (leaf_index + 1).ilog2() as u64)
 }
 
@@ -462,6 +548,92 @@ mod tests {
                 let fast = nodes_to_pin(size, prune_pos);
                 let slow = nodes_to_pin_slow(size, prune_pos);
                 assert_eq!(fast, slow, "n={n}, prune={prune}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_peak_birth_step() {
+        // Verify peak_birth_step matches the inline computation used in test_step_to_pos.
+        for n in 1u64..=256 {
+            let size = Position::new(size_for_leaves(n));
+            let mut end_leaf_cursor = n;
+            for (pos, height) in PeakIterator::new(size) {
+                let leaves_in_peak = 1u64 << height;
+                let last_leaf = end_leaf_cursor - 1;
+                let step = peak_birth_step(last_leaf, height);
+                let computed_pos = step_to_pos(step, height == 0);
+                assert_eq!(computed_pos, pos, "n={n}, height={height}");
+                end_leaf_cursor -= leaves_in_peak;
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_iterator_reaches_target_leaf() {
+        // For every leaf in every MMB up to 256 leaves, verify that the PathIterator
+        // yields siblings whose positions match the children() function, and that the
+        // final descent reaches the target leaf.
+        for n in 1u64..=256 {
+            let size = Position::new(size_for_leaves(n));
+            let mut end_leaf_cursor = n;
+
+            for (peak_pos, height) in PeakIterator::new(size) {
+                let leaves_in_peak = 1u64 << height;
+                let start_leaf = end_leaf_cursor - leaves_in_peak;
+                let last_leaf = end_leaf_cursor - 1;
+                let step = peak_birth_step(last_leaf, height);
+
+                for target_loc in start_leaf..end_leaf_cursor {
+                    let items: alloc::vec::Vec<_> =
+                        PathIterator::new(target_loc, step, height, start_leaf).collect();
+
+                    // Should yield exactly `height` items.
+                    assert_eq!(
+                        items.len(),
+                        height as usize,
+                        "n={n}, peak={peak_pos}, target_loc={target_loc}"
+                    );
+
+                    // Verify each (parent_pos, sibling_pos, sibling_is_left).
+                    for &(parent_pos, sibling_pos, sibling_is_left) in &items {
+                        let parent_h = parent_birth_step(parent_pos)
+                            .expect("parent must be a valid parent");
+                        let _ = parent_h; // just checking it doesn't panic
+
+                        // Recover height from the path depth.
+                        let depth =
+                            items.iter().position(|&(p, _, _)| p == parent_pos).unwrap();
+                        let h = height - depth as u32;
+                        let (left, right) = children(parent_pos, h);
+                        assert!(
+                            sibling_pos == left || sibling_pos == right,
+                            "sibling {sibling_pos} not a child of {parent_pos} at h={h}"
+                        );
+                        // Verify sibling_is_left flag.
+                        assert_eq!(
+                            sibling_is_left,
+                            sibling_pos == left,
+                            "sibling_is_left wrong for parent={parent_pos}"
+                        );
+                    }
+
+                    // The last parent should have the target leaf as a child.
+                    if height > 0 {
+                        let (last_parent, last_sibling, _) = items[items.len() - 1];
+                        let (left, right) = children(last_parent, 1);
+                        let target_pos = leaf_pos(target_loc);
+                        assert!(
+                            target_pos == left || target_pos == right,
+                            "target {target_pos} not a child of last parent {last_parent}"
+                        );
+                        // Sibling should be the other child.
+                        let expected_sibling = if target_pos == left { right } else { left };
+                        assert_eq!(last_sibling, expected_sibling);
+                    }
+                }
+
+                end_leaf_cursor = start_leaf;
             }
         }
     }

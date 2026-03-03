@@ -2,7 +2,10 @@
 
 use crate::mmb::{
     hasher::Hasher,
-    iterator::{child_steps, children, leaves_for_size, nodes_to_pin, step_to_pos, PeakIterator},
+    iterator::{
+        child_steps, children, leaves_for_size, nodes_to_pin, peak_birth_step, step_to_pos,
+        PeakIterator,
+    },
     Error::{self, *},
     Location, Position,
 };
@@ -629,11 +632,7 @@ impl<D: Digest> DirtyMmb<D> {
             if target_loc >= start_leaf_cursor {
                 // Compute the peak's birth step from the leaf range.
                 let last_leaf = end_leaf_cursor - 1;
-                let step = if height == 0 {
-                    last_leaf
-                } else {
-                    last_leaf + (1u64 << (height - 1)) - 1
-                };
+                let step = peak_birth_step(last_leaf, height);
                 covering = Some((step, height, start_leaf_cursor));
                 break;
             }
