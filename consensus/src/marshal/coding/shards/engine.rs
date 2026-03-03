@@ -1400,8 +1400,7 @@ where
                 };
                 self.insert_strong_shard(
                     ctx.scheme.me().as_ref(),
-                    sender,
-                    sender_index,
+                    (sender, sender_index),
                     strong,
                     blocker,
                 )
@@ -1409,7 +1408,7 @@ where
             }
             DistributionShard::Weak(data) => {
                 let weak = WeakShard { index, data };
-                self.insert_weak_shard(sender, sender_index, weak, blocker)
+                self.insert_weak_shard((sender, sender_index), weak, blocker)
                     .await
             }
         };
@@ -1434,8 +1433,7 @@ where
     async fn insert_strong_shard(
         &mut self,
         me: Option<&Participant>,
-        sender: P,
-        sender_index: Participant,
+        (sender, sender_index): (P, Participant),
         shard: StrongShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
@@ -1487,8 +1485,7 @@ where
     /// Returns `true` only when this progresses reconstruction state.
     async fn insert_weak_shard(
         &mut self,
-        sender: P,
-        sender_index: Participant,
+        (sender, sender_index): (P, Participant),
         shard: WeakShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
