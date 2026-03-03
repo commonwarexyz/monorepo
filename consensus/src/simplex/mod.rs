@@ -4711,7 +4711,7 @@ mod tests {
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector_cfg: L)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4778,7 +4778,6 @@ mod tests {
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
             // Create engines: 7 honest engines, 3 byzantine
-            let elector = elector_cfg;
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
