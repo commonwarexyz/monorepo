@@ -203,7 +203,10 @@ module replica {
             v < view,
             v >= view - LEADER_INACTIVITY_WINDOW,
         })
-        previous_views.forall(v => not(has_participated_in_view(designated, v)))
+        and {
+            previous_views.size() == LEADER_INACTIVITY_WINDOW,
+            previous_views.forall(v => not(has_participated_in_view(designated, v)))
+        }
     }
 
     pure def has_notarized(r: ReplicaState): bool = {
