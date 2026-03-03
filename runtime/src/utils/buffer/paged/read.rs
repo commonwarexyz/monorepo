@@ -2,7 +2,7 @@ use super::Checksum;
 use crate::{Blob, Buf, Error, IoBuf};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
-use tracing::error;
+use tracing::{error, warn};
 
 /// State for a single buffer of pages read from the blob.
 ///
@@ -209,11 +209,13 @@ impl ReplayBuf {
             0
         };
         self.buffers.push_back(state);
-        assert!(
-            logical_bytes >= skip,
-            "fill returned fewer logical bytes ({logical_bytes}) than the seek offset within the page ({skip})"
-        );
-        self.remaining += logical_bytes - skip;
+        if logical_bytes < skip {
+            warn!(
+                logical_bytes,
+                skip, "fill returned fewer logical bytes than the seek offset, truncating replay"
+            );
+        }
+        self.remaining += logical_bytes.saturating_sub(skip);
     }
 
     /// Returns the logical length of the given page in the given buffer.
@@ -232,6 +234,9 @@ impl Buf for ReplayBuf {
     }
 
     fn chunk(&self) -> &[u8] {
+        if self.remaining == 0 {
+            return &[];
+        }
         let Some(buf) = self.buffers.front() else {
             return &[];
         };
@@ -631,6 +636,66 @@ mod tests {
                 collected.len()
             );
             assert_eq!(collected, &data[seek_offset..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_seek_after_crc_fallback_truncates_instead_of_panicking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+
+            let cache_ref =
+                CacheRef::from_pooler_physical(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let logical_page_size = cache_ref.logical_page_size() as usize;
+            let physical_page_size = cache_ref.physical_page_size() as usize;
+            let append = Append::new(
+                blob.clone(),
+                blob_size,
+                BUFFER_PAGES * PAGE_SIZE.get() as usize,
+                cache_ref,
+            )
+            .await
+            .unwrap();
+
+            // Write one partial page, then extend it so CRC slot 2 becomes authoritative.
+            let len_old = logical_page_size / 2;
+            let len_new = len_old + 10;
+            let data_old: Vec<u8> = (0u8..=255).cycle().take(len_old).collect();
+            let data_extra: Vec<u8> = (200u8..=255).cycle().take(len_new - len_old).collect();
+
+            append.append(&data_old).await.unwrap();
+            append.sync().await.unwrap();
+            append.append(&data_extra).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Corrupt CRC slot 2 so validation falls back to the older, shorter CRC slot.
+            let crc_start = physical_page_size - super::super::Checksum::SIZE;
+            let crc2_offset = (crc_start + 8) as u64;
+            let orig_crc2 = blob.read_at(crc2_offset, 1).await.unwrap().coalesce();
+            blob.write_at(crc2_offset, vec![orig_crc2.as_ref()[0] ^ 0xFF])
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            let page = blob
+                .read_at(0, physical_page_size)
+                .await
+                .unwrap()
+                .coalesce()
+                .freeze();
+            let validated = super::super::Checksum::validate_page(page.as_ref()).unwrap();
+            let (fallback_len, _) = validated.get_crc();
+            assert_eq!(fallback_len as usize, len_old);
+
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let seek_offset = len_old + 1; // valid vs cached logical size, beyond fallback length
+            replay.seek_to(seek_offset as u64).unwrap();
+
+            // Report EOF
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(replay.remaining(), 0);
+            assert!(replay.chunk().is_empty());
         });
     }
 }
