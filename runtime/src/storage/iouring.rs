@@ -321,6 +321,9 @@ impl Blob {
             }
 
             bytes_written += op_bytes_written;
+            if bytes_written == buf_len {
+                break;
+            }
             offset = offset
                 .checked_add(op_bytes_written as u64)
                 .ok_or(Error::OffsetOverflow)?;
@@ -405,6 +408,9 @@ impl Blob {
             }
 
             bufs.advance(op_bytes_written);
+            if !bufs.has_remaining() {
+                break;
+            }
             offset = offset
                 .checked_add(op_bytes_written as u64)
                 .ok_or(Error::OffsetOverflow)?;
@@ -727,20 +733,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_write_offset_overflow() {
+    async fn test_single_write_no_spurious_offset_overflow() {
         let (storage, storage_directory) = create_test_storage();
         let (blob, _) = storage.open("partition", b"single_overflow").await.unwrap();
 
         let result = blob
             .write_at(u64::MAX - Header::SIZE_U64, IoBuf::from(b"x"))
             .await;
-        assert!(matches!(result, Err(crate::Error::OffsetOverflow)));
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     #[tokio::test]
-    async fn test_vectored_write_offset_overflow() {
+    async fn test_vectored_write_no_spurious_offset_overflow() {
         let (storage, storage_directory) = create_test_storage();
         let (blob, _) = storage
             .open("partition", b"vectored_overflow")
@@ -753,7 +762,10 @@ mod tests {
                 vec![IoBuf::from(b"a"), IoBuf::from(b"b")],
             )
             .await;
-        assert!(matches!(result, Err(crate::Error::OffsetOverflow)));
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
