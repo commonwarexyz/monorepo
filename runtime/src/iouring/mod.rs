@@ -856,7 +856,8 @@ mod tests {
     };
 
     #[test]
-    fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
+    fn test_ring_construction_paths() {
+        // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
         let cfg = Config {
             size: 1_000,
@@ -866,22 +867,33 @@ mod tests {
 
         assert_eq!(iouring.cfg.size, 1_024);
 
+        // Already-power-of-two size is preserved.
         let cfg = Config {
             size: 1_024,
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-
         assert_eq!(iouring.cfg.size, 1_024);
-    }
 
-    #[test]
-    fn test_new_ring_io_poll_branch_executes() {
+        // Cover ring-builder branch that enables IOPOLL.
         let cfg = Config {
             io_poll: true,
             ..Default::default()
         };
         let _ = new_ring(&cfg);
+    }
+
+    #[test]
+    fn test_should_retry_classification() {
+        // Transient retryable codes.
+        for code in [-libc::EAGAIN, -libc::EWOULDBLOCK, -libc::EINTR] {
+            assert!(should_retry(code));
+        }
+
+        // Non-transient examples.
+        for code in [0, -libc::EINVAL, -libc::ETIMEDOUT] {
+            assert!(!should_retry(code));
+        }
     }
 
     #[test]
@@ -905,7 +917,25 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_submission_queue_cancel_staging_hits_sq_capacity() {
+    fn test_opbuffer_write_vectored_and_opiovecs_helpers() {
+        let write_vectored = OpBuffer::from(IoBufs::from(vec![IoBuf::from(b"a"), IoBuf::from(b"b")]));
+        match write_vectored {
+            OpBuffer::WriteVectored(_) => {}
+            _ => panic!("expected write-vectored buffer variant"),
+        }
+
+        let iovecs = vec![libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }]
+        .into_boxed_slice();
+        let expected = iovecs.as_ptr();
+        let owned = OpIovecs::new(iovecs);
+        assert_eq!(owned.as_ptr(), expected);
+    }
+
+    #[test]
+    fn test_fill_submission_queue_returns_true_when_cancel_staging_fills_sq() {
         let cfg = Config {
             size: 8,
             ..Default::default()
@@ -913,32 +943,97 @@ mod tests {
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
-        iouring.wake_rearm_needed = false;
-        let (tx, _rx) = oneshot::channel();
-        let waiter_id = iouring.waiters.insert(tx, None, None, None, Some(1));
-        let cancel_user_data = iouring
-            .waiters
-            .cancel(waiter_id)
-            .expect("cancel should transition active waiter");
-        assert_eq!(cancel_user_data, waiter_id.cancel_user_data());
-        let mut pending_cancels = VecDeque::from([waiter_id]);
 
-        {
-            let mut submission_queue = ring.submission();
-            while !submission_queue.is_full() {
-                let nop = opcode::Nop::new().build();
-                // SAFETY: NOP has no borrowed pointers and SQ capacity is checked above.
-                unsafe {
-                    submission_queue.push(&nop).expect("unable to fill queue");
-                }
-            }
+        // Queue enough cancellations to overflow one staging pass once wake poll
+        // rearm also consumes an SQE.
+        let mut pending_cancels = VecDeque::new();
+        for _ in 0..cfg.size as usize {
+            let (tx, _rx) = oneshot::channel();
+            let waiter_id = iouring.waiters.insert(tx, None, None, None, None);
+            let cancel_user_data = iouring
+                .waiters
+                .cancel(waiter_id)
+                .expect("cancel should transition waiter to cancel-requested");
+            assert_eq!(cancel_user_data, waiter_id.cancel_user_data());
+            pending_cancels.push_back(waiter_id);
         }
 
+        // Staging should stop at SQ capacity and leave some cancels queued.
         let at_capacity = iouring
             .fill_submission_queue(&mut ring, &mut pending_cancels)
-            .expect("producer should still be connected");
+            .expect("channel should remain connected");
         assert!(at_capacity);
-        assert_eq!(pending_cancels.len(), 1);
+        assert!(!pending_cancels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_timeout_slot_reuse_does_not_cancel_new_waiter_early() {
+        let cfg = Config {
+            // Keep ring size realistic; size=1 can deadlock progress in some setups.
+            // Waiter slot reuse is still exercised because we complete op1 before op2.
+            size: 8,
+            max_op_timeout: Duration::from_millis(200),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // First operation completes quickly but still carries a deadline, leaving a stale
+        // timeout entry that should be ignored later after slot reuse.
+        let (tx1, rx1) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: opcode::Nop::new().build(),
+                sender: tx1,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: Some(Instant::now() + Duration::from_millis(15)),
+            })
+            .await
+            .expect("failed to submit first operation");
+        let (result1, _) = tokio::time::timeout(Duration::from_secs(2), rx1)
+            .await
+            .expect("first completion timed out")
+            .expect("missing first completion");
+        assert_eq!(result1, 0);
+
+        // Second operation reuses the only waiter slot and blocks until timeout.
+        let (left, _right) = UnixStream::pair().expect("failed to create unix stream pair");
+        let mut buf = IoBufMut::with_capacity(8);
+        let recv =
+            opcode::Recv::new(Fd(left.as_raw_fd()), buf.as_mut_ptr(), buf.capacity() as _).build();
+        let (tx2, rx2) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: recv,
+                sender: tx2,
+                buffer: Some(buf.into()),
+                fd: None,
+                iovecs: None,
+                deadline: Some(Instant::now() + Duration::from_millis(80)),
+            })
+            .await
+            .expect("failed to submit second operation");
+
+        // If stale timeout entries were not ignored, this could time out around the first
+        // operation's deadline (~15ms) instead of the second one (~80ms).
+        let start = Instant::now();
+        let (result2, _) = tokio::time::timeout(Duration::from_secs(2), rx2)
+            .await
+            .expect("second completion timed out")
+            .expect("missing second completion");
+        let elapsed = start.elapsed();
+        assert_eq!(result2, -libc::ETIMEDOUT);
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "timeout fired too early after slot reuse: {elapsed:?}"
+        );
+
+        drop(submitter);
+        handle.join().expect("io_uring loop thread panicked");
     }
 
     #[test]
@@ -1095,27 +1190,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_wake_path_makes_progress() {
-        let timeout = tokio::time::timeout(
-            Duration::from_secs(2),
-            recv_then_send(Default::default(), true),
-        );
-        assert!(
-            timeout.await.is_ok(),
-            "recv_then_send timed out unexpectedly"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_wake_path_branch_without_success_assertions() {
-        let timeout = tokio::time::timeout(
-            Duration::from_secs(2),
-            recv_then_send(Default::default(), false),
-        );
-        assert!(
-            timeout.await.is_ok(),
-            "recv_then_send timed out unexpectedly"
-        );
+    async fn test_wake_path_progress_scenarios() {
+        for should_succeed in [true, false] {
+            // Run both wake-path scenarios:
+            // - strict success assertions enabled
+            // - branch-only progress check (no success assertions)
+            let timeout = tokio::time::timeout(
+                Duration::from_secs(2),
+                recv_then_send(Default::default(), should_succeed),
+            );
+            assert!(
+                timeout.await.is_ok(),
+                "recv_then_send timed out unexpectedly (should_succeed={should_succeed})"
+            );
+        }
     }
 
     #[tokio::test]

@@ -291,6 +291,7 @@ mod tests {
         let waker = Waker::new().expect("eventfd creation should succeed");
         let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
 
+        // Reinstall should enqueue exactly one wake poll request.
         let mut sq = ring.submission();
         let before = sq.len();
         waker.reinstall(&mut sq);
@@ -342,6 +343,8 @@ mod tests {
     fn test_new_error_when_fd_table_exhausted() {
         let mut held_fds = Vec::new();
         let devnull = b"/dev/null\0";
+
+        // Hold one real descriptor and duplicate it until the process hits EMFILE.
         // SAFETY: `devnull` is a valid nul-terminated path.
         let base = unsafe { libc::open(devnull.as_ptr().cast(), libc::O_RDONLY) };
         assert!(base >= 0);
@@ -362,6 +365,7 @@ mod tests {
             break;
         }
 
+        // With no fd capacity left, eventfd creation must fail.
         assert!(Waker::new().is_err());
     }
 }

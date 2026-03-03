@@ -291,9 +291,11 @@ mod tests {
 
     #[test]
     fn test_waiter_id_encoding_and_generation_wrap() {
+        // Generation bits are masked to the representable range.
         let wrapped = WaiterId::new(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
         assert_eq!(wrapped.generation(), 4);
 
+        // Generation wraps after reaching the max encoded value.
         let max = WaiterId::new(7, WaiterId::GENERATION_MASK as u32);
         assert_eq!(max.next_generation().generation(), 0);
 
@@ -301,6 +303,7 @@ mod tests {
         assert_eq!(waiter_id.index(), 7);
         assert_eq!(waiter_id.generation(), 3);
 
+        // Encoding/decoding must preserve id and tag semantics.
         let (decoded_op, is_cancel_op) = WaiterId::from_user_data(waiter_id.user_data());
         assert_eq!(decoded_op, waiter_id);
         assert!(!is_cancel_op);
@@ -418,6 +421,7 @@ mod tests {
     fn test_waiters_insert_and_cancel_invariants() {
         let mut waiters = Waiters::new(2);
 
+        // Inserting beyond configured capacity should panic.
         let (tx0, _rx0) = oneshot::channel();
         let (tx1, _rx1) = oneshot::channel();
         let _ = waiters.insert(tx0, None, None, None, None);
@@ -428,6 +432,7 @@ mod tests {
         }));
         assert!(insert_overflow.is_err());
 
+        // Cancellation is allowed even when no deadline is tracked.
         let mut waiters = Waiters::new(2);
         let (tx, _rx) = oneshot::channel();
         let no_deadline = waiters.insert(tx, None, None, None, None);
@@ -436,6 +441,7 @@ mod tests {
             .expect("cancel should support active waiter without deadline");
         assert_eq!(cancel, no_deadline.cancel_user_data());
 
+        // Repeated cancel on the same waiter must be ignored.
         let (tx, _rx) = oneshot::channel();
         let active = waiters.insert(tx, None, None, None, Some(3));
         let _ = waiters.cancel(active);
