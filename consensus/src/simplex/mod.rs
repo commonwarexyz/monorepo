@@ -2992,15 +2992,6 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                // The Byzantine node's batcher blocks all honest peers as
-                // unknown, so its only vote is a nullify on leader timeout.
-                // A short timeout ensures that nullify reaches honest nodes
-                // before they advance past the activity window for view 1.
-                let (leader_timeout, certification_timeout) = if idx_scheme == 0 {
-                    (Duration::from_millis(100), Duration::from_millis(200))
-                } else {
-                    (Duration::from_secs(1), Duration::from_secs(2))
-                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -3012,8 +3003,8 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout,
-                    certification_timeout,
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
