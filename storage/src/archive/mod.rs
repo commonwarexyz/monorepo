@@ -111,6 +111,39 @@ pub trait Archive: Send {
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Extension of [Archive] that supports multiple items at the same index.
+///
+/// Unlike [Archive::put], which is a no-op when the index already exists,
+/// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
+/// at an existing index. Each key must still be globally unique. This is useful
+/// for workloads where a logical grouping (e.g., a consensus view) may contain
+/// multiple entries.
+pub trait MultiArchive: Archive {
+    /// Store an item, allowing multiple items at the same index.
+    ///
+    /// Multiple items may share the same `index` as long as their keys differ.
+    /// If the same key already exists (at any index), the call is a no-op.
+    fn put_multi(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::sync] in a single operation.
+    fn put_multi_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            self.put_multi(index, key, value).await?;
+            self.sync().await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

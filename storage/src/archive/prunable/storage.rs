@@ -115,8 +115,11 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
-    /// Maps index to position in index journal.
-    indices: BTreeMap<u64, u64>,
+    /// Maps index to position(s) in index journal.
+    ///
+    /// Each index may have multiple positions when used via [crate::archive::MultiArchive].
+    /// When used via [crate::archive::Archive], each index has exactly one position.
+    indices: BTreeMap<u64, Vec<u64>>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,
@@ -157,7 +160,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
-        let mut indices = BTreeMap::new();
+        let mut indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
@@ -168,7 +171,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal)
-                indices.insert(entry.index, position);
+                indices.entry(entry.index).or_default().push(position);
 
                 // Store index in keys
                 keys.insert(&entry.key, entry.index);
@@ -228,9 +231,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Update metrics
         self.gets.inc();
 
-        // Get index location
+        // Get first position at this index
         let position = match self.indices.get(&index) {
-            Some(pos) => *pos,
+            Some(positions) => match positions.first() {
+                Some(pos) => *pos,
+                None => return Ok(None),
+            },
             None => return Ok(None),
         };
 
@@ -260,24 +266,26 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 continue;
             }
 
-            // Get index location
-            let position = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-
-            // Fetch index entry from index journal to verify key
+            // Get all positions at this index
+            let positions = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section(*index);
-            let entry = self.oversized.get(section, position).await?;
 
-            // Verify key matches
-            if entry.key.as_ref() == key.as_ref() {
-                // Fetch value directly from blob storage (bypasses page cache)
-                let (value_offset, value_size) = entry.value_location();
-                let value = self
-                    .oversized
-                    .get_value(section, value_offset, value_size)
-                    .await?;
-                return Ok(Some(value));
+            for position in positions {
+                // Fetch index entry from index journal to verify key
+                let entry = self.oversized.get(section, *position).await?;
+
+                // Verify key matches
+                if entry.key.as_ref() == key.as_ref() {
+                    // Fetch value directly from blob storage (bypasses page cache)
+                    let (value_offset, value_size) = entry.value_location();
+                    let value = self
+                        .oversized
+                        .get_value(section, value_offset, value_size)
+                        .await?;
+                    return Ok(Some(value));
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
         }
 
         Ok(None)
@@ -354,7 +362,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             return Err(Error::AlreadyPrunedTo(oldest_allowed));
         }
 
-        // Check for existing index
+        // Check for existing index (single-item semantics)
         if self.indices.contains_key(&index) {
             return Ok(());
         }
@@ -365,7 +373,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
-        self.indices.insert(index, position);
+        self.indices.entry(index).or_default().push(position);
 
         // Store interval
         self.intervals.insert(index);
@@ -432,6 +440,40 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    crate::archive::MultiArchive for Archive<T, E, K, V>
+{
+    async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if index < oldest_allowed {
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+        }
+
+        // Write value and index entry atomically (glob first, then index)
+        let section = self.section(index);
+        let entry = Record::new(index, key.clone(), 0, 0);
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
+
+        // Store index location
+        self.indices.entry(index).or_default().push(position);
+
+        // Store interval
+        self.intervals.insert(index);
+
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
+
+        // Add section to pending
+        self.pending.insert(section);
+
+        // Update metrics
+        let _ = self.items_tracked.try_set(self.indices.len());
+        Ok(())
     }
 }
 
