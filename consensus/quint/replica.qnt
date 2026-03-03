@@ -620,6 +620,7 @@ module replica {
                 all {
                     or {
                         not(VALID_BLOCKS.contains(proposal.block)),
+                        not(valid_parent(self, proposal.view, proposal.block_parent, proposal.view_parent, certs)),
                         not(unique_parent),
                     },
 
@@ -894,6 +895,9 @@ module replica {
                         not(parent_conflicted),
                         self.certified.get(cert_view_num) == None,
                         not(has_sent_finalize(id, cert_view_num)),
+                        // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
+                        // state the reverse guard "no finalize after nullify in the same view".
+                        // The Rust voter implementation enforces that exclusion, so this model does that too.
                         not(has_sent_nullify(id, cert_view_num)),
                     }
                     val can_send_nullify = and {
@@ -901,7 +905,13 @@ module replica {
                             not(can_certify(id, cert_block_val)),
                             parent_conflicted,
                         },
+                        // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
+                        // Real implementation may rebroadcast nullify for liveness.
                         not(has_sent_nullify(id, cert_view_num)),
+                        // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
+                        // state the reverse guard "no nullify after finalize in the same view".
+                        // The Rust voter implementation enforces that exclusion, so this model does that too.
+                        not(has_sent_finalize(id, cert_view_num))
                     }
 
                     if (can_send_finalize)
@@ -1252,8 +1262,13 @@ module replica {
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
         ByzantineSigs.contains(m1.sig),
-        m1.block == m2.block,
-    })
+        ByzantineSigs.contains(m2.sig),
+        and {
+          m1.block == m2.block,
+          m1.block_parent == m2.block_parent,
+          m1.view_parent == m2.view_parent,
+        },
+      })
 
     val valid_last_finalized = CORRECT.forall(id => {
         val self = replica_state.get(id)
