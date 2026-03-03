@@ -76,7 +76,7 @@ cfg_if::cfg_if! {
 pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
     /// The parent MMR.
     parent: &'a P,
-    /// How many of the parent's nodes are retained. Starts at `parent.size()`                                                                                                                               
+    /// How many of the parent's nodes are retained. Starts at `parent.size()`
     /// and shrinks with each `pop()`.
     parent_retained: Position,
     /// Nodes appended by this batch, at positions [retained, retained + appended.len()).
@@ -357,7 +357,7 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
         }
     }
 
-    /// Compute digests for dirty internal nodes, bottom-up by height.                                                                                                                                         
+    /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
