@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use crate::mmr::{
         iterator::nodes_to_pin,
-        location::LocationRangeExt as _,
+        LocationRangeExt as _,
         mem::{CleanMmr, DirtyMmr},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};

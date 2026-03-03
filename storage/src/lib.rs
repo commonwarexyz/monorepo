@@ -13,6 +13,7 @@
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
+    pub mod merkle;
     pub mod mmb;
     pub mod mmr;
 });

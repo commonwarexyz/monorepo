@@ -1,8 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{
-    location::LocationRangeExt as _, mem::DirtyMmr, Location, StandardHasher,
-};
+use commonware_storage::mmr::{mem::DirtyMmr, Location, LocationRangeExt as _, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};

@@ -2,7 +2,7 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMB variants or extensions.
 
-use super::position::{self, Position};
+use super::{Position, MAX_POSITION};
 
 /// Given an MMB size, return the number of leaves N such that `2*N - ilog2(N+1) == size`.
 ///
@@ -13,7 +13,7 @@ pub(crate) const fn leaves_for_size(size: u64) -> Option<u64> {
     }
 
     // Max valid MMB size is MAX_POSITION + 1 (= 2^63 - 2).
-    if size > position::MAX_POSITION.as_u64() + 1 {
+    if size > MAX_POSITION.as_u64() + 1 {
         return None;
     }
 
@@ -110,9 +110,9 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [position::MAX_POSITION].
+    /// Panics if `size` exceeds [MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(size <= position::MAX_POSITION, "size exceeds MAX_POSITION");
+        assert!(size <= MAX_POSITION, "size exceeds MAX_POSITION");
 
         if size == 0 {
             return size;

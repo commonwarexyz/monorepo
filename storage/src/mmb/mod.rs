@@ -103,14 +103,69 @@
 
 pub mod hasher;
 pub mod iterator;
-pub mod location;
 pub mod mem;
-pub mod position;
 
 pub use hasher::Standard as StandardHasher;
-pub use location::{Location, LocationRangeExt, MAX_LOCATION};
-pub use position::{Position, MAX_POSITION};
 use thiserror::Error;
+
+// --- Merkle family marker and type aliases ---
+
+use crate::merkle::{self, MerkleFamily};
+
+/// Marker type for the MMB family.
+#[derive(Copy, Clone, Debug)]
+pub struct Mmb;
+
+impl MerkleFamily for Mmb {
+    /// Maximum valid position: `2^63 - 3` (for `2^62 + 30` leaves).
+    const MAX_POSITION: u64 = 0x7FFF_FFFF_FFFF_FFFD; // (1 << 63) - 3
+
+    /// Maximum valid location: `2^62 + 29` (max leaf index for `2^62 + 30` leaves).
+    const MAX_LOCATION: u64 = 0x4000_0000_0000_001D; // 2^62 + 29
+
+    fn location_to_position(loc: u64) -> u64 {
+        // 2*N - ilog2(N+1) for MMB
+        2 * loc - (loc + 1).ilog2() as u64
+    }
+
+    fn position_to_location(pos: u64) -> Option<u64> {
+        // Solve 2*N - ilog2(N+1) = pos for N.
+        // Starting estimate: N ~ (pos + ilog2(N+1)) / 2 ~ pos/2. One refinement gives accuracy
+        // within +/-1, so the loop body runs at most a few times.
+        let mut n = pos / 2;
+        n = (pos + (n + 1).ilog2() as u64) / 2;
+        loop {
+            let leaf_pos = 2 * n - (n + 1).ilog2() as u64;
+            if leaf_pos == pos {
+                return Some(n);
+            }
+            if leaf_pos > pos {
+                // pos is not a leaf position (it falls between two leaf positions, so it's a
+                // parent).
+                return None;
+            }
+            n += 1;
+        }
+    }
+
+    fn is_valid_size(size: u64) -> bool {
+        iterator::leaves_for_size(size).is_some()
+    }
+}
+
+/// A node index or node count in an MMB.
+pub type Position = merkle::Position<Mmb>;
+
+/// A leaf index or leaf count in an MMB.
+pub type Location = merkle::Location<Mmb>;
+
+/// Maximum valid [Position] value for an MMB.
+pub const MAX_POSITION: Position = Position::MAX;
+
+/// Maximum valid [Location] value for an MMB.
+pub const MAX_LOCATION: Location = Location::MAX;
+
+pub use crate::merkle::LocationRangeExt;
 
 /// Errors that can occur during MMB operations.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
@@ -150,4 +205,21 @@ pub enum Error {
 
     #[error("location {0} > MAX_LOCATION")]
     LocationOverflow(Location),
+}
+
+impl From<merkle::PositionConversionError<Mmb>> for Error {
+    fn from(err: merkle::PositionConversionError<Mmb>) -> Self {
+        match err {
+            merkle::PositionConversionError::NonLeaf(pos) => Self::NonLeaf(pos),
+            merkle::PositionConversionError::Overflow(pos) => Self::PosOutOfBounds(pos),
+        }
+    }
+}
+
+impl From<merkle::LocationConversionError<Mmb>> for Error {
+    fn from(err: merkle::LocationConversionError<Mmb>) -> Self {
+        match err {
+            merkle::LocationConversionError::Overflow(loc) => Self::LocOutOfBounds(loc),
+        }
+    }
 }

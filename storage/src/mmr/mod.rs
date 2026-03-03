@@ -69,9 +69,7 @@
 
 pub mod hasher;
 pub mod iterator;
-pub mod location;
 pub mod mem;
-pub mod position;
 pub mod proof;
 
 #[cfg(test)]
@@ -86,10 +84,124 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
-pub use location::{Location, LocationError, MAX_LOCATION};
-pub use position::{Position, MAX_POSITION};
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
+
+// --- Merkle family marker and type aliases ---
+
+use crate::merkle::{self, MerkleFamily};
+
+/// Marker type for the MMR family.
+#[derive(Copy, Clone, Debug)]
+pub struct Mmr;
+
+impl MerkleFamily for Mmr {
+    /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
+    const MAX_POSITION: u64 = 0x7FFFFFFFFFFFFFFF; // (1 << 63) - 1
+
+    /// Maximum valid location: the largest leaf count is `2^62`.
+    const MAX_LOCATION: u64 = 0x4000_0000_0000_0000; // 2^62
+
+    fn location_to_position(loc: u64) -> u64 {
+        // 2*N - popcount(N) for MMR
+        loc.checked_mul(2)
+            .expect("should not overflow for valid leaf index")
+            - loc.count_ones() as u64
+    }
+
+    fn position_to_location(pos: u64) -> Option<u64> {
+        // Position 0 is always the first leaf at location 0.
+        if pos == 0 {
+            return Some(0);
+        }
+
+        // Find the height of the perfect binary tree containing this position.
+        // Safe: pos + 1 cannot overflow since pos <= MAX_POSITION (checked by caller).
+        let start = u64::MAX >> (pos + 1).leading_zeros();
+        let height = start.trailing_ones();
+        // Height 0 means this position is a peak (not a leaf in a tree).
+        if height == 0 {
+            return None;
+        }
+        let mut two_h = 1 << (height - 1);
+        let mut cur_node = start - 1;
+        let mut leaf_loc_floor = 0u64;
+
+        while two_h > 1 {
+            if cur_node == pos {
+                return None;
+            }
+            let left_pos = cur_node - two_h;
+            two_h >>= 1;
+            if pos > left_pos {
+                // The leaf is in the right subtree, so we must account for the leaves in the left
+                // subtree all of which precede it.
+                leaf_loc_floor += two_h;
+                cur_node -= 1; // move to the right child
+            } else {
+                // The node is in the left subtree
+                cur_node = left_pos;
+            }
+        }
+
+        Some(leaf_loc_floor)
+    }
+
+    fn is_valid_size(size: u64) -> bool {
+        if size == 0 {
+            return true;
+        }
+        let leading_zeros = size.leading_zeros();
+        if leading_zeros == 0 {
+            // size overflow
+            return false;
+        }
+        let start = u64::MAX >> leading_zeros;
+        let mut two_h = 1 << start.trailing_ones();
+        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
+        while two_h > 1 {
+            if node_pos < size {
+                if two_h == 2 {
+                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
+                    // invalid.
+                    return node_pos == size - 1;
+                }
+                // move to the right sibling
+                node_pos += two_h - 1;
+                if node_pos < size {
+                    // If the right sibling is in the MMR, then it is invalid.
+                    return false;
+                }
+                continue;
+            }
+            // descend to the left child
+            two_h >>= 1;
+            node_pos -= two_h;
+        }
+        true
+    }
+}
+
+/// A node index or node count in an MMR.
+pub type Position = merkle::Position<Mmr>;
+
+/// A leaf index or leaf count in an MMR.
+pub type Location = merkle::Location<Mmr>;
+
+/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
+///
+/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
+pub const MAX_POSITION: Position = Position::MAX;
+
+/// Maximum valid [Location] value: the largest leaf count an MMR can hold.
+///
+/// `MAX_LOCATION = 2^62`.
+pub const MAX_LOCATION: Location = Location::MAX;
+
+/// Error type for converting a [Position] to a [Location].
+pub type LocationError = merkle::PositionConversionError<Mmr>;
+
+pub use crate::merkle::LocationRangeExt;
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
@@ -148,6 +260,14 @@ impl From<LocationError> for Error {
         match err {
             LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
             LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+        }
+    }
+}
+
+impl From<merkle::LocationConversionError<Mmr>> for Error {
+    fn from(err: merkle::LocationConversionError<Mmr>) -> Self {
+        match err {
+            merkle::LocationConversionError::Overflow(loc) => Self::LocationOverflow(loc),
         }
     }
 }

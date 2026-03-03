@@ -228,7 +228,7 @@ impl<D: Digest> CleanMmr<D> {
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_mmr_size() {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
@@ -497,7 +497,7 @@ impl<D: Digest> DirtyMmr<D> {
             if new_size < self.pruned_to_pos {
                 return Err(ElementPruned(new_size));
             }
-            if new_size.is_mmr_size() {
+            if new_size.is_valid_size() {
                 break;
             }
             new_size -= 1;
@@ -961,7 +961,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
-                    mmr.size().is_mmr_size(),
+                    mmr.size().is_valid_size(),
                     "mmr of size {} should be valid",
                     mmr.size()
                 );
@@ -969,7 +969,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !Position::new(size).is_mmr_size(),
+                        !Position::new(size).is_valid_size(),
                         "mmr of size {size} should be invalid",
                     );
                 }

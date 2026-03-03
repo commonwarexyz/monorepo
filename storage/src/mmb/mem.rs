@@ -145,7 +145,7 @@ impl<D: Digest, S: State<D>> Mmb<D, S> {
     /// Return the total number of leaves in the MMB.
     pub fn leaves(&self) -> Location {
         leaves_for_size(*self.size())
-            .map(Location::new_unchecked)
+            .map(Location::new)
             .expect("invalid mmb size")
     }
 
@@ -237,7 +237,7 @@ impl<D: Digest> CleanMmb<D> {
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_mmb_size() {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
@@ -812,7 +812,7 @@ mod tests {
 
             assert_eq!(
                 *mmb.root(),
-                hasher.root(Location::new_unchecked(0), [].iter())
+                hasher.root(Location::new(0), [].iter())
             );
         });
     }
@@ -906,7 +906,7 @@ mod tests {
             // Verify root matches hash structure (peaks folded oldest-first).
             let root = *mmb.root();
             let peak_digests = [digest7, digest9, digest12];
-            let expected_root = hasher.root(Location::new_unchecked(8), peak_digests.iter());
+            let expected_root = hasher.root(Location::new(8), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // Verify that the two newest peaks are same-height, so adding a 9th leaf triggers a merge.
@@ -969,7 +969,7 @@ mod tests {
 
             // Advance the prune boundary in steps, confirming the root never changes.
             for prune_pos in [10, 25, 50, 100, 150, 199, 200] {
-                let pos = Position::try_from(Location::new_unchecked(prune_pos)).unwrap();
+                let pos = Position::try_from(Location::new(prune_pos)).unwrap();
                 mmb.prune_to_pos(pos).unwrap();
                 assert_eq!(
                     *mmb.root(),
@@ -994,7 +994,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
-                    mmb.size().is_mmb_size(),
+                    mmb.size().is_valid_size(),
                     "mmb of size {} should be valid",
                     mmb.size()
                 );
@@ -1002,7 +1002,7 @@ mod tests {
                 mmb.add(&mut hasher, &element);
                 for size in *old_size + 1..*mmb.size() {
                     assert!(
-                        !Position::new(size).is_mmb_size(),
+                        !Position::new(size).is_valid_size(),
                         "mmb of size {size} should be invalid",
                     );
                 }
@@ -1133,7 +1133,7 @@ mod tests {
             // to its previous state when we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                let leaf_loc = Location::new_unchecked(leaf as u64);
+                let leaf_loc = Location::new(leaf as u64);
                 mmb.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 let updated_root = *mmb.root();
                 assert!(root != updated_root);
@@ -1150,7 +1150,7 @@ mod tests {
             mmb.prune_to_pos(Position::new(150)).unwrap();
             for leaf_pos in 150u64..=190 {
                 mmb.prune_to_pos(Position::new(leaf_pos)).unwrap();
-                let leaf_loc = Location::new_unchecked(leaf_pos);
+                let leaf_loc = Location::new(leaf_pos);
                 mmb.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
         });
@@ -1181,7 +1181,7 @@ mod tests {
             let mmb = CleanMmb::new(&mut hasher);
             let mut mmb = build_test_mmb(&mut hasher, mmb, 100);
             mmb.prune_all();
-            let result = mmb.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
+            let result = mmb.update_leaf(&mut hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
@@ -1232,7 +1232,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xFF);
 
             // Save the original leaf digest so we can restore it.
-            let loc = Location::new_unchecked(5);
+            let loc = Location::new(5);
             let leaf_pos = Position::try_from(loc).unwrap();
             let original_digest = mmb.get_node(leaf_pos).unwrap();
 
@@ -1252,7 +1252,7 @@ mod tests {
             let mut dirty = mmb.into_dirty();
             for i in [0u64, 1, 50, 100, 199] {
                 dirty
-                    .update_leaf_digest(Location::new_unchecked(i), updated_digest)
+                    .update_leaf_digest(Location::new(i), updated_digest)
                     .unwrap();
             }
             let mmb = dirty.merkleize(&mut hasher, None);
@@ -1269,7 +1269,7 @@ mod tests {
                 // Out of bounds: location >= leaf count.
                 let mmb = CleanMmb::new(&mut hasher);
                 let mut mmb = build_test_mmb(&mut hasher, mmb, 100).into_dirty();
-                let result = mmb.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
+                let result = mmb.update_leaf_digest(Location::new(100), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::InvalidPosition(_))));
             }
 
@@ -1279,7 +1279,7 @@ mod tests {
                 let mut mmb = build_test_mmb(&mut hasher, mmb, 100);
                 mmb.prune_to_pos(Position::new(50)).unwrap();
                 let mut dirty = mmb.into_dirty();
-                let result = dirty.update_leaf_digest(Location::new_unchecked(0), Sha256::fill(0));
+                let result = dirty.update_leaf_digest(Location::new(0), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::ElementPruned(_))));
             }
         });
@@ -1296,7 +1296,7 @@ mod tests {
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
-            let leaf_loc = Location::new_unchecked(leaf);
+            let leaf_loc = Location::new(leaf);
             updates.push((leaf_loc, &element));
         }
         let mut mmb = mmb.into_dirty();
@@ -1311,7 +1311,7 @@ mod tests {
         for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            let leaf_loc = Location::new_unchecked(leaf);
+            let leaf_loc = Location::new(leaf);
             updates.push((leaf_loc, element));
         }
         let mut mmb = mmb.into_dirty();

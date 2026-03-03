@@ -35,6 +35,12 @@ pub enum Error {
     Journal(#[from] super::Error),
 }
 
+impl From<crate::merkle::LocationConversionError<crate::mmr::Mmr>> for Error {
+    fn from(e: crate::merkle::LocationConversionError<crate::mmr::Mmr>) -> Self {
+        Self::Mmr(e.into())
+    }
+}
+
 /// An append-only data structure that maintains a sequential journal of items alongside a Merkle
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
