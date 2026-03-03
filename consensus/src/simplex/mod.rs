@@ -4831,8 +4831,9 @@ mod tests {
 
             // ========== Create engines ==========
 
-            // Engines are started after certificate preload so this test does not
-            // rely on pinning early leaders.
+            // Start engines after preloading certificates into each participant's
+            // recovered channel (ensuring processing before any leader attempts to issue a
+            // conflicting vote).
             let elector = RoundRobin::<Sha256>::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
