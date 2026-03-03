@@ -445,59 +445,6 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    /// Elector pre-populated with a fixed leader for views up to `through`,
-    /// falling back to round-robin for all later views.
-    #[derive(Clone, Debug)]
-    struct FixedElector {
-        leader: Participant,
-        through: View,
-    }
-
-    impl Default for FixedElector {
-        fn default() -> Self {
-            Self {
-                leader: Participant::new(0),
-                through: View::new(1),
-            }
-        }
-    }
-
-    impl<S: commonware_cryptography::certificate::Scheme> Elector<S> for FixedElector {
-        type Elector = FixedElectorInner<S>;
-
-        fn build(
-            self,
-            participants: &commonware_utils::ordered::Set<S::PublicKey>,
-        ) -> Self::Elector {
-            assert!(!participants.is_empty(), "no participants");
-            FixedElectorInner {
-                leader: self.leader,
-                through: self.through,
-                n: participants.len() as u32,
-                _phantom: std::marker::PhantomData,
-            }
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct FixedElectorInner<S> {
-        leader: Participant,
-        through: View,
-        n: u32,
-        _phantom: std::marker::PhantomData<S>,
-    }
-
-    impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S> for FixedElectorInner<S> {
-        fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
-            if round.view() <= self.through {
-                self.leader
-            } else {
-                let idx = (round.epoch().get().wrapping_add(round.view().get())) as u32 % self.n;
-                Participant::new(idx)
-            }
-        }
-    }
-
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
@@ -5070,6 +5017,60 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
+        /// Elector pre-populated with a fixed leader for views up to `through`,
+        /// falling back to round-robin for all later views.
+        #[derive(Clone)]
+        struct FixedElector {
+            leader: Participant,
+            through: View,
+        }
+
+        impl Default for FixedElector {
+            fn default() -> Self {
+                Self {
+                    leader: Participant::new(0),
+                    through: View::new(1),
+                }
+            }
+        }
+
+        impl<S: commonware_cryptography::certificate::Scheme> Elector<S> for FixedElector {
+            type Elector = FixedElectorInner<S>;
+
+            fn build(
+                self,
+                participants: &commonware_utils::ordered::Set<S::PublicKey>,
+            ) -> Self::Elector {
+                assert!(!participants.is_empty(), "no participants");
+                FixedElectorInner {
+                    leader: self.leader,
+                    through: self.through,
+                    n: participants.len() as u32,
+                    _phantom: std::marker::PhantomData,
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct FixedElectorInner<S> {
+            leader: Participant,
+            through: View,
+            n: u32,
+            _phantom: std::marker::PhantomData<S>,
+        }
+
+        impl<S: commonware_cryptography::certificate::Scheme> elector::Elector<S> for FixedElectorInner<S> {
+            fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+                if round.view() <= self.through {
+                    self.leader
+                } else {
+                    let idx =
+                        (round.epoch().get().wrapping_add(round.view().get())) as u32 % self.n;
+                    Participant::new(idx)
+                }
+            }
+        }
+
         // Elect a Byzantine node (index 9) as leader for views 1-3 so that
         // honest voters do not propose before the injected certificates
         // (F=1, F+1=2, F+2=3) arrive.
