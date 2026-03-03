@@ -585,7 +585,7 @@ impl IoUringLoop {
             let waiter_id = self.waiters.insert(sender, buffer, fd, iovecs, target_tick);
 
             // Tag SQE with waiter id for completion matching.
-            work = work.user_data(waiter_id.op_user_data());
+            work = work.user_data(waiter_id.user_data());
 
             // Submit the operation.
             //
@@ -620,7 +620,7 @@ impl IoUringLoop {
                 self.pending_cancels.push_front(waiter_id);
                 return true;
             }
-            let cancel = AsyncCancel::new(waiter_id.op_user_data())
+            let cancel = AsyncCancel::new(waiter_id.user_data())
                 .build()
                 .user_data(waiter_id.cancel_user_data());
 
@@ -701,7 +701,7 @@ impl IoUringLoop {
         self.expired_timeouts = expired;
     }
 
-    fn earliest_deadline(&self) -> Option<Duration> {
+    const fn earliest_deadline(&self) -> Option<Duration> {
         if !self.timeout_wheel.has_active_deadlines() {
             return None;
         }
@@ -904,6 +904,7 @@ mod tests {
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
         // Force a deterministic kernel error path by closing the ring FD first.
+        // SAFETY: `ring.as_raw_fd()` is a valid owned fd at this point.
         let close_result = unsafe { libc::close(ring.as_raw_fd()) };
         assert_eq!(close_result, 0, "failed to close ring fd in test");
         let err = iouring
@@ -968,7 +969,7 @@ mod tests {
         iouring.timeout_wheel.schedule(old_slot, 1);
         let completed = iouring
             .waiters
-            .on_completion(old_slot.op_user_data(), 0)
+            .on_completion(old_slot.user_data(), 0)
             .expect("missing waiter completion");
         iouring.deliver_completion(completed);
 
@@ -1012,7 +1013,7 @@ mod tests {
         // The op result should be delivered immediately and the late cancel CQE ignored.
         let completed = iouring
             .waiters
-            .on_completion(slot_index.op_user_data(), 123)
+            .on_completion(slot_index.user_data(), 123)
             .expect("missing completion");
         iouring.deliver_completion(completed);
         let completed = iouring

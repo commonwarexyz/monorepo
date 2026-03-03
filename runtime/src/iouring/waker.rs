@@ -330,6 +330,7 @@ mod tests {
         assert!(replacement >= 0);
         let old = {
             let inner = std::sync::Arc::get_mut(&mut waker.inner).expect("unique waker in test");
+            // SAFETY: `replacement` came from `dup` above and is uniquely owned here.
             std::mem::replace(&mut inner.wake_fd, unsafe {
                 std::os::fd::OwnedFd::from_raw_fd(replacement)
             })

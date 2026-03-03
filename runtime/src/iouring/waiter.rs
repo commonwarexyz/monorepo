@@ -28,15 +28,10 @@ impl WaiterId {
     const CANCEL_TAG: UserData = 1u64 << 63;
 
     /// Build a waiter id from slot index and generation components.
-    pub const fn from_parts(index: u32, generation: u32) -> Self {
+    pub const fn new(index: u32, generation: u32) -> Self {
         let index = index as UserData;
         let generation = generation as UserData;
-        Self((generation as UserData & Self::GENERATION_MASK) << Self::INDEX_BITS | index)
-    }
-
-    /// Build a waiter id at generation zero for a slot index.
-    pub const fn from_slot(index: u32) -> Self {
-        Self::from_parts(index, 0)
+        Self((generation & Self::GENERATION_MASK) << Self::INDEX_BITS | index)
     }
 
     /// Return the slot index component of this waiter id.
@@ -44,46 +39,41 @@ impl WaiterId {
         (self.0 & Self::INDEX_MASK) as u32
     }
 
-    /// Return the raw generation component of this waiter id.
+    /// Return the generation component of this waiter id.
     const fn generation(self) -> u32 {
         ((self.0 >> Self::INDEX_BITS) & Self::GENERATION_MASK) as u32
-    }
-
-    /// Return the SQE/CQE user_data value for the original operation.
-    pub const fn op_user_data(self) -> UserData {
-        self.0
-    }
-
-    /// Return the SQE/CQE user_data value for the cancel request.
-    pub const fn cancel_user_data(self) -> UserData {
-        self.0 | Self::CANCEL_TAG
-    }
-
-    /// Decode CQE user data into waiter id and cancellation-tag marker.
-    const fn decode_user_data(user_data: UserData) -> (Self, bool) {
-        let is_cancel = (user_data & Self::CANCEL_TAG) != 0;
-        (Self(user_data & !Self::CANCEL_TAG), is_cancel)
     }
 
     /// Return the waiter id for the same slot with incremented generation.
     const fn next_generation(self) -> Self {
         let generation = ((self.generation() as UserData).wrapping_add(1)) & Self::GENERATION_MASK;
-        Self::from_parts(self.index(), generation as u32)
+        Self::new(self.index(), generation as u32)
     }
-}
 
-/// Waiter resources and metadata returned when a waiter reaches terminal state.
-pub struct CompletedWaiter {
-    /// Sender used to deliver completion back to the original caller.
-    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// Buffer to return to the caller.
-    pub buffer: Option<OpBuffer>,
-    /// Operation result code.
-    pub result: i32,
-    /// True when completion happened through cancellation handling.
-    pub cancelled: bool,
-    /// Scheduled deadline tick, when known for active-op completion.
-    pub target_tick: Option<Tick>,
+    /// Encode this waiter id as `user_data` for the operation SQE/CQE.
+    ///
+    /// This value contains only the packed waiter identity (slot + generation),
+    /// with the cancel tag bit clear.
+    pub const fn user_data(self) -> UserData {
+        self.0
+    }
+
+    /// Encode this waiter id as `user_data` for the cancel SQE/CQE.
+    ///
+    /// This preserves the waiter identity and sets the high cancel-tag bit so
+    /// completion handling can distinguish cancel CQEs from operation CQEs.
+    pub const fn cancel_user_data(self) -> UserData {
+        self.0 | Self::CANCEL_TAG
+    }
+
+    /// Decode `user_data` into waiter identity and cancel-tag state.
+    ///
+    /// The returned waiter id always has the cancel-tag bit stripped. The
+    /// boolean reports whether that bit was set in the input value.
+    const fn from_user_data(user_data: UserData) -> (Self, bool) {
+        let is_cancel = (user_data & Self::CANCEL_TAG) != 0;
+        (Self(user_data & !Self::CANCEL_TAG), is_cancel)
+    }
 }
 
 /// Lifecycle state of an in-flight waiter across operation and cancellation handling.
@@ -93,7 +83,8 @@ enum WaiterState {
     Active {
         /// Absolute wheel tick by which the operation must complete.
         ///
-        /// If completion has not been observed by this tick, cancellation is requested.
+        /// If completion has not been observed by this tick, cancellation is
+        /// requested. `None` means this waiter has no timeout deadline.
         target_tick: Option<Tick>,
     },
     /// Cancellation was requested and cancel SQE was submitted.
@@ -130,6 +121,24 @@ struct Waiter {
     iovecs: Option<OpIovecs>,
 }
 
+/// Waiter resources and metadata returned when a waiter reaches terminal state.
+pub struct CompletedWaiter {
+    /// Sender used to deliver completion back to the original caller.
+    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
+    /// Buffer to return to the caller.
+    pub buffer: Option<OpBuffer>,
+    /// Operation result code.
+    pub result: i32,
+    /// True when completion happened through cancellation handling.
+    pub cancelled: bool,
+    /// Scheduled deadline tick, when known.
+    ///
+    /// `None` means there is no deadline to remove from timeout tracking (either no
+    /// deadline was set, or completion was observed after cancellation had already
+    /// been requested).
+    pub target_tick: Option<Tick>,
+}
+
 /// Tracks in-flight operations and the state needed to complete them.
 pub struct Waiters {
     /// Waiters indexed by slot index.
@@ -152,7 +161,7 @@ impl Waiters {
         let mut free = Vec::with_capacity(capacity);
         free.extend((0..capacity).rev().map(|index| {
             let index = u32::try_from(index).expect("slot index overflow");
-            WaiterId::from_slot(index)
+            WaiterId::new(index, 0)
         }));
 
         Self {
@@ -206,35 +215,65 @@ impl Waiters {
         id
     }
 
+    /// Request cancellation for an active waiter.
+    ///
+    /// Returns cancellation `user_data` when the waiter exists and is active.
+    /// Returns `None` when the waiter id is stale, not present, or already
+    /// cancel-requested.
+    ///
+    /// Panics if `waiter_id` encodes a slot index outside this waiters set capacity.
+    pub fn cancel(&mut self, waiter_id: WaiterId) -> Option<UserData> {
+        let index = waiter_id.index() as usize;
+        let waiter = self.entries[index].as_mut()?;
+        if waiter.id != waiter_id {
+            return None;
+        }
+        match waiter.state {
+            WaiterState::Active { .. } => {
+                waiter.state = WaiterState::CancelRequested;
+                Some(waiter_id.cancel_user_data())
+            }
+            WaiterState::CancelRequested => None,
+        }
+    }
+
     /// Process one completion to waiter state.
     ///
-    /// Returns a completed waiter when this completion reaches terminal state
-    /// for the slot, otherwise returns `None`.
+    /// Returns a completed waiter when this completion reaches terminal state for
+    /// the waiter id, otherwise returns `None`.
+    ///
+    /// `None` includes stale waiter ids (for example, the slot was reused with a
+    /// newer generation).
+    ///
+    /// Panics if `user_data` decodes to a slot index outside this waiters set
+    /// capacity.
     pub fn on_completion(&mut self, user_data: UserData, result: i32) -> Option<CompletedWaiter> {
-        let (waiter_id, is_cancel) = WaiterId::decode_user_data(user_data);
+        let (waiter_id, is_cancel) = WaiterId::from_user_data(user_data);
         let index = waiter_id.index() as usize;
 
-        let completion = {
-            let waiter = self.entries.get_mut(index)?.as_mut()?;
-            if waiter.id != waiter_id {
-                return None;
-            }
-            if is_cancel {
-                None
-            } else {
-                match &mut waiter.state {
-                    WaiterState::Active { target_tick } => Some((result, false, *target_tick)),
-                    WaiterState::CancelRequested => Some((result, true, None)),
-                }
-            }
+        let waiter = self.entries[index].as_mut()?;
+        if waiter.id != waiter_id {
+            // Slot was reused, this CQE belongs to an older waiter generation.
+            return None;
+        }
+
+        if is_cancel {
+            // Cancel CQEs acknowledge cancel requests but do not complete waiters.
+            return None;
+        }
+
+        let (cancelled, target_tick) = match waiter.state {
+            WaiterState::Active { target_tick } => (false, target_tick),
+            WaiterState::CancelRequested => (true, None),
         };
 
-        let (result, cancelled, target_tick) = completion?;
         let Waiter {
             id, sender, buffer, ..
         } = self.entries[index].take().expect("missing waiter");
+
         self.free.push(id.next_generation());
         self.len -= 1;
+
         Some(CompletedWaiter {
             sender,
             buffer,
@@ -242,34 +281,6 @@ impl Waiters {
             cancelled,
             target_tick,
         })
-    }
-
-    /// Request cancellation for an active waiter.
-    ///
-    /// Returns cancellation CQE user_data when state transitions from active to
-    /// cancel-requested; otherwise returns `None`.
-    ///
-    /// Panics if the slot exists but is not active.
-    pub fn cancel(&mut self, waiter_id: WaiterId) -> Option<UserData> {
-        let index = waiter_id.index() as usize;
-        let waiter = self.entries.get_mut(index)?.as_mut()?;
-        if waiter.id != waiter_id {
-            return None;
-        }
-        match waiter.state {
-            WaiterState::Active {
-                target_tick: Some(_),
-            } => {
-                waiter.state = WaiterState::CancelRequested;
-                Some(waiter_id.cancel_user_data())
-            }
-            WaiterState::Active { target_tick: None } => {
-                panic!("cancel requested for waiter without active deadline")
-            }
-            WaiterState::CancelRequested => {
-                panic!("cancel requested for non-active waiter")
-            }
-        }
     }
 }
 
@@ -285,21 +296,21 @@ mod tests {
 
     #[test]
     fn test_waiter_id_encoding_and_generation_wrap() {
-        let wrapped = WaiterId::from_parts(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
+        let wrapped = WaiterId::new(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
         assert_eq!(wrapped.generation(), 4);
 
-        let max = WaiterId::from_parts(7, WaiterId::GENERATION_MASK as u32);
+        let max = WaiterId::new(7, WaiterId::GENERATION_MASK as u32);
         assert_eq!(max.next_generation().generation(), 0);
 
-        let waiter_id = WaiterId::from_parts(7, 3);
+        let waiter_id = WaiterId::new(7, 3);
         assert_eq!(waiter_id.index(), 7);
         assert_eq!(waiter_id.generation(), 3);
 
-        let (decoded_op, is_cancel_op) = WaiterId::decode_user_data(waiter_id.op_user_data());
+        let (decoded_op, is_cancel_op) = WaiterId::from_user_data(waiter_id.user_data());
         assert_eq!(decoded_op, waiter_id);
         assert!(!is_cancel_op);
 
-        let (decoded_cancel, is_cancel) = WaiterId::decode_user_data(waiter_id.cancel_user_data());
+        let (decoded_cancel, is_cancel) = WaiterId::from_user_data(waiter_id.cancel_user_data());
         assert_eq!(decoded_cancel, waiter_id);
         assert!(is_cancel);
     }
@@ -319,11 +330,11 @@ mod tests {
         assert_eq!(waiters.len(), 2);
 
         // Completion for a stale generation must be ignored.
-        let stale = WaiterId::from_parts(id1.index(), id1.generation().wrapping_add(1));
-        assert!(waiters.on_completion(stale.op_user_data(), 0).is_none());
+        let stale = WaiterId::new(id1.index(), id1.generation().wrapping_add(1));
+        assert!(waiters.on_completion(stale.user_data(), 0).is_none());
 
         let completed1 = waiters
-            .on_completion(id1.op_user_data(), 7)
+            .on_completion(id1.user_data(), 7)
             .expect("missing waiter completion");
         assert_eq!(completed1.result, 7);
         assert!(!completed1.cancelled);
@@ -343,8 +354,8 @@ mod tests {
             id1.generation().wrapping_add(1) & (WaiterId::GENERATION_MASK as u32)
         );
 
-        let _ = waiters.on_completion(id0.op_user_data(), 1);
-        let _ = waiters.on_completion(id2.op_user_data(), 2);
+        let _ = waiters.on_completion(id0.user_data(), 1);
+        let _ = waiters.on_completion(id2.user_data(), 2);
 
         // Cover vectored buffers plus fd/iovec keepalive storage.
         let (tx3, _rx3) = oneshot::channel();
@@ -367,7 +378,7 @@ mod tests {
             None,
         );
         let completed3 = waiters
-            .on_completion(id3.op_user_data(), 9)
+            .on_completion(id3.user_data(), 9)
             .expect("missing vectored completion");
         assert!(matches!(
             completed3.buffer,
@@ -383,7 +394,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let waiter_id = waiters.insert(tx, None, None, None, Some(2));
 
-        let stale = WaiterId::from_parts(waiter_id.index(), waiter_id.generation().wrapping_add(1));
+        let stale = WaiterId::new(waiter_id.index(), waiter_id.generation().wrapping_add(1));
         assert!(waiters.cancel(stale).is_none());
 
         let cancel = waiters
@@ -394,7 +405,7 @@ mod tests {
         // Cancel CQE does not complete the waiter. The op CQE delivers the result.
         assert!(waiters.on_completion(cancel, -libc::ECANCELED).is_none());
         let completed = waiters
-            .on_completion(waiter_id.op_user_data(), 123)
+            .on_completion(waiter_id.user_data(), 123)
             .expect("missing completion");
         assert_eq!(completed.result, 123);
         assert!(completed.cancelled);
@@ -409,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_waiters_insert_and_cancel_panic_invariants() {
+    fn test_waiters_insert_and_cancel_invariants() {
         let mut waiters = Waiters::new(2);
 
         let (tx0, _rx0) = oneshot::channel();
@@ -425,17 +436,14 @@ mod tests {
         let mut waiters = Waiters::new(2);
         let (tx, _rx) = oneshot::channel();
         let no_deadline = waiters.insert(tx, None, None, None, None);
-        let missing_deadline = catch_unwind(AssertUnwindSafe(|| {
-            let _ = waiters.cancel(no_deadline);
-        }));
-        assert!(missing_deadline.is_err());
+        let cancel = waiters
+            .cancel(no_deadline)
+            .expect("cancel should support active waiter without deadline");
+        assert_eq!(cancel, no_deadline.cancel_user_data());
 
         let (tx, _rx) = oneshot::channel();
         let active = waiters.insert(tx, None, None, None, Some(3));
         let _ = waiters.cancel(active);
-        let second_cancel = catch_unwind(AssertUnwindSafe(|| {
-            let _ = waiters.cancel(active);
-        }));
-        assert!(second_cancel.is_err());
+        assert!(waiters.cancel(active).is_none());
     }
 }
