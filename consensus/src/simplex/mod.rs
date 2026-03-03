@@ -4665,10 +4665,11 @@ mod tests {
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn split_views_no_lockup<S, F>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -4841,7 +4842,7 @@ mod tests {
             // Start engines after preloading certificates into each participant's
             // recovered channel (ensuring processing before any leader attempts to issue a
             // conflicting vote).
-            let elector = RoundRobin::<Sha256>::default();
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -5021,14 +5022,14 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        split_views_no_lockup(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        split_views_no_lockup(bls12381_threshold_std::fixture::<MinPk, _>);
-        split_views_no_lockup(bls12381_threshold_std::fixture::<MinSig, _>);
-        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>);
-        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup(ed25519::fixture);
-        split_views_no_lockup(secp256r1::fixture);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
+        split_views_no_lockup::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn tle<V, L>()
