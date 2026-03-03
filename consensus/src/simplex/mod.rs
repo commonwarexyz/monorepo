@@ -4880,7 +4880,7 @@ mod tests {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
                         me: validator.clone(),
-                        propose_latency: (10.0, 5.0),
+                        propose_latency: (250.0, 50.0), // ensure we process certificates first
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
                         should_certify: mocks::application::Certifier::Sometimes,
