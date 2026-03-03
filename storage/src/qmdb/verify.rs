@@ -122,8 +122,8 @@ mod tests {
     use super::*;
     use crate::mmr::{
         iterator::nodes_to_pin,
-        LocationRangeExt as _,
         mem::{CleanMmr, DirtyMmr},
+        LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;

@@ -24,9 +24,9 @@
 //!
 //! # Construction
 //!
-//! On each step, one leaf is appended at the next available position. If the two rightmost peaks
-//! then have equal height, they are merged: one parent node is appended immediately after the
-//! leaf. This "1-merge-per-leaf" budget ensures that after N leaves, the number of peaks is
+//! On each step, one leaf is appended at the next available position. If a unique pair of
+//! adjacent same-height peaks exists, they are merged: one parent node is appended immediately
+//! after the leaf. This "1-merge-per-leaf" budget ensures that after N leaves, the number of peaks is
 //! always `ilog2(N+1)` and the total size is `2*N - ilog2(N+1)`.
 //!
 //! Because the leaf is always appended first and the merge parent (if any) follows, the physical
@@ -104,26 +104,23 @@
 pub mod hasher;
 pub mod iterator;
 pub mod mem;
-#[cfg(any(feature = "std", test))]
 pub mod proof;
 
+// --- Merkle family marker and type aliases ---
+use crate::merkle::{self, MerkleFamily};
 pub use hasher::Standard as StandardHasher;
 use thiserror::Error;
-
-// --- Merkle family marker and type aliases ---
-
-use crate::merkle::{self, MerkleFamily};
 
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
 pub struct Mmb;
 
 impl MerkleFamily for Mmb {
-    /// Maximum valid position: `2^63 - 3` (for `2^62 + 30` leaves).
-    const MAX_POSITION: u64 = 0x7FFF_FFFF_FFFF_FFFD; // (1 << 63) - 3
+    /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
+    const MAX_POSITION: u64 = 0x7FFF_FFFF_FFFF_FFFE; // (1 << 63) - 2
 
-    /// Maximum valid location: `2^62 + 29` (max leaf index for `2^62 + 30` leaves).
-    const MAX_LOCATION: u64 = 0x4000_0000_0000_001D; // 2^62 + 29
+    /// Maximum valid location (leaf count): `2^62 + 30`.
+    const MAX_LOCATION: u64 = 0x4000_0000_0000_001E; // 2^62 + 30
 
     fn location_to_position(loc: u64) -> u64 {
         // 2*N - ilog2(N+1) for MMB
@@ -161,10 +158,14 @@ pub type Position = merkle::Position<Mmb>;
 /// A leaf index or leaf count in an MMB.
 pub type Location = merkle::Location<Mmb>;
 
-/// Maximum valid [Position] value for an MMB.
+/// Maximum valid [Position] value: the largest node count (size) an MMB can hold.
+///
+/// An MMB with `2^62 + 30` leaves has `2^63 - 2` nodes, so `MAX_POSITION = 2^63 - 2`.
 pub const MAX_POSITION: Position = Position::MAX;
 
-/// Maximum valid [Location] value for an MMB.
+/// Maximum valid [Location] value: the largest leaf count an MMB can hold.
+///
+/// `MAX_LOCATION = 2^62 + 30`.
 pub const MAX_LOCATION: Location = Location::MAX;
 
 pub use crate::merkle::LocationRangeExt;
@@ -186,9 +187,6 @@ pub enum Error {
 
     #[error("element pruned: {0}")]
     ElementPruned(Position),
-
-    #[error("position is not a leaf: {0}")]
-    PositionNotLeaf(Position),
 
     #[error("invalid position: {0}")]
     InvalidPosition(Position),

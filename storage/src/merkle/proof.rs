@@ -1,13 +1,11 @@
 //! Shared [Proof] structure for Merkle-family data structures (MMR, MMB).
 
-use super::MerkleFamily;
+use super::{Location, MerkleFamily};
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use thiserror::Error;
-
-use super::Location;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
@@ -129,4 +127,3 @@ where
         Ok(Self { leaves, digests })
     }
 }
-

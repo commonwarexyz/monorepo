@@ -30,6 +30,12 @@ pub trait Hasher: Send + Sync {
         peak_digests: impl Iterator<Item = &'a Self::Digest>,
     ) -> Self::Digest;
 
+    /// One step of the root fold: `Hash(acc || peak)`.
+    ///
+    /// This is the fold operation used by [`root`](Self::root). It is exposed separately so that
+    /// proof verification can incrementally fold peaks without recomputing `Hash(leaves)`.
+    fn fold_peak(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest;
+
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> Self::Digest;
 
@@ -108,15 +114,17 @@ impl<H: CHasher> Hasher for Standard<H> {
         leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        // Start with hash(leaves), then left-fold each peak: hash(acc, peak).
-        self.hasher.update(&leaves.as_u64().to_be_bytes());
-        let mut acc = self.finalize();
+        let mut acc = self.digest(&leaves.as_u64().to_be_bytes());
         for digest in peak_digests {
-            self.update_with_digest(&acc);
-            self.update_with_digest(digest);
-            acc = self.finalize();
+            acc = self.fold_peak(&acc, digest);
         }
         acc
+    }
+
+    fn fold_peak(&mut self, acc: &H::Digest, peak: &H::Digest) -> H::Digest {
+        self.update_with_digest(acc);
+        self.update_with_digest(peak);
+        self.finalize()
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {

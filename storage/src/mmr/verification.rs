@@ -171,7 +171,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{LocationRangeExt as _, mem::DirtyMmr, StandardHasher as Standard};
+    use crate::mmr::{mem::DirtyMmr, LocationRangeExt as _, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};

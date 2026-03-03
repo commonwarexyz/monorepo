@@ -16,16 +16,14 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
-        Location,
         mem::{
             Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr,
             State as MemState,
         },
-        Position,
         storage::Storage,
         verification,
         Error::{self, *},
-        Proof,
+        Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -1057,8 +1055,8 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for DirtyMmr<E,
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::build_test_mmr, hasher::Hasher as _, LocationRangeExt as _, mem,
-        Location, StandardHasher as Standard,
+        conformance::build_test_mmr, hasher::Hasher as _, mem, Location, LocationRangeExt as _,
+        StandardHasher as Standard,
     };
     use commonware_cryptography::{
         sha256::{self, Digest},

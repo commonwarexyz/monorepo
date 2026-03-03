@@ -152,15 +152,6 @@ impl<D: Digest, S: State<D>> Mmb<D, S> {
             .expect("invalid mmb size")
     }
 
-    /// Return the position of the last leaf in this MMB, or None if the MMB is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        if self.size() == 0 {
-            return None;
-        }
-
-        Some(PeakIterator::last_leaf_pos(self.size()))
-    }
-
     /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
     /// retained nodes respectively.
     pub fn bounds(&self) -> Range<Position> {
@@ -351,6 +342,21 @@ impl<D: Digest> CleanMmb<D> {
         result
     }
 
+    /// Build an inclusion proof for the given range of elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Empty] if the range is empty.
+    /// Returns [Error::RangeOutOfBounds] if the range extends beyond the MMB.
+    /// Returns [Error::MissingNode] if a required node has been pruned.
+    pub fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = D>,
+        range: Range<Location>,
+    ) -> Result<crate::mmb::proof::Proof<D>, Error> {
+        crate::mmb::proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
+    }
+
     /// Convert this Clean MMB into a Dirty MMB without making any changes to it.
     pub fn into_dirty(self) -> DirtyMmb<D> {
         self.into()
@@ -446,7 +452,7 @@ impl<D: Digest> DirtyMmb<D> {
     #[cfg(any(feature = "std", test))]
     #[allow(dead_code)]
     pub(crate) fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
-        let pos = Position::try_from(loc).map_err(|_| Error::InvalidPosition(Position::new(0)))?;
+        let pos = Position::try_from(loc)?;
         if pos >= self.size() {
             return Err(Error::InvalidPosition(pos));
         }
@@ -801,7 +807,6 @@ mod tests {
             );
             assert_eq!(mmb.size(), 0);
             assert_eq!(mmb.leaves(), 0u64);
-            assert_eq!(mmb.last_leaf_pos(), None);
             assert!(mmb.bounds().is_empty());
             assert_eq!(mmb.get_node(Position::new(0)), None);
             assert_eq!(*mmb.root(), Mmb::empty_mmb_root(hasher.inner()));
@@ -809,10 +814,7 @@ mod tests {
             assert!(matches!(mmb.pop(), Err(Empty)));
             let mmb = mmb.merkleize(&mut hasher, None);
 
-            assert_eq!(
-                *mmb.root(),
-                hasher.root(Location::new(0), [].iter())
-            );
+            assert_eq!(*mmb.root(), hasher.root(Location::new(0), [].iter()));
         });
     }
 
@@ -1549,21 +1551,15 @@ mod tests {
         });
     }
 
-    /// Test the leaf count and last leaf position calculations.
+    /// Test the leaf count calculation.
     #[test]
-    fn test_leaves_and_last_leaf_pos() {
+    fn test_leaves() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmb = DirtyMmb::new();
             for i in 0u64..100 {
                 assert_eq!(*mmb.leaves(), i);
-                if i > 0 {
-                    let last = mmb.last_leaf_pos().unwrap();
-                    // The last leaf should be convertible to a location
-                    let loc = Location::try_from(last).unwrap();
-                    assert_eq!(*loc, i - 1);
-                }
                 hasher_update_and_add(&mut hasher, &mut mmb, i);
             }
         });

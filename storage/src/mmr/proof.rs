@@ -4,6 +4,7 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
+pub use crate::merkle::proof::{ReconstructionError, MAX_PROOF_DIGESTS_PER_ELEMENT};
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::nodes_to_pin;
 use crate::mmr::{
@@ -20,8 +21,6 @@ use commonware_cryptography::Digest;
 use core::{cmp::Reverse, ops::Range};
 #[cfg(feature = "std")]
 use tracing::debug;
-
-pub use crate::merkle::proof::{ReconstructionError, MAX_PROOF_DIGESTS_PER_ELEMENT};
 
 /// MMR inclusion proof. Type alias for `merkle::Proof<Mmr, D>`.
 pub type Proof<D> = crate::merkle::Proof<super::Mmr, D>;
@@ -581,9 +580,8 @@ mod tests {
     use super::*;
     use crate::mmr::{
         hasher::Standard,
-        LocationRangeExt as _,
         mem::{CleanMmr, DirtyMmr},
-        MAX_LOCATION,
+        LocationRangeExt as _, MAX_LOCATION,
     };
     use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

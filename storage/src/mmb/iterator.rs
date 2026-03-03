@@ -12,8 +12,7 @@ pub(crate) const fn leaves_for_size(size: u64) -> Option<u64> {
         return Some(0);
     }
 
-    // Max valid MMB size is MAX_POSITION + 1 (= 2^63 - 2).
-    if size > MAX_POSITION.as_u64() + 1 {
+    if size > MAX_POSITION.as_u64() {
         return None;
     }
 
@@ -92,20 +91,6 @@ impl PeakIterator {
         self.n
     }
 
-    /// Return the position of the last leaf in an MMB of the given size.
-    ///
-    /// The last leaf is always the N-th leaf (0-indexed as N-1), whose physical index is
-    /// `2*(N-1) - ilog2(N)`.
-    pub fn last_leaf_pos(size: Position) -> Position {
-        if size == 0 {
-            return Position::new(0);
-        }
-
-        let n = leaves_for_size(*size).expect("size is not a valid MMB size");
-        let last = n - 1;
-        Position::new(2 * last - (last + 1).ilog2() as u64)
-    }
-
     /// Returns the largest valid MMB size that is no greater than the given size.
     ///
     /// # Panics
@@ -171,80 +156,6 @@ impl Iterator for PeakIterator {
         };
 
         Some((Position::new(physical_index), height as u32))
-    }
-}
-
-/// A PathIterator yields `(parent_pos, sibling_pos, sibling_is_left)` for each node along the
-/// path from a peak to a target leaf in an MMB perfect binary tree, not including the peak
-/// itself.
-///
-/// This is the MMB analog of [`crate::mmr::iterator::PathIterator`]. It uses the birth-step
-/// representation internally (via [`child_steps`] and [`step_to_pos`]) to descend from peak to
-/// leaf, matching the pattern used by `mark_dirty` in the in-memory MMB.
-///
-/// # Construction
-///
-/// Use [`PathIterator::new`] with the target leaf's location, the peak's birth step and height,
-/// and the leftmost leaf index covered by the peak (obtainable from [`PeakIterator`]).
-#[allow(dead_code)]
-pub(crate) struct PathIterator {
-    target_loc: u64,
-    step: u64,
-    height: u32,
-    leaf_start: u64,
-}
-
-impl PathIterator {
-    /// Create a new `PathIterator` that descends from a peak to the leaf at `target_loc`.
-    ///
-    /// - `target_loc`: the 0-based leaf index of the target leaf.
-    /// - `peak_step`: the birth step of the peak node.
-    /// - `height`: the height of the peak (0 for a bare leaf).
-    /// - `leaf_start`: the leftmost leaf index covered by this peak.
-    #[allow(dead_code)]
-    pub(crate) const fn new(target_loc: u64, peak_step: u64, height: u32, leaf_start: u64) -> Self {
-        Self {
-            target_loc,
-            step: peak_step,
-            height,
-            leaf_start,
-        }
-    }
-}
-
-impl Iterator for PathIterator {
-    /// `(parent_pos, sibling_pos, sibling_is_left)`.
-    ///
-    /// `sibling_is_left` is true when the sibling is the left child (i.e. the path descended
-    /// right). This is needed for range proofs to filter left-path vs right-path siblings, since
-    /// MMB positions are non-monotonic and the MMR's `parent == sibling + 1` trick does not apply.
-    type Item = (Position, Position, bool);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.height == 0 {
-            return None;
-        }
-
-        let parent_pos = step_to_pos(self.step, false);
-        let (left_step, right_step) = child_steps(self.step, self.height);
-        self.height -= 1;
-        let is_child_leaf = self.height == 0;
-
-        let leaves_in_half = 1u64 << self.height;
-        let mid = self.leaf_start + leaves_in_half;
-
-        if self.target_loc < mid {
-            // Target is in the left subtree; sibling is the right child.
-            let sibling_pos = step_to_pos(right_step, is_child_leaf);
-            self.step = left_step;
-            Some((parent_pos, sibling_pos, false))
-        } else {
-            // Target is in the right subtree; sibling is the left child.
-            let sibling_pos = step_to_pos(left_step, is_child_leaf);
-            self.step = right_step;
-            self.leaf_start = mid;
-            Some((parent_pos, sibling_pos, true))
-        }
     }
 }
 
@@ -319,30 +230,10 @@ pub(crate) fn children(pos: Position, height: u32) -> (Position, Position) {
     // Safely unwrap the birth step, or panic with a clear error if the caller passed a leaf.
     let s = parent_birth_step(pos).expect("pos is not a valid parent position");
 
-    // Delay from the child's creation step to the parent's creation step.
-    let (right_step, left_step) = if height == 1 {
-        // h=1 parent (children are h=0 leaves): right delay = 0, left delay = 1
-        (s, s - 1)
-    } else {
-        // h>1 parent (children are parents): right delay = 2^(h-2), left delay = 3*2^(h-2)
-        let base = 1u64 << (height - 2);
-        (s - base, s - 3 * base)
-    };
-
-    // Convert child step to physical position. Height-0 children use the leaf formula;
-    // higher children use the parent formula.
-    let child_pos = |step: u64, is_leaf: bool| -> Position {
-        let log_val = (step + 1).ilog2() as u64;
-        if is_leaf {
-            Position::new(2 * step - log_val)
-        } else {
-            Position::new(2 * step + 1 - log_val)
-        }
-    };
-
+    let (left_step, right_step) = child_steps(s, height);
     let is_leaf = height == 1;
-    let left = child_pos(left_step, is_leaf);
-    let right = child_pos(right_step, is_leaf);
+    let left = step_to_pos(left_step, is_leaf);
+    let right = step_to_pos(right_step, is_leaf);
 
     (left, right)
 }
@@ -393,7 +284,8 @@ pub(crate) fn nodes_to_pin(mmb_size: Position, prune_pos: Position) -> alloc::ve
         if peak_pos < prune_pos {
             pinned.push(peak_pos);
         } else if height > 0 {
-            // If the oldest leaf in this peak is still retained, the entire peak is retained.
+            // If the oldest leaf is pruned, the peak spans the prune boundary,
+            // so we must traverse its children.
             if leaf_pos(leaf_start) < prune_pos {
                 collect_pruned_children(peak_pos, height, leaf_start, prune_pos, &mut pinned);
             }
@@ -457,6 +349,37 @@ mod tests {
             let size = size_for_leaves(n);
             assert_eq!(leaves_for_size(size), Some(n), "N={n}");
         }
+    }
+
+    #[test]
+    fn test_max_position_and_max_location_consistent() {
+        use crate::mmb::{MAX_LOCATION, MAX_POSITION};
+
+        // MAX_POSITION must be a valid MMB size whose leaf count is MAX_LOCATION.
+        let max_pos = MAX_POSITION.as_u64();
+        let max_loc = MAX_LOCATION.as_u64();
+        assert_eq!(
+            leaves_for_size(max_pos),
+            Some(max_loc),
+            "MAX_POSITION should correspond to MAX_LOCATION leaves"
+        );
+
+        // The size formula should agree.
+        assert_eq!(
+            size_for_leaves(max_loc),
+            max_pos,
+            "size_for_leaves(MAX_LOCATION) should equal MAX_POSITION"
+        );
+
+        // One more leaf should exceed MAX_POSITION.
+        let over_size = size_for_leaves(max_loc + 1);
+        assert!(
+            over_size > max_pos,
+            "one more leaf should exceed MAX_POSITION"
+        );
+
+        // leaves_for_size must reject sizes above MAX_POSITION.
+        assert_eq!(leaves_for_size(max_pos + 1), None);
     }
 
     /// Slow reference implementation for `nodes_to_pin` that recurses into every retained branch.
@@ -565,75 +488,6 @@ mod tests {
                 let computed_pos = step_to_pos(step, height == 0);
                 assert_eq!(computed_pos, pos, "n={n}, height={height}");
                 end_leaf_cursor -= leaves_in_peak;
-            }
-        }
-    }
-
-    #[test]
-    fn test_path_iterator_reaches_target_leaf() {
-        // For every leaf in every MMB up to 256 leaves, verify that the PathIterator
-        // yields siblings whose positions match the children() function, and that the
-        // final descent reaches the target leaf.
-        for n in 1u64..=256 {
-            let size = Position::new(size_for_leaves(n));
-            let mut end_leaf_cursor = n;
-
-            for (peak_pos, height) in PeakIterator::new(size) {
-                let leaves_in_peak = 1u64 << height;
-                let start_leaf = end_leaf_cursor - leaves_in_peak;
-                let last_leaf = end_leaf_cursor - 1;
-                let step = peak_birth_step(last_leaf, height);
-
-                for target_loc in start_leaf..end_leaf_cursor {
-                    let items: alloc::vec::Vec<_> =
-                        PathIterator::new(target_loc, step, height, start_leaf).collect();
-
-                    // Should yield exactly `height` items.
-                    assert_eq!(
-                        items.len(),
-                        height as usize,
-                        "n={n}, peak={peak_pos}, target_loc={target_loc}"
-                    );
-
-                    // Verify each (parent_pos, sibling_pos, sibling_is_left).
-                    for &(parent_pos, sibling_pos, sibling_is_left) in &items {
-                        let parent_h = parent_birth_step(parent_pos)
-                            .expect("parent must be a valid parent");
-                        let _ = parent_h; // just checking it doesn't panic
-
-                        // Recover height from the path depth.
-                        let depth =
-                            items.iter().position(|&(p, _, _)| p == parent_pos).unwrap();
-                        let h = height - depth as u32;
-                        let (left, right) = children(parent_pos, h);
-                        assert!(
-                            sibling_pos == left || sibling_pos == right,
-                            "sibling {sibling_pos} not a child of {parent_pos} at h={h}"
-                        );
-                        // Verify sibling_is_left flag.
-                        assert_eq!(
-                            sibling_is_left,
-                            sibling_pos == left,
-                            "sibling_is_left wrong for parent={parent_pos}"
-                        );
-                    }
-
-                    // The last parent should have the target leaf as a child.
-                    if height > 0 {
-                        let (last_parent, last_sibling, _) = items[items.len() - 1];
-                        let (left, right) = children(last_parent, 1);
-                        let target_pos = leaf_pos(target_loc);
-                        assert!(
-                            target_pos == left || target_pos == right,
-                            "target {target_pos} not a child of last parent {last_parent}"
-                        );
-                        // Sibling should be the other child.
-                        let expected_sibling = if target_pos == left { right } else { left };
-                        assert_eq!(last_sibling, expected_sibling);
-                    }
-                }
-
-                end_leaf_cursor = start_leaf;
             }
         }
     }

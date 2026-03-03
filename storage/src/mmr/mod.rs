@@ -83,13 +83,11 @@ cfg_if::cfg_if! {
     }
 }
 
+// --- Merkle family marker and type aliases ---
+use crate::merkle::{self, MerkleFamily};
 pub use hasher::Standard as StandardHasher;
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
-
-// --- Merkle family marker and type aliases ---
-
-use crate::merkle::{self, MerkleFamily};
 
 /// Marker type for the MMR family.
 #[derive(Copy, Clone, Debug)]

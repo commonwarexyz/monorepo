@@ -9,11 +9,10 @@ pub mod location;
 pub mod position;
 pub mod proof;
 
+use core::fmt;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 pub use proof::Proof;
-
-use core::fmt;
 
 /// Marker trait for Merkle-family data structures.
 ///
