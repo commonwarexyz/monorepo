@@ -6,7 +6,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::Cached;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{collections::HashSet, marker::PhantomData};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 // Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
@@ -378,7 +378,6 @@ fn decode<H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = chunks[0].shard.len();
-    let mut seen = HashSet::new();
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -388,12 +387,13 @@ fn decode<H: Hasher, S: Strategy>(
         if index >= total {
             return Err(Error::InvalidIndex(index));
         }
-        if !seen.insert(index) {
+        let digest_slot = &mut shard_digests[index as usize];
+        if digest_slot.is_some() {
             return Err(Error::DuplicateIndex(index));
         }
 
         // Add to provided shards and retain the checked digest for this index.
-        shard_digests[index as usize] = Some(chunk.digest);
+        *digest_slot = Some(chunk.digest);
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
