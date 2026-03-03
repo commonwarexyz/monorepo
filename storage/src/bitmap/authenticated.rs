@@ -585,37 +585,26 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                 })
                 .collect();
 
-            if let Some(ref pool) = self.pool {
-                if updates.len() >= MIN_TO_PARALLELIZE {
-                    pool.install(|| {
-                        updates
-                            .par_iter()
-                            .map_init(
-                                || hasher.fork(),
-                                |h, &(loc, chunk)| {
-                                    let pos = Position::try_from(loc).unwrap();
-                                    (loc, h.leaf_digest(pos, chunk.as_ref()))
-                                },
-                            )
-                            .collect()
-                    })
-                } else {
+            match self.pool.as_ref() {
+                Some(pool) if updates.len() >= MIN_TO_PARALLELIZE => pool.install(|| {
                     updates
-                        .iter()
-                        .map(|&(loc, chunk)| {
-                            let pos = Position::try_from(loc).unwrap();
-                            (loc, hasher.leaf_digest(pos, chunk.as_ref()))
-                        })
+                        .par_iter()
+                        .map_init(
+                            || hasher.fork(),
+                            |h, &(loc, chunk)| {
+                                let pos = Position::try_from(loc).unwrap();
+                                (loc, h.leaf_digest(pos, chunk.as_ref()))
+                            },
+                        )
                         .collect()
-                }
-            } else {
-                updates
+                }),
+                _ => updates
                     .iter()
                     .map(|&(loc, chunk)| {
                         let pos = Position::try_from(loc).unwrap();
                         (loc, hasher.leaf_digest(pos, chunk.as_ref()))
                     })
-                    .collect()
+                    .collect(),
             }
         };
         batch.update_leaf_batched(&dirty)?;
