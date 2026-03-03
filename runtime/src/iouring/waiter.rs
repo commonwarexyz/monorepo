@@ -1,7 +1,7 @@
 //! Waiter identity and lifecycle state for io_uring in-flight operations.
 //!
-//! This module owns waiter ids, cancellation identity, and completion state
-//! transitions used by the io_uring event loop.
+//! This module manages waiter IDs and waiter lifecycle transitions.
+//! It is the source of truth for in-flight operation completion state.
 
 use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
 use commonware_utils::channel::oneshot;
