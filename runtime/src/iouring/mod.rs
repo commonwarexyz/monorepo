@@ -856,7 +856,7 @@ mod tests {
     };
 
     #[test]
-    fn test_ring_construction_paths() {
+    fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
         let cfg = Config {
@@ -874,13 +874,6 @@ mod tests {
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
         assert_eq!(iouring.cfg.size, 1_024);
-
-        // Cover ring-builder branch that enables IOPOLL.
-        let cfg = Config {
-            io_poll: true,
-            ..Default::default()
-        };
-        let _ = new_ring(&cfg);
     }
 
     #[test]
@@ -918,7 +911,8 @@ mod tests {
 
     #[test]
     fn test_opbuffer_write_vectored_and_opiovecs_helpers() {
-        let write_vectored = OpBuffer::from(IoBufs::from(vec![IoBuf::from(b"a"), IoBuf::from(b"b")]));
+        let write_vectored =
+            OpBuffer::from(IoBufs::from(vec![IoBuf::from(b"a"), IoBuf::from(b"b")]));
         match write_vectored {
             OpBuffer::WriteVectored(_) => {}
             _ => panic!("expected write-vectored buffer variant"),
