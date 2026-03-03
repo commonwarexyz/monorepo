@@ -16,124 +16,15 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use core::{cmp::Reverse, ops::Range};
 #[cfg(feature = "std")]
 use tracing::debug;
 
-/// The maximum number of digests in a proof per element being proven.
-///
-/// This accounts for the worst case proof size, in an MMR with 62 peaks. The
-/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
-/// and 61 peak digests.
-pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
+pub use crate::merkle::proof::{ReconstructionError, MAX_PROOF_DIGESTS_PER_ELEMENT};
 
-/// Errors that can occur when reconstructing a digest from a proof due to invalid input.
-#[derive(Error, Debug)]
-pub enum ReconstructionError {
-    #[error("missing digests in proof")]
-    MissingDigests,
-    #[error("extra digests in proof")]
-    ExtraDigests,
-    #[error("start location is out of bounds")]
-    InvalidStartLoc,
-    #[error("end location is out of bounds")]
-    InvalidEndLoc,
-    #[error("missing elements")]
-    MissingElements,
-    #[error("invalid size")]
-    InvalidSize,
-}
-
-/// Contains the information necessary for proving the inclusion of an element, or some range of
-/// elements, in the MMR from its root digest.
-///
-/// The `digests` vector contains:
-///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
-///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
-#[derive(Clone, Debug, Eq)]
-pub struct Proof<D: Digest> {
-    /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
-    /// structures may override the meaning of this field. For example, the authenticated
-    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within this field.
-    pub leaves: Location,
-    /// The digests necessary for proving the inclusion of an element, or range of elements, in the
-    /// MMR.
-    pub digests: Vec<D>,
-}
-
-impl<D: Digest> PartialEq for Proof<D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.leaves == other.leaves && self.digests == other.digests
-    }
-}
-
-impl<D: Digest> EncodeSize for Proof<D> {
-    fn encode_size(&self) -> usize {
-        self.leaves.encode_size() + self.digests.encode_size()
-    }
-}
-
-impl<D: Digest> Write for Proof<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of leaves in the MMR
-        self.leaves.write(buf);
-
-        // Write the digests
-        self.digests.write(buf);
-    }
-}
-
-impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of items being proven.
-    ///
-    /// The upper bound on digests is derived as `max_items * MAX_PROOF_DIGESTS_PER_ELEMENT`.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_items: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        // Read the number of nodes in the MMR
-        let leaves = Location::read(buf)?;
-
-        // Read the digests
-        let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-        let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
-
-        Ok(Self { leaves, digests })
-    }
-}
-
-impl<D: Digest> Default for Proof<D> {
-    /// Create an empty proof. The empty proof will verify only against the root digest of an empty
-    /// (`leaves == 0`) MMR.
-    fn default() -> Self {
-        Self {
-            leaves: Location::new(0),
-            digests: vec![],
-        }
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Proof<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            leaves: u.arbitrary()?,
-            digests: u.arbitrary()?,
-        })
-    }
-}
+/// MMR inclusion proof. Type alias for `merkle::Proof<Mmr, D>`.
+pub type Proof<D> = crate::merkle::Proof<super::Mmr, D>;
 
 impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
@@ -694,7 +585,7 @@ mod tests {
         mem::{CleanMmr, DirtyMmr},
         MAX_LOCATION,
     };
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
 
