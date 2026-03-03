@@ -804,7 +804,7 @@ impl<
         }
         self.journal = Some(journal);
 
-        // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        // Log current view after recovery
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.state.current_view();
@@ -813,20 +813,19 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        self.state
-            .trigger_timeout(observed_view, TimeoutReason::Initialization);
 
         // Initialize batcher with leader for current view
-        //
-        // We don't worry about sending any constructed messages here because we expect the view to immediately timeout
-        // and we'll send our nullify vote shortly.
         let leader = self
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        batcher
+        if let Some(reason) = batcher
             .update(observed_view, leader, self.state.last_finalized())
-            .await;
+            .await
+        {
+            debug!(%observed_view, %leader, ?reason, "nullifying round");
+            self.state.trigger_timeout(observed_view, reason);
+        }
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
