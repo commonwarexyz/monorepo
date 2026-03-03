@@ -53,5 +53,4 @@ module twins {
   val finalized_blocks_have_unique_parent = i::finalized_blocks_have_unique_parent
   val finalized_certificates_are_committed = i::finalized_certificates_are_committed
   val committed_chain_is_parent_linked = i::committed_chain_is_parent_linked
-
 }

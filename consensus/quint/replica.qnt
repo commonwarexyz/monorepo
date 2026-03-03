@@ -1099,18 +1099,22 @@ module replica {
 
         // Adversary may inject arbitrary well-typed vote messages.
         all {
-            nondet sender = BYZANTINE.oneOf()
-            nondet view = VIEWS.oneOf()
-            nondet block = AllBlocks.oneOf()
-            nondet k = oneOf(Set(NotarizeKind, NullifyKind, FinalizeKind))
-            val vote = if (k == NotarizeKind) {
-                notarize(view, sender, block)
-            } else if (k == NullifyKind) {
-                nullify(view, sender)
-            } else {
-                finalize(view, sender, block)
-            }
-            sent_vote' = sent_vote.union(Set(vote)),
+              nondet sender = BYZANTINE.oneOf()
+              nondet view = VIEWS.oneOf()
+              nondet block = AllBlocks.oneOf()
+              nondet kinds = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
+
+              val votes = kinds.map(k =>
+                  if (k == NotarizeKind) {
+                      notarize(view, sender, block)
+                  } else if (k == NullifyKind) {
+                      nullify(view, sender)
+                  } else {
+                      finalize(view, sender, block)
+                  }
+              )
+
+              sent_vote' = sent_vote.union(votes)
         },
 
         // Adversary may inject arbitrary certificates.
