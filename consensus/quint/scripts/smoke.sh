@@ -89,6 +89,14 @@ case "${1:-}" in
     "all"|"--all")
         run_split
         ;;
+    "help"|"--help"|"-h")
+        echo "Usage: $0 [option]"
+        echo ""
+        echo "Options:"
+        echo "  (none)       Run in 4 separate tmux sessions"
+        echo "  all, --all   Run in a single tmux session with 4 panes"
+        echo "  help, -h     Show this help message"
+        ;;
     *)
         run_separate
         ;;
