@@ -4851,30 +4851,24 @@ mod tests {
 
             loop {
                 select! {
-                    msg = resolver_receiver.recv() => match msg {
-                        Some(MailboxMessage::Certified { view, success }) if view == target_view => {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certified { view, success } if view == target_view => {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
-                        Some(MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_)) => {}
-                        None => panic!(
-                            "resolver channel closed before certification for restarted view {target_view}"
-                        ),
+                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        match msg {
-                            Some(batcher::Message::Constructed(Vote::Nullify(nullify)))
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
                                 if nullify.view() == target_view =>
                             {
                                 panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
-                            Some(batcher::Message::Update { response, .. }) => {
+                            batcher::Message::Update { response, .. } => {
                                 response.send(None).unwrap();
                             }
-                            Some(_) => {}
-                            None => panic!(
-                                "batcher channel closed before certification for restarted view {target_view}"
-                            ),
+                            _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
