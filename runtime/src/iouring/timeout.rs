@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
 ///
-/// This is derived from `start` and `tick_nanos` (see [`TimeoutWheel::tick_at`]).
-/// It is not wall-clock time and should be treated as an opaque counter.
+/// This is derived from `start` and `tick_nanos` inside [`TimeoutWheel::advance`]
+/// and [`TimeoutWheel::target_tick`]. It is not wall-clock time and should be
+/// treated as an opaque counter.
 pub type Tick = u64;
 
 /// Entry yielded when a wheel bucket expires.
