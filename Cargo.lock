@@ -1235,6 +1235,7 @@ name = "commonware-consensus-fuzz"
 version = "2026.2.0"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -1242,6 +1243,7 @@ dependencies = [
  "commonware-math",
  "commonware-p2p",
  "commonware-parallel",
+ "commonware-resolver",
  "commonware-runtime",
  "commonware-utils",
  "futures",
