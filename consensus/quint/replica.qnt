@@ -1102,7 +1102,10 @@ module replica {
               nondet sender = BYZANTINE.oneOf()
               nondet view = VIEWS.oneOf()
               nondet block = AllBlocks.oneOf()
-              nondet kinds = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
+
+              nondet base = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
+              nondet kind = Set(NotarizeKind, NullifyKind, FinalizeKind).oneOf()
+              val kinds = base.union(Set(kind))
 
               val votes = kinds.map(k =>
                   if (k == NotarizeKind) {
