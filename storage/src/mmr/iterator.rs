@@ -43,24 +43,6 @@ impl PeakIterator {
         }
     }
 
-    /// Return the position of the last leaf in an MMR of the given size.
-    ///
-    /// This is an O(log2(n)) operation.
-    ///
-    /// # Panics
-    ///
-    /// Panics if size is too large (specifically, the topmost bit should be 0).
-    pub fn last_leaf_pos(size: Position) -> Position {
-        if size == 0 {
-            return Position::new(0);
-        }
-
-        let last_peak = Self::new(size)
-            .last()
-            .expect("PeakIterator has at least one peak when size > 0");
-        last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
-    }
-
     /// Returns the largest valid MMR size that is no greater than the given size.
     ///
     /// This is an O(log2(n)) operation using binary search on the number of leaves.
@@ -270,10 +252,7 @@ mod tests {
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
             let leaf_loc_got = Location::try_from(leaf_pos).unwrap();
-            assert_eq!(
-                leaf_loc_got,
-                Location::new_unchecked(leaf_loc_expected as u64)
-            );
+            assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = Position::try_from(leaf_loc_got).unwrap();
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..*leaf_pos {

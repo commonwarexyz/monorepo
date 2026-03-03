@@ -125,7 +125,7 @@ impl<
     /// retained operations respectively.
     pub async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.journal.reader().await.bounds();
-        Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
+        Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
@@ -305,12 +305,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.reader().await;
-            let start_loc = Location::new_unchecked(reader.bounds().start);
+            let start_loc = Location::new(reader.bounds().start);
 
             // Build snapshot from the log.
             build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-            Location::new_unchecked(
+            Location::new(
                 reader
                     .bounds()
                     .end
@@ -567,7 +567,7 @@ pub(super) mod test {
             let db = open_db(context.with_label("first")).await;
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, 1);
-            assert_eq!(bounds.start, Location::new_unchecked(0));
+            assert_eq!(bounds.start, Location::new(0));
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -703,11 +703,11 @@ pub(super) mod test {
             // end.
             let max_ops = NZU64!(5);
             for i in 0..*db.bounds().await.end {
-                let (proof, log) = db.proof(Location::new_unchecked(i), max_ops).await.unwrap();
+                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
-                    Location::new_unchecked(i),
+                    Location::new(i),
                     &log,
                     &root
                 ));
@@ -836,7 +836,7 @@ pub(super) mod test {
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Prune the db to the first half of the operations.
-            db.prune(Location::new_unchecked((ELEMENTS+2) / 2))
+            db.prune(Location::new((ELEMENTS+2) / 2))
                 .await
                 .unwrap();
             let bounds = db.bounds().await;
@@ -845,7 +845,7 @@ pub(super) mod test {
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
             let oldest_retained_loc = bounds.start;
-            assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
+            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 1;
@@ -866,16 +866,16 @@ pub(super) mod test {
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, ELEMENTS + 2);
             let oldest_retained_loc = bounds.start;
-            assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
+            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
-            let loc = Location::new_unchecked(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
+            let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
             db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
             let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(
                 oldest_retained_loc,
-                Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
+                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
             );
 
             // Confirm boundary persists across restart.
@@ -885,7 +885,7 @@ pub(super) mod test {
             let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(
                 oldest_retained_loc,
-                Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
+                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
             );
 
             // Try to fetch a pruned key.
@@ -901,7 +901,7 @@ pub(super) mod test {
             let pruned_pos = ELEMENTS / 2;
             let proof_result = db
                 .proof(
-                    Location::new_unchecked(pruned_pos),
+                    Location::new(pruned_pos),
                     NZU64!(pruned_pos + 100),
                 )
                 .await;
@@ -918,10 +918,10 @@ pub(super) mod test {
             let mut db = open_db(context.with_label("test")).await;
 
             // Test pruning empty database (no commits)
-            let result = db.prune(Location::new_unchecked(1)).await;
+            let result = db.prune(Location::new(1)).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
-                    if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
+                    if prune_loc == Location::new(1) && commit_loc == Location::new(0))
             );
 
             // Add key-value pairs and commit
@@ -946,7 +946,7 @@ pub(super) mod test {
             // Test valid prune (at last commit) - need Merkleized state for prune
             let (durable_db, _) = db.commit(None).await.unwrap();
             let mut db = durable_db.into_merkleized();
-            assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
+            assert!(db.prune(Location::new(3)).await.is_ok());
 
             // Test pruning beyond last commit
             let new_last_commit = db.last_commit_loc;

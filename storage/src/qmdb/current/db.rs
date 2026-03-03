@@ -327,7 +327,7 @@ where
         let pruned_ops = (self.status.pruned_chunks() as u64)
             .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
             .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
-        let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops))?;
+        let ops_mmr_size = Position::try_from(Location::new(pruned_ops))?;
         let grafting_height = grafting::height::<N>();
         for (i, (ops_pos, _)) in PeakIterator::new(ops_mmr_size).enumerate() {
             let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
@@ -467,8 +467,7 @@ where
         // which remain accessible via `get_node` for root computation and metadata persistence.
         let pruned_chunks = status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos =
-                Position::try_from(Location::new_unchecked(pruned_chunks))?;
+            let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
             if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
                 grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
             }
@@ -914,9 +913,8 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 
     // Build a DirtyMmr: either from pruned components or empty.
     let mut dirty = if pruned_chunks > 0 {
-        let grafted_pruned_to_pos =
-            Position::try_from(Location::new_unchecked(pruned_chunks as u64))
-                .expect("pruned_chunks overflow");
+        let grafted_pruned_to_pos = Position::try_from(Location::new(pruned_chunks as u64))
+            .expect("pruned_chunks overflow");
         mmr::mem::DirtyMmr::from_components(
             Vec::new(),
             grafted_pruned_to_pos,
@@ -976,7 +974,7 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
     let pinned_nodes = if pruned_chunks > 0 {
-        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
+        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
         let mut pinned = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);

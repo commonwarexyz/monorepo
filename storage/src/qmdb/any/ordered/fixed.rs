@@ -673,11 +673,10 @@ pub(crate) mod test {
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(5), max_ops)
+                .historical_proof(original_op_count, Location::new(5), max_ops)
                 .await
                 .unwrap();
-            let (regular_proof, regular_ops) =
-                db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
+            let (regular_proof, regular_ops) = db.proof(Location::new(5), max_ops).await.unwrap();
 
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -685,7 +684,7 @@ pub(crate) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                Location::new_unchecked(5),
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -700,7 +699,7 @@ pub(crate) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new_unchecked(5), NZU64!(10))
+                .historical_proof(original_op_count, Location::new(5), NZU64!(10))
                 .await
                 .unwrap();
             assert_eq!(historical_proof.leaves, original_op_count);
@@ -710,7 +709,7 @@ pub(crate) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                Location::new_unchecked(5),
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -737,22 +736,19 @@ pub(crate) mod test {
             let full_size = db.bounds().await.end;
 
             // Verify a single-op proof at the full commit size.
-            let (proof, proof_ops) = db
-                .proof(Location::new_unchecked(1), NZU64!(1))
-                .await
-                .unwrap();
+            let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new_unchecked(1),
+                Location::new(1),
                 &proof_ops,
                 &root
             ));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
-                .historical_proof(full_size, Location::new_unchecked(1), NZU64!(1))
+                .historical_proof(full_size, Location::new(1), NZU64!(1))
                 .await
                 .unwrap();
             assert_eq!(hp.digests, proof.digests);
@@ -760,25 +756,17 @@ pub(crate) mod test {
 
             // Test requesting more operations than available in historical position.
             let (_proof, limited_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(10),
-                    Location::new_unchecked(5),
-                    NZU64!(20),
-                )
+                .historical_proof(Location::new(10), Location::new(5), NZU64!(20))
                 .await
                 .unwrap();
             assert_eq!(limited_ops.len(), 5); // limited by historical size
 
             // Test proof at minimum historical position.
             let (min_proof, min_ops) = db
-                .historical_proof(
-                    Location::new_unchecked(4),
-                    Location::new_unchecked(1),
-                    NZU64!(3),
-                )
+                .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
                 .await
                 .unwrap();
-            assert_eq!(min_proof.leaves, Location::new_unchecked(4));
+            assert_eq!(min_proof.leaves, Location::new(4));
             assert_eq!(min_ops.len(), 3);
 
             db.destroy().await.unwrap();
@@ -798,7 +786,7 @@ pub(crate) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let root = db.root();
 
-            let start_loc = Location::new_unchecked(20);
+            let start_loc = Location::new(20);
             let max_ops = NZU64!(10);
             let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
 

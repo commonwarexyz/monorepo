@@ -65,7 +65,7 @@ where
 {
     /// Returns the Location of the next item appended to the journal.
     pub async fn size(&self) -> Location {
-        Location::new_unchecked(self.journal.size().await)
+        Location::new(self.journal.size().await)
     }
 }
 
@@ -126,7 +126,7 @@ where
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
             mmr.pop(*pop_count as usize).await?;
-            mmr_size = Location::new_unchecked(journal_size);
+            mmr_size = Location::new(journal_size);
         }
 
         // If the MMR is behind, replay journal items to catch up.
@@ -165,7 +165,7 @@ where
     pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
-            return Ok(Location::new_unchecked(self.reader().await.bounds().start));
+            return Ok(Location::new(self.reader().await.bounds().start));
         }
 
         // Sync the MMR before pruning the journal, otherwise the MMR's last element could end up
@@ -175,7 +175,7 @@ where
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
-            return Ok(Location::new_unchecked(self.reader().await.bounds().start));
+            return Ok(Location::new(self.reader().await.bounds().start));
         }
 
         let bounds = self.reader().await.bounds();
@@ -186,7 +186,7 @@ where
             .prune_to_pos(Position::try_from(Location::from(bounds.start))?)
             .await?;
 
-        Ok(Location::new_unchecked(bounds.start))
+        Ok(Location::new(bounds.start))
     }
 }
 
@@ -241,7 +241,7 @@ where
         let bounds = reader.bounds();
 
         if *historical_leaves > bounds.end {
-            return Err(MmrError::RangeOutOfBounds(Location::new_unchecked(bounds.end)).into());
+            return Err(MmrError::RangeOutOfBounds(Location::new(bounds.end)).into());
         }
         if start_loc >= historical_leaves {
             return Err(MmrError::RangeOutOfBounds(start_loc).into());
@@ -344,7 +344,7 @@ where
             .add(&mut self.hasher, &encoded_item)
             .map_err(Error::Mmr)?;
 
-        Ok(Location::new_unchecked(loc))
+        Ok(Location::new(loc))
     }
 
     /// Create a new dirty journal from aligned components.
@@ -641,7 +641,7 @@ mod tests {
         for i in 0..count {
             let op = create_operation(i as u8);
             let loc = journal.append(op).await.unwrap();
-            assert_eq!(loc, Location::new_unchecked(i as u64));
+            assert_eq!(loc, Location::new(i as u64));
         }
 
         let journal = journal.merkleize();
@@ -715,7 +715,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
+            assert_eq!(mmr.leaves(), Location::new(0));
             assert_eq!(journal.size().await, 0);
         });
     }
@@ -738,7 +738,7 @@ mod tests {
             let mmr = mmr.merkleize(&mut hasher);
 
             // Add commit operation to journal only (making journal ahead)
-            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new(0));
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -748,7 +748,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been popped to match journal
-            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -767,7 +767,7 @@ mod tests {
             }
 
             // Add commit
-            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new(0));
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -777,7 +777,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been replayed to match journal
-            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -794,7 +794,7 @@ mod tests {
             // Add 20 uncommitted operations
             for i in 0..20 {
                 let loc = journal.append(create_operation(i as u8)).await.unwrap();
-                assert_eq!(loc, Location::new_unchecked(i as u64));
+                assert_eq!(loc, Location::new(i as u64));
             }
             let journal = journal.merkleize();
 
@@ -831,7 +831,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new(0)))
                     .await
                     .unwrap();
                 for i in 4..7 {
@@ -860,12 +860,12 @@ mod tests {
                 // Add multiple commits
                 journal.append(create_operation(0)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new(0)))
                     .await
                     .unwrap(); // pos 1
                 journal.append(create_operation(2)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(1)))
+                    .append(Operation::CommitFloor(None, Location::new(1)))
                     .await
                     .unwrap(); // pos 3
                 journal.append(create_operation(4)).await.unwrap();
@@ -916,7 +916,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new(0)))
                     .await
                     .unwrap(); // pos 10
                 for i in 11..15 {
@@ -956,7 +956,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new(0)))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
@@ -1013,7 +1013,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new(0)))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
@@ -1051,7 +1051,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 let mut journal = journal.merkleize();
-                journal.prune(Location::new_unchecked(100)).await.unwrap();
+                journal.prune(Location::new(100)).await.unwrap();
                 assert_eq!(journal.reader().await.bounds().start, 98);
                 let mut journal = journal.into_dirty();
                 let res = journal.rewind(97).await;
@@ -1080,7 +1080,7 @@ mod tests {
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
                 let loc = journal.append(op.clone()).await.unwrap();
-                assert_eq!(loc, Location::new_unchecked(i as u64));
+                assert_eq!(loc, Location::new(i as u64));
                 assert_eq!(journal.size().await, (i + 1) as u64);
             }
             let journal = journal.merkleize();
@@ -1090,10 +1090,7 @@ mod tests {
             // Verify all operations can be read back correctly
             journal.sync().await.unwrap();
             for (i, expected_op) in expected_ops.iter().enumerate() {
-                let read_op = journal
-                    .read(Location::new_unchecked(i as u64))
-                    .await
-                    .unwrap();
+                let read_op = journal.read(Location::new(i as u64)).await.unwrap();
                 assert_eq!(read_op, *expected_op);
             }
         });
@@ -1107,20 +1104,20 @@ mod tests {
             let journal = create_journal_with_ops(context, "read", 50).await;
 
             // Verify reading first operation
-            let first_op = journal.read(Location::new_unchecked(0)).await.unwrap();
+            let first_op = journal.read(Location::new(0)).await.unwrap();
             assert_eq!(first_op, create_operation(0));
 
             // Verify reading middle operation
-            let middle_op = journal.read(Location::new_unchecked(25)).await.unwrap();
+            let middle_op = journal.read(Location::new(25)).await.unwrap();
             assert_eq!(middle_op, create_operation(25));
 
             // Verify reading last operation
-            let last_op = journal.read(Location::new_unchecked(49)).await.unwrap();
+            let last_op = journal.read(Location::new(49)).await.unwrap();
             assert_eq!(last_op, create_operation(49));
 
             // Verify all operations match expected values
             for i in 0..50 {
-                let op = journal.read(Location::new_unchecked(i)).await.unwrap();
+                let op = journal.read(Location::new(i)).await.unwrap();
                 assert_eq!(op, create_operation(i as u8));
             }
         });
@@ -1137,15 +1134,15 @@ mod tests {
 
             // Add commit and prune
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
-            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
+            let pruned_boundary = journal.prune(Location::new(50)).await.unwrap();
 
             // Try to read an operation before the pruned boundary
-            let read_loc = Location::new_unchecked(0);
+            let read_loc = Location::new(0);
             if read_loc < pruned_boundary {
                 let result = journal.read(read_loc).await;
                 assert!(matches!(
@@ -1164,7 +1161,7 @@ mod tests {
             let journal = create_journal_with_ops(context, "read_oob", 3).await;
 
             // Try to read beyond the end
-            let result = journal.read(Location::new_unchecked(10)).await;
+            let result = journal.read(Location::new(10)).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(crate::journal::Error::ItemOutOfRange(_)))
@@ -1183,7 +1180,7 @@ mod tests {
 
             // Verify all operations can be read back and match expected values
             for i in 0..50 {
-                let op = journal.read(Location::new_unchecked(i)).await.unwrap();
+                let op = journal.read(Location::new(i)).await.unwrap();
                 assert_eq!(op, create_operation(i as u8));
             }
         });
@@ -1202,18 +1199,18 @@ mod tests {
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
                 let loc = journal.append(op.clone()).await.unwrap();
-                assert_eq!(loc, Location::new_unchecked(i as u64),);
+                assert_eq!(loc, Location::new(i as u64),);
             }
 
             // Add commit operation to commit the operations
             let commit_loc = journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .append(Operation::CommitFloor(None, Location::new(0)))
                 .await
                 .unwrap();
             let journal = journal.merkleize();
             assert_eq!(
                 commit_loc,
-                Location::new_unchecked(20),
+                Location::new(20),
                 "commit should be at location 20"
             );
             journal.sync().await.unwrap();
@@ -1225,10 +1222,7 @@ mod tests {
 
             // Verify all operations can be read back
             for (i, expected_op) in expected_ops.iter().enumerate() {
-                let read_op = journal
-                    .read(Location::new_unchecked(i as u64))
-                    .await
-                    .unwrap();
+                let read_op = journal.read(Location::new(i as u64)).await.unwrap();
                 assert_eq!(read_op, *expected_op);
             }
         });
@@ -1241,9 +1235,9 @@ mod tests {
         executor.start(|context| async move {
             let mut journal = create_empty_journal(context, "prune_empty").await;
 
-            let boundary = journal.prune(Location::new_unchecked(0)).await.unwrap();
+            let boundary = journal.prune(Location::new(0)).await.unwrap();
 
-            assert_eq!(boundary, Location::new_unchecked(0));
+            assert_eq!(boundary, Location::new(0));
         });
     }
 
@@ -1258,16 +1252,16 @@ mod tests {
 
             // Add commit at position 50
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
-            let boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
+            let boundary = journal.prune(Location::new(50)).await.unwrap();
 
             // Boundary should be <= requested location (may align to section boundary)
-            assert!(boundary <= Location::new_unchecked(50));
+            assert!(boundary <= Location::new(50));
         });
     }
 
@@ -1281,13 +1275,13 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
-            let requested = Location::new_unchecked(50);
+            let requested = Location::new(50);
             let actual = journal.prune(requested).await.unwrap();
 
             // Actual boundary should match bounds.start
@@ -1310,14 +1304,14 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             let count_before = journal.size().await;
-            journal.prune(Location::new_unchecked(50)).await.unwrap();
+            journal.prune(Location::new(50)).await.unwrap();
             let count_after = journal.size().await;
 
             assert_eq!(count_before, count_after);
@@ -1347,13 +1341,13 @@ mod tests {
                 create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
+            let pruned_boundary = journal.prune(Location::new(50)).await.unwrap();
 
             // Should match the pruned boundary (may be <= 50 due to section alignment)
             let bounds = journal.reader().await.bounds();
@@ -1385,13 +1379,13 @@ mod tests {
                     .await
                     .into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new(50)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
+            let pruned_boundary = journal.prune(Location::new(50)).await.unwrap();
 
             assert_eq!(journal.reader().await.bounds().start, pruned_boundary);
         });
@@ -1407,13 +1401,13 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(None, Location::new(25)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
+            let pruned_boundary = journal.prune(Location::new(25)).await.unwrap();
 
             // Verify MMR and journal remain in sync
             let bounds = journal.reader().await.bounds();
@@ -1421,7 +1415,7 @@ mod tests {
             assert_eq!(pruned_boundary, bounds.start);
 
             // Verify boundary is at or before requested (due to section alignment)
-            assert!(pruned_boundary <= Location::new_unchecked(25));
+            assert!(pruned_boundary <= Location::new(25));
 
             // Verify operation count is unchanged
             assert_eq!(journal.size().await, 51);
@@ -1435,10 +1429,7 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_multi", 50).await;
 
-            let (proof, ops) = journal
-                .proof(Location::new_unchecked(0), NZU64!(50))
-                .await
-                .unwrap();
+            let (proof, ops) = journal.proof(Location::new(0), NZU64!(50)).await.unwrap();
 
             assert_eq!(ops.len(), 50);
             for (i, op) in ops.iter().enumerate() {
@@ -1451,7 +1442,7 @@ mod tests {
             assert!(verify_proof(
                 &proof,
                 &ops,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &root,
                 &mut hasher
             ));
@@ -1467,7 +1458,7 @@ mod tests {
 
             let size = journal.size().await;
             let (proof, ops) = journal
-                .historical_proof(size, Location::new_unchecked(0), NZU64!(20))
+                .historical_proof(size, Location::new(0), NZU64!(20))
                 .await
                 .unwrap();
 
@@ -1483,7 +1474,7 @@ mod tests {
             assert!(verify_proof(
                 &proof,
                 &ops,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &root,
                 &mut hasher
             ));
@@ -1500,7 +1491,7 @@ mod tests {
             let size = journal.size().await;
             // Request proof starting near the end
             let (proof, ops) = journal
-                .historical_proof(size, Location::new_unchecked(40), NZU64!(20))
+                .historical_proof(size, Location::new(40), NZU64!(20))
                 .await
                 .unwrap();
 
@@ -1516,7 +1507,7 @@ mod tests {
             assert!(verify_proof(
                 &proof,
                 &ops,
-                Location::new_unchecked(40),
+                Location::new(40),
                 &root,
                 &mut hasher
             ));
@@ -1532,11 +1523,7 @@ mod tests {
 
             // Request proof with size > actual journal size
             let result = journal
-                .historical_proof(
-                    Location::new_unchecked(10),
-                    Location::new_unchecked(0),
-                    NZU64!(1),
-                )
+                .historical_proof(Location::new(10), Location::new(0), NZU64!(1))
                 .await;
 
             assert!(matches!(
@@ -1587,7 +1574,7 @@ mod tests {
 
             // Generate proof for the historical state
             let (proof, ops) = journal
-                .historical_proof(historical_size, Location::new_unchecked(0), NZU64!(50))
+                .historical_proof(historical_size, Location::new(0), NZU64!(50))
                 .await
                 .unwrap();
 
@@ -1601,7 +1588,7 @@ mod tests {
             assert!(verify_proof(
                 &proof,
                 &ops,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &historical_root,
                 &mut hasher
             ));
@@ -1617,16 +1604,16 @@ mod tests {
 
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(None, Location::new(25)))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
             journal.sync().await.unwrap();
-            let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
+            let pruned_boundary = journal.prune(Location::new(25)).await.unwrap();
 
             // Try to get proof starting at a location before the pruned boundary
             let size = journal.size().await;
-            let start_loc = Location::new_unchecked(0);
+            let start_loc = Location::new(0);
             if start_loc < pruned_boundary {
                 let result = journal.historical_proof(size, start_loc, NZU64!(1)).await;
 

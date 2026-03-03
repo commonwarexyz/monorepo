@@ -45,9 +45,7 @@ fn fuzz(input: FuzzInput) {
 
     let leaves = mmr.leaves();
     if leaves > 0 {
-        if let Some(start_loc) = Location::new(0) {
-            let _ = mmr.range_proof(start_loc..leaves);
-        }
+        let _ = mmr.range_proof(Location::new(0)..leaves);
     }
 }
 

@@ -93,7 +93,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_known_op_count = Location::new(1).unwrap();
+        let mut last_known_op_count = Location::new(1);
 
         for op in data.operations.iter().take(MAX_OPS) {
             match op {
@@ -166,7 +166,7 @@ fn fuzz(data: FuzzInput) {
                         let current_root = clean_db.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
-                        let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
+                        let adjusted_start = Location::new(*start_loc % *actual_op_count);
                         let (proof, log) = clean_db
                             .proof(adjusted_start, *max_ops)
                             .await
@@ -202,7 +202,7 @@ fn fuzz(data: FuzzInput) {
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
                         let current_root = clean_db.root();
-                        let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
+                        let adjusted_start = Location::new(*start_loc % *actual_op_count);
 
                         if let Ok(res) = clean_db
                             .proof(adjusted_start, *max_ops)

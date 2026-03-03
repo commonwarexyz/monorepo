@@ -702,8 +702,8 @@ mod test {
         let db = db.into_mutable();
         let (db, range) = db.commit(Some(metadata)).await.unwrap();
         let mut db = db.into_merkleized().await.unwrap();
-        assert_eq!(range.start, Location::new_unchecked(1));
-        assert_eq!(range.end, Location::new_unchecked(2));
+        assert_eq!(range.start, Location::new(1));
+        assert_eq!(range.end, Location::new(2));
         assert_eq!(db.bounds().await.end, 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
