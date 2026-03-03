@@ -48,4 +48,10 @@ module twins {
   val certificates_are_valid_inv = i::certificates_are_valid_inv
   val notarized_consistency = i::notarized_consistency
   val safe_finalization = i::safe_finalization
+  val parent_refs_well_formed = i::parent_refs_well_formed
+  val finalize_requires_notarization = i::finalize_requires_notarization
+  val finalized_blocks_have_unique_parent = i::finalized_blocks_have_unique_parent
+  val finalized_certificates_are_committed = i::finalized_certificates_are_committed
+  val committed_chain_is_parent_linked = i::committed_chain_is_parent_linked
+
 }

@@ -20,15 +20,19 @@ test:
 	cd tests && quint test tests_n5f1b1.qnt
 
 repl:
-	echo "init\n step\n step\n step" | quint -r main_n6f0.qnt::main
+	echo "init\n step\n step\n step" | quint -r main_n4f1b0.qnt::main
 
+MAX_STEPS ?= 100
+MAX_SAMPLES ?= 1000
 run:
-	quint run --max-steps 20 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_n4f1b0.qnt
-	quint run --max-steps 20 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_n4f1b1.qnt
-	quint run --max-steps 20 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_n5f1b1.qnt
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
+    	--invariant=all_invariants twins_n4f1b1.qnt
 
 clean:
 	./scripts/verify.sh clean
