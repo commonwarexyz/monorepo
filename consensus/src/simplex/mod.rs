@@ -2939,6 +2939,13 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let leader_timeout = if idx_scheme == 0 {
+                    // Force the wrong-namespace byzantine node to timeout quickly so
+                    // honest nodes deterministically observe at least one invalid vote.
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(1)
+                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2950,7 +2957,7 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
+                    leader_timeout,
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
