@@ -176,11 +176,6 @@ impl Waiters {
         self.len
     }
 
-    /// Return total waiter slot capacity.
-    pub const fn capacity(&self) -> usize {
-        self.entries.len()
-    }
-
     /// Return whether there are no in-flight waiters.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
@@ -318,7 +313,7 @@ mod tests {
     #[test]
     fn test_waiters_lifecycle_and_slot_reuse() {
         let mut waiters = Waiters::new(3);
-        assert_eq!(waiters.capacity(), 3);
+        assert_eq!(waiters.entries.len(), 3);
         assert_eq!(waiters.len(), 0);
         assert!(waiters.is_empty());
 
