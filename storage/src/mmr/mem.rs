@@ -75,8 +75,7 @@ impl Dirty {
 
     /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
     pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
-        let mut v: Vec<_> = self.dirty_nodes.iter().copied().collect();
-        self.dirty_nodes.clear();
+        let mut v: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
         v.sort_by_key(|a| a.1);
         v
     }
@@ -632,9 +631,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
-        let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
-        self.state.dirty_nodes.clear();
-        nodes.sort_by_key(|a| a.1);
+        let nodes = self.state.take_sorted_by_height();
 
         for (pos, height) in nodes {
             let left = pos - (1 << height);
@@ -663,10 +660,7 @@ impl<D: Digest> DirtyMmr<D> {
         pool: ThreadPool,
         min_to_parallelize: usize,
     ) {
-        let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
-        self.state.dirty_nodes.clear();
-        // Sort by increasing height.
-        nodes.sort_by_key(|a| a.1);
+        let nodes = self.state.take_sorted_by_height();
 
         let mut same_height = Vec::new();
         let mut current_height = 1;
