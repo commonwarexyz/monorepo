@@ -1828,6 +1828,201 @@ mod tests {
         populate_resolver_on_restart::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// Regression: startup must consume timeout hints returned by initial batcher update.
+    ///
+    /// On restart, we recover into `target_view` and inject `LeaderNullify` from the
+    /// first `batcher.update`. Even with long timeouts, voter must emit `nullify(target_view)`
+    /// immediately rather than waiting for `leader_timeout`.
+    fn startup_update_timeout_hint_nullifies_recovered_view<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"startup_update_timeout_hint_nullify".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let me = participants[0].clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let partition = "voter_startup_update_timeout_hint_nullify".to_string();
+            let epoch = Epoch::new(333);
+            let make_cfg = |page_cache: CacheRef| Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch,
+                mailbox_size: 128,
+                // Long deadlines prove nullify comes from startup timeout hint, not timer expiry.
+                leader_timeout: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache,
+            };
+
+            // First run: persist progress to a later view.
+            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                _ => panic!("expected initial update"),
+            }
+
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            handle.abort();
+
+            // Restart and inject startup timeout hint from first update.
+            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    finalized,
+                    response,
+                    ..
+                } => {
+                    assert_eq!(current, target_view);
+                    assert_eq!(finalized, target_view.previous().unwrap());
+                    response.send(Some(TimeoutReason::LeaderNullify)).unwrap();
+                }
+                _ => panic!("expected startup update after restart"),
+            }
+
+            // Expect immediate nullify from startup timeout hint despite 10s timeouts.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!(
+                            "expected immediate nullify for recovered view {target_view} from startup timeout hint"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_startup_update_timeout_hint_nullifies_recovered_view() {
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(ed25519::fixture);
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
+    }
+
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

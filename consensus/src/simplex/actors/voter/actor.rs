@@ -819,9 +819,13 @@ impl<
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        batcher
+        if let Some(reason) = batcher
             .update(observed_view, leader, self.state.last_finalized())
-            .await;
+            .await
+        {
+            debug!(%observed_view, %leader, ?reason, "nullifying round");
+            self.state.trigger_timeout(observed_view, reason);
+        }
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
