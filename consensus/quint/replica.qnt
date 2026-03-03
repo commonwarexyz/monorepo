@@ -444,7 +444,7 @@ module replica {
                 nondet id = oneOf(CORRECT)
                 nondet new_block = oneOf(VALID_BLOCKS)
                 nondet parent_block = oneOf(AllBlocks.union(Set(GENESIS_BLOCK)))
-                nondet parent_view = VIEWS.oneOf()
+                nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
                 proposer_step(id, new_block, parent_block, parent_view),
             },
             all {
