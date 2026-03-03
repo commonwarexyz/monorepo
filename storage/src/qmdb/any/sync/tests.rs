@@ -10,7 +10,7 @@ use crate::{
     mmr::{Location, Position},
     qmdb::{
         self,
-        any::states::CleanAny,
+        any::states::DbAny,
         operation::Operation as OperationTrait,
         store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{
@@ -48,9 +48,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible
-    for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
-{
+impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }
@@ -75,9 +73,9 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 
 /// Harness for sync tests.
 pub(crate) trait SyncTestHarness: Sized + 'static {
-    /// The database type being tested (Clean state: Merkleized + Durable).
+    /// The database type being tested.
     type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest, Config: Clone>
-        + CleanAny<Key = Digest>
+        + DbAny<Key = Digest>
         + MerkleizedStore<Digest = Digest>
         + Gettable<Key = Digest>;
 
@@ -103,7 +101,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         config: ConfigOf<Self>,
     ) -> impl std::future::Future<Output = Self::Db> + Send;
 
-    /// Apply operations to a database and commit (returns to Clean state)
+    /// Apply operations to a database and commit.
     fn apply_ops(
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
@@ -1330,7 +1328,7 @@ mod harnesses {
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
-        type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
+        type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
             MerkleizedStore::root(db)
@@ -1368,12 +1366,12 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 
@@ -1423,16 +1421,12 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Vec<u8>>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
-                .await
-                .unwrap()
-                .0
-                .into_merkleized()
+            db.commit(None::<Vec<u8>>).await.unwrap();
+            db
         }
     }
 
@@ -1479,12 +1473,12 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>).await.unwrap();
+            db
         }
     }
 
@@ -1532,16 +1526,12 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
-                .await
-                .unwrap()
-                .0
-                .into_merkleized()
+            db.commit(None::<Vec<u8>>).await.unwrap();
+            db
         }
     }
 }

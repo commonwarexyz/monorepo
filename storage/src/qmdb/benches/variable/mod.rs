@@ -6,10 +6,8 @@ use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
         any::{
-            ordered::variable::Db as OVariable,
-            states::{MutableAny, UnmerkleizedDurableAny},
-            unordered::variable::Db as UVariable,
-            VariableConfig as AConfig,
+            ordered::variable::Db as OVariable, states::DbAny,
+            unordered::variable::Db as UVariable, VariableConfig as AConfig,
         },
         current::{
             ordered::variable::Db as OVCurrent, unordered::variable::Db as UVCurrent,
@@ -77,11 +75,11 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) db type aliases for Any databases.
+/// Db type aliases for Any databases.
 type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
-/// Clean (Merkleized, Durable) db type aliases for Current databases.
+/// Db type aliases for Current databases.
 type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
@@ -153,17 +151,9 @@ async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-///
-/// Takes a mutable database and returns it in durable state after final commit.
-async fn gen_random_kv<M>(
-    mut db: M,
-    num_elements: u64,
-    num_operations: u64,
-    commit_frequency: u32,
-) -> M::Durable
+async fn gen_random_kv<M>(db: &mut M, num_elements: u64, num_operations: u64, commit_frequency: u32)
 where
-    M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
+    M: DbAny<Key = Digest> + LogStore<Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -187,13 +177,13 @@ where
         assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             assert!(db.write_batch(batch.into_iter()).await.is_ok());
-            let (durable, _) = db.commit(None).await.unwrap();
-            db = durable.into_mutable();
+            DbAny::commit(db, None).await.unwrap();
             batch = db.start_batch();
         }
     }
 
     assert!(db.write_batch(batch.into_iter()).await.is_ok());
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    DbAny::commit(db, None)
+        .await
+        .expect("commit shouldn't fail");
 }

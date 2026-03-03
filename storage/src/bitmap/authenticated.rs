@@ -16,7 +16,7 @@ use crate::{
         batch::UnmerkleizedBatch,
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
-        mem::{CleanMmr, Config, MIN_TO_PARALLELIZE},
+        mem::{Config, Mmr, MIN_TO_PARALLELIZE},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -126,7 +126,7 @@ pub struct BitMap<
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: CleanMmr<D>,
+    mmr: Mmr<D>,
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
@@ -324,7 +324,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             }
         } as usize;
         if pruned_chunks == 0 {
-            let mmr = CleanMmr::new(hasher);
+            let mmr = Mmr::new(hasher);
             let cached_root = *mmr.root();
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
@@ -351,7 +351,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             pinned_nodes.push(digest);
         }
 
-        let mmr = CleanMmr::init(
+        let mmr = Mmr::init(
             Config {
                 nodes: Vec::new(),
                 pruned_to_pos: mmr_size,

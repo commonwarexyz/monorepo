@@ -11,7 +11,7 @@
 //! # Lifecycle
 //!
 //! ```text
-//! CleanMmr ──borrow──> UnmerkleizedBatch  (accumulate mutations)
+//! Mmr ─────borrow────> UnmerkleizedBatch  (accumulate mutations)
 //!                            │
 //!                       merkleize()
 //!                            │
@@ -26,7 +26,7 @@
 //!                      mmr.apply(cs)
 //!                            │
 //!                            v
-//!                        CleanMmr          (updated in place)
+//!                           Mmr             (updated in place)
 //! ```
 //!
 //! # Type aliases
@@ -39,7 +39,7 @@
 //!
 //! ```ignore
 //! let mut hasher = StandardHasher::<Sha256>::new();
-//! let mut mmr = CleanMmr::new(&mut hasher.inner());
+//! let mut mmr = Mmr::new(&mut hasher);
 //!
 //! // Build a batch of mutations.
 //! let changeset = {
@@ -101,7 +101,7 @@ pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
 pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 
 /// Owned set of changes against a base MMR.
-/// Apply via [`super::mem::CleanMmr::apply`].
+/// Apply via [`super::mem::Mmr::apply`].
 pub struct Changeset<D: Digest> {
     /// Number of nodes retained from the original MMR. Nodes at or above
     /// this position are replaced by `appended`.
@@ -118,7 +118,7 @@ pub struct Changeset<D: Digest> {
 
 impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
     /// The total number of nodes visible through this batch.
-    fn size(&self) -> Position {
+    pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent_retained + self.appended.len() as u64)
     }
 
@@ -576,15 +576,15 @@ mod tests {
     use crate::mmr::{
         conformance::build_test_mmr,
         hasher::{Hasher as _, Standard},
-        mem::CleanMmr,
+        mem::Mmr,
         read::Readable,
     };
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
 
     /// Build a reference MMR with `n` elements for comparison.
-    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> CleanMmr<sha256::Digest> {
-        let mmr = CleanMmr::new(hasher);
+    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<sha256::Digest> {
+        let mmr = Mmr::new(hasher);
         build_test_mmr(hasher, mmr, n)
     }
 
@@ -602,7 +602,7 @@ mod tests {
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Batch: start from empty base, add all via batch
-                let base = CleanMmr::new(&mut hasher);
+                let base = Mmr::new(&mut hasher);
                 let mut batch = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
                     hasher.inner().update(&i.to_be_bytes());
@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     /// update_leaf (element-based) hashes the element before storing. Verify root matches
-    /// building the same update via CleanMmr::update_leaf.
+    /// building the same update via Mmr::update_leaf.
     #[test]
     fn test_update_leaf_element() {
         let executor = deterministic::Runner::default();
@@ -1540,7 +1540,7 @@ mod tests {
             let merkleized = batch.merkleize(&mut hasher);
             assert_ne!(merkleized.root(), base_root);
 
-            // Reference: same update on CleanMmr.
+            // Reference: same update on Mmr.
             let mut reference = base.clone();
             reference
                 .update_leaf(&mut hasher, Location::new(5), element)
@@ -1582,7 +1582,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let base = CleanMmr::new(&mut hasher);
+            let base = Mmr::new(&mut hasher);
 
             let mut batch = UnmerkleizedBatch::new(&base);
             let result = batch.pop();

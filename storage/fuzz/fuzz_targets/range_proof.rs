@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_storage::mmr::{
-    mem::{CleanMmr, Config},
+    mem::{Config, Mmr},
     Location, Position, StandardHasher,
 };
 use libfuzzer_sys::fuzz_target;
@@ -35,7 +35,7 @@ fn fuzz(input: FuzzInput) {
     };
 
     let mut hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = CleanMmr::init(config, &mut hasher) else {
+    let Ok(mmr) = Mmr::init(config, &mut hasher) else {
         return;
     };
 

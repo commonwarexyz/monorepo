@@ -11,7 +11,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            states::{MutableAny, UnmerkleizedDurableAny},
+            states::DbAny,
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
@@ -94,7 +94,7 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) Db type aliases for Any databases.
+/// Db type aliases for Any databases.
 type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
 type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
 type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
@@ -178,25 +178,25 @@ fn variable_current_cfg(
     }
 }
 
-/// Get an unordered fixed Any QMDB instance in clean state.
+/// Get an unordered fixed Any QMDB instance instance.
 async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let any_cfg = any_cfg(&ctx);
     UFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Get an ordered fixed Any QMDB instance in clean state.
+/// Get an ordered fixed Any QMDB instance instance.
 async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let any_cfg = any_cfg(&ctx);
     OFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Get an unordered variable Any QMDB instance in clean state.
+/// Get an unordered variable Any QMDB instance instance.
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let variable_any_cfg = variable_any_cfg(&ctx);
     UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
-/// Get an ordered variable Any QMDB instance in clean state.
+/// Get an ordered variable Any QMDB instance instance.
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
     let variable_any_cfg = variable_any_cfg(&ctx);
     OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
@@ -239,17 +239,13 @@ async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations (if Some), or at the end (if None).
-///
-/// Takes a mutable database and returns it in durable state after final commit.
 async fn gen_random_kv<M>(
-    mut db: M,
+    db: &mut M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> M::Durable
-where
-    M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
+) where
+    M: DbAny<Key = Digest> + LogStore<Value = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -282,8 +278,9 @@ where
                 db.write_batch(iter)
                     .await
                     .expect("write_batch shouldn't fail");
-                let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-                db = durable.into_mutable();
+                DbAny::commit(db, None)
+                    .await
+                    .expect("commit shouldn't fail");
                 batch = db.start_batch();
             }
         }
@@ -293,6 +290,7 @@ where
     db.write_batch(iter)
         .await
         .expect("write_batch shouldn't fail");
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    DbAny::commit(db, None)
+        .await
+        .expect("commit shouldn't fail");
 }

@@ -6,7 +6,7 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_fixed, unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Durable, Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -19,11 +19,11 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Merkleized<H>, Durable>
+    Db<E, K, V, H, T>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -63,7 +63,7 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_fixed, FixedConfig as Config, FixedValue},
-            Durable, Error, Merkleized,
+            Error,
         },
         translator::Translator,
     };
@@ -80,16 +80,13 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, S = Merkleized<H>, D = Durable> =
-        crate::qmdb::any::unordered::Db<
-            E,
-            Journal<E, Operation<K, V>>,
-            Index<T, Location, P>,
-            H,
-            Update<K, V>,
-            S,
-            D,
-        >;
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        Index<T, Location, P>,
+        H,
+        Update<K, V>,
+    >;
 
     impl<
             E: Storage + Clock + Metrics,
@@ -98,7 +95,7 @@ pub mod partitioned {
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
+        > Db<E, K, V, H, T, P>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -128,15 +125,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 1, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 2, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -158,7 +153,7 @@ pub(crate) mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore,
             },
-            verify_proof, NonDurable, Unmerkleized,
+            verify_proof,
         },
         translator::TwoCap,
     };
@@ -173,10 +168,7 @@ pub(crate) mod test {
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    pub(crate) type DirtyAnyTest =
-        Db<Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -218,7 +210,7 @@ pub(crate) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut DirtyAnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
@@ -241,7 +233,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db_context = context.with_label("db");
-            let mut db = open_db(db_context.clone()).await.into_mutable();
+            let mut db = open_db(db_context.clone()).await;
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -250,7 +242,7 @@ pub(crate) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.write_batch([(k, Some(v))]).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            db.commit(None).await.unwrap();
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -268,10 +260,10 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            db.commit(None).await.unwrap();
             let root_hash = db.root();
             let original_op_count = db.bounds().await.end;
 
@@ -298,10 +290,9 @@ pub(crate) mod test {
 
             // Add more operations to the database
             // (use different seed to avoid key collisions)
-            let mut db = db.into_mutable();
             let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut db, more_ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            db.commit(None).await.unwrap();
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -340,11 +331,9 @@ pub(crate) mod test {
             let mut hasher = StandardHasher::<Sha256>::new();
             let ops = create_test_ops(50);
 
-            let mut db = create_test_db(context.with_label("first"))
-                .await
-                .into_mutable();
+            let mut db = create_test_db(context.with_label("first")).await;
             apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            db.commit(None).await.unwrap();
 
             let root = db.root();
             let full_size = db.bounds().await.end;
@@ -399,29 +388,24 @@ pub(crate) mod test {
             let max_ops = NZU64!(10);
 
             // Build checkpoints only at commit points and record reference proofs/roots there.
-            let mut db = create_test_db(context.with_label("main"))
-                .await
-                .into_mutable();
+            let mut db = create_test_db(context.with_label("main")).await;
             let mut offset = 0usize;
             let mut checkpoints = Vec::new();
             for chunk in [20usize, 15, 25, 30, 10] {
                 apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
                 offset += chunk;
 
-                let (clean_db, _) = db.commit(None).await.unwrap();
-                let clean_db = clean_db.into_merkleized();
-                let end_loc = clean_db.bounds().await.end;
-                let root = clean_db.root();
-                let (proof, proof_ops) = clean_db.proof(start_loc, max_ops).await.unwrap();
+                db.commit(None).await.unwrap();
+                let end_loc = db.bounds().await.end;
+                let root = db.root();
+                let (proof, proof_ops) = db.proof(start_loc, max_ops).await.unwrap();
                 checkpoints.push((end_loc, root, proof, proof_ops));
-
-                db = clean_db.into_mutable();
             }
 
             // Grow state past the checkpoints and verify all historical proofs from that later state.
-            let final_db = db.commit(None).await.unwrap().0.into_merkleized();
+            db.commit(None).await.unwrap();
             for (historical_size, root, reference_proof, reference_ops) in checkpoints {
-                let (historical_proof, historical_ops) = final_db
+                let (historical_proof, historical_ops) = db
                     .historical_proof(historical_size, start_loc, max_ops)
                     .await
                     .unwrap();
@@ -438,8 +422,8 @@ pub(crate) mod test {
             }
 
             // Verify the current full-size proof against the current root as a final sanity check.
-            let full_root = final_db.root();
-            let (full_proof, full_ops) = final_db.proof(start_loc, max_ops).await.unwrap();
+            let full_root = db.root();
+            let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
             assert!(verify_proof(
                 &mut hasher,
                 &full_proof,
@@ -448,13 +432,13 @@ pub(crate) mod test {
                 &full_root
             ));
 
-            final_db.destroy().await.unwrap();
+            db.destroy().await.unwrap();
         });
     }
 
     #[test_traced("DEBUG")]
     fn test_any_unordered_fixed_batch() {
-        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await });
     }
 
     #[allow(dead_code)]
@@ -467,7 +451,7 @@ pub(crate) mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut DirtyAnyTest, key: Digest, value: Digest) {
+    fn assert_mutable_db_futures_are_send(db: &mut AnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_send(db.write_batch([(key, Some(value))]));
@@ -477,7 +461,7 @@ pub(crate) mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: DirtyAnyTest) {
+    fn assert_mutable_commit_is_send(mut db: AnyTest) {
         assert_send(db.commit(None));
     }
 
@@ -485,12 +469,12 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+        type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Mmr = TestMmr;

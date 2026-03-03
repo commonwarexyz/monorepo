@@ -3,12 +3,8 @@
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        kv::{Batchable as _, Deletable as _, Gettable, Updatable as _},
-        qmdb::{
-            any::states::{MutableAny, UnmerkleizedDurableAny},
-            Error,
-        },
-        Persistable as _,
+        kv::{Deletable as _, Gettable, Updatable as _},
+        qmdb::{any::states::DbAny, Error},
     };
     use commonware_codec::Codec;
     use commonware_cryptography::{sha256, Hasher};
@@ -44,10 +40,10 @@ pub mod tests {
         type Fut = Fut;
     }
 
-    /// Destroy an MutableAny database by committing and then destroying.
-    async fn destroy_db<D: MutableAny>(db: D) -> Result<(), Error> {
-        let db = db.commit(None).await?.0;
-        db.into_merkleized().await?.destroy().await
+    /// Destroy a DbAny database by committing and then destroying.
+    async fn destroy_db<D: DbAny>(mut db: D) -> Result<(), Error> {
+        DbAny::commit(&mut db, None).await?;
+        db.destroy().await
     }
 
     /// Run the batch test suite against a database factory within a deterministic executor twice,
@@ -56,10 +52,9 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let executor = deterministic::Runner::default();
         let mut new_db_clone = new_db.clone();
@@ -94,10 +89,9 @@ pub mod tests {
     pub async fn run_batch_tests<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let counter = &mut 0usize;
 
@@ -123,10 +117,9 @@ pub mod tests {
     async fn test_overlay_reads<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(1);
@@ -145,10 +138,9 @@ pub mod tests {
     async fn test_create<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         let mut batch = db.start_batch();
@@ -173,10 +165,9 @@ pub mod tests {
     async fn test_delete<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         let base_key = TestKey::from_seed(4);
@@ -200,10 +191,9 @@ pub mod tests {
     async fn test_delete_unchecked<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(6);
@@ -228,10 +218,9 @@ pub mod tests {
     ) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         let mut batch = db.start_batch();
@@ -253,10 +242,9 @@ pub mod tests {
     async fn test_write_batch<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         for i in 0..100 {
@@ -297,10 +285,9 @@ pub mod tests {
     ) -> Result<(), Error>
     where
         F: NewDbIndexed<D>,
-        D: MutableAny,
+        D: DbAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
-        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = next_db(new_db, counter).await;
         // Create 100 keys and commit them.
@@ -308,8 +295,7 @@ pub mod tests {
             db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))])
                 .await?;
         }
-        let (durable, _) = db.commit(None).await?;
-        let mut db = durable.into_mutable();
+        DbAny::commit(&mut db, None).await?;
 
         // Delete half of the keys at random.
         let mut rng = test_rng();
@@ -326,18 +312,17 @@ pub mod tests {
 
         // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
-        let (durable, _) = db.commit(None).await?;
+        DbAny::commit(&mut db, None).await?;
         for i in 0..100 {
             if deleted.contains(&i) {
-                assert!(durable.get(&TestKey::from_seed(i)).await?.is_none());
+                assert!(db.get(&TestKey::from_seed(i)).await?.is_none());
             } else {
                 assert_eq!(
-                    durable.get(&TestKey::from_seed(i)).await?,
+                    db.get(&TestKey::from_seed(i)).await?,
                     Some(TestValue::from_seed(i))
                 );
             }
         }
-        let mut db = durable.into_mutable();
 
         // Recreate the deleted keys.
         let mut batch = db.start_batch();
@@ -350,15 +335,15 @@ pub mod tests {
         }
         db.write_batch(batch.into_iter()).await?;
 
-        let (durable, _) = db.commit(None).await?;
+        DbAny::commit(&mut db, None).await?;
         for i in 0..100 {
             assert_eq!(
-                durable.get(&TestKey::from_seed(i)).await?,
+                db.get(&TestKey::from_seed(i)).await?,
                 Some(TestValue::from_seed(i))
             );
         }
 
-        destroy_db(durable.into_mutable()).await
+        destroy_db(db).await
     }
 
     impl TestKey for sha256::Digest {

@@ -12,14 +12,11 @@ use crate::{
     },
     kv,
     mmr::{journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{
-        any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error,
-        MerkleizationState, Merkleized, NonDurable, Unmerkleized,
-    },
+    qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -32,8 +29,7 @@ use tracing::warn;
 mod operation;
 pub use operation::Operation;
 
-type Journal<E, K, V, H, S> =
-    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;
+type Journal<E, K, V, H> = authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H>;
 
 pub mod sync;
 
@@ -85,11 +81,9 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
-    D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
-    journal: Journal<E, K, V, H, M>,
+    journal: Journal<E, K, V, H>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -100,21 +94,11 @@ pub struct Immutable<
 
     /// The location of the last commit operation.
     last_commit_loc: Location,
-
-    /// Marker for the durability state.
-    _durable: core::marker::PhantomData<D>,
 }
 
-// Functionality shared across all DB states.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > Immutable<E, K, V, H, T, M, D>
+// Shared read-only functionality.
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T>
 {
     /// Return the Location of the next operation appended to this db.
     pub async fn size(&self) -> Location {
@@ -185,18 +169,7 @@ impl<
 
         Ok(metadata)
     }
-}
 
-// Functionality shared across Merkleized states.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > Immutable<E, K, V, H, T, Merkleized<H>, D>
-{
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
     ///
@@ -234,12 +207,6 @@ impl<
 
         Ok(())
     }
-}
-
-// Functionality specific to Clean state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Merkleized<H>, Durable>
-{
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
@@ -294,9 +261,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         if journal.size().await == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            let mut dirty_journal = journal.into_dirty();
-            dirty_journal.append(&Operation::Commit(None)).await?;
-            journal = dirty_journal.merkleize();
+            journal.append(&Operation::Commit(None)).await?;
             journal.sync().await?;
         }
 
@@ -323,7 +288,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             journal,
             snapshot,
             last_commit_loc,
-            _durable: core::marker::PhantomData,
         })
     }
 
@@ -339,61 +303,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         Ok(self.journal.destroy().await?)
     }
 
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
-        Immutable {
-            journal: self.journal.into_dirty(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, Durable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Unmerkleized, Durable>
-{
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
-        Immutable {
-            journal: self.journal,
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-
-    /// Convert to merkleized state.
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, Durable> {
-        Immutable {
-            journal: self.journal.merkleize(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Merkleized, NonDurable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Merkleized<H>, NonDurable>
-{
-    /// Convert this database into a mutable state for batched updates.
-    pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
-        Immutable {
-            journal: self.journal.into_dirty(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, NonDurable) state - the mutable state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
-{
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
@@ -419,53 +328,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    /// Returns the committed database and the range of committed locations. Note that even if no
+    /// Returns the range of committed locations. Note that even if no
     /// operations were added since the last commit, this is a root-state changing operation.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V>,
-    ) -> Result<
-        (
-            Immutable<E, K, V, H, T, Unmerkleized, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let loc = self.journal.append(&Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         self.last_commit_loc = loc;
-        let range = loc..loc + 1;
-
-        let db = Immutable {
-            journal: self.journal,
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        };
-
-        Ok((db, range))
-    }
-
-    /// Convert to merkleized state without committing (for read-only merkle operations).
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, NonDurable> {
-        Immutable {
-            journal: self.journal.merkleize(),
-            snapshot: self.snapshot,
-            last_commit_loc: self.last_commit_loc,
-            _durable: core::marker::PhantomData,
-        }
+        Ok(loc..loc + 1)
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > kv::Gettable for Immutable<E, K, V, H, T, M, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    kv::Gettable for Immutable<E, K, V, H, T>
 {
     type Key = K;
     type Value = V;
@@ -476,15 +350,8 @@ impl<
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    crate::qmdb::store::LogStore for Immutable<E, K, V, H, T>
 {
     type Value = V;
 
@@ -498,7 +365,7 @@ impl<
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, Durable>
+    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -564,7 +431,7 @@ pub(super) mod test {
     pub fn test_immutable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.with_label("first")).await;
+            let mut db = open_db(context.with_label("first")).await;
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, 1);
             assert_eq!(bounds.start, Location::new(0));
@@ -574,17 +441,14 @@ pub(super) mod test {
             let k1 = Sha256::fill(1u8);
             let v1 = vec![4, 5, 6, 7];
             let root = db.root();
-            let mut db = db.into_mutable();
             db.set(k1, v1).await.unwrap();
             drop(db); // Simulate failed commit
-            let db = open_db(context.with_label("second")).await;
+            let mut db = open_db(context.with_label("second")).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await.end, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            let db = db.into_mutable();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // commit op added
             let root = db.root();
             drop(db);
@@ -601,7 +465,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
-            let db = open_db(context.with_label("first")).await;
+            let mut db = open_db(context.with_label("first")).await;
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -612,21 +476,18 @@ pub(super) mod test {
             assert!(db.get(&k2).await.unwrap().is_none());
 
             // Set the first key.
-            let mut db = db.into_mutable();
             db.set(k1, v1.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.bounds().await.end, 2);
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
-            let (durable_db, _) = db.commit(metadata.clone()).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let _ = db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.bounds().await.end, 3);
             assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
             // Set the second key.
-            let mut db = db.into_mutable();
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
@@ -636,8 +497,7 @@ pub(super) mod test {
             assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Commit the second key.
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 5);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -647,7 +507,6 @@ pub(super) mod test {
             // Add an uncommitted op then simulate failure.
             let k3 = Sha256::fill(3u8);
             let v3 = vec![9, 10, 11];
-            let mut db = db.into_mutable();
             db.set(k3, v3).await.unwrap();
             assert_eq!(db.bounds().await.end, 6);
 
@@ -671,8 +530,7 @@ pub(super) mod test {
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.with_label("first")).await;
-            let mut db = db.into_mutable();
+            let mut db = open_db(context.with_label("first")).await;
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -682,8 +540,7 @@ pub(super) mod test {
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -723,8 +580,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let db = open_db(context.with_label("first")).await;
-            let mut db = db.into_mutable();
+            let mut db = open_db(context.with_label("first")).await;
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -733,13 +589,11 @@ pub(super) mod test {
             }
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             let halfway_root = db.root();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
-            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -748,8 +602,8 @@ pub(super) mod test {
 
             // Commit without merkleizing the MMR, then drop to simulate failure.
             // The commit persists the data to the journal, but the MMR is not synced.
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            drop(durable_db); // Drop before merkleizing
+            let _ = db.commit(None).await.unwrap();
+            drop(db); // Drop before merkleizing
 
             // Recovery should replay the log to regenerate the MMR.
             // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
@@ -772,20 +626,18 @@ pub(super) mod test {
     pub fn test_immutable_db_recovery_from_failed_log_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("first")).await.into_mutable();
+            let mut db = open_db(context.with_label("first")).await;
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
 
-            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -820,8 +672,7 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let db = open_db(context.with_label("first")).await;
-            let mut db = db.into_mutable();
+            let mut db = open_db(context.with_label("first")).await;
 
             for i in 1u64..ELEMENTS+1 {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -831,8 +682,7 @@ pub(super) mod test {
 
             assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let _ = db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Prune the db to the first half of the operations.
@@ -932,20 +782,16 @@ pub(super) mod test {
             let v2 = vec![2u8; 16];
             let v3 = vec![3u8; 16];
 
-            let mut db = db.into_mutable();
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
-            let mut db = db.into_mutable();
+            let _ = db.commit(None).await.unwrap();
             db.set(k3, v3.clone()).await.unwrap();
 
             // op_count is 5 (initial_commit, k1, k2, commit, k3), last_commit is at location 3
             assert_eq!(*db.last_commit_loc, 3);
 
-            // Test valid prune (at last commit) - need Merkleized state for prune
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            // Test valid prune (at last commit)
+            let _ = db.commit(None).await.unwrap();
             assert!(db.prune(Location::new(3)).await.is_ok());
 
             // Test pruning beyond last commit
@@ -966,35 +812,15 @@ pub(super) mod test {
         qmdb::store::tests::{assert_log_store, assert_merkleized_store},
     };
 
-    type MerkleizedDb =
-        Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
-    type MutableDb = Immutable<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        Unmerkleized,
-        NonDurable,
-    >;
+    type TestDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
+    fn assert_db_futures_are_send(db: &mut TestDb, key: Digest, value: Vec<u8>, loc: Location) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
         assert_send(db.set(key, value));
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: MutableDb) {
         assert_send(db.commit(None));
     }
 }
