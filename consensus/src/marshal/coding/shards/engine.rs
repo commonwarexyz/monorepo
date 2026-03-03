@@ -841,12 +841,15 @@ where
         commitment: Commitment,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
-            let should_broadcast_weak = state.broadcast_our_weak();
-            if let Some(weak_shard) = state.take_weak_shard() {
-                if should_broadcast_weak {
-                    self.broadcast_weak_shard(sender, weak_shard).await;
+            match state.take_pending_action() {
+                Some(ValidatedShardAction::Broadcast(shard)) => {
+                    self.broadcast_weak_shard(sender, shard).await;
+                    self.notify_shard_subscribers(commitment);
                 }
-                self.notify_shard_subscribers(commitment);
+                Some(ValidatedShardAction::NotifyOnly) => {
+                    self.notify_shard_subscribers(commitment);
+                }
+                None => {}
             }
         }
 
@@ -1026,6 +1029,17 @@ where
     Ready(ReadyState<P, C, H>),
 }
 
+/// Action to take with a validated weak shard after strong shard verification.
+///
+/// Participants broadcast their weak shard to all peers, while non-participants
+/// only need to notify local subscribers (they don't gossip).
+enum ValidatedShardAction<C: CodingScheme, H: Hasher> {
+    /// Broadcast the weak shard to all peers and notify local subscribers.
+    Broadcast(Shard<C, H>),
+    /// Only notify local subscribers (non-participant validated a strong shard).
+    NotifyOnly,
+}
+
 /// State shared across all reconstruction phases.
 struct CommonState<P, C, H>
 where
@@ -1035,10 +1049,8 @@ where
 {
     /// The leader associated with this reconstruction state.
     leader: P,
-    /// Our validated weak shard, ready to broadcast to other participants.
-    our_weak_shard: Option<Shard<C, H>>,
-    /// Whether we should gossip our weak shard for this commitment.
-    broadcast_our_weak: bool,
+    /// Our validated weak shard and the action to take with it.
+    pending_action: Option<ValidatedShardAction<C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a valid shard.
@@ -1109,8 +1121,7 @@ where
     fn new(leader: P, round: Round, participants_len: u64) -> Self {
         Self {
             leader,
-            our_weak_shard: None,
-            broadcast_our_weak: false,
+            pending_action: None,
             checked_shards: Vec::new(),
             contributed: BitMap::zeroes(participants_len),
             round,
@@ -1127,6 +1138,10 @@ where
 {
     /// Verify the leader's strong shard and store checking data.
     ///
+    /// When `is_participant` is true, the validated weak shard is stored for
+    /// broadcasting to peers. When false (non-participant), only subscriber
+    /// notification is scheduled.
+    ///
     /// Returns `false` if verification fails (sender is blocked), `true` on
     /// success. Does not transition state; the caller should invoke
     /// `try_transition` after this returns `true`.
@@ -1134,7 +1149,7 @@ where
         &mut self,
         sender: P,
         shard: StrongShard<C>,
-        broadcast_our_weak: bool,
+        is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let StrongShard {
@@ -1155,12 +1170,15 @@ where
         self.common.received_strong = Some(received_strong);
         self.common.contributed.set(u64::from(index), true);
         self.common.checked_shards.push(checked);
-        self.common.our_weak_shard = Some(Shard::new(
-            commitment,
-            index,
-            DistributionShard::Weak(weak_shard_data),
-        ));
-        self.common.broadcast_our_weak = broadcast_our_weak;
+        self.common.pending_action = Some(if is_participant {
+            ValidatedShardAction::Broadcast(Shard::new(
+                commitment,
+                index,
+                DistributionShard::Weak(weak_shard_data),
+            ))
+        } else {
+            ValidatedShardAction::NotifyOnly
+        });
         self.checking_data = Some(checking_data);
         true
     }
@@ -1310,15 +1328,11 @@ where
         self.common().checked_shards.as_slice()
     }
 
-    /// Takes the validated [`Shard`] for broadcasting to other participants.
-    /// Returns [`None`] if we haven't validated our own shard yet.
-    const fn take_weak_shard(&mut self) -> Option<Shard<C, H>> {
-        self.common_mut().our_weak_shard.take()
-    }
-
-    /// Returns whether this node should gossip its weak shard for this commitment.
-    const fn broadcast_our_weak(&self) -> bool {
-        self.common().broadcast_our_weak
+    /// Takes the pending action for this commitment's validated weak shard.
+    ///
+    /// Returns [`None`] if the strong shard hasn't been validated yet.
+    const fn take_pending_action(&mut self) -> Option<ValidatedShardAction<C, H>> {
+        self.common_mut().pending_action.take()
     }
 
     /// Inserts a [`Shard`] into the state.
