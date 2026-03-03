@@ -26,7 +26,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         response: oneshot::Sender<Option<Set<P>>>,
     },
     Subscribe {
-        sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+        response: oneshot::Sender<PeerSetSubscription<P>>,
     },
     SubscribeConnected {
         response: oneshot::Sender<ring::Receiver<Vec<P>>>,
@@ -257,10 +257,15 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> PeerSetSubscription<P> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.sender.0.send_lossy(Message::Subscribe { sender });
-        receiver
+    async fn subscribe(&self) -> PeerSetSubscription<P> {
+        self.sender
+            .0
+            .request(|response| Message::Subscribe { response })
+            .await
+            .unwrap_or_else(|| {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            })
     }
 }
 
@@ -294,7 +299,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        self.oracle.subscribe()
+        self.oracle.subscribe().await
     }
 }
 
@@ -340,7 +345,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<P> {
-        self.oracle.subscribe()
+        self.oracle.subscribe().await
     }
 }
 
