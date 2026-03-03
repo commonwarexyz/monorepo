@@ -141,7 +141,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use timeout::{Tick, TimeoutEntry, TimeoutWheel};
+use timeout::{Tick, TimeoutWheel};
 use waiter::{CompletedWaiter, WaiterId, Waiters};
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
@@ -389,9 +389,6 @@ pub(crate) struct IoUringLoop {
     receiver: mpsc::Receiver<Op>,
     waiters: Waiters,
     timeout_wheel: TimeoutWheel,
-    expired_timeouts: Vec<TimeoutEntry>,
-    pending_cancels: VecDeque<WaiterId>,
-    now: Option<Instant>,
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u64,
@@ -438,9 +435,6 @@ impl IoUringLoop {
                 receiver,
                 waiters,
                 timeout_wheel,
-                expired_timeouts: Vec::with_capacity(size),
-                pending_cancels: VecDeque::with_capacity(size),
-                now: None,
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
@@ -448,26 +442,13 @@ impl IoUringLoop {
         )
     }
 
-    /// Return this iteration's cached wall-clock snapshot.
-    ///
-    /// The cache is reset at the top of each `run` loop iteration and populated
-    /// lazily on first use to avoid unnecessary clock reads on no-timeout paths.
-    #[inline]
-    fn now(&mut self) -> Instant {
-        *self.now.get_or_insert_with(Instant::now)
-    }
-
     /// Runs the io_uring event loop until all submitters are dropped and in-flight work drains.
     ///
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
+        let mut pending_cancels = VecDeque::with_capacity(self.cfg.size as usize);
         loop {
-            // Reset per-iteration lazy clock snapshot. `self.now()` captures
-            // at most once per iteration and shares that value across timeout
-            // advancement and deadline scheduling.
-            self.now = None;
-
             // Process available completions.
             for cqe in ring.completion() {
                 self.handle_cqe(cqe);
@@ -475,12 +456,13 @@ impl IoUringLoop {
 
             // Process due deadlines before staging new submissions so timed-out
             // waiters move to cancellation promptly and free capacity sooner.
-            self.advance_timeouts();
+            self.advance_timeouts(&mut pending_cancels);
 
             // Stage as much inbound work as capacity allows.
-            let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
+            let Some(at_capacity) = self.fill_submission_queue(&mut ring, &mut pending_cancels)
+            else {
                 // Producer side disconnected. Drain in-flight operations and exit.
-                self.drain(&mut ring);
+                self.drain(&mut ring, &mut pending_cancels);
                 return;
             };
 
@@ -528,10 +510,15 @@ impl IoUringLoop {
     ///
     /// Returns whether staging ended at waiter or SQ capacity, or `None` if
     /// producer channel disconnected.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
+    fn fill_submission_queue(
+        &mut self,
+        ring: &mut IoUring,
+        pending_cancels: &mut VecDeque<WaiterId>,
+    ) -> Option<bool> {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
         let mut at_sq_capacity = false;
+        let mut aligned_idle_timeout_clock = false;
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
         if std::mem::take(&mut self.wake_rearm_needed) {
@@ -539,7 +526,7 @@ impl IoUringLoop {
         }
 
         // Stage pending cancel SQEs first so timed-out operations are canceled promptly.
-        if self.stage_pending_cancels(&mut submission_queue) {
+        if self.stage_pending_cancels(&mut submission_queue, pending_cancels) {
             at_sq_capacity = true;
         }
 
@@ -574,15 +561,23 @@ impl IoUringLoop {
             } = op;
 
             let target_tick = if let Some(deadline) = deadline {
-                let now = self.now();
-                self.timeout_wheel.align_idle_to_now(now);
-                Some(self.timeout_wheel.target_tick_for_deadline(deadline, now))
+                // Avoid per-loop clock reads when no deadlines are active.
+                // When the first deadline arrives after an idle period, align
+                // wheel time once before converting deadlines to ticks.
+                if self.timeout_wheel.next_deadline().is_none() && !aligned_idle_timeout_clock {
+                    let _ = self.timeout_wheel.advance(Instant::now());
+                    aligned_idle_timeout_clock = true;
+                }
+                Some(self.timeout_wheel.target_tick(deadline))
             } else {
                 None
             };
 
             // Store in-flight operation state before submission.
             let waiter_id = self.waiters.insert(sender, buffer, fd, iovecs, target_tick);
+            if let Some(target_tick) = target_tick {
+                self.timeout_wheel.schedule(waiter_id, target_tick);
+            }
 
             // Tag SQE with waiter id for completion matching.
             work = work.user_data(waiter_id.user_data());
@@ -598,26 +593,26 @@ impl IoUringLoop {
                     .push(&work)
                     .expect("unable to push to queue");
             }
-
-            if let Some(target_tick) = target_tick {
-                self.timeout_wheel.schedule(waiter_id, target_tick);
-            }
         }
 
         // Track which submitted sequence has been consumed.
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-        Some(at_waiter_capacity || at_sq_capacity || !self.pending_cancels.is_empty())
+        Some(at_waiter_capacity || at_sq_capacity || !pending_cancels.is_empty())
     }
 
     /// Stage queued cancel SQEs.
     ///
     /// Returns true if staging stopped at SQ capacity.
-    fn stage_pending_cancels(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
-        while let Some(waiter_id) = self.pending_cancels.pop_front() {
+    fn stage_pending_cancels(
+        &mut self,
+        submission_queue: &mut SubmissionQueue<'_>,
+        pending_cancels: &mut VecDeque<WaiterId>,
+    ) -> bool {
+        while let Some(waiter_id) = pending_cancels.pop_front() {
             if submission_queue.capacity() == submission_queue.len() {
-                self.pending_cancels.push_front(waiter_id);
+                pending_cancels.push_front(waiter_id);
                 return true;
             }
             let cancel = AsyncCancel::new(waiter_id.user_data())
@@ -671,7 +666,7 @@ impl IoUringLoop {
             target_tick,
         } = completed;
         if let Some(target_tick) = target_tick {
-            self.timeout_wheel.remove_active_deadline(target_tick);
+            self.timeout_wheel.remove(target_tick);
         }
         if cancelled && result == -libc::ECANCELED {
             result = -libc::ETIMEDOUT;
@@ -679,33 +674,24 @@ impl IoUringLoop {
         let _ = sender.send((result, buffer));
     }
 
-    fn advance_timeouts(&mut self) {
-        if !self.timeout_wheel.has_active_deadlines() {
-            self.timeout_wheel.maybe_purge_idle_stale();
+    fn advance_timeouts(&mut self, pending_cancels: &mut VecDeque<WaiterId>) {
+        if self.timeout_wheel.next_deadline().is_none() {
             return;
         }
-        let now = self.now();
-        let now_tick = self.timeout_wheel.tick_at(now);
-        let mut expired = std::mem::take(&mut self.expired_timeouts);
-        let active_bulk_cleared = self.timeout_wheel.advance(now_tick, &mut expired);
-        for timeout in expired.drain(..) {
+        let Some(expired) = self.timeout_wheel.advance(Instant::now()) else {
+            return;
+        };
+        for timeout in expired {
             if let Some(cancel_user_data) = self.waiters.cancel(timeout.waiter_id) {
                 assert_eq!(cancel_user_data, timeout.waiter_id.cancel_user_data());
-                if !active_bulk_cleared {
-                    self.timeout_wheel
-                        .remove_active_deadline(timeout.target_tick);
-                }
-                self.pending_cancels.push_back(timeout.waiter_id);
+                self.timeout_wheel.remove(timeout.target_tick);
+                pending_cancels.push_back(timeout.waiter_id);
             }
         }
-        self.expired_timeouts = expired;
     }
 
     const fn earliest_deadline(&self) -> Option<Duration> {
-        if !self.timeout_wheel.has_active_deadlines() {
-            return None;
-        }
-        self.timeout_wheel.timeout_until_next_deadline()
+        self.timeout_wheel.next_deadline()
     }
 
     /// Drain in-flight operations during shutdown.
@@ -713,7 +699,7 @@ impl IoUringLoop {
     /// - If `shutdown_timeout` is `None`, this waits until all waiters complete.
     /// - If `shutdown_timeout` is `Some`, this waits until all waiters complete
     ///   or the timeout elapses, then abandons any remaining waiters.
-    fn drain(&mut self, ring: &mut IoUring) {
+    fn drain(&mut self, ring: &mut IoUring, pending_cancels: &mut VecDeque<WaiterId>) {
         let mut remaining = self.cfg.shutdown_timeout;
 
         while !self.waiters.is_empty() {
@@ -721,10 +707,10 @@ impl IoUringLoop {
                 break;
             }
 
-            self.advance_timeouts();
+            self.advance_timeouts(pending_cancels);
             {
                 let mut submission_queue = ring.submission();
-                let _ = self.stage_pending_cancels(&mut submission_queue);
+                let _ = self.stage_pending_cancels(&mut submission_queue, pending_cancels);
             }
 
             let start = Instant::now();
@@ -933,7 +919,7 @@ mod tests {
             .cancel(waiter_id)
             .expect("cancel should transition active waiter");
         assert_eq!(cancel_user_data, waiter_id.cancel_user_data());
-        iouring.pending_cancels.push_back(waiter_id);
+        let mut pending_cancels = VecDeque::from([waiter_id]);
 
         {
             let mut submission_queue = ring.submission();
@@ -947,10 +933,10 @@ mod tests {
         }
 
         let at_capacity = iouring
-            .fill_submission_queue(&mut ring)
+            .fill_submission_queue(&mut ring, &mut pending_cancels)
             .expect("producer should still be connected");
         assert!(at_capacity);
-        assert_eq!(iouring.pending_cancels.len(), 1);
+        assert_eq!(pending_cancels.len(), 1);
     }
 
     #[test]
@@ -961,6 +947,7 @@ mod tests {
         };
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
+        let mut pending_cancels = VecDeque::new();
 
         // Schedule an old waiter at tick 1, then complete it early so the wheel
         // retains a stale entry for this slot/tick pair.
@@ -982,15 +969,13 @@ mod tests {
         // At tick 1, only the stale old entry should expire. The new waiter must
         // stay active and no cancel should be queued.
         std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
-        iouring.now = None;
-        iouring.advance_timeouts();
-        assert!(iouring.pending_cancels.is_empty());
+        iouring.advance_timeouts(&mut pending_cancels);
+        assert!(pending_cancels.is_empty());
 
         // At tick 3, the real timeout should queue cancellation.
         std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
-        iouring.now = None;
-        iouring.advance_timeouts();
-        assert_eq!(iouring.pending_cancels.len(), 1);
+        iouring.advance_timeouts(&mut pending_cancels);
+        assert_eq!(pending_cancels.len(), 1);
     }
 
     #[test]
@@ -1006,8 +991,7 @@ mod tests {
             .expect("cancel should transition active waiter");
         assert_eq!(cancel, slot_index.cancel_user_data());
         iouring.timeout_wheel.schedule(slot_index, 2);
-        iouring.timeout_wheel.remove_active_deadline(2);
-        iouring.pending_cancels.push_back(slot_index);
+        iouring.timeout_wheel.remove(2);
 
         // Simulate op CQE first, then cancel CQE.
         // The op result should be delivered immediately and the late cancel CQE ignored.
