@@ -4857,7 +4857,9 @@ mod tests {
                             break;
                         }
                         Some(MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_)) => {}
-                        None => break,
+                        None => panic!(
+                            "resolver channel closed before certification for restarted view {target_view}"
+                        ),
                     },
                     msg = batcher_receiver.recv() => {
                         match msg {
@@ -4870,11 +4872,15 @@ mod tests {
                                 response.send(None).unwrap();
                             }
                             Some(_) => {}
-                            None => break,
+                            None => panic!(
+                                "batcher channel closed before certification for restarted view {target_view}"
+                            ),
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("expected immediate nullify for view {target_view} after restart");
+                        panic!(
+                            "timed out waiting for successful certification for restarted view {target_view}"
+                        );
                     },
                 }
             };
