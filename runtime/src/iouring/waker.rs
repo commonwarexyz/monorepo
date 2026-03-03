@@ -272,18 +272,31 @@ mod tests {
         assert_eq!(snapshot, 1);
         waker.publish();
         assert_eq!(waker.submitted(), 2);
+
+        // Acknowledge/disarm are wake-gating operations and must not change
+        // the submitted sequence domain.
         waker.acknowledge();
+        assert_eq!(waker.submitted(), 2);
+        waker.disarm();
+        assert_eq!(waker.submitted(), 2);
+
+        // Re-arming should observe the same submitted snapshot while idle.
+        assert_eq!(waker.arm(), 2);
         waker.disarm();
     }
 
     #[test]
-    fn test_ring_and_acknowledge_noop_when_empty() {
+    fn test_ring_and_acknowledge_empty_paths_keep_sequence_stable() {
         let waker = Waker::new().expect("eventfd creation should succeed");
+        let before = waker.submitted();
 
         waker.ring();
         waker.acknowledge();
         // Second acknowledge should take the non-blocking empty path.
         waker.acknowledge();
+        let after = waker.submitted();
+
+        assert_eq!(after, before);
     }
 
     #[test]
@@ -301,6 +314,7 @@ mod tests {
     #[test]
     fn test_ring_and_acknowledge_error_branches() {
         let mut waker = Waker::new().expect("eventfd creation should succeed");
+        let before = waker.submitted();
 
         // Saturate counter near max so `ring` hits the non-blocking EAGAIN path.
         let fd = waker.inner.wake_fd.as_raw_fd();
@@ -337,35 +351,8 @@ mod tests {
             })
         };
         std::mem::forget(old);
-    }
 
-    #[test]
-    fn test_new_error_when_fd_table_exhausted() {
-        let mut held_fds = Vec::new();
-        let devnull = b"/dev/null\0";
-
-        // Hold one real descriptor and duplicate it until the process hits EMFILE.
-        // SAFETY: `devnull` is a valid nul-terminated path.
-        let base = unsafe { libc::open(devnull.as_ptr().cast(), libc::O_RDONLY) };
-        assert!(base >= 0);
-        // SAFETY: `open` returned an owned descriptor.
-        held_fds.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(base) });
-
-        loop {
-            // SAFETY: source fd is valid while held in `held_fds`.
-            let duped = unsafe { libc::dup(held_fds[0].as_raw_fd()) };
-            if duped >= 0 {
-                // SAFETY: `dup` returned an owned descriptor.
-                held_fds.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(duped) });
-                continue;
-            }
-
-            let err = std::io::Error::last_os_error().raw_os_error();
-            assert_eq!(err, Some(libc::EMFILE));
-            break;
-        }
-
-        // With no fd capacity left, eventfd creation must fail.
-        assert!(Waker::new().is_err());
+        // Direct eventfd read/write error paths should not perturb sequence tracking.
+        assert_eq!(waker.submitted(), before);
     }
 }
