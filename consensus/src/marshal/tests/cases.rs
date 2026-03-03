@@ -105,10 +105,10 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
                 H::parent_commitment(block),
                 H::commitment(block),
             );
-            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
+            let notarization = H::make_notarization(proposal.clone(), &schemes);
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let fin = H::make_finalization(proposal, &schemes, H::quorum());
+            let fin = H::make_finalization(proposal, &schemes);
             if quorum_sees_finalization {
                 let do_finalize = context.gen_bool(0.2);
                 for (i, h) in handles
@@ -221,7 +221,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -313,7 +313,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -436,10 +436,10 @@ pub fn sync_height_floor<H: TestHarness>() {
                 H::parent_commitment(block),
                 H::commitment(block),
             );
-            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
+            let notarization = H::make_notarization(proposal.clone(), &schemes);
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let fin = H::make_finalization(proposal, &schemes, H::quorum());
+            let fin = H::make_finalization(proposal, &schemes);
             for h in handles.iter_mut() {
                 H::report_finalization(&mut h.mailbox, fin.clone()).await;
             }
@@ -590,7 +590,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut mailbox, finalization).await;
         }
 
@@ -769,7 +769,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             H::parent_commitment(&stale_block),
             commitment,
         );
-        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+        let finalization = H::make_finalization(proposal, &schemes);
         H::report_finalization(&mut victim_mailbox, finalization).await;
 
         // Let block requests get issued while responses are still blocked.
@@ -867,10 +867,10 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             H::parent_commitment(&block),
             commitment,
         );
-        let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
+        let notarization = H::make_notarization(proposal.clone(), &schemes);
         H::report_notarization(&mut handle.mailbox, notarization).await;
 
-        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+        let finalization = H::make_finalization(proposal, &schemes);
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         let received_block = subscription_rx.await.unwrap();
@@ -951,10 +951,10 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
                 H::parent_commitment(block),
                 H::commitment(block),
             );
-            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
+            let notarization = H::make_notarization(proposal.clone(), &schemes);
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -969,6 +969,165 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         assert_eq!(received2.height().get(), 2);
         assert_eq!(received1_sub3.height().get(), 1);
     })
+}
+
+/// Regression test: marshal must support multiple same-round notarizations by digest.
+///
+/// Minimmit can produce multiple M-notarizations for the same view. This test
+/// verifies that resolver backfill requests keyed by `(round, digest)` can
+/// retrieve both notarized blocks independently.
+pub fn minimmit_same_round_multiple_notarizations() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let mut oracle = setup_network(context.clone(), Some(1));
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = StandardMinimmitHarness::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let peers = vec![participants[0].clone(), participants[1].clone()];
+        oracle
+            .manager()
+            .track(0, peers.clone().try_into().unwrap())
+            .await;
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let mut victim: ValidatorHandle<StandardMinimmitHarness> = {
+            let setup = StandardMinimmitHarness::setup_validator(
+                context.with_label("victim"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            ValidatorHandle {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            }
+        };
+        let mut attacker: ValidatorHandle<StandardMinimmitHarness> = {
+            let setup = StandardMinimmitHarness::setup_validator(
+                context.with_label("attacker"),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            ValidatorHandle {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            }
+        };
+
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let parent = Sha256::hash(b"");
+        let parent_commitment = StandardMinimmitHarness::genesis_parent_commitment();
+        let block_a = make_raw_block(parent, Height::new(1), 10);
+        let block_b = make_raw_block(parent, Height::new(1), 11);
+        assert_ne!(block_a.digest(), block_b.digest());
+
+        StandardMinimmitHarness::propose(&mut attacker, round, &block_a).await;
+        StandardMinimmitHarness::verify(&mut attacker, round, &block_a).await;
+        StandardMinimmitHarness::propose(&mut attacker, round, &block_b).await;
+        StandardMinimmitHarness::verify(&mut attacker, round, &block_b).await;
+
+        let proposal_a = StandardMinimmitHarness::make_proposal(
+            round,
+            View::zero(),
+            parent_commitment,
+            block_a.digest(),
+        );
+        let notarization_a = StandardMinimmitHarness::make_notarization(proposal_a, &schemes);
+        StandardMinimmitHarness::report_notarization(&mut attacker.mailbox, notarization_a.clone())
+            .await;
+
+        let proposal_b = StandardMinimmitHarness::make_proposal(
+            round,
+            View::zero(),
+            parent_commitment,
+            block_b.digest(),
+        );
+        let notarization_b = StandardMinimmitHarness::make_notarization(proposal_b, &schemes);
+        StandardMinimmitHarness::report_notarization(&mut attacker.mailbox, notarization_b.clone())
+            .await;
+
+        context.sleep(Duration::from_millis(100)).await;
+
+        let rx_a = victim
+            .mailbox
+            .subscribe_by_digest(Some(round), block_a.digest())
+            .await;
+        let rx_b = victim
+            .mailbox
+            .subscribe_by_digest(Some(round), block_b.digest())
+            .await;
+
+        let delivered_a: B = rx_a.await.expect("block A delivery missing");
+        let delivered_b: B = rx_b.await.expect("block B delivery missing");
+        assert_eq!(delivered_a.digest(), block_a.digest());
+        assert_eq!(delivered_b.digest(), block_b.digest());
+
+        // Cache both notarized blocks on victim from local buffer before restart.
+        StandardMinimmitHarness::report_notarization(&mut victim.mailbox, notarization_a).await;
+        StandardMinimmitHarness::report_notarization(&mut victim.mailbox, notarization_b).await;
+
+        // Ensure the actor has processed both cache writes before restart.
+        victim
+            .mailbox
+            .get_block(&block_a.digest())
+            .await
+            .expect("block A should be available before restart");
+        victim
+            .mailbox
+            .get_block(&block_b.digest())
+            .await
+            .expect("block B should be available before restart");
+
+        // Restart victim to clear in-memory buffer and verify both same-round notarized blocks
+        // are durably available from the cache.
+        drop(victim);
+        let mut victim_restart: ValidatorHandle<StandardMinimmitHarness> = {
+            let setup = StandardMinimmitHarness::setup_validator(
+                context.with_label("victim_restart"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            ValidatorHandle {
+                mailbox: setup.mailbox,
+                extra: setup.extra,
+            }
+        };
+
+        // Trigger epoch cache initialization for the restarted node.
+        let reinit_notarization = StandardMinimmitHarness::make_notarization(
+            StandardMinimmitHarness::make_proposal(
+                round,
+                View::zero(),
+                parent_commitment,
+                block_a.digest(),
+            ),
+            &schemes,
+        );
+        StandardMinimmitHarness::report_notarization(
+            &mut victim_restart.mailbox,
+            reinit_notarization,
+        )
+        .await;
+
+        victim_restart
+            .mailbox
+            .get_block(&block_a.digest())
+            .await
+            .expect("block A should be durably cached");
+        victim_restart
+            .mailbox
+            .get_block(&block_b.digest())
+            .await
+            .expect("block B should be durably cached");
+    });
 }
 
 /// Test canceled subscriptions.
@@ -1041,10 +1200,10 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
                 H::parent_commitment(block),
                 H::commitment(block),
             );
-            let notarization = H::make_notarization(proposal.clone(), &schemes, H::quorum());
+            let notarization = H::make_notarization(proposal.clone(), &schemes);
             H::report_notarization(&mut handle.mailbox, notarization).await;
 
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
@@ -1175,7 +1334,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             H::parent_commitment(&block3),
             H::commitment(&block3),
         );
-        let notarization3 = H::make_notarization(proposal3.clone(), &schemes, H::quorum());
+        let notarization3 = H::make_notarization(proposal3.clone(), &schemes);
         H::report_notarization(&mut handle.mailbox, notarization3).await;
         H::propose(
             &mut handle,
@@ -1203,7 +1362,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
                 H::commitment(&block4),
             ),
             &schemes,
-            H::quorum(),
         );
         H::report_finalization(&mut handle.mailbox, finalization4).await;
         H::propose(
@@ -1230,9 +1388,9 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             H::parent_commitment(&block5),
             H::commitment(&block5),
         );
-        let notarization5 = H::make_notarization(proposal5.clone(), &schemes, H::quorum());
+        let notarization5 = H::make_notarization(proposal5.clone(), &schemes);
         H::report_notarization(&mut handle.mailbox, notarization5).await;
-        let finalization5 = H::make_finalization(proposal5, &schemes, H::quorum());
+        let finalization5 = H::make_finalization(proposal5, &schemes);
         H::report_finalization(&mut handle.mailbox, finalization5).await;
         H::propose(
             &mut handle,
@@ -1306,7 +1464,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             H::parent_commitment(&block),
             commitment,
         );
-        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+        let finalization = H::make_finalization(proposal, &schemes);
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Latest should now be the finalized block
@@ -1385,7 +1543,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             // Latest should always point to most recently finalized
@@ -1467,7 +1625,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -1548,7 +1706,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             H::parent_commitment(&block),
             commitment,
         );
-        let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+        let finalization = H::make_finalization(proposal, &schemes);
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Get by commitment
@@ -1617,7 +1775,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal.clone(), &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal.clone(), &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             // Verify finalization is retrievable
@@ -1716,7 +1874,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle0.mailbox, finalization).await;
 
             parent = digest;
@@ -1809,7 +1967,7 @@ pub fn ancestry_stream<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -1882,8 +2040,8 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             H::parent_commitment(&block),
             commitment,
         );
-        let notarization_v1 = H::make_notarization(proposal_v1.clone(), &schemes, H::quorum());
-        let finalization_v1 = H::make_finalization(proposal_v1.clone(), &schemes, H::quorum());
+        let notarization_v1 = H::make_notarization(proposal_v1.clone(), &schemes);
+        let finalization_v1 = H::make_finalization(proposal_v1.clone(), &schemes);
         H::report_notarization(&mut handles[0].mailbox, notarization_v1.clone()).await;
         H::report_finalization(&mut handles[0].mailbox, finalization_v1.clone()).await;
 
@@ -1894,8 +2052,8 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             H::parent_commitment(&block),
             commitment,
         );
-        let notarization_v2 = H::make_notarization(proposal_v2.clone(), &schemes, H::quorum());
-        let finalization_v2 = H::make_finalization(proposal_v2.clone(), &schemes, H::quorum());
+        let notarization_v2 = H::make_notarization(proposal_v2.clone(), &schemes);
+        let finalization_v2 = H::make_finalization(proposal_v2.clone(), &schemes);
         H::report_notarization(&mut handles[1].mailbox, notarization_v2.clone()).await;
         H::report_finalization(&mut handles[1].mailbox, finalization_v2.clone()).await;
 
@@ -2014,7 +2172,7 @@ pub fn init_processed_height<H: TestHarness>() {
                 H::parent_commitment(&block),
                 commitment,
             );
-            let finalization = H::make_finalization(proposal, &schemes, H::quorum());
+            let finalization = H::make_finalization(proposal, &schemes);
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
@@ -2115,7 +2273,6 @@ pub fn broadcast_caches_block<H: TestHarness>() {
                 commitment,
             ),
             &schemes,
-            H::quorum(),
         );
         H::report_notarization(&mut handle2.mailbox, notarization).await;
 
@@ -2125,5 +2282,108 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             .get_block(&digest)
             .await
             .expect("block should be cached after broadcast");
+    })
+}
+
+/// Regression test: multiple same-round verified blocks must survive restart.
+pub fn broadcast_caches_multiple_same_round_blocks<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let mut oracle = setup_network(context.clone(), None);
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = H::fixture(&mut context, NAMESPACE, H::num_validators());
+
+        // Set up one validator.
+        let validator = participants[0].clone();
+        let setup = H::setup_validator(
+            context.with_label("validator_0"),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // Create two distinct blocks for the same round.
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let parent = Sha256::hash(b"");
+        let parent_commitment = H::genesis_parent_commitment();
+        let block_a = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            10,
+            participants.len() as u16,
+        );
+        let block_b = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            11,
+            participants.len() as u16,
+        );
+        let digest_a = H::digest(&block_a);
+        let digest_b = H::digest(&block_b);
+        assert_ne!(digest_a, digest_b, "test blocks should have unique digests");
+
+        // Broadcast both blocks.
+        H::propose(&mut handle, round, &block_a).await;
+        H::propose(&mut handle, round, &block_b).await;
+
+        // Ensure both blocks are retrievable before restart.
+        handle
+            .mailbox
+            .get_block(&digest_a)
+            .await
+            .expect("block A should be cached after broadcast");
+        handle
+            .mailbox
+            .get_block(&digest_b)
+            .await
+            .expect("block B should be cached after broadcast");
+
+        // Restart marshal, removing any in-memory cache.
+        drop(handle);
+        let setup2 = H::setup_validator(
+            context.with_label("validator_0_restart"),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle2: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: setup2.mailbox,
+            extra: setup2.extra,
+        };
+
+        // Trigger epoch cache initialization for the restarted validator.
+        let notarization = H::make_notarization(
+            H::make_proposal(
+                round,
+                View::new(0),
+                parent_commitment,
+                H::commitment(&block_a),
+            ),
+            &schemes,
+        );
+        H::report_notarization(&mut handle2.mailbox, notarization).await;
+
+        // Block B is never notarized in this test, so this checks verified cache durability.
+        handle2
+            .mailbox
+            .get_block(&digest_a)
+            .await
+            .expect("block A should still be cached after restart");
+        handle2
+            .mailbox
+            .get_block(&digest_b)
+            .await
+            .expect("block B should still be cached after restart");
     })
 }

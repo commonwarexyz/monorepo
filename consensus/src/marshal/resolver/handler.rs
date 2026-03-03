@@ -105,7 +105,7 @@ impl<D: Digest> Producer for Handler<D> {
 pub enum Request<D: Digest> {
     Block(D),
     Finalized { height: Height },
-    Notarized { round: Round },
+    Notarized { round: Round, commitment: D },
 }
 
 impl<D: Digest> Request<D> {
@@ -130,7 +130,9 @@ impl<D: Digest> Request<D> {
                 *theirs > *mine
             }
             (Self::Finalized { .. }, _) => true,
-            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
+            (Self::Notarized { round: mine, .. }, Self::Notarized { round: theirs, .. }) => {
+                *theirs > *mine
+            }
             (Self::Notarized { .. }, _) => true,
         }
     }
@@ -142,7 +144,10 @@ impl<D: Digest> Write for Request<D> {
         match self {
             Self::Block(digest) => digest.write(buf),
             Self::Finalized { height } => height.write(buf),
-            Self::Notarized { round } => round.write(buf),
+            Self::Notarized { round, commitment } => {
+                round.write(buf);
+                commitment.write(buf);
+            }
         }
     }
 }
@@ -158,6 +163,7 @@ impl<D: Digest> Read for Request<D> {
             },
             NOTARIZED_REQUEST => Self::Notarized {
                 round: Round::read(buf)?,
+                commitment: D::read(buf)?,
             },
             i => return Err(CodecError::InvalidEnum(i)),
         };
@@ -170,7 +176,7 @@ impl<D: Digest> EncodeSize for Request<D> {
         1 + match self {
             Self::Block(block) => block.encode_size(),
             Self::Finalized { height } => height.encode_size(),
-            Self::Notarized { round } => round.encode_size(),
+            Self::Notarized { round, commitment } => round.encode_size() + commitment.encode_size(),
         }
     }
 }
@@ -182,7 +188,16 @@ impl<D: Digest> PartialEq for Request<D> {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a == b,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
-            (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
+            (
+                Self::Notarized {
+                    round: a,
+                    commitment: ac,
+                },
+                Self::Notarized {
+                    round: b,
+                    commitment: bc,
+                },
+            ) => a == b && ac == bc,
             _ => false,
         }
     }
@@ -195,7 +210,16 @@ impl<D: Digest> Ord for Request<D> {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
-            (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
+            (
+                Self::Notarized {
+                    round: a,
+                    commitment: ac,
+                },
+                Self::Notarized {
+                    round: b,
+                    commitment: bc,
+                },
+            ) => a.cmp(b).then_with(|| ac.cmp(bc)),
             (a, b) => a.subject().cmp(&b.subject()),
         }
     }
@@ -213,7 +237,10 @@ impl<D: Digest> Hash for Request<D> {
         match self {
             Self::Block(digest) => digest.hash(state),
             Self::Finalized { height } => height.hash(state),
-            Self::Notarized { round } => round.hash(state),
+            Self::Notarized { round, commitment } => {
+                round.hash(state);
+                commitment.hash(state);
+            }
         }
     }
 }
@@ -223,7 +250,9 @@ impl<D: Digest> Display for Request<D> {
         match self {
             Self::Block(digest) => write!(f, "Block({digest:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
-            Self::Notarized { round } => write!(f, "Notarized({round:?})"),
+            Self::Notarized { round, commitment } => {
+                write!(f, "Notarized({round:?}, {commitment:?})")
+            }
         }
     }
 }
@@ -233,7 +262,9 @@ impl<D: Digest> Debug for Request<D> {
         match self {
             Self::Block(digest) => write!(f, "Block({digest:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
-            Self::Notarized { round } => write!(f, "Notarized({round:?})"),
+            Self::Notarized { round, commitment } => {
+                write!(f, "Notarized({round:?}, {commitment:?})")
+            }
         }
     }
 }
@@ -252,6 +283,7 @@ where
             }),
             2 => Ok(Self::Notarized {
                 round: u.arbitrary()?,
+                commitment: u.arbitrary()?,
             }),
             _ => unreachable!(),
         }
@@ -289,6 +321,7 @@ mod tests {
         };
         let notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(0), View::new(1)),
+            commitment: Sha256::hash(b"notarized"),
         };
         assert_ne!(hash_of(&finalized), hash_of(&notarized));
     }
@@ -329,7 +362,8 @@ mod tests {
     #[test]
     fn test_subject_notarized_encoding() {
         let round = Round::new(Epoch::new(67890), View::new(12345));
-        let request = Request::<D>::Notarized { round };
+        let commitment = Sha256::hash(b"notarized");
+        let request = Request::<D>::Notarized { round, commitment };
 
         // Test encoding
         let encoded = request.encode();
@@ -339,7 +373,7 @@ mod tests {
         let mut buf = encoded.as_ref();
         let decoded = Request::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Notarized { round });
+        assert_eq!(decoded, Request::Notarized { round, commitment });
     }
 
     #[test]
@@ -372,6 +406,7 @@ mod tests {
         };
         let r3 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
+            commitment: Sha256::hash(b"notarized"),
         };
 
         let predicate = r1.predicate();
@@ -393,6 +428,7 @@ mod tests {
         };
         let r3 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(0)),
+            commitment: Sha256::hash(b"notarized"),
         };
 
         // Verify encode_size matches actual encoded length
@@ -436,12 +472,15 @@ mod tests {
         // Notarized ordering by view
         let not1 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(50)),
+            commitment: Sha256::hash(b"notarized-50"),
         };
         let not2 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
+            commitment: Sha256::hash(b"notarized-150"),
         };
         let not3 = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
+            commitment: Sha256::hash(b"notarized-150"),
         };
 
         assert!(not1 < not2);
@@ -458,6 +497,7 @@ mod tests {
         };
         let notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(200)),
+            commitment: Sha256::hash(b"notarized"),
         };
 
         // Block < Finalized < Notarized
@@ -489,6 +529,7 @@ mod tests {
         };
         let notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(200)),
+            commitment: Sha256::hash(b"notarized"),
         };
 
         // PartialOrd should always return Some
@@ -520,6 +561,7 @@ mod tests {
         let requests = vec![
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
+                commitment: Sha256::hash(b"notarized-300"),
             },
             Request::<D>::Block(digest2),
             Request::<D>::Finalized {
@@ -528,6 +570,7 @@ mod tests {
             Request::<D>::Block(digest1),
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
+                commitment: Sha256::hash(b"notarized-250"),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
@@ -568,13 +611,15 @@ mod tests {
         assert_eq!(
             sorted[5],
             Request::<D>::Notarized {
-                round: Round::new(Epoch::new(333), View::new(250))
+                round: Round::new(Epoch::new(333), View::new(250)),
+                commitment: Sha256::hash(b"notarized-250")
             }
         );
         assert_eq!(
             sorted[6],
             Request::<D>::Notarized {
-                round: Round::new(Epoch::new(333), View::new(300))
+                round: Round::new(Epoch::new(333), View::new(300)),
+                commitment: Sha256::hash(b"notarized-300")
             }
         );
     }
@@ -590,9 +635,11 @@ mod tests {
         };
         let min_notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(0)),
+            commitment: Sha256::hash(b"notarized-min"),
         };
         let max_notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(u64::MAX)),
+            commitment: Sha256::hash(b"notarized-max"),
         };
 
         assert!(min_finalized < max_finalized);

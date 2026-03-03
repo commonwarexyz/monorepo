@@ -156,4 +156,14 @@ mod matrix {
     );
     run_for_all_harnesses!(test_init_processed_height, init_processed_height);
     run_for_all_harnesses!(test_broadcast_caches_block, broadcast_caches_block);
+
+    #[test_traced("WARN")]
+    fn test_broadcast_caches_multiple_same_round_blocks() {
+        harness::broadcast_caches_multiple_same_round_blocks::<StandardMinimmitHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_minimmit_same_round_multiple_notarizations() {
+        harness::minimmit_same_round_multiple_notarizations();
+    }
 }

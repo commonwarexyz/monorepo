@@ -73,7 +73,7 @@ mod tests {
             tests::{
                 default_leader, genesis_commitment, make_coding_block, setup_network,
                 setup_network_links, CodingB, CodingCtx, CodingHarness, TestHarness,
-                BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, V,
+                BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, S, V,
             },
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
@@ -1353,7 +1353,7 @@ mod tests {
                 parent: View::zero(),
                 payload: commitment_a,
             };
-            let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
+            let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes);
 
             // Report finalization to v0. v0 doesn't have the block:
             //   - it fetches Request::Block(digest)
