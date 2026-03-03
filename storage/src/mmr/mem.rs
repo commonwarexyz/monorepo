@@ -441,18 +441,14 @@ impl<D: Digest> DirtyMmr<D> {
     /// Add `digest` as a new leaf in the MMR, returning its position.
     pub(crate) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
+        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator()).len() as u32;
         let leaf_pos = self.size();
         self.nodes.push_back(digest);
 
-        let mut height = 1;
-        for _ in nodes_needing_parents {
+        for height in 1..=nodes_needing_parents {
             let new_node_pos = self.size();
             self.nodes.push_back(D::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
-            height += 1;
         }
 
         leaf_pos

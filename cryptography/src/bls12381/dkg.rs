@@ -971,8 +971,8 @@ where
                 use std::collections::HashMap;
 
                 let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
-                let map = Map::try_from_iter(base.into_iter())
-                    .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+                let map =
+                    Map::try_from_iter(base).map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
                 Ok(Self::Ok(map))
             }
