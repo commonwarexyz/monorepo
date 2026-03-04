@@ -32,16 +32,19 @@ stability_scope!(ALPHA {
     /// In driver mode ([`service::ServiceBuilder`]), hooks run in this order:
     ///
     /// 1. `on_startup` once (receives [`Actor::Args`] data).
-    /// 2. Per iteration: `preprocess`, then race lanes against
-    ///    `on_external` for one event. If a lane message is received (`Some`),
+    /// 2. Per iteration: `preprocess`, then race
+    ///    `on_external_priority`, lanes, and `on_external` for one event
+    ///    (with the runtime shutdown signal checked first). If a lane
+    ///    message is received (`Some`),
     ///    the service may drain additional ready messages from that same lane,
     ///    up to [`Actor::max_lane_batch`]. Each message is dispatched to
     ///    `on_read_only` (concurrent) or `on_read_write` (serial). After at
     ///    least one message is dispatched, `postprocess` runs once. If the
-    ///    source yields `None` (lane closed or `on_external` exhaustion),
+    ///    source yields `None` (lane closed, `on_external_priority`
+    ///    exhaustion, or `on_external` exhaustion),
     ///    skip directly to `on_shutdown`.
     /// 3. `on_shutdown` once, on graceful exit (runtime stop, lane closure,
-    ///    or `on_external` returning `None`).
+    ///    or either external hook returning `None`).
     ///
     /// Returning `Err` from `on_read_only` or `on_read_write` is fatal: the error is logged,
     /// remaining in-flight reads are drained, and then `on_shutdown` is called
@@ -94,6 +97,7 @@ stability_scope!(ALPHA {
         /// Runs once when the control loop stops gracefully.
         ///
         /// Called on: runtime shutdown signal, lane closure,
+        /// [`Actor::on_external_priority`] returning `None`,
         /// [`Actor::on_external`] returning `None`, or after a fatal handler
         /// error from [`Actor::on_read_only`] or [`Actor::on_read_write`].
         fn on_shutdown(
@@ -185,12 +189,48 @@ stability_scope!(ALPHA {
             futures::future::pending()
         }
 
+        /// Poll high-priority external per-iteration sources and map them to
+        /// ingress.
+        ///
+        /// The service loop recreates this future each iteration and races it
+        /// against lane receivers and [`Actor::on_external`]. Returning
+        /// `Some(ingress)` dispatches one event via [`Actor::on_read_write`].
+        /// Returning `None` signals exhaustion and stops the actor (calls
+        /// [`Actor::on_shutdown`]).
+        ///
+        /// This hook is polled after the shutdown signal and before lanes and
+        /// [`Actor::on_external`].
+        ///
+        /// # Cancellation safety
+        ///
+        /// This future is dropped and recreated whenever another source wins
+        /// the race. Implementations must be **cancellation-safe**: any work
+        /// done before an internal `.await` point may be lost if the future
+        /// is cancelled at that point.
+        ///
+        /// # Ownership
+        ///
+        /// The returned future must be `'static` so it can be raced
+        /// concurrently with [`Actor::on_external`].
+        fn on_external_priority(
+            &mut self,
+            _context: &mut E,
+            _args: &mut Self::Args,
+        ) -> impl Future<Output = Option<<Self::Ingress as IntoIngressEnvelope>::ReadWriteIngress>>
+               + Send
+               + 'static {
+            futures::future::pending()
+        }
+
         /// Poll external per-iteration sources and map them to ingress.
         ///
         /// The service loop recreates this future each iteration and races it
         /// against lane receivers. Returning `Some(ingress)` dispatches one
         /// event via [`Actor::on_read_write`]. Returning `None` signals
         /// exhaustion and stops the actor (calls [`Actor::on_shutdown`]).
+        ///
+        /// This hook is polled after the shutdown signal,
+        /// [`Actor::on_external_priority`], and lanes.
         ///
         /// # Cancellation safety
         ///

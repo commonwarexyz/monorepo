@@ -211,11 +211,20 @@ where
             }
 
             let event = {
+                let external_priority = self
+                    .actor
+                    .on_external_priority(self.context.as_present_mut(), &mut args);
+                let external_priority = pin!(external_priority);
                 let external = self
                     .actor
                     .on_external(self.context.as_present_mut(), &mut args);
                 let external = pin!(external);
-                let recv = Self::recv_event(&mut self.shutdown, &mut self.lanes, external);
+                let recv = Self::recv_event(
+                    &mut self.shutdown,
+                    &mut self.lanes,
+                    external_priority,
+                    external,
+                );
                 if reads.is_empty() {
                     Some(recv.await)
                 } else {
@@ -444,21 +453,27 @@ where
 
     /// Await the next event for the actor loop using biased `select!`.
     ///
-    /// Priority order: shutdown signal, lane messages, then the actor-defined
-    /// external future. At most one event is returned per call.
-    async fn recv_event<W, F>(
+    /// Priority order: shutdown signal, actor-defined priority external
+    /// future, lane messages, then actor-defined external future. At most
+    /// one event is returned per call.
+    async fn recv_event<W, P, F>(
         shutdown: &mut Signal,
         lanes: &mut [LaneReceiver<A::Ingress>],
+        mut external_priority: Pin<&mut P>,
         mut external: Pin<&mut F>,
     ) -> LoopEvent<A::Ingress, W>
     where
         W: Send + 'static,
+        P: Future<Output = Option<W>> + Send,
         F: Future<Output = Option<W>> + Send,
     {
         let mut lane_recv = Lanes { lanes };
         select! {
             _ = &mut *shutdown => {
                 LoopEvent::Shutdown
+            },
+            message = &mut external_priority => {
+                LoopEvent::External(message)
             },
             lane_event = &mut lane_recv => {
                 LoopEvent::Mailbox(lane_event.lane, lane_event.message)
