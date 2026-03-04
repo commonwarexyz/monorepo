@@ -72,13 +72,7 @@ where
             }
             COMMIT_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
-                let floor_loc = UInt::read(buf)?;
-                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
-                    CodecError::Invalid(
-                        "storage::qmdb::any::operation::variable::Operation",
-                        "commit floor location overflow",
-                    )
-                })?;
+                let floor_loc = Location::read(buf)?;
                 Ok(Self::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),

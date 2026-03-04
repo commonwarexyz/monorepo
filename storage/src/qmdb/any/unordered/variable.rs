@@ -390,12 +390,12 @@ pub(crate) mod test {
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1961))
+                Some(Location::new(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
+            assert_eq!(db.inactivity_floor_loc(), Location::new(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.bounds().await.start, Location::new_unchecked(756));
+            assert_eq!(db.bounds().await.start, Location::new(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.sync().await.unwrap();
@@ -407,10 +407,10 @@ pub(crate) mod test {
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1961))
+                Some(Location::new(1961))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(db.bounds().await.start, Location::new_unchecked(756));
+            assert_eq!(db.inactivity_floor_loc(), Location::new(756));
+            assert_eq!(db.bounds().await.start, Location::new(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -436,7 +436,7 @@ pub(crate) mod test {
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
-            let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
+            let beyond_floor = Location::new(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
             let mut db = db.into_merkleized();

@@ -154,7 +154,7 @@ where
         context.with_label("mmr"),
         mmr::journaled::SyncConfig {
             config: mmr_config,
-            range: Position::try_from(range.start)?..Position::try_from(range.end + 1)?,
+            range: Position::try_from(range.start)?..Position::try_from(range.end)?,
             pinned_nodes,
         },
         &mut hasher,
@@ -182,7 +182,7 @@ where
     //
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
-    let known_inactivity_floor = Location::new_unchecked(status.len());
+    let known_inactivity_floor = Location::new(status.len());
     let any: AnyDb<E, J, I, H, U, _, _> = AnyDb::init_from_log(
         index,
         log,

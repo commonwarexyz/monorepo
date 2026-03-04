@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::Prune { loc } => {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
-                        let safe_loc = Location::new(safe_loc).unwrap();
+                        let safe_loc = Location::new(safe_loc);
                         let mut merkleized_db = db.into_merkleized();
                         merkleized_db
                             .prune(safe_loc)
@@ -188,7 +188,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.bounds().await.end;
                     if op_count > 0 {
                         let safe_start = start_index % op_count.as_u64();
-                        let safe_start = Location::new(safe_start).unwrap();
+                        let safe_start = Location::new(safe_start);
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
                         let (durable_db, _) = db.commit(None).await.unwrap();
@@ -213,9 +213,9 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.bounds().await.end;
                     if op_count > 0 && uncommitted_ops.is_empty() {
                         let safe_size = (size % op_count.as_u64()).max(1);
-                        let safe_size = Location::new(safe_size).unwrap();
+                        let safe_size = Location::new(safe_size);
                         let safe_start = start_loc % safe_size.as_u64();
-                        let safe_start = Location::new(safe_start).unwrap();
+                        let safe_start = Location::new(safe_start);
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 

@@ -362,7 +362,7 @@ where
         .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
 
     // Initialize the anydb with a callback that populates the status bitmap.
-    let last_known_inactivity_floor = Location::new_unchecked(status.len());
+    let last_known_inactivity_floor = Location::new(status.len());
     let any = any::init_fixed(
         context.with_label("any"),
         config.into(),
@@ -450,7 +450,7 @@ where
         .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
 
     // Initialize the anydb with a callback that populates the activity status bitmap.
-    let last_known_inactivity_floor = Location::new_unchecked(status.len());
+    let last_known_inactivity_floor = Location::new(status.len());
     let any = any::init_variable(
         context.with_label("any"),
         config.into(),
@@ -1020,13 +1020,10 @@ pub mod tests {
             db.prune(db.inactivity_floor_loc().await).await.unwrap();
 
             // Verify expected state after prune.
-            assert_eq!(
-                db.bounds().await.end,
-                Location::new_unchecked(expected_op_count)
-            );
+            assert_eq!(db.bounds().await.end, Location::new(expected_op_count));
             assert_eq!(
                 db.inactivity_floor_loc().await,
-                Location::new_unchecked(expected_inactivity_floor)
+                Location::new(expected_inactivity_floor)
             );
 
             // Record root before dropping.
@@ -1037,13 +1034,10 @@ pub mod tests {
             // Reopen the db and verify it has exactly the same state.
             let db: C = open_db(context.with_label("second"), "build-big".into()).await;
             assert_eq!(root, db.root());
-            assert_eq!(
-                db.bounds().await.end,
-                Location::new_unchecked(expected_op_count)
-            );
+            assert_eq!(db.bounds().await.end, Location::new(expected_op_count));
             assert_eq!(
                 db.inactivity_floor_loc().await,
-                Location::new_unchecked(expected_inactivity_floor)
+                Location::new(expected_inactivity_floor)
             );
 
             // Confirm the db's state matches that of the separate map we computed independently.

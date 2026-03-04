@@ -176,11 +176,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
         self.inner.read().mem_mmr.leaves()
     }
 
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        self.inner.read().mem_mmr.last_leaf_pos()
-    }
-
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
@@ -1176,7 +1171,7 @@ mod tests {
             assert!(empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
-                Location::new_unchecked(0),
+                Location::new(0),
                 &root
             ));
             assert!(empty_proof.verify_multi_inclusion(
@@ -1193,7 +1188,7 @@ mod tests {
             assert!(!empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
-                Location::new_unchecked(0),
+                Location::new(0),
                 &root
             ));
             assert!(!empty_proof.verify_multi_inclusion(
@@ -1288,7 +1283,7 @@ mod tests {
                 }
             }
             let mut mmr = mmr.merkleize(&mut hasher);
-            let leaf_pos = Position::try_from(Location::new_unchecked(50)).unwrap();
+            let leaf_pos = Position::try_from(Location::new(50)).unwrap();
             mmr.prune_to_pos(leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             let mut mmr = mmr.into_dirty();
@@ -1334,7 +1329,7 @@ mod tests {
                 mmr.add(&mut hasher, &i.to_be_bytes()).unwrap();
             }
             let mut mmr = mmr.merkleize(&mut hasher);
-            mmr.prune_to_pos(Position::try_from(Location::new_unchecked(8)).unwrap())
+            mmr.prune_to_pos(Position::try_from(Location::new(8)).unwrap())
                 .await
                 .unwrap();
             let mut mmr = mmr.into_dirty();
@@ -1356,8 +1351,8 @@ mod tests {
             let mut mmr = mmr.merkleize(&mut hasher).into_dirty();
             assert_eq!(mmr.merkleized_leaves(), mmr.leaves());
             assert!(matches!(mmr.pop(9).await, Err(Error::Empty)));
-            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
-            assert_eq!(mmr.merkleized_leaves(), Location::new_unchecked(0));
+            assert_eq!(mmr.leaves(), Location::new(0));
+            assert_eq!(mmr.merkleized_leaves(), Location::new(0));
             mmr.merkleize(&mut hasher).destroy().await.unwrap();
         });
     }
@@ -1385,7 +1380,7 @@ mod tests {
 
             // Generate & verify proof from element that is not yet flushed to the journal.
             const TEST_ELEMENT: usize = 133;
-            const TEST_ELEMENT_LOC: Location = Location::new_unchecked(TEST_ELEMENT as u64);
+            const TEST_ELEMENT_LOC: Location = Location::new(TEST_ELEMENT as u64);
 
             let proof = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
             let root = mmr.root();
@@ -1405,8 +1400,7 @@ mod tests {
             assert_eq!(proof, proof2);
 
             // Generate & verify a proof that spans flushed elements and the last element.
-            let range = Location::new_unchecked(TEST_ELEMENT as u64)
-                ..Location::new_unchecked(LEAF_COUNT as u64);
+            let range = Location::new(TEST_ELEMENT as u64)..Location::new(LEAF_COUNT as u64);
             let proof = mmr.range_proof(range.clone()).await.unwrap();
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
@@ -1739,10 +1733,7 @@ mod tests {
 
             // Historical proof should match "regular" proof when historical size == current database size
             let historical_proof = mmr
-                .historical_range_proof(
-                    original_leaves,
-                    Location::new_unchecked(2)..Location::new_unchecked(6),
-                )
+                .historical_range_proof(original_leaves, Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
             assert_eq!(historical_proof.leaves, original_leaves);
@@ -1750,11 +1741,11 @@ mod tests {
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[2..6],
-                Location::new_unchecked(2),
+                Location::new(2),
                 &root
             ));
             let regular_proof = mmr
-                .range_proof(Location::new_unchecked(2)..Location::new_unchecked(6))
+                .range_proof(Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
             assert_eq!(regular_proof.leaves, historical_proof.leaves);
@@ -1768,10 +1759,7 @@ mod tests {
             }
             let mmr = mmr.merkleize(&mut hasher);
             let new_historical_proof = mmr
-                .historical_range_proof(
-                    original_leaves,
-                    Location::new_unchecked(2)..Location::new_unchecked(6),
-                )
+                .historical_range_proof(original_leaves, Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
             assert_eq!(new_historical_proof.leaves, historical_proof.leaves);
@@ -1838,10 +1826,7 @@ mod tests {
 
             // Test proof at historical position after pruning
             let historical_proof = mmr
-                .historical_range_proof(
-                    historical_leaves,
-                    Location::new_unchecked(35)..Location::new_unchecked(39),
-                )
+                .historical_range_proof(historical_leaves, Location::new(35)..Location::new(39))
                 .await
                 .unwrap();
 
@@ -1851,7 +1836,7 @@ mod tests {
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[35..39],
-                Location::new_unchecked(35),
+                Location::new(35),
                 &historical_root
             ));
 
@@ -1894,7 +1879,7 @@ mod tests {
             }
             let mmr = mmr.merkleize(&mut hasher);
 
-            let range = Location::new_unchecked(30)..Location::new_unchecked(61);
+            let range = Location::new(30)..Location::new(61);
 
             // Only apply elements up to end_loc to the reference MMR.
             let ref_mmr = Mmr::init(
@@ -1960,10 +1945,7 @@ mod tests {
 
             // Test single element proof at historical position
             let single_proof = mmr
-                .historical_range_proof(
-                    Location::new_unchecked(1),
-                    Location::new_unchecked(0)..Location::new_unchecked(1),
-                )
+                .historical_range_proof(Location::new(1), Location::new(0)..Location::new(1))
                 .await
                 .unwrap();
 
@@ -1971,7 +1953,7 @@ mod tests {
             assert!(single_proof.verify_range_inclusion(
                 &mut hasher,
                 &[element],
-                Location::new_unchecked(0),
+                Location::new(0),
                 &root
             ));
 
@@ -2350,8 +2332,8 @@ mod tests {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
 
-            let historical_leaves = Location::new_unchecked(11);
-            let range = Location::new_unchecked(3)..Location::new_unchecked(9);
+            let historical_leaves = Location::new(11);
+            let range = Location::new(3)..Location::new(9);
             let result = mmr
                 .historical_range_proof(historical_leaves, range.clone())
                 .await;
@@ -2421,13 +2403,13 @@ mod tests {
             }
 
             let mut clean = mmr.merkleize(&mut hasher);
-            let prune_pos = Position::try_from(Location::new_unchecked(16)).unwrap();
+            let prune_pos = Position::try_from(Location::new(16)).unwrap();
             clean.prune_to_pos(prune_pos).await.unwrap();
 
             let historical_leaves = clean.leaves();
             let mut pruned_loc = None;
             for loc_u64 in 0..*historical_leaves {
-                let loc = Location::new_unchecked(loc_u64);
+                let loc = Location::new(loc_u64);
                 let result = clean
                     .historical_range_proof(historical_leaves, loc..loc + 1)
                     .await;
@@ -2471,8 +2453,8 @@ mod tests {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
 
-            let historical_leaves = Location::new_unchecked(10);
-            let range = Location::new_unchecked(2)..Location::new_unchecked(8);
+            let historical_leaves = Location::new(10);
+            let range = Location::new(2)..Location::new(8);
             // Transition through clean and back to dirty so historical proofs are available.
             let mmr = mmr.merkleize(&mut hasher).into_dirty();
 
@@ -2517,8 +2499,8 @@ mod tests {
             let clean = mmr.merkleize(&mut hasher);
             clean.sync().await.unwrap();
 
-            let historical_leaves = Location::new_unchecked(20);
-            let range = Location::new_unchecked(5)..Location::new_unchecked(15);
+            let historical_leaves = Location::new(20);
+            let range = Location::new(5)..Location::new(15);
             let expected = clean
                 .historical_range_proof(historical_leaves, range.clone())
                 .await
@@ -2560,11 +2542,11 @@ mod tests {
             }
             let mut mmr = mmr.merkleize(&mut hasher);
 
-            let prune_loc = Location::new_unchecked(10);
+            let prune_loc = Location::new(10);
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr.prune_to_pos(prune_pos).await.unwrap();
 
-            let requested = Location::new_unchecked(20);
+            let requested = Location::new(20);
             let range = prune_loc..requested;
             let clean_proof = mmr
                 .historical_range_proof(requested, range.clone())
@@ -2596,7 +2578,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let empty_end = Location::new_unchecked(0);
+            let empty_end = Location::new(0);
             let clean_empty = mmr
                 .historical_range_proof(empty_end, empty_end..empty_end)
                 .await;
@@ -2679,7 +2661,7 @@ mod tests {
             assert!(clean_ok.is_ok());
             let pruned_end = keep_loc - 1;
             // make sure this is in a pruned range, considering blob boundaries.
-            let start_loc = Location::new_unchecked(1);
+            let start_loc = Location::new(1);
             let clean_pruned = mmr
                 .historical_range_proof(end, start_loc..pruned_end + 1)
                 .await;
@@ -2721,7 +2703,7 @@ mod tests {
             let requested = mmr.leaves() + 1;
 
             let clean_result = mmr
-                .historical_range_proof(requested, Location::new_unchecked(0)..requested)
+                .historical_range_proof(requested, Location::new(0)..requested)
                 .await;
             assert!(matches!(
                 clean_result,
@@ -2730,7 +2712,7 @@ mod tests {
 
             let mmr = mmr.into_dirty();
             let dirty_result = mmr
-                .historical_range_proof(requested, Location::new_unchecked(0)..requested)
+                .historical_range_proof(requested, Location::new(0)..requested)
                 .await;
             assert!(matches!(
                 dirty_result,
@@ -2760,8 +2742,8 @@ mod tests {
                 mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
 
-            let requested_unmerkleized = Location::new_unchecked(5);
-            let valid_range = Location::new_unchecked(0)..Location::new_unchecked(1);
+            let requested_unmerkleized = Location::new(5);
+            let valid_range = Location::new(0)..Location::new(1);
             let unmerkleized = mmr
                 .historical_range_proof(requested_unmerkleized, valid_range.clone())
                 .await;
@@ -2787,7 +2769,7 @@ mod tests {
             // Requested range end is out of bounds for the current MMR; this should also win over
             // Unmerkleized.
             let end_oob = mmr.leaves() + 1;
-            let range_oob = Location::new_unchecked(0)..end_oob;
+            let range_oob = Location::new(0)..end_oob;
             let dirty_result = mmr
                 .historical_range_proof(requested_unmerkleized, range_oob.clone())
                 .await;
@@ -2799,7 +2781,7 @@ mod tests {
             // Requested range end can also be out of bounds for the requested historical size
             // while still being within the current MMR size. This should also beat Unmerkleized.
             let range_end_gt_requested = requested_unmerkleized + 1;
-            let range_oob_at_requested = Location::new_unchecked(0)..range_end_gt_requested;
+            let range_oob_at_requested = Location::new(0)..range_end_gt_requested;
             assert!(range_end_gt_requested <= mmr.leaves());
             let dirty_result = mmr
                 .historical_range_proof(requested_unmerkleized, range_oob_at_requested)
@@ -2810,8 +2792,8 @@ mod tests {
             ));
 
             // Range location overflow should be returned before Unmerkleized.
-            let overflow_loc = Location::new_unchecked(u64::MAX);
-            let overflow_range = Location::new_unchecked(0)..overflow_loc;
+            let overflow_loc = Location::new(u64::MAX);
+            let overflow_range = Location::new(0)..overflow_loc;
             let dirty_result = mmr
                 .historical_range_proof(requested_unmerkleized, overflow_range.clone())
                 .await;
@@ -2857,7 +2839,7 @@ mod tests {
                 let prune_pos = Position::new(raw_pos);
                 mmr.prune_to_pos(prune_pos).await.unwrap();
                 for loc_u64 in 0..*end {
-                    let loc = Location::new_unchecked(loc_u64);
+                    let loc = Location::new(loc_u64);
                     let loc_pos = Position::try_from(loc).expect("test loc should be valid");
                     let range_includes_pruned_leaf = loc_pos < prune_pos;
                     match mmr.historical_proof(end, loc).await {
@@ -2873,7 +2855,7 @@ mod tests {
 
                 let dirty = mmr.into_dirty();
                 for loc_u64 in 0..*end {
-                    let loc = Location::new_unchecked(loc_u64);
+                    let loc = Location::new(loc_u64);
                     let loc_pos = Position::try_from(loc).expect("test loc should be valid");
                     let range_includes_pruned_leaf = loc_pos < prune_pos;
                     match dirty.historical_proof(end, loc).await {

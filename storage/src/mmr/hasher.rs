@@ -211,7 +211,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Location::new_unchecked(0), empty_vec.iter());
+        let empty_out = mmr_hasher.root(Location::new(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -221,22 +221,22 @@ mod tests {
         assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
+        let out = mmr_hasher.root(Location::new(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
+        let mut out2 = mmr_hasher.root(Location::new(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(Location::new_unchecked(11), digests.iter());
+        out2 = mmr_hasher.root(Location::new(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

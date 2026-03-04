@@ -74,8 +74,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     page_cache: db_config.page_cache.clone(),
                 },
-                range: Position::try_from(range.start)?
-                    ..Position::try_from(range.end.saturating_add(1))?,
+                range: Position::try_from(range.start)?..Position::try_from(range.end)?,
                 pinned_nodes,
             },
             &mut hasher,
@@ -96,12 +95,12 @@ where
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.journal.reader().await;
-            let start_loc = Location::new_unchecked(reader.bounds().start);
+            let start_loc = Location::new(reader.bounds().start);
 
             // Build snapshot from the log
             build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-            Location::new_unchecked(
+            Location::new(
                 reader
                     .bounds()
                     .end
@@ -591,7 +590,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new_unchecked(31)..Location::new_unchecked(31),
+                    range: Location::new(31)..Location::new(31),
                 },
                 context: context.with_label("client"),
                 resolver: Arc::new(target_db),
@@ -605,8 +604,8 @@ mod tests {
                     lower_bound_pos,
                     upper_bound_pos,
                 })) => {
-                    assert_eq!(lower_bound_pos, Location::new_unchecked(31));
-                    assert_eq!(upper_bound_pos, Location::new_unchecked(31));
+                    assert_eq!(lower_bound_pos, Location::new(31));
+                    assert_eq!(upper_bound_pos, Location::new(31));
                 }
                 _ => panic!("Expected InvalidTarget error"),
             }
@@ -810,7 +809,7 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
 
-            target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -946,7 +945,7 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
 
-            target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();

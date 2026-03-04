@@ -150,15 +150,6 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         Location::try_from(self.size()).expect("invalid mmr size")
     }
 
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        if self.size() == 0 {
-            return None;
-        }
-
-        Some(PeakIterator::last_leaf_pos(self.size()))
-    }
-
     /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
     /// retained nodes respectively.
     pub fn bounds(&self) -> Range<Position> {
@@ -441,18 +432,14 @@ impl<D: Digest> DirtyMmr<D> {
     /// Add `digest` as a new leaf in the MMR, returning its position.
     pub(crate) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
+        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator()).len() as u32;
         let leaf_pos = self.size();
         self.nodes.push_back(digest);
 
-        let mut height = 1;
-        for _ in nodes_needing_parents {
+        for height in 1..=nodes_needing_parents {
             let new_node_pos = self.size();
             self.nodes.push_back(D::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
-            height += 1;
         }
 
         leaf_pos
@@ -785,8 +772,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
-            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
-            assert_eq!(mmr.last_leaf_pos(), None);
+            assert_eq!(mmr.leaves(), Location::new(0));
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
@@ -796,10 +782,7 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(
-                *mmr.root(),
-                hasher.root(Location::new_unchecked(0), [].iter())
-            );
+            assert_eq!(*mmr.root(), hasher.root(Location::new(0), [].iter()));
         });
     }
 
@@ -886,7 +869,7 @@ mod tests {
             // verify root
             let root = *mmr.root();
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root(Location::new_unchecked(11), peak_digests.iter());
+            let expected_root = hasher.root(Location::new(11), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
@@ -898,30 +881,23 @@ mod tests {
             // fact still be able to generate them for some, but it's not guaranteed. For example,
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
-            assert!(matches!(
-                mmr.proof(Location::new_unchecked(0)),
-                Err(ElementPruned(_))
-            ));
-            assert!(matches!(
-                mmr.proof(Location::new_unchecked(6)),
-                Err(ElementPruned(_))
-            ));
+            assert!(matches!(mmr.proof(Location::new(0)), Err(ElementPruned(_))));
+            assert!(matches!(mmr.proof(Location::new(6)), Err(ElementPruned(_))));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
-            assert!(mmr.proof(Location::new_unchecked(8)).is_ok());
-            assert!(mmr.proof(Location::new_unchecked(10)).is_ok());
+            assert!(mmr.proof(Location::new(8)).is_ok());
+            assert!(mmr.proof(Location::new(10)).is_ok());
 
             let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
-                mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(9))
-                    .is_err(),
+                mmr.range_proof(Location::new(5)..Location::new(9)).is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new_unchecked(8)..mmr.leaves()).is_ok(),
+                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
@@ -939,7 +915,6 @@ mod tests {
             .unwrap();
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
-            assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.bounds().start, mmr.bounds().start);
             assert_eq!(*mmr_copy.root(), root);
         });
@@ -1130,7 +1105,7 @@ mod tests {
             }
             let mut mmr = mmr.merkleize(&mut hasher, None);
 
-            let leaf_pos = Position::try_from(Location::new_unchecked(100)).unwrap();
+            let leaf_pos = Position::try_from(Location::new(100)).unwrap();
             mmr.prune_to_pos(leaf_pos);
             let mut mmr = mmr.into_dirty();
             while mmr.size() > leaf_pos {
@@ -1162,7 +1137,7 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                let leaf_loc = Location::new_unchecked(leaf as u64);
+                let leaf_loc = Location::new(leaf as u64);
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
@@ -1179,7 +1154,7 @@ mod tests {
             mmr.prune_to_pos(Position::new(150));
             for leaf_pos in 150u64..=190 {
                 mmr.prune_to_pos(Position::new(leaf_pos));
-                let leaf_loc = Location::new_unchecked(leaf_pos);
+                let leaf_loc = Location::new(leaf_pos);
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
         });
@@ -1210,7 +1185,7 @@ mod tests {
             let mmr = CleanMmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
-            let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
+            let result = mmr.update_leaf(&mut hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
@@ -1261,7 +1236,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xFF);
 
             // Save the original leaf digest so we can restore it.
-            let loc = Location::new_unchecked(5);
+            let loc = Location::new(5);
             let leaf_pos = Position::try_from(loc).unwrap();
             let original_digest = mmr.get_node(leaf_pos).unwrap();
 
@@ -1281,7 +1256,7 @@ mod tests {
             let mut dirty = mmr.into_dirty();
             for i in [0u64, 1, 50, 100, 199] {
                 dirty
-                    .update_leaf_digest(Location::new_unchecked(i), updated_digest)
+                    .update_leaf_digest(Location::new(i), updated_digest)
                     .unwrap();
             }
             let mmr = dirty.merkleize(&mut hasher, None);
@@ -1298,7 +1273,7 @@ mod tests {
                 // Out of bounds: location >= leaf count.
                 let mmr = CleanMmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100).into_dirty();
-                let result = mmr.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
+                let result = mmr.update_leaf_digest(Location::new(100), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::InvalidPosition(_))));
             }
 
@@ -1308,7 +1283,7 @@ mod tests {
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
                 mmr.prune_to_pos(Position::new(50));
                 let mut dirty = mmr.into_dirty();
-                let result = dirty.update_leaf_digest(Location::new_unchecked(0), Sha256::fill(0));
+                let result = dirty.update_leaf_digest(Location::new(0), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::ElementPruned(_))));
             }
         });
@@ -1325,7 +1300,7 @@ mod tests {
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
-            let leaf_loc = Location::new_unchecked(leaf);
+            let leaf_loc = Location::new(leaf);
             updates.push((leaf_loc, &element));
         }
         let mut mmr = mmr.into_dirty();
@@ -1340,7 +1315,7 @@ mod tests {
         for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            let leaf_loc = Location::new_unchecked(leaf);
+            let leaf_loc = Location::new(leaf);
             updates.push((leaf_loc, element));
         }
         let mut mmr = mmr.into_dirty();
@@ -1517,18 +1492,18 @@ mod tests {
         executor.start(|_| async move {
             // Range end > leaves errors on empty MMR
             let mmr = CleanMmr::new(&mut hasher);
-            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
-            let result = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(1));
+            assert_eq!(mmr.leaves(), Location::new(0));
+            let result = mmr.range_proof(Location::new(0)..Location::new(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end > leaves errors on non-empty MMR
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
-            assert_eq!(mmr.leaves(), Location::new_unchecked(10));
-            let result = mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(11));
+            assert_eq!(mmr.leaves(), Location::new(10));
+            let result = mmr.range_proof(Location::new(5)..Location::new(11));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end == leaves succeeds
-            let result = mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(10));
+            let result = mmr.range_proof(Location::new(5)..Location::new(10));
             assert!(result.is_ok());
         });
     }
@@ -1541,7 +1516,7 @@ mod tests {
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
             let mmr = CleanMmr::new(&mut hasher);
-            let result = mmr.proof(Location::new_unchecked(0));
+            let result = mmr.proof(Location::new(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1550,7 +1525,7 @@ mod tests {
 
             // Test on non-empty MMR with location >= leaves
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
-            let result = mmr.proof(Location::new_unchecked(10));
+            let result = mmr.proof(Location::new(10));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1558,7 +1533,7 @@ mod tests {
             );
 
             // location < leaves should succeed
-            let result = mmr.proof(Location::new_unchecked(9));
+            let result = mmr.proof(Location::new(9));
             assert!(result.is_ok(), "expected Ok, got {:?}", result);
         });
     }

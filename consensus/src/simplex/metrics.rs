@@ -16,7 +16,6 @@ impl Peer {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum TimeoutReason {
-    Initialization,
     Inactivity,
     LeaderNullify,
     LeaderTimeout,

@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
                     let merkleized_db = db.into_merkleized();
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let start_loc = Location::new(start_loc).unwrap();
+                    let start_loc = Location::new(start_loc);
                     let root = merkleized_db.root();
                     if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
@@ -248,9 +248,9 @@ fn fuzz(input: FuzzInput) {
                     }
                     let merkleized_db = db.into_merkleized();
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                    let size = Location::new(size).unwrap();
+                    let size = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
-                    let start_loc = Location::new(start_loc).unwrap();
+                    let start_loc = Location::new(start_loc);
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let root = merkleized_db.root();
                     if let Ok((proof, ops)) = merkleized_db

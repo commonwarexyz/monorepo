@@ -171,8 +171,8 @@ mod tests {
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
         });
-        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
+        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new(5));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(7));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -188,7 +188,7 @@ mod tests {
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
         let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
-        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
+        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new(3));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -208,9 +208,8 @@ mod tests {
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
         });
-        let commit_some =
-            Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));
+        let commit_some = Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new(9));
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(10));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -230,7 +229,7 @@ mod tests {
             FixedBytes::from([5, 5, 5, 5]),
             vec![7, 7, 7, 7],
         ));
-        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12));
+        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new(12));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);

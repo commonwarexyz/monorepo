@@ -113,7 +113,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = Location::new(1).unwrap();
+        let mut last_committed_op_count = Location::new(1);
 
         for op in &data.operations {
             match op {
@@ -220,7 +220,7 @@ fn fuzz(data: FuzzInput) {
 
                         // Adjust start_loc and max_ops to be within the valid range
                         let current_op_count = merkleized_db.bounds().await.end;
-                        let start_loc = Location::new(start_loc % *current_op_count).unwrap();
+                        let start_loc = Location::new(start_loc % *current_op_count);
 
                         let oldest_loc = merkleized_db.inactivity_floor_loc();
                         if start_loc >= oldest_loc {
@@ -256,7 +256,7 @@ fn fuzz(data: FuzzInput) {
                     let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
 
                     let current_op_count = merkleized_db.bounds().await.end;
-                    let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
+                    let start_loc = Location::new(start_loc % current_op_count.as_u64());
                     let root = merkleized_db.root();
 
                     if let Ok((range_proof, ops, chunks)) = merkleized_db

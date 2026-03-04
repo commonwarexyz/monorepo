@@ -190,7 +190,7 @@ impl<
             let active_keys =
                 build_snapshot_from_log(inactivity_floor_loc, &reader, &mut snapshot, |_, _| {})
                     .await?;
-            let last_commit_loc = Location::new_unchecked(
+            let last_commit_loc = Location::new(
                 reader
                     .bounds()
                     .end

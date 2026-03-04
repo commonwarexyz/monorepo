@@ -110,6 +110,48 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl std::future::Future<Output = Self::Db> + Send;
 }
 
+/// Test that empty operations arrays fetched do not cause panics when stored and applied
+pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Init target_db to satisfy engine configuration bounds
+        let target_db = H::init_db(context.with_label("target")).await;
+
+        // Use an arbitrary target
+        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let config = Config {
+            db_config,
+            fetch_batch_size: NZU64!(10),
+            target: Target {
+                root: Digest::from([1u8; 32]),
+                range: Location::new(0)..Location::new(10),
+            },
+            context: context.with_label("client"),
+            resolver: Arc::new(target_db),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+        };
+
+        // Create the engine
+        let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
+
+        // Pass empty operations vectors which should not cause panics
+        client.store_operations(Location::new(0), vec![]);
+        client.store_operations(Location::new(5), vec![]);
+
+        // Apply operations which also shouldn't panic
+        client.apply_operations().await.unwrap();
+
+        // It is considered a success simply if it didn't panic.
+    });
+}
+
 /// Test that invalid bounds are rejected
 pub(crate) fn test_sync_invalid_bounds<H: SyncTestHarness>()
 where
@@ -126,7 +168,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: Digest::from([1u8; 32]),
-                range: Location::new_unchecked(31)..Location::new_unchecked(30), // Invalid: start > end
+                range: Location::new(31)..Location::new(30), // Invalid: start > end
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -141,8 +183,8 @@ where
                 lower_bound_pos,
                 upper_bound_pos,
             })) => {
-                assert_eq!(lower_bound_pos, Location::new_unchecked(31));
-                assert_eq!(upper_bound_pos, Location::new_unchecked(30));
+                assert_eq!(lower_bound_pos, Location::new(31));
+                assert_eq!(upper_bound_pos, Location::new(30));
             }
             _ => panic!("Expected InvalidTarget error"),
         }
@@ -166,7 +208,7 @@ where
             context: context.with_label("client"),
             target: Target {
                 root: target_root,
-                range: Location::new_unchecked(0)..Location::new_unchecked(5),
+                range: Location::new(0)..Location::new(5),
             },
             resolver,
             apply_batch_size: 2,
@@ -1280,7 +1322,7 @@ where
         let source_db = H::init_db(context.with_label("source")).await;
 
         // An empty database has exactly 1 operation (the initial CommitFloor)
-        assert_eq!(source_db.bounds().await.end, Location::new_unchecked(1));
+        assert_eq!(source_db.bounds().await.end, Location::new(1));
 
         let target_hash = MerkleizedStore::root(&source_db);
         let (mmr, journal) = source_db.into_log_components();
@@ -1293,18 +1335,15 @@ where
             new_db_config,
             journal,
             None,
-            Location::new_unchecked(0)..Location::new_unchecked(1),
+            Location::new(0)..Location::new(1),
             1024,
         )
         .await
         .unwrap();
 
         // Verify database state
-        assert_eq!(synced_db.bounds().await.end, Location::new_unchecked(1));
-        assert_eq!(
-            synced_db.inactivity_floor_loc().await,
-            Location::new_unchecked(0)
-        );
+        assert_eq!(synced_db.bounds().await.end, Location::new(1));
+        assert_eq!(synced_db.inactivity_floor_loc().await, Location::new(0));
         assert_eq!(MerkleizedStore::root(&synced_db), target_hash);
 
         // Test that we can perform operations on the synced database
@@ -1312,7 +1351,7 @@ where
         synced_db = H::apply_ops(synced_db, ops).await;
 
         // Verify the operations worked
-        assert!(synced_db.bounds().await.end > Location::new_unchecked(1));
+        assert!(synced_db.bounds().await.end > Location::new(1));
 
         synced_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
@@ -1563,6 +1602,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_invalid_bounds() {
                 super::test_sync_invalid_bounds::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_empty_operations_no_panic() {
+                super::test_sync_empty_operations_no_panic::<$harness>();
             }
 
             #[test_traced]

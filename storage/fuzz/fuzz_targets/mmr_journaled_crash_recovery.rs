@@ -135,7 +135,7 @@ async fn run_operations(
                 if mmr.add(hasher, data).is_err() {
                     // Partial write possible: max is size after one leaf added
                     max_size = max_size.max(
-                        Position::try_from(Location::new(leaves_before).unwrap() + 1)
+                        Position::try_from(Location::new(leaves_before) + 1)
                             .unwrap()
                             .as_u64(),
                     );
@@ -159,10 +159,9 @@ async fn run_operations(
                         // Partial pop possible: min could be target
                         min_leaves = min_leaves.min(target_leaves);
                         if target_leaves > 0 {
-                            let target_size =
-                                Position::try_from(Location::new(target_leaves).unwrap())
-                                    .unwrap()
-                                    .as_u64();
+                            let target_size = Position::try_from(Location::new(target_leaves))
+                                .unwrap()
+                                .as_u64();
                             min_size = min_size.min(target_size);
                         } else {
                             min_size = 0;

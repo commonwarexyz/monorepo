@@ -1,15 +1,18 @@
 use super::location::Location;
 use bytes::{Buf, BufMut};
-use commonware_codec::ReadExt;
+use commonware_codec::{varint::UInt, ReadExt};
 use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
-/// Maximum valid [Position] value that can exist in a valid MMR.
+/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
 ///
-/// This value corresponds to the last node in an MMR with the maximum number of leaves.
-pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 63) - 2
+/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
+///
+/// Node indices are 0-based, so valid indices satisfy `pos < MAX_POSITION`. Node counts
+/// and MMR sizes satisfy `pos <= MAX_POSITION`.
+pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
 
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
@@ -35,6 +38,13 @@ impl Position {
     #[inline]
     pub const fn as_u64(self) -> u64 {
         self.0
+    }
+
+    /// Returns `true` iff this value is within the valid range (`<= MAX_POSITION`).
+    /// This covers both node indices (`< MAX_POSITION`) and node counts (`<= MAX_POSITION`).
+    #[inline]
+    pub const fn is_valid(self) -> bool {
+        self.0 <= MAX_POSITION.0
     }
 
     /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
@@ -159,9 +169,9 @@ impl From<Position> for u64 {
     }
 }
 
-/// Try to convert a [Location] to a [Position].
+/// Try to convert a leaf [Location] to its node [Position].
 ///
-/// Returns an error if `loc` > [super::MAX_LOCATION].
+/// Returns [super::Error::LocationOverflow] if `!loc.is_valid()`.
 ///
 /// # Examples
 ///
@@ -169,12 +179,13 @@ impl From<Position> for u64 {
 /// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
 /// use core::convert::TryFrom;
 ///
-/// let loc = Location::new(5).unwrap();
+/// let loc = Location::new(5);
 /// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
 ///
-/// // Invalid locations return error
-/// assert!(Location::new(MAX_LOCATION + 1).is_none());
+/// // MAX_LOCATION converts successfully (it is the leaf count for 2^62 leaves)
+/// let pos = Position::try_from(MAX_LOCATION).unwrap();
+/// assert!(pos.is_valid());
 /// ```
 impl TryFrom<Location> for Position {
     type Error = super::Error;
@@ -189,7 +200,7 @@ impl TryFrom<Location> for Position {
         Ok(Self(
             loc_val
                 .checked_mul(2)
-                .expect("should not overflow for valid location")
+                .expect("should not overflow for valid leaf index")
                 - loc_val.count_ones() as u64,
         ))
     }
@@ -308,14 +319,14 @@ impl SubAssign<u64> for Position {
 impl commonware_codec::Write for Position {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        commonware_codec::varint::UInt(self.0).write(buf);
+        UInt(self.0).write(buf);
     }
 }
 
 impl commonware_codec::EncodeSize for Position {
     #[inline]
     fn encode_size(&self) -> usize {
-        commonware_codec::varint::UInt(self.0).encode_size()
+        UInt(self.0).encode_size()
     }
 }
 
@@ -324,9 +335,9 @@ impl commonware_codec::Read for Position {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
-        if value <= MAX_POSITION.0 {
-            Ok(Self(value))
+        let pos = Self(UInt::read(buf)?.into());
+        if pos.is_valid() {
+            Ok(pos)
         } else {
             Err(commonware_codec::Error::Invalid(
                 "Position",
@@ -346,22 +357,22 @@ mod tests {
     #[test]
     fn test_from_location() {
         const CASES: &[(Location, Position)] = &[
-            (Location::new_unchecked(0), Position::new(0)),
-            (Location::new_unchecked(1), Position::new(1)),
-            (Location::new_unchecked(2), Position::new(3)),
-            (Location::new_unchecked(3), Position::new(4)),
-            (Location::new_unchecked(4), Position::new(7)),
-            (Location::new_unchecked(5), Position::new(8)),
-            (Location::new_unchecked(6), Position::new(10)),
-            (Location::new_unchecked(7), Position::new(11)),
-            (Location::new_unchecked(8), Position::new(15)),
-            (Location::new_unchecked(9), Position::new(16)),
-            (Location::new_unchecked(10), Position::new(18)),
-            (Location::new_unchecked(11), Position::new(19)),
-            (Location::new_unchecked(12), Position::new(22)),
-            (Location::new_unchecked(13), Position::new(23)),
-            (Location::new_unchecked(14), Position::new(25)),
-            (Location::new_unchecked(15), Position::new(26)),
+            (Location::new(0), Position::new(0)),
+            (Location::new(1), Position::new(1)),
+            (Location::new(2), Position::new(3)),
+            (Location::new(3), Position::new(4)),
+            (Location::new(4), Position::new(7)),
+            (Location::new(5), Position::new(8)),
+            (Location::new(6), Position::new(10)),
+            (Location::new(7), Position::new(11)),
+            (Location::new(8), Position::new(15)),
+            (Location::new(9), Position::new(16)),
+            (Location::new(10), Position::new(18)),
+            (Location::new(11), Position::new(19)),
+            (Location::new(12), Position::new(22)),
+            (Location::new(13), Position::new(23)),
+            (Location::new(14), Position::new(25)),
+            (Location::new(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
             let pos = Position::try_from(*loc).unwrap();
@@ -471,38 +482,21 @@ mod tests {
 
     #[test]
     fn test_max_position() {
-        // The constraint is: MMR_size must have top bit clear (< 2^63)
-        // For N leaves: MMR_size = 2*N - popcount(N)
-        // Worst case (maximum size) is when N is a power of 2: MMR_size = 2*N - 1
-
-        // Maximum N where 2*N - 1 < 2^63:
-        //   2*N - 1 < 2^63
-        //   2*N < 2^63 + 1
-        //   N <= 2^62
+        // MAX_POSITION = max MMR size = 2^63 - 1 (for 2^62 leaves).
         let max_leaves = 1u64 << 62;
+        let max_size = 2 * max_leaves - 1; // 2^63 - 1
+        assert_eq!(*MAX_POSITION, max_size);
+        assert_eq!(*MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(max_size.leading_zeros(), 1); // top bit clear
 
-        // For N = 2^62 leaves:
-        // MMR_size = 2 * 2^62 - 1 = 2^63 - 1
-        let mmr_size_at_max = 2 * max_leaves - 1;
-        assert_eq!(mmr_size_at_max, (1u64 << 63) - 1);
-        assert_eq!(mmr_size_at_max.leading_zeros(), 1); // Top bit clear ✓
+        // One more leaf would overflow: size = 2^63, top bit set.
+        let overflow_size = 2 * (max_leaves + 1) - 1;
+        assert_eq!(overflow_size.leading_zeros(), 0);
 
-        // Last position (0-indexed) = MMR_size - 1 = 2^63 - 2
-        let expected_max_pos = mmr_size_at_max - 1;
-        assert_eq!(MAX_POSITION, expected_max_pos);
-        assert_eq!(MAX_POSITION, (1u64 << 63) - 2);
-
-        // Verify the constraint: a position at MAX_POSITION + 1 would require
-        // an MMR_size >= 2^63, which violates the "top bit clear" requirement
-        let hypothetical_mmr_size = MAX_POSITION + 2; // Would need this many nodes
-        assert_eq!(hypothetical_mmr_size, 1u64 << 63);
-        assert_eq!(hypothetical_mmr_size.leading_zeros(), 0); // Top bit NOT clear ✗
-
-        // Verify relationship with MAX_LOCATION
-        // Converting MAX_LOCATION to position should give a value < MAX_POSITION
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-        let last_leaf_pos = Position::try_from(max_loc).unwrap();
-        assert!(*last_leaf_pos < MAX_POSITION);
+        // MAX_LOCATION converts to MAX_POSITION.
+        let pos = Position::try_from(MAX_LOCATION).unwrap();
+        assert_eq!(pos, MAX_POSITION);
+        assert!(pos.is_valid());
     }
 
     #[test]
@@ -530,9 +524,9 @@ mod tests {
 
         // Test overflow boundaries.
         assert!(!Position::new(u64::MAX).is_mmr_size());
-        assert!(Position::new(u64::MAX >> 1).is_mmr_size());
+        assert!(Position::new(u64::MAX >> 1).is_mmr_size()); // 2^63 - 1 = MAX_POSITION
         assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
-        assert!(!MAX_POSITION.is_mmr_size());
+        assert!(MAX_POSITION.is_mmr_size()); // MAX_POSITION is the largest valid MMR size
     }
 
     #[test]
@@ -560,11 +554,11 @@ mod tests {
 
     #[test]
     fn test_read_cfg_invalid_values() {
-        use commonware_codec::{Encode, ReadExt};
+        use commonware_codec::{varint::UInt, Encode, ReadExt};
 
         // Encode MAX_POSITION + 1 as a raw varint, then try to decode as Position
         let invalid_value = *MAX_POSITION + 1;
-        let encoded = commonware_codec::varint::UInt(invalid_value).encode();
+        let encoded = UInt(invalid_value).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());
         assert!(matches!(
@@ -573,7 +567,7 @@ mod tests {
         ));
 
         // Encode u64::MAX as a raw varint
-        let encoded = commonware_codec::varint::UInt(u64::MAX).encode();
+        let encoded = UInt(u64::MAX).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());
         assert!(matches!(

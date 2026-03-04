@@ -311,7 +311,7 @@ where
                             .iter()
                             .cloned()
                             .chain(players.iter().cloned())
-                            .chain(next_players.into_iter()),
+                            .chain(next_players),
                     ),
                 )
                 .await;

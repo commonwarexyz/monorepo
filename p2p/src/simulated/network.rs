@@ -371,7 +371,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let _ = response.send(self.peer_sets.get(&id).cloned());
                 }
             }
-            ingress::Message::Subscribe { sender } => {
+            ingress::Message::Subscribe { response } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded_channel();
+
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
                     let all = self.all_tracked_peers();
@@ -379,6 +382,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     sender.send_lossy(notification);
                 }
                 self.subscribers.push(sender);
+
+                // Return the receiver to the caller
+                let _ = response.send(receiver);
             }
             ingress::Message::SubscribeConnected { response } => {
                 // Create a ring channel for the subscriber

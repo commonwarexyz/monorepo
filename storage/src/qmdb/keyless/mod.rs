@@ -103,10 +103,7 @@ impl<
         let reader = self.journal.reader().await;
         let op_count = reader.bounds().end;
         if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(
-                loc,
-                Location::new_unchecked(op_count),
-            ));
+            return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
         }
         let op = reader.read(*loc).await?;
 
@@ -365,7 +362,7 @@ impl<
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.journal.reader().await.bounds();
-        Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
+        Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
@@ -429,10 +426,10 @@ mod test {
             let db = open_db(context.with_label("db1")).await;
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, 1); // initial commit should exist
-            assert_eq!(bounds.start, Location::new_unchecked(0));
+            assert_eq!(bounds.start, Location::new(0));
 
             assert_eq!(db.get_metadata().await.unwrap(), None);
-            assert_eq!(db.last_commit_loc(), Location::new_unchecked(0));
+            assert_eq!(db.last_commit_loc(), Location::new(0));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
@@ -453,7 +450,7 @@ mod test {
             assert_eq!(db.bounds().await.end, 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
-                db.get(Location::new_unchecked(1)).await.unwrap(),
+                db.get(Location::new(1)).await.unwrap(),
                 Some(metadata.clone())
             ); // the commit op
             let root = db.root();
@@ -463,7 +460,7 @@ mod test {
             assert_eq!(db.bounds().await.end, 2); // commit op should remain after re-open.
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             assert_eq!(db.root(), root);
-            assert_eq!(db.last_commit_loc(), Location::new_unchecked(1));
+            assert_eq!(db.last_commit_loc(), Location::new(1));
 
             db.destroy().await.unwrap();
         });
@@ -491,7 +488,7 @@ mod test {
             let mut db = durable.into_merkleized();
             assert_eq!(db.bounds().await.end, 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
-            assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
+            assert_eq!(db.get(Location::new(3)).await.unwrap(), None); // the commit op
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
@@ -696,7 +693,7 @@ mod test {
             let db = open_db(context.with_label("db5")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
             assert_eq!(db.root(), root);
-            assert_eq!(db.last_commit_loc(), Location::new_unchecked(0));
+            assert_eq!(db.last_commit_loc(), Location::new(0));
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             let mut db = db.into_mutable();
@@ -731,7 +728,7 @@ mod test {
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
-                db.historical_proof(db.bounds().await.end + 1, Location::new_unchecked(5), NZU64!(10))
+                db.historical_proof(db.bounds().await.end + 1, Location::new(5), NZU64!(10))
                     .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
@@ -750,11 +747,11 @@ mod test {
             ];
 
             for (start_loc, max_ops) in test_cases {
-                let (proof, ops) = db.proof(Location::new_unchecked(start_loc), NZU64!(max_ops)).await.unwrap();
+                let (proof, ops) = db.proof(Location::new(start_loc), NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof
                 assert!(
-                    verify_proof(&mut hasher, &proof, Location::new_unchecked(start_loc), &ops, &root),
+                    verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
                 );
 
@@ -793,14 +790,14 @@ mod test {
                 // Verify that proof fails with wrong root
                 let wrong_root = Sha256::hash(&[0xFF; 32]);
                 assert!(
-                    !verify_proof(&mut hasher, &proof, Location::new_unchecked(start_loc), &ops, &wrong_root),
+                    !verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
                     "Proof should fail with wrong root"
                 );
 
                 // Verify that proof fails with wrong start location
                 if start_loc > 0 {
                     assert!(
-                        !verify_proof(&mut hasher, &proof, Location::new_unchecked(start_loc - 1), &ops, &root),
+                        !verify_proof(&mut hasher, &proof, Location::new(start_loc - 1), &ops, &root),
                         "Proof should fail with wrong start location"
                     );
                 }
@@ -843,7 +840,7 @@ mod test {
 
             // Prune the first 30 operations
             const PRUNE_LOC: u64 = 30;
-            db.prune(Location::new_unchecked(PRUNE_LOC)).await.unwrap();
+            db.prune(Location::new(PRUNE_LOC)).await.unwrap();
 
             // Verify pruning worked
             let oldest_retained = db.bounds().await.start;
@@ -865,7 +862,7 @@ mod test {
 
             // Test that we can't get pruned values
             for i in 0..*oldest_retained {
-                let result = db.get(Location::new_unchecked(i)).await;
+                let result = db.get(Location::new(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
                 match result {
                     Ok(None) => {} // Commit operation or pruned
@@ -879,9 +876,9 @@ mod test {
             // Test proof generation after pruning - should work for non-pruned ranges
             let test_cases = vec![
                 (oldest_retained, 10), // Starting from oldest retained
-                (Location::new_unchecked(50), 20),                       // Middle range (if not pruned)
-                (Location::new_unchecked(150), 10),                      // Later range
-                (Location::new_unchecked(190), 15),                      // Near the end
+                (Location::new(50), 20),                       // Middle range (if not pruned)
+                (Location::new(150), 10),                      // Later range
+                (Location::new(190), 15),                      // Near the end
             ];
 
             for (start_loc, max_ops) in test_cases {
@@ -909,7 +906,7 @@ mod test {
             }
 
             // Test pruning more aggressively
-            const AGGRESSIVE_PRUNE: Location = Location::new_unchecked(150);
+            const AGGRESSIVE_PRUNE: Location = Location::new(150);
             db.prune(AGGRESSIVE_PRUNE).await.unwrap();
 
             let new_oldest = db.bounds().await.start;
@@ -1042,7 +1039,7 @@ mod test {
             let db = open_db(context.clone()).await;
 
             // Test getting from empty database
-            let result = db.get(Location::new_unchecked(0)).await.unwrap();
+            let result = db.get(Location::new(0)).await.unwrap();
             assert!(result.is_none());
 
             // Add some values
@@ -1054,17 +1051,17 @@ mod test {
             let (durable, _) = db.commit(None).await.unwrap();
 
             // Test getting valid locations - should succeed
-            assert_eq!(durable.get(Location::new_unchecked(1)).await.unwrap().unwrap(), v1);
-            assert_eq!(durable.get(Location::new_unchecked(2)).await.unwrap().unwrap(), v2);
+            assert_eq!(durable.get(Location::new(1)).await.unwrap().unwrap(), v1);
+            assert_eq!(durable.get(Location::new(2)).await.unwrap().unwrap(), v2);
 
             // Test getting out of bounds location
-            let result = durable.get(Location::new_unchecked(3)).await.unwrap();
+            let result = durable.get(Location::new(3)).await.unwrap();
             assert!(result.is_none());
 
             // Test getting out of bounds location
-            let result = durable.get(Location::new_unchecked(4)).await;
+            let result = durable.get(Location::new(4)).await;
             assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(4) && size == Location::new_unchecked(4))
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new(4) && size == Location::new(4))
             );
 
             let db = durable.into_merkleized();
@@ -1079,10 +1076,10 @@ mod test {
             let mut db = open_db(context.clone()).await;
 
             // Test pruning empty database (no commits)
-            let result = db.prune(Location::new_unchecked(1)).await;
+            let result = db.prune(Location::new(1)).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
-                    if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
+                    if prune_loc == Location::new(1) && commit_loc == Location::new(0))
             );
 
             // Add values and commit
@@ -1098,16 +1095,16 @@ mod test {
 
             // op_count is 5 (initial_commit, v1, v2, commit, v3), last_commit_loc is 3
             let last_commit = db.last_commit_loc();
-            assert_eq!(last_commit, Location::new_unchecked(3));
+            assert_eq!(last_commit, Location::new(3));
 
             // Test valid prune (at last commit) - need Clean state for prune
             let (durable, _) = db.commit(None).await.unwrap();
             let mut db = durable.into_merkleized();
-            assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
+            assert!(db.prune(Location::new(3)).await.is_ok());
 
             // Test pruning beyond last commit
             let new_last_commit = db.last_commit_loc();
-            let beyond = Location::new_unchecked(*new_last_commit + 1);
+            let beyond = Location::new(*new_last_commit + 1);
             let result = db.prune(beyond).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
