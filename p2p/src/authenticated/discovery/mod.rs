@@ -121,7 +121,7 @@
 //!
 //! ## IP Poisoning
 //!
-//! A malicious peer can claim an ingress socket address that collides with an honest peer, drawing invalid dial attempts to
+//! A malicious peer can claim an ingress [std::net::SocketAddr] that collides with an honest peer, drawing invalid dial attempts to
 //! the honest peer (where we expect the malicious public key rather than the honest public key).
 //!
 //! Because we rate limit inbound connection attempts per IP/subnet, this poisoning can lead to us dropping legitimate

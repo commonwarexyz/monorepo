@@ -70,7 +70,8 @@
 //!
 //! ## IP Poisoning
 //!
-//! A malicious peer can claim an ingress socket address that collides with an honest peer, drawing invalid dial attempts to
+//! A malicious peer can claim an ingress [std::net::SocketAddr] that collides with an honest
+//! peer, drawing invalid dial attempts to
 //! the honest peer (where we expect the malicious public key rather than the honest public key).
 //!
 //! Because we rate limit inbound connection attempts per IP/subnet, this poisoning can lead to us dropping legitimate
@@ -80,7 +81,8 @@
 //! To mitigate this issue, we shuffle peer dial order on each dial queue refresh. This ensures we eventually dial a poisoned
 //! IP with the correct public key before hitting the rate limit imposed by the listener at said IP.
 //!
-//! _Applications that wish to entirely prevent this class of attack can assert uniqueness of ingress socket address during
+//! _Applications that wish to entirely prevent this class of attack can assert uniqueness of
+//! ingress [std::net::SocketAddr] during
 //! peer registration._
 //!
 //! ## Message Delivery
