@@ -77,7 +77,7 @@
 //! dial attempts (if quota was already exhausted on useless dial attempts). Recall, an honest dialer doesn't know which public
 //! key actually resides at an address and must try all that collide.
 //!
-//! To mitigate this issue, we shuffle peer dial order on each dial queue refresh. This ensures we should eventually dial a poisoned
+//! To mitigate this issue, we shuffle peer dial order on each dial queue refresh. This ensures we eventually dial a poisoned
 //! IP with the correct public key before hitting the rate limit imposed by the listener at said IP.
 //!
 //! _Applications that wish to entirely prevent this class of attack can assert uniqueness of ingress socket address during
