@@ -20,7 +20,7 @@ where
     pub public_key: P,
 
     /// The provider of peers that can be consulted for fetching data.
-    pub provider: C,
+    pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.
     pub blocker: B,
@@ -67,7 +67,7 @@ where
     let (resolver_engine, resolver) = p2p::Engine::new(
         ctx.with_label("resolver"),
         p2p::Config {
-            provider: config.provider,
+            peer_provider: config.peer_provider,
             blocker: config.blocker,
             consumer: handler.clone(),
             producer: handler,
