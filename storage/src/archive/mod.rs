@@ -1101,12 +1101,36 @@ mod tests {
     }
 
     #[allow(dead_code)]
+    fn assert_multi_archive_futures_are_send<T: super::MultiArchive>(
+        archive: &mut T,
+        key: T::Key,
+        value: T::Value,
+    ) where
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        assert_archive_futures_are_send(archive, key.clone(), value.clone());
+        assert_send(archive.get_all(1));
+        assert_send(archive.put_multi(1, key.clone(), value.clone()));
+        assert_send(archive.put_multi_sync(2, key, value));
+    }
+
+    #[allow(dead_code)]
     fn assert_prunable_archive_futures_are_send(
         archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
         assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_multi_archive_futures_are_send(
+        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_multi_archive_futures_are_send(archive, key, value);
     }
 
     #[allow(dead_code)]
