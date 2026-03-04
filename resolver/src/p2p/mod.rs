@@ -196,7 +196,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                provider,
+                peer_provider: provider,
                 blocker,
                 consumer,
                 producer,
@@ -1762,7 +1762,7 @@ mod tests {
             let (engine, mailbox) = Engine::new(
                 ctx,
                 Config {
-                    provider: oracle.manager(),
+                    peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
                     consumer,
                     producer,

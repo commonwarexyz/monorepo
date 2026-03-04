@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    provider: D,
+    peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     blocker: B,
@@ -128,7 +128,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                provider: cfg.provider,
+                peer_provider: cfg.peer_provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
@@ -154,7 +154,7 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let peer_set_subscription = &mut self.provider.subscribe().await;
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap(

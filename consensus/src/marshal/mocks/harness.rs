@@ -355,7 +355,7 @@ impl TestHarness for StandardHarness {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            provider: oracle.manager(),
+            peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -585,7 +585,7 @@ impl TestHarness for StandardHarness {
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            provider: oracle.manager(),
+            peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -1118,7 +1118,7 @@ impl TestHarness for CodingHarness {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            provider: oracle.manager(),
+            peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -1376,7 +1376,7 @@ impl TestHarness for CodingHarness {
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            provider: oracle.manager(),
+            peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),

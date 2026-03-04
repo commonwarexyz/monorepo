@@ -15,7 +15,7 @@ pub struct Config<
     Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers
-    pub provider: D,
+    pub peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     pub blocker: B,
