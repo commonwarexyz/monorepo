@@ -12,8 +12,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{union, N3f1};
-use futures::channel::oneshot;
+use commonware_utils::{channel::oneshot, union, N3f1};
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
@@ -23,7 +22,7 @@ pub enum Error {
     // Proposal Errors
     /// The proposal was canceled by the application
     #[error("Application verify error: {0}")]
-    AppProposeCanceled(oneshot::Canceled),
+    AppProposeCanceled(oneshot::error::RecvError),
 
     // P2P Errors
     /// Unable to send a message over the P2P network
@@ -325,7 +324,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble::<_, N3f1>(attestations.into_iter(), strategy)?;
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
 
         Some(Self { item, certificate })
     }

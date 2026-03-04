@@ -54,26 +54,28 @@
 //! assert_eq!(result, 55); // 1 + 4 + 9 + 16 + 25
 //! ```
 
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
-
-use cfg_if::cfg_if;
-use core::fmt;
-
-cfg_if! {
-    if #[cfg(feature = "std")] {
-        use rayon::{
-            iter::{IntoParallelIterator, ParallelIterator},
-            ThreadPool as RThreadPool, ThreadPoolBuilder,
-            ThreadPoolBuildError
-        };
-        use std::{num::NonZeroUsize, sync::Arc};
-    } else {
-        extern crate alloc;
-        use alloc::vec::Vec;
-    }
-}
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(BETA {
+    use cfg_if::cfg_if;
+    use core::fmt;
+
+    cfg_if! {
+        if #[cfg(feature = "std")] {
+            use rayon::{
+                iter::{IntoParallelIterator, ParallelIterator},
+                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
+            };
+            use std::{num::NonZeroUsize, sync::Arc};
+        } else {
+            extern crate alloc;
+            use alloc::vec::Vec;
+        }
+    }
     /// A strategy for executing fold operations.
     ///
     /// This trait abstracts over sequential and parallel execution, allowing algorithms

@@ -10,19 +10,29 @@
 //!   - Variable-size values
 
 use crate::{
+    index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::fixed::{Config as JConfig, Journal},
+        contiguous::{
+            fixed::{Config as FConfig, Journal as FJournal},
+            variable::{Config as VConfig, Journal as VJournal},
+        },
     },
-    mmr::journaled::Config as MmrConfig,
-    qmdb::{operation::Committable, Error, Merkleized},
+    mmr::{journaled::Config as MmrConfig, Location},
+    qmdb::{
+        any::operation::{Operation, Update},
+        operation::{Committable, Key},
+        Durable, Error, Merkleized,
+    },
     translator::Translator,
 };
-use commonware_codec::CodecFixedShared;
+use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
+use tracing::warn;
 
 pub(crate) mod db;
 pub(crate) mod operation;
@@ -108,19 +118,26 @@ pub struct VariableConfig<T: Translator, C> {
     pub page_cache: CacheRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
-
-/// Initialize the authenticated log from the given config, returning it along with the inactivity
-/// floor specified by the last commit.
-pub(crate) async fn init_fixed_authenticated_log<
-    E: Storage + Clock + Metrics,
-    O: Committable + CodecFixedShared,
-    H: Hasher,
-    T: Translator,
->(
+/// Shared initialization logic for fixed-sized value [db::Db].
+pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     context: E,
     cfg: FixedConfig<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+    known_inactivity_floor: Option<Location>,
+    callback: F,
+    new_index: NewIndex,
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    F: FnMut(bool, Option<Location>),
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: CodecFixedShared + Committable,
+{
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
@@ -130,22 +147,97 @@ pub(crate) async fn init_fixed_authenticated_log<
         page_cache: cfg.page_cache.clone(),
     };
 
-    let journal_config = JConfig {
+    let journal_config = FConfig {
         partition: cfg.log_journal_partition,
         items_per_blob: cfg.log_items_per_blob,
         write_buffer: cfg.log_write_buffer,
         page_cache: cfg.page_cache,
     };
 
-    let log = AuthenticatedLog::new(
+    let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
-        O::is_commit,
+        Operation::is_commit,
     )
     .await?;
 
-    Ok(log)
+    let log = if log.size().await != 0 {
+        log
+    } else {
+        warn!("Authenticated log is empty, initializing new db");
+        let mut log = log.into_dirty();
+        let commit_floor = Operation::CommitFloor(None, Location::new(0));
+        log.append(commit_floor).await?;
+        let log = log.merkleize();
+        log.sync().await?;
+        log
+    };
+
+    let index = new_index(context.with_label("index"), cfg.translator);
+    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
+}
+
+/// Shared initialization logic for variable-sized value [db::Db].
+pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
+    context: E,
+    cfg: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    known_inactivity_floor: Option<Location>,
+    callback: F,
+    new_index: NewIndex,
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    F: FnMut(bool, Option<Location>),
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: Codec + Committable,
+{
+    let mmr_config = MmrConfig {
+        journal_partition: cfg.mmr_journal_partition,
+        metadata_partition: cfg.mmr_metadata_partition,
+        items_per_blob: cfg.mmr_items_per_blob,
+        write_buffer: cfg.mmr_write_buffer,
+        thread_pool: cfg.thread_pool,
+        page_cache: cfg.page_cache.clone(),
+    };
+
+    let journal_config = VConfig {
+        partition: cfg.log_partition,
+        items_per_section: cfg.log_items_per_blob,
+        compression: cfg.log_compression,
+        codec_config: cfg.log_codec_config,
+        page_cache: cfg.page_cache,
+        write_buffer: cfg.log_write_buffer,
+    };
+
+    let log = authenticated::Journal::<_, VJournal<_, _>, _, _>::new(
+        context.with_label("log"),
+        mmr_config,
+        journal_config,
+        Operation::is_commit,
+    )
+    .await?;
+
+    let log = if log.size().await != 0 {
+        log
+    } else {
+        warn!("Authenticated log is empty, initializing new db");
+        let mut log = log.into_dirty();
+        let commit_floor = Operation::CommitFloor(None, Location::new(0));
+        log.append(commit_floor).await?;
+        let log = log.merkleize();
+        log.sync().await?;
+        log
+    };
+
+    let index = new_index(context.with_label("index"), cfg.translator);
+    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
 }
 
 #[cfg(test)]
@@ -154,7 +246,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         qmdb::any::{FixedConfig, VariableConfig},
-        translator::TwoCap,
+        translator::OneCap,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -163,70 +255,80 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(super) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
+    pub(crate) fn fixed_db_config<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<T> {
         FixedConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log_journal_{suffix}"),
+            log_journal_partition: format!("log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
-            translator: TwoCap,
+            translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
-    pub(super) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
+    pub(crate) fn variable_db_config<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> VariableConfig<T, ((), ())> {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{suffix}"),
+            log_partition: format!("log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: (),
-            translator: TwoCap,
+            log_codec_config: ((), ()),
+            translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     use crate::{
-        kv::Updatable,
+        kv::{Batchable as _, Gettable as _},
+        mmr::Location,
         qmdb::{
             any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-            store::MerkleizedStore,
+            store::{LogStore, MerkleizedStore},
         },
         Persistable,
     };
+    use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use core::{future::Future, pin::Pin};
+    use std::collections::HashMap;
 
     /// Test that merkleization state changes don't reset `steps`.
     pub(crate) async fn test_any_db_steps_not_reset<D>(db: D)
     where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = Digest, Error = crate::qmdb::Error>,
     {
         // Create a db with a couple keys.
         let mut db = db.into_mutable();
 
-        assert!(db
-            .create(Sha256::fill(1u8), Sha256::fill(2u8))
+        assert!(db.get(&Sha256::fill(1u8)).await.unwrap().is_none());
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(2u8)))])
             .await
-            .unwrap());
-        assert!(db
-            .create(Sha256::fill(3u8), Sha256::fill(4u8))
+            .unwrap();
+        assert!(db.get(&Sha256::fill(3u8)).await.unwrap().is_none());
+        db.write_batch([(Sha256::fill(3u8), Some(Sha256::fill(4u8)))])
             .await
-            .unwrap());
+            .unwrap();
         let (clean_db, _) = db.commit(None).await.unwrap();
         let mut db = clean_db.into_mutable();
 
         // Updating an existing key should make steps non-zero.
-        db.update(Sha256::fill(1u8), Sha256::fill(5u8))
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(5u8)))])
             .await
             .unwrap();
         let steps = db.steps();
@@ -241,5 +343,769 @@ pub(crate) mod test {
         let (db, _) = db.commit(None).await.unwrap();
         let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
+    }
+
+    /// Test recovery on non-empty db.
+    pub(crate) async fn test_any_db_non_empty_recovery<D, V: Clone + CodecShared>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        let mut db = db.into_mutable();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let mut db = db.into_merkleized().await.unwrap();
+        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        let root = db.root();
+        let op_count = db.size().await;
+        let inactivity_floor_loc = db.inactivity_floor_loc().await;
+
+        let db = reopen_db(context.with_label("reopen1")).await;
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = reopen_db(context.with_label("reopen2")).await;
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.root(), root);
+
+        let mut dirty = db.into_mutable();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            dirty.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = reopen_db(context.with_label("reopen3")).await;
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for _ in 0..3 {
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.write_batch([(k, Some(v))]).await.unwrap();
+            }
+        }
+        let db = reopen_db(context.with_label("reopen4")).await;
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let _ = db.commit(None).await.unwrap();
+        let db = reopen_db(context.with_label("reopen5")).await;
+        assert!(db.size().await > op_count);
+        assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test recovery on empty db.
+    pub(crate) async fn test_any_db_empty_recovery<D, V: Clone + CodecShared>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+    {
+        let root = db.root();
+
+        let db = reopen_db(context.with_label("reopen1")).await;
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = reopen_db(context.with_label("reopen2")).await;
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        drop(db);
+        let db = reopen_db(context.with_label("reopen3")).await;
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for _ in 0..3 {
+            for i in 0u64..1000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.write_batch([(k, Some(v))]).await.unwrap();
+            }
+        }
+        drop(db);
+        let db = reopen_db(context.with_label("reopen4")).await;
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root(), root);
+
+        let mut db = db.into_mutable();
+        for i in 0u64..1000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+        drop(db);
+        let db = reopen_db(context.with_label("reopen5")).await;
+        assert!(db.size().await > 1);
+        assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that a large mixed workload can be authenticated and replayed correctly.
+    pub(crate) async fn test_any_db_build_and_authenticate<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
+        <D as MerkleizedStore>::Operation: Codec,
+    {
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+
+        const ELEMENTS: u64 = 1000;
+
+        let mut db = db.into_mutable();
+        let mut map = HashMap::<Digest, V>::default();
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+            map.insert(k, v);
+        }
+
+        // Update every 3rd key.
+        for i in 0u64..ELEMENTS {
+            if i % 3 != 0 {
+                continue;
+            }
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value((i + 1) * 10000);
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+            map.insert(k, v);
+        }
+
+        // Delete every 7th key.
+        for i in 0u64..ELEMENTS {
+            if i % 7 != 1 {
+                continue;
+            }
+            let k = Sha256::hash(&i.to_be_bytes());
+            db.write_batch([(k, None)]).await.unwrap();
+            map.remove(&k);
+        }
+
+        // Commit + sync with pruning raises inactivity floor.
+        let (db, _) = db.commit(None).await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
+        db.sync().await.unwrap();
+        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+
+        // Drop & reopen and ensure state matches.
+        let root = db.root();
+        db.sync().await.unwrap();
+        drop(db);
+        let db = reopen_db(context.with_label("reopened")).await;
+        assert_eq!(root, db.root());
+
+        // State matches reference map.
+        for i in 0u64..ELEMENTS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            if let Some(map_value) = map.get(&k) {
+                let Some(db_value) = db.get(&k).await.unwrap() else {
+                    panic!("key not found in db: {k}");
+                };
+                assert_eq!(*map_value, db_value);
+            } else {
+                assert!(db.get(&k).await.unwrap().is_none());
+            }
+        }
+
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let bounds = db.bounds().await;
+        let inactivity_floor = db.inactivity_floor_loc().await;
+        for loc in *inactivity_floor..*bounds.end {
+            let loc = Location::new(loc);
+            let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
+            assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that replaying multiple updates of the same key on startup preserves correct state.
+    pub(crate) async fn test_any_db_log_replay<
+        D,
+        V: Clone + CodecShared + PartialEq + std::fmt::Debug,
+    >(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+    {
+        let mut db = db.into_mutable();
+
+        // Update the same key many times.
+        const UPDATES: u64 = 100;
+        let k = Sha256::hash(&UPDATES.to_be_bytes());
+        let mut last_value = None;
+        for i in 0u64..UPDATES {
+            let v = make_value(i * 1000);
+            last_value = Some(v.clone());
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+        let root = db.root();
+
+        // Reopen and verify the state is preserved correctly.
+        drop(db);
+        let db = reopen_db(context.with_label("reopened")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.get(&k).await.unwrap(), last_value);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that historical_proof returns correct proofs for past database states.
+    pub(crate) async fn test_any_db_historical_proof_basic<D, V: Clone + CodecShared>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
+    {
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use commonware_utils::NZU64;
+
+        let mut db = db.into_mutable();
+
+        // Add some operations
+        const OPS: u64 = 20;
+        for i in 0u64..OPS {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+        let root_hash = db.root();
+        let original_op_count = db.size().await;
+
+        // Historical proof should match "regular" proof when historical size == current database size
+        let max_ops = NZU64!(10);
+        let start_loc = Location::new(5);
+        let (historical_proof, historical_ops) = db
+            .historical_proof(original_op_count, start_loc, max_ops)
+            .await
+            .unwrap();
+        let (regular_proof, regular_ops) = db.proof(start_loc, max_ops).await.unwrap();
+
+        assert_eq!(historical_proof.leaves, regular_proof.leaves);
+        assert_eq!(historical_proof.digests, regular_proof.digests);
+        assert_eq!(historical_ops, regular_ops);
+        let mut hasher = StandardHasher::<Sha256>::new();
+        assert!(verify_proof(
+            &mut hasher,
+            &historical_proof,
+            start_loc,
+            &historical_ops,
+            &root_hash
+        ));
+
+        // Add more operations to the database
+        let mut db = db.into_mutable();
+        for i in OPS..(OPS + 5) {
+            let k = Sha256::hash(&(i + 1000).to_be_bytes()); // different keys
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+
+        // Historical proof should remain the same even though database has grown
+        let (historical_proof2, historical_ops2) = db
+            .historical_proof(original_op_count, start_loc, max_ops)
+            .await
+            .unwrap();
+        assert_eq!(historical_proof2.leaves, original_op_count);
+        assert_eq!(historical_proof2.digests, regular_proof.digests);
+        assert_eq!(historical_ops2, regular_ops);
+        assert!(verify_proof(
+            &mut hasher,
+            &historical_proof2,
+            start_loc,
+            &historical_ops2,
+            &root_hash
+        ));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test that tampering with historical proofs causes verification to fail.
+    pub(crate) async fn test_any_db_historical_proof_invalid<D, V: Clone + CodecShared>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
+    {
+        use crate::{mmr::StandardHasher, qmdb::verify_proof};
+        use commonware_utils::NZU64;
+
+        let mut db = db.into_mutable();
+
+        // Add some operations
+        for i in 0u64..10 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+
+        let historical_op_count = Location::new(5);
+        let (proof, ops) = db
+            .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
+            .await
+            .unwrap();
+        assert_eq!(proof.leaves, historical_op_count);
+        assert_eq!(ops.len(), 4);
+
+        let mut hasher = StandardHasher::<Sha256>::new();
+
+        // Changing the proof digests should cause verification to fail
+        {
+            let mut tampered_proof = proof.clone();
+            tampered_proof.digests[0] = Sha256::hash(b"invalid");
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &tampered_proof,
+                Location::new(1),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Appending an extra digest should cause verification to fail
+        {
+            let mut tampered_proof = proof.clone();
+            tampered_proof.digests.push(Sha256::hash(b"invalid"));
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &tampered_proof,
+                Location::new(1),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the ops should cause verification to fail
+        {
+            let root_hash = db.root();
+            let mut tampered_ops = ops.clone();
+            // Swap first two ops if we have at least 2
+            if tampered_ops.len() >= 2 {
+                tampered_ops.swap(0, 1);
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(1),
+                    &tampered_ops,
+                    &root_hash
+                ));
+            }
+        }
+
+        // Appending an extra (duplicate) op should cause verification to fail
+        {
+            let root_hash = db.root();
+            let mut tampered_ops = ops.clone();
+            tampered_ops.push(tampered_ops[0].clone());
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(1),
+                &tampered_ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the start location should cause verification to fail
+        {
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(2),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the root digest should cause verification to fail
+        {
+            let invalid_root = Sha256::hash(b"invalid");
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(1),
+                &ops,
+                &invalid_root
+            ));
+        }
+
+        // Changing the proof leaves count should cause verification to fail
+        {
+            let mut tampered_proof = proof.clone();
+            tampered_proof.leaves = Location::new(100);
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &tampered_proof,
+                Location::new(1),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test historical_proof edge cases: singleton db, limited ops, min position.
+    pub(crate) async fn test_any_db_historical_proof_edge_cases<D, V: Clone + CodecShared>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
+    {
+        use commonware_utils::NZU64;
+
+        let mut db = db.into_mutable();
+
+        // Add 50 operations
+        for i in 0u64..50 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = make_value(i * 1000);
+            db.write_batch([(k, Some(v))]).await.unwrap();
+        }
+        let db = db.commit(None).await.unwrap().0;
+        let db = db.into_merkleized().await.unwrap();
+
+        // Test singleton database (historical size = 2 means 1 op after initial commit)
+        let (single_proof, single_ops) = db
+            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
+            .await
+            .unwrap();
+        assert_eq!(single_proof.leaves, Location::new(2));
+        assert_eq!(single_ops.len(), 1);
+
+        // Test requesting more operations than available in historical position
+        let (_limited_proof, limited_ops) = db
+            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+            .await
+            .unwrap();
+        assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+
+        // Test proof at minimum historical position
+        let (min_proof, min_ops) = db
+            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+            .await
+            .unwrap();
+        assert_eq!(min_proof.leaves, Location::new(4));
+        assert_eq!(min_ops.len(), 3);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test making multiple commits, one of which deletes a key from a previous commit.
+    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        V: Clone + CodecShared + Eq + std::fmt::Debug,
+    {
+        let mut map = HashMap::<Digest, V>::default();
+        const ELEMENTS: u64 = 10;
+        let metadata_value = make_value(42);
+        let mut db = db.into_mutable();
+        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
+        for j in 0u64..ELEMENTS {
+            for i in 0u64..ELEMENTS {
+                let k = key_at(j, i);
+                let v = make_value(i * 1000);
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                map.insert(k, v);
+            }
+            let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
+            db = clean_db.into_merkleized().await.unwrap().into_mutable();
+        }
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
+        let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
+
+        db.write_batch([(k, None)]).await.unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
+        let db = db.into_merkleized().await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
+
+        let root = db.root();
+        drop(db);
+        let db = reopen_db(context.with_label("reopened")).await;
+        assert_eq!(root, db.root());
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
+
+        db.destroy().await.unwrap();
+    }
+
+    use crate::qmdb::any::{
+        ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
+        unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+    };
+    use commonware_macros::{test_group, test_traced};
+    use commonware_runtime::{deterministic, Runner as _};
+
+    // Type aliases for all 12 variants (all use OneCap for collision coverage).
+    type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedFixedP1 =
+        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+    type UnorderedVariableP1 =
+        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+    type OrderedFixedP1 =
+        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+    type OrderedVariableP1 =
+        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+    type UnorderedFixedP2 =
+        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+    type UnorderedVariableP2 =
+        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedFixedP2 =
+        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedVariableP2 =
+        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+
+    #[inline]
+    fn to_digest(i: u64) -> Digest {
+        Sha256::hash(&i.to_be_bytes())
+    }
+
+    // Defines all 12 variants in one place. Calls $cb!($($args)*, $label, $type, $config) for each.
+    macro_rules! with_all_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+        };
+    }
+
+    // Runner macros - each receives common args followed by (label, type, config) from with_all_variants.
+    // Uses Box::pin to move futures to the heap and avoid stack overflow.
+    macro_rules! test_simple {
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_", $sfx);
+            Box::pin(async {
+                let ctx = $ctx.with_label($l);
+                $f(<$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap())
+                .await;
+            })
+            .await
+        }};
+    }
+
+    macro_rules! test_with_reopen {
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_", $sfx);
+            Box::pin(async {
+                let ctx = $ctx.with_label($l);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap();
+                $f(
+                    ctx,
+                    db,
+                    |ctx| {
+                        Box::pin(async move {
+                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                                .await
+                                .unwrap()
+                        })
+                    },
+                    to_digest,
+                )
+                .await;
+            })
+            .await
+        }};
+    }
+
+    macro_rules! test_with_make_value {
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_", $sfx);
+            Box::pin(async {
+                let ctx = $ctx.with_label($l);
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap();
+                $f(ctx, db, to_digest).await;
+            })
+            .await
+        }};
+    }
+
+    // Macro to run a test on all 12 DB variants.
+    macro_rules! for_all_variants {
+        ($ctx:expr, $sfx:expr, simple: $f:expr) => {{
+            with_all_variants!(test_simple!($ctx, $sfx, $f));
+        }};
+        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
+            with_all_variants!(test_with_reopen!($ctx, $sfx, $f));
+        }};
+        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
+            with_all_variants!(test_with_make_value!($ctx, $sfx, $f));
+        }};
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn test_all_variants_steps_not_reset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "snr", simple: test_any_db_steps_not_reset);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_log_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "lr", with_reopen: test_any_db_log_replay);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_build_and_authenticate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_historical_proof_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "hpb", with_make_value: test_any_db_historical_proof_basic);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_historical_proof_invalid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "hpi", with_make_value: test_any_db_historical_proof_invalid);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_historical_proof_edge_cases() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "hpec", with_make_value: test_any_db_historical_proof_edge_cases);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_multiple_commits_delete_replayed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_non_empty_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "ner", with_reopen: test_any_db_non_empty_recovery);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_empty_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "er", with_reopen: test_any_db_empty_recovery);
+        });
     }
 }

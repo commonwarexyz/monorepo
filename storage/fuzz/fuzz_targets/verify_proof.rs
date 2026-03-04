@@ -48,7 +48,8 @@ fn fuzz(input: FuzzInput) {
             payload.truncate(MAX_OPERATION_BYTES);
         }
         // Only add operations with valid locations
-        if let Some(location) = Location::new(entry.location) {
+        let location = Location::new(entry.location);
+        if location.is_valid() {
             operations.push((location, payload));
         }
     }

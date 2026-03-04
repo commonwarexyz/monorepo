@@ -9,17 +9,15 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
+    deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
+    Runner, Spawner,
 };
+use commonware_utils::channel::{mpsc, oneshot};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    future::try_join_all,
-    SinkExt, StreamExt,
-};
+use futures::future::try_join_all;
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -289,7 +287,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + RngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -307,7 +305,12 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, distribution).await;
+    let identities = setup_network_identities(
+        context.network_buffer_pool().clone(),
+        &mut oracle,
+        distribution,
+    )
+    .await;
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
@@ -316,7 +319,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
     // Wait for all jobs to indicate they're done
     let mut responders = Vec::with_capacity(peers);
     for _ in 0..peers {
-        responders.push(rx.next().await.unwrap());
+        responders.push(rx.recv().await.unwrap());
     }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
@@ -333,6 +336,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
 
 /// Set up network identities for all peers across regions
 async fn setup_network_identities<C: Clock>(
+    pool: BufferPool,
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
 ) -> Vec<PeerIdentity<C>> {
@@ -350,7 +354,8 @@ async fn setup_network_identities<C: Clock>(
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
-            let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
+            let (sender, receiver) =
+                wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
@@ -406,7 +411,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     let mut jobs = Vec::new();
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
         let proposer_identity = proposer_identity.clone();
-        let mut tx = tx.clone();
+        let tx = tx.clone();
         let job = context.with_label("job");
         let commands = commands.to_vec();
         jobs.push(job.spawn(move |ctx| async move {

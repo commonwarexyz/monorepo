@@ -1,10 +1,10 @@
 use crate::{mocks, Error, IoBufs};
-use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
+use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// Range of ephemeral ports assigned to dialers.
@@ -16,8 +16,8 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sender.send(buf).await.map_err(|_| Error::SendFailed)
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.sender.send(bufs).await.map_err(|_| Error::SendFailed)
     }
 }
 
@@ -27,11 +27,11 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
+    fn peek(&self, max_len: usize) -> &[u8] {
         self.receiver.peek(max_len)
     }
 }
@@ -47,7 +47,7 @@ impl crate::Listener for Listener {
     type Stream = Stream;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
         Ok((socket, Sink { sender }, Stream { receiver }))
     }
 
@@ -96,13 +96,13 @@ impl crate::Network for Network {
         }
 
         // Ensure the port is not already bound
-        let mut listeners = self.listeners.lock().unwrap();
+        let mut listeners = self.listeners.lock();
         if listeners.contains_key(&socket) {
             return Err(Error::BindFailed);
         }
 
         // Bind the socket
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         listeners.insert(socket, sender);
         Ok(Listener {
             address: socket,
@@ -113,7 +113,7 @@ impl crate::Network for Network {
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
         // Assign dialer a port from the ephemeral range
         let dialer = {
-            let mut ephemeral = self.ephemeral.lock().unwrap();
+            let mut ephemeral = self.ephemeral.lock();
             let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
             *ephemeral = ephemeral
                 .checked_add(1)
@@ -122,8 +122,8 @@ impl crate::Network for Network {
         };
 
         // Get listener
-        let mut sender = {
-            let listeners = self.listeners.lock().unwrap();
+        let sender = {
+            let listeners = self.listeners.lock();
             let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
             sender.clone()
         };
@@ -133,7 +133,6 @@ impl crate::Network for Network {
         let (listener_sender, listener_receiver) = mocks::Channel::init();
         sender
             .send((dialer, dialer_sender, listener_receiver))
-            .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {

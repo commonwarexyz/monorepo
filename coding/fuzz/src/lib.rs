@@ -1,6 +1,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::Sequential;
+use commonware_utils::NZU16;
 use std::iter;
 
 const STRATEGY: Sequential = Sequential;
@@ -68,8 +69,8 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     } = input;
 
     let config = Config {
-        minimum_shards: min,
-        extra_shards: recovery,
+        minimum_shards: NZU16!(min),
+        extra_shards: NZU16!(recovery),
     };
     let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
@@ -80,15 +81,15 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     // (This is so that we can move their shard out of the vector easily).
     let (my_i, my_shard) = shards.pop().unwrap();
     let (my_checking_data, my_checked_shard, _) =
-        S::reshard(&config, &commitment, my_i, my_shard).unwrap();
+        S::weaken(&config, &commitment, my_i, my_shard).unwrap();
 
     // Check to_use - 1 shards, then include our own checked shards.
     let checked_shards = shards
         .into_iter()
         .take((to_use - 1) as usize)
         .map(|(i, shard)| {
-            let (_, _, reshard) = S::reshard(&config, &commitment, i, shard).unwrap();
-            S::check(&config, &commitment, &my_checking_data, i, reshard).unwrap()
+            let (_, _, weak_shard) = S::weaken(&config, &commitment, i, shard).unwrap();
+            S::check(&config, &commitment, &my_checking_data, i, weak_shard).unwrap()
         })
         .chain(iter::once(my_checked_shard))
         .collect::<Vec<_>>();

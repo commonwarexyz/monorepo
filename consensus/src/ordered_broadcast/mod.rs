@@ -98,8 +98,11 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
-    use futures::{channel::oneshot, future::join_all};
+    use commonware_utils::{
+        channel::{fallible::OneshotExt, oneshot},
+        NZUsize, NZU16, NZU64,
+    };
+    use futures::future::join_all;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -259,7 +262,7 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -380,6 +383,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -467,6 +471,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -598,6 +603,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -705,6 +711,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_invalid_signature_injection() {
         invalid_signature_injection(bls12381_threshold::fixture::<MinPk, _>);
@@ -785,7 +792,11 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                         strategy: Sequential,
                     },
                 );
@@ -943,7 +954,11 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                         strategy: Sequential,
                     },
                 );
@@ -997,7 +1012,11 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                         strategy: Sequential,
                     },
                 );
@@ -1017,6 +1036,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_external_sequencer() {
         external_sequencer(bls12381_threshold::fixture::<MinPk, _>);

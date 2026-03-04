@@ -9,13 +9,15 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -38,7 +40,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -83,8 +85,8 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
-                nullify_retry: cfg.nullify_retry,
+                certification_timeout: cfg.certification_timeout,
+                timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

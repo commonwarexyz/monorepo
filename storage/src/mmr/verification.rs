@@ -71,7 +71,7 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
         Ok(self.digests.get(&pos).cloned())
     }
 
-    fn size(&self) -> Position {
+    async fn size(&self) -> Position {
         self.size
     }
 }
@@ -88,7 +88,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    let leaves = Location::try_from(mmr.size())?;
+    let leaves = Location::try_from(mmr.size().await)?;
     historical_range_proof(mmr, leaves, range).await
 }
 
@@ -145,7 +145,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     }
 
     // Collect all required node positions
-    let size = mmr.size();
+    let size = mmr.size().await;
     let leaves = Location::try_from(size)?;
     let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
 
@@ -198,8 +198,8 @@ mod tests {
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
-            let mut range_start = Location::new_unchecked(0);
-            let mut range_end = Location::new_unchecked(49);
+            let mut range_start = Location::new(0);
+            let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
                 let range_proof = mmr.range_proof(range.clone()).unwrap();

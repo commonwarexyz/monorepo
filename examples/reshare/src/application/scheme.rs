@@ -11,10 +11,8 @@ use commonware_cryptography::{
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use commonware_utils::sync::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 /// The BLS12-381 threshold signing scheme used in simplex.
 pub type ThresholdScheme<V> =
@@ -48,7 +46,7 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
     pub fn register(&self, epoch: Epoch, scheme: S) -> bool {
-        let mut schemes = self.schemes.lock().unwrap();
+        let mut schemes = self.schemes.lock();
         schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
 
@@ -56,7 +54,7 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
     ///
     /// Returns `false` if no scheme was registered for the epoch.
     pub fn unregister(&self, epoch: &Epoch) -> bool {
-        let mut schemes = self.schemes.lock().unwrap();
+        let mut schemes = self.schemes.lock();
         schemes.remove(epoch).is_some()
     }
 }
@@ -66,7 +64,7 @@ impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scheme = S;
 
     fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
-        let schemes = self.schemes.lock().unwrap();
+        let schemes = self.schemes.lock();
         schemes.get(&epoch).cloned()
     }
 

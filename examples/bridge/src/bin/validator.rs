@@ -10,14 +10,14 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        sharing::Sharing,
+        sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -119,9 +119,11 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Sharing<MinSig> =
-        Sharing::decode_cfg(identity.as_ref(), &NZU32!(validators.len() as u32))
-            .expect("Identity not well-formed");
+    let identity: Sharing<MinSig> = Sharing::decode_cfg(
+        identity.as_ref(),
+        &(NZU32!(validators.len() as u32), ModeVersion::v0()),
+    )
+    .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
@@ -196,7 +198,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, validators.clone()).await;
+        oracle.track(0, validators.clone()).await;
 
         // Register consensus channels
         //
@@ -252,13 +254,13 @@ fn main() {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
             },
         );

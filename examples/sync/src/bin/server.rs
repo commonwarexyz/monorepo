@@ -1,25 +1,27 @@
-//! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::qmdb::any::unordered::fixed::Db] database.
+//! Server that serves operations and proofs to clients attempting to sync an
+//! `any`, `current`, or `immutable` database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
-    Storage, StreamOf,
+    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
+    Spawner, Storage, StreamOf,
 };
 use commonware_storage::qmdb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any::{self},
-    crate_version,
+    any, crate_version, current,
     databases::{DatabaseType, Syncable},
-    immutable::{self},
+    immutable,
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::DurationExt;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{
+    channel::mpsc,
+    sync::{AsyncRwLock, Mutex},
+    DurationExt,
+};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -57,8 +59,8 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async mutex with Option to allow ownership transfers.
-    database: RwLock<Option<DB>>,
+    /// The database wrapped in async rwlock with Option to allow ownership transfers.
+    database: AsyncRwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -66,7 +68,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: RwLock<SystemTime>,
+    last_operation_time: Mutex<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -75,11 +77,11 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(Some(database)),
+            database: AsyncRwLock::new(Some(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: RwLock::new(SystemTime::now()),
+            last_operation_time: Mutex::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -106,10 +108,17 @@ where
     DB: Syncable,
     E: Storage + Clock + Metrics + RngCore,
 {
-    let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-        *last_time = now;
+    let should_add = {
+        let mut last_time = state.last_operation_time.lock();
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+            *last_time = now;
+            true
+        } else {
+            false
+        }
+    };
+    if should_add {
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
@@ -157,16 +166,20 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound, upper_bound) = {
+    let (root, inactivity_floor, size) = {
         let db_opt = state.database.read().await;
         let database = db_opt.as_ref().expect("database should exist");
-        (database.root(), database.lower_bound(), database.op_count())
+        (
+            database.root(),
+            database.inactivity_floor().await,
+            database.size().await,
+        )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            range: lower_bound..upper_bound,
+            range: inactivity_floor..size,
         },
     };
 
@@ -189,7 +202,7 @@ where
     let database = db_opt.as_ref().expect("database should exist");
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = database.size().await;
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -286,12 +299,63 @@ where
     }
 }
 
+/// Receive loop: reads frames from the stream, dispatches handlers, and exits
+/// when the stream closes. Runs as a dedicated task so that `recv_frame` is
+/// never cancelled by `select!` (cancelling a partially-read frame corrupts
+/// the stream).
+async fn recv_loop<DB, E>(
+    context: E,
+    state: Arc<State<DB>>,
+    mut stream: StreamOf<E>,
+    response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
+    client_addr: SocketAddr,
+) where
+    DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
+    E: Metrics + Network + Spawner,
+{
+    loop {
+        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
+            Ok(data) => data,
+            Err(err) => {
+                debug!(?err, client_addr = %client_addr, "client disconnected");
+                return;
+            }
+        };
+
+        let message = match wire::Message::decode(message_data.coalesce()) {
+            Ok(msg) => msg,
+            Err(err) => {
+                warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                state.error_counter.inc();
+                continue;
+            }
+        };
+
+        context.with_label("request_handler").spawn({
+            let state = state.clone();
+            let response_sender = response_sender.clone();
+            move |_| async move {
+                let response = handle_message::<DB>(&state, message).await;
+                if let Err(err) = response_sender.send(response).await {
+                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
+                }
+            }
+        });
+    }
+}
+
 /// Handle a client connection with concurrent request processing.
+///
+/// Splits into a recv task and a send loop. The recv task reads frames from the
+/// stream without cancellation (avoiding BufReader corruption from `select!`
+/// dropping an in-progress `recv_frame`). The send loop reads responses from
+/// the handler channel and writes them to the sink.
 async fn handle_client<DB, E>(
     context: E,
     state: Arc<State<DB>>,
     mut sink: SinkOf<E>,
-    mut stream: StreamOf<E>,
+    stream: StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -301,64 +365,30 @@ where
 {
     info!(client_addr = %client_addr, "client connected");
 
-    // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
-    select_loop! {
-        context,
-        on_stopped => {
-            debug!("context shutdown, closing client connection");
-        },
-        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-            match incoming {
-                Ok(message_data) => {
-                    // Parse the message.
-                    let message = match wire::Message::decode(message_data.coalesce()) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(client_addr = %client_addr, ?err, "failed to parse message");
-                            state.error_counter.inc();
-                            continue;
-                        }
-                    };
 
-                    // Start a new task to handle the message.
-                    // The response will be sent on `response_sender`.
-                    context.with_label("request_handler").spawn({
-                        let state = state.clone();
-                        let mut response_sender = response_sender.clone();
-                        move |_| async move {
-                            let response = handle_message::<DB>(&state, message).await;
-                            if let Err(err) = response_sender.send(response).await {
-                                warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
-                            }
-                        }
-                    });
-                }
-                Err(err) => {
-                    info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            }
-        },
+    // Spawn a dedicated recv task so recv_frame is never cancelled.
+    let recv_handle = context.with_label("recv").spawn({
+        let state = state.clone();
+        let response_sender = response_sender.clone();
+        move |context| recv_loop::<DB, E>(context, state, stream, response_sender, client_addr)
+    });
 
-        outgoing = response_receiver.next() => {
-            if let Some(response) = outgoing {
-                // We have a response to send to the client.
-                let response_data = response.encode();
-                if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            } else {
-                // Channel closed
-                return Ok(());
-            }
-        },
+    // Drop our copy so the channel closes when the recv task's senders are all dropped.
+    drop(response_sender);
+
+    // Send loop: forward responses to the client.
+    while let Some(response) = response_receiver.recv().await {
+        let response_data = response.encode();
+        if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
+            info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+            state.error_counter.inc();
+            break;
+        }
     }
 
+    recv_handle.abort();
     Ok(())
 }
 
@@ -390,7 +420,8 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = ?database.op_count(),
+        size = ?database.size().await,
+        inactivity_floor = ?database.inactivity_floor().await,
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -464,11 +495,22 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = any::create_config();
+    let db_config = any::create_config(&context);
     let database = any::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
+/// Run the Current database server.
+async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    let db_config = current::create_config(&context);
+    let database = current::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -476,10 +518,10 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = immutable::create_config();
+    let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -494,8 +536,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|immutable")
-                .help("Database type to use. Must be `any` or `immutable`.")
+                .value_name("any|current|immutable")
+                .help("Database type to use. Must be `any`, `current`, or `immutable`.")
                 .default_value("any"),
         )
         .arg(
@@ -626,6 +668,7 @@ fn main() {
         // Run the appropriate server based on database type
         let result = match config.database_type {
             DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Current => run_current(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
         };
 

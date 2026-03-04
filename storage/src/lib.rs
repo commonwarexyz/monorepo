@@ -8,7 +8,7 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
@@ -16,11 +16,12 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod mmr;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub mod qmdb;
     mod bitmap;
-    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
+    pub mod qmdb;
+    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
     pub mod bmt;
     pub mod cache;
+    pub mod queue;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
@@ -31,7 +32,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
-    pub mod translator;
 
     /// A storage structure with capabilities to persist and recover state across restarts.
     pub trait Persistable {
@@ -41,7 +41,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// Durably persist the structure, guaranteeing the current state will survive a crash.
         ///
         /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-        fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        fn commit(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
             self.sync()
         }
 
@@ -49,7 +49,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// no recovery will be needed on startup.
         ///
         /// This provides a stronger guarantee than [Self::commit] but may be slower.
-        fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
+        fn sync(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 
         /// Destroy the structure, removing all associated storage.
         ///
@@ -57,4 +57,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// artifacts. This can be used to clean up disk resources in tests.
         fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
+});
+commonware_macros::stability_scope!(BETA {
+    pub mod translator;
 });

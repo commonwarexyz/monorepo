@@ -2,9 +2,11 @@
 //! benchmark code across the variants.
 
 use crate::{
-    kv::{Batchable, Deletable, Gettable},
+    journal::contiguous::Mutable,
+    kv::{Batchable, Gettable},
     mmr::Location,
     qmdb::{
+        operation::Key,
         store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
@@ -12,8 +14,18 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
 use std::{future::Future, ops::Range};
+
+/// A mutable operation log that can be durably persisted.
+pub(crate) trait PersistableMutableLog<O>:
+    Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
+
+impl<T, O> PersistableMutableLog<O> for T where
+    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
 
 /// Trait for the (Merkleized,Durable) state.
 ///
@@ -23,7 +35,7 @@ pub trait CleanAny:
     MerkleizedStore
     + PrunableStore
     + Persistable<Error = Error>
-    + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The mutable state type (Unmerkleized,Non-durable).
     type Mutable: MutableAny<
@@ -43,7 +55,7 @@ pub trait CleanAny:
 /// Use `into_mutable` to transition to the (Unmerkleized,NonDurable) state, or `into_merkleized` to
 /// transition to the (Merkleized,Durable) state.
 pub trait UnmerkleizedDurableAny:
-    LogStore + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    LogStore + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;
@@ -72,12 +84,10 @@ pub trait UnmerkleizedDurableAny:
 
 /// Trait for the (Merkleized,NonDurable) state.
 ///
-/// This state allows authentication (root, proofs) and pruning. Use `commit` to transition to the
-/// Merkleized, Durable state.
+/// This state allows historical proofs and pruning. Use `into_mutable` to transition back to the
+/// Mutable state.
 pub trait MerkleizedNonDurableAny:
-    MerkleizedStore
-    + PrunableStore
-    + Gettable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
+    PrunableStore + Gettable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The mutable state type (Unmerkleized,NonDurable).
     type Mutable: MutableAny<Key = Self::Key>;
@@ -88,11 +98,11 @@ pub trait MerkleizedNonDurableAny:
 
 /// Trait for the (Unmerkleized,NonDurable) state.
 ///
-/// This is the only state that allows mutations (create/update/delete). Use `commit` to transition
+/// This is the only state that allows mutations via write_batch. Use `commit` to transition
 /// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
 /// NonDurable state.
 pub trait MutableAny:
-    LogStore + Deletable<Key: Array, Value = <Self as LogStore>::Value, Error = Error> + Batchable
+    LogStore + Batchable<Key: Key, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;
@@ -106,11 +116,7 @@ pub trait MutableAny:
 
     /// The provable state type (Merkleized,NonDurable).
     type Merkleized: MerkleizedNonDurableAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = Self::Digest,
-            Operation = Self::Operation,
-        >;
+        + LogStore<Value = <Self as LogStore>::Value>;
 
     /// Commit any pending operations to the database, ensuring their durability. Returns the db in
     /// its durable state and the location range of committed operations. Note that even if no

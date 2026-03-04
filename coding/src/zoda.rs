@@ -89,9 +89,9 @@
 //!    - the checksum Z,
 //!    - rows i * S..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
 //!
-//! ## Re-Sharding
+//! ## Weakening
 //!
-//! When re-transmitting a shard to other people, only the following are transmitted:
+//! When transmitting a weak shard to other people, only the following are transmitted:
 //! - rows i * S..(i + 1) * S of Y, along with the inclusion proofs.
 //!
 //! ## Checking
@@ -269,8 +269,8 @@ mod topology {
 
         /// Figure out what size different values will have, based on the config and the data.
         pub fn reckon(config: &Config, data_bytes: usize) -> Self {
-            let n = config.minimum_shards as usize;
-            let k = config.extra_shards as usize;
+            let n = config.minimum_shards.get() as usize;
+            let k = config.extra_shards.get() as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
             // temporarily correct that to be at least 1, then make sure to adjust
             // it back again to 0.
@@ -322,16 +322,16 @@ mod topology {
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone)]
-pub struct Shard<D: Digest> {
+#[derive(Clone, Debug)]
+pub struct StrongShard<D: Digest> {
     data_bytes: usize,
     root: D,
     inclusion_proof: Proof<D>,
-    rows: Matrix,
-    checksum: Arc<Matrix>,
+    rows: Matrix<F>,
+    checksum: Arc<Matrix<F>>,
 }
 
-impl<D: Digest> PartialEq for Shard<D> {
+impl<D: Digest> PartialEq for StrongShard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.data_bytes == other.data_bytes
             && self.root == other.root
@@ -341,9 +341,9 @@ impl<D: Digest> PartialEq for Shard<D> {
     }
 }
 
-impl<D: Digest> Eq for Shard<D> {}
+impl<D: Digest> Eq for StrongShard<D> {}
 
-impl<D: Digest> EncodeSize for Shard<D> {
+impl<D: Digest> EncodeSize for StrongShard<D> {
     fn encode_size(&self) -> usize {
         self.data_bytes.encode_size()
             + self.root.encode_size()
@@ -353,7 +353,7 @@ impl<D: Digest> EncodeSize for Shard<D> {
     }
 }
 
-impl<D: Digest> Write for Shard<D> {
+impl<D: Digest> Write for StrongShard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.data_bytes.write(buf);
         self.root.write(buf);
@@ -363,7 +363,7 @@ impl<D: Digest> Write for Shard<D> {
     }
 }
 
-impl<D: Digest> Read for Shard<D> {
+impl<D: Digest> Read for StrongShard<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -376,14 +376,14 @@ impl<D: Digest> Read for Shard<D> {
             data_bytes,
             root: ReadExt::read(buf)?,
             inclusion_proof: Read::read_cfg(buf, &max_els)?,
-            rows: Read::read_cfg(buf, &max_els)?,
-            checksum: Arc::new(Read::read_cfg(buf, &max_els)?),
+            rows: Read::read_cfg(buf, &(max_els, ()))?,
+            checksum: Arc::new(Read::read_cfg(buf, &(max_els, ()))?),
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Shard<D>
+impl<D: Digest> arbitrary::Arbitrary<'_> for StrongShard<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -399,33 +399,33 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct ReShard<D: Digest> {
+pub struct WeakShard<D: Digest> {
     inclusion_proof: Proof<D>,
-    shard: Matrix,
+    shard: Matrix<F>,
 }
 
-impl<D: Digest> PartialEq for ReShard<D> {
+impl<D: Digest> PartialEq for WeakShard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.inclusion_proof == other.inclusion_proof && self.shard == other.shard
     }
 }
 
-impl<D: Digest> Eq for ReShard<D> {}
+impl<D: Digest> Eq for WeakShard<D> {}
 
-impl<D: Digest> EncodeSize for ReShard<D> {
+impl<D: Digest> EncodeSize for WeakShard<D> {
     fn encode_size(&self) -> usize {
         self.inclusion_proof.encode_size() + self.shard.encode_size()
     }
 }
 
-impl<D: Digest> Write for ReShard<D> {
+impl<D: Digest> Write for WeakShard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.inclusion_proof.write(buf);
         self.shard.write(buf);
     }
 }
 
-impl<D: Digest> Read for ReShard<D> {
+impl<D: Digest> Read for WeakShard<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -437,13 +437,13 @@ impl<D: Digest> Read for ReShard<D> {
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
-            shard: Read::read_cfg(buf, &max_data_els)?,
+            shard: Read::read_cfg(buf, &(max_data_els, ()))?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for ReShard<D>
+impl<D: Digest> arbitrary::Arbitrary<'_> for WeakShard<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -456,9 +456,10 @@ where
 }
 
 /// A ZODA shard that has been checked for integrity already.
+#[derive(Clone)]
 pub struct CheckedShard {
     index: usize,
-    shard: Matrix,
+    shard: Matrix<F>,
 }
 
 /// Take indices up to `total`, and shuffle them.
@@ -480,7 +481,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
 /// Create a checking matrix of the right shape.
 ///
 /// This matrix is random, using the transcript as a deterministic source of randomness.
-fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
+fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     Matrix::rand(
         &mut transcript.noise(b"checking matrix"),
         topology.data_cols,
@@ -488,13 +489,13 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
     )
 }
 
-/// Data used to check [ReShard]s.
+/// Data used to check [WeakShard]s.
 #[derive(Clone)]
 pub struct CheckingData<D: Digest> {
     topology: Topology,
     root: D,
-    checking_matrix: Matrix,
-    encoded_checksum: Matrix,
+    checking_matrix: Matrix<F>,
+    encoded_checksum: Matrix<F>,
     shuffled_indices: Vec<u32>,
 }
 
@@ -512,7 +513,7 @@ impl<D: Digest> CheckingData<D> {
         commitment: &Summary,
         data_bytes: usize,
         root: D,
-        checksum: &Matrix,
+        checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
@@ -522,11 +523,19 @@ impl<D: Digest> CheckingData<D> {
         if *commitment != expected_commitment {
             return Err(Error::InvalidShard);
         }
-        let transcript = Transcript::resume(expected_commitment);
+        let mut transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
         }
+        // Commit to the checksum before generating the indices to check.
+        //
+        // Nota bene: `checksum.encode()` is *serializing* the checksum, not
+        // Reed-Solomon encoding it.
+        //
+        // cf. the implementation of `Scheme::encode` for ZODA for why it's important
+        // that we do Reed-Solomon encoding of the checksum ourselves.
+        transcript.commit(checksum.encode());
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
             .expect("checksum has too many rows")
@@ -546,13 +555,13 @@ impl<D: Digest> CheckingData<D> {
     fn check<H: Hasher<Digest = D>>(
         &self,
         index: u16,
-        reshard: &ReShard<D>,
+        weak_shard: &WeakShard<D>,
     ) -> Result<CheckedShard, Error> {
         self.topology.check_index(index)?;
-        if reshard.shard.rows() != self.topology.samples
-            || reshard.shard.cols() != self.topology.data_cols
+        if weak_shard.shard.rows() != self.topology.samples
+            || weak_shard.shard.cols() != self.topology.data_cols
         {
-            return Err(Error::InvalidReShard);
+            return Err(Error::InvalidWeakShard);
         }
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
@@ -562,30 +571,30 @@ impl<D: Digest> CheckingData<D> {
         // computed indices for this shard
         let proof_elements: Vec<(H::Digest, u32)> = these_shuffled_indices
             .iter()
-            .zip(reshard.shard.iter())
+            .zip(weak_shard.shard.iter())
             .map(|(&i, row)| (row_digest::<H>(row), i))
             .collect();
 
         // Verify the multi-proof
         let mut hasher = H::new();
-        if reshard
+        if weak_shard
             .inclusion_proof
             .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
             .is_err()
         {
-            return Err(Error::InvalidReShard);
+            return Err(Error::InvalidWeakShard);
         }
 
-        let shard_checksum = reshard.shard.mul(&self.checking_matrix);
+        let shard_checksum = weak_shard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
             if row != &self.encoded_checksum[i as usize] {
-                return Err(Error::InvalidReShard);
+                return Err(Error::InvalidWeakShard);
             }
         }
         Ok(CheckedShard {
             index,
-            shard: reshard.shard.clone(),
+            shard: weak_shard.shard.clone(),
         })
     }
 }
@@ -594,8 +603,8 @@ impl<D: Digest> CheckingData<D> {
 pub enum Error {
     #[error("invalid shard")]
     InvalidShard,
-    #[error("invalid reshard")]
-    InvalidReShard,
+    #[error("invalid weak shard")]
+    InvalidWeakShard,
     #[error("invalid index {0}")]
     InvalidIndex(u16),
     #[error("insufficient shards {0} < {1}")]
@@ -606,8 +615,7 @@ pub enum Error {
     FailedToCreateInclusionProof(BmtError),
 }
 
-// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
-const NAMESPACE: &[u8] = b"commonware-zoda";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {
@@ -623,9 +631,9 @@ impl<H> std::fmt::Debug for Zoda<H> {
 impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
 
-    type Shard = Shard<H::Digest>;
+    type StrongShard = StrongShard<H::Digest>;
 
-    type ReShard = ReShard<H::Digest>;
+    type WeakShard = WeakShard<H::Digest>;
 
     type CheckingData = CheckingData<H::Digest>;
 
@@ -637,7 +645,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         config: &Config,
         data: impl bytes::Buf,
         strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+    ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
         let topology = Topology::reckon(config, data_bytes);
@@ -671,16 +679,19 @@ impl<H: Hasher> Scheme for Zoda<H> {
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
 
-        // Step 5: Generate a checking matrix, and a shuffling with the commitment.
-        let transcript = Transcript::resume(commitment);
+        // Step 5: Generate a checking matrix and checksum with the commitment.
+        let mut transcript = Transcript::resume(commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
+        let checksum = Arc::new(data.mul(&checking_matrix));
+        // Bind index sampling to this checksum to prevent follower-specific malleability.
+        // It's important to commit to the checksum itself, rather than its encoding,
+        // because followers have to encode the checksum itself to prevent the leader from
+        // cheating.
+        transcript.commit(checksum.encode());
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
-        // Step 6: Multiply the data with the checking matrix.
-        let checksum = Arc::new(data.mul(&checking_matrix));
-
-        // Step 7: Produce the shards in parallel.
-        let shard_results: Vec<Result<Shard<H::Digest>, Error>> =
+        // Step 6: Produce the shards in parallel.
+        let shard_results: Vec<Result<StrongShard<H::Digest>, Error>> =
             strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
                 let indices = &shuffled_indices
                     [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
@@ -694,7 +705,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 let inclusion_proof = bmt
                     .multi_proof(indices)
                     .map_err(Error::FailedToCreateInclusionProof)?;
-                Ok(Shard {
+                Ok(StrongShard {
                     data_bytes,
                     root,
                     inclusion_proof,
@@ -708,13 +719,13 @@ impl<H: Hasher> Scheme for Zoda<H> {
         Ok((commitment, shards))
     }
 
-    fn reshard(
+    fn weaken(
         config: &Config,
         commitment: &Self::Commitment,
         index: u16,
-        shard: Self::Shard,
-    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
-        let reshard = ReShard {
+        shard: Self::StrongShard,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
+        let weak_shard = WeakShard {
             inclusion_proof: shard.inclusion_proof,
             shard: shard.rows,
         };
@@ -725,8 +736,8 @@ impl<H: Hasher> Scheme for Zoda<H> {
             shard.root,
             shard.checksum.as_ref(),
         )?;
-        let checked_shard = checking_data.check::<H>(index, &reshard)?;
-        Ok((checking_data, checked_shard, reshard))
+        let checked_shard = checking_data.check::<H>(index, &weak_shard)?;
+        Ok((checking_data, checked_shard, weak_shard))
     }
 
     fn check(
@@ -734,9 +745,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: &Self::CheckingData,
         index: u16,
-        reshard: Self::ReShard,
+        weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        checking_data.check::<H>(index, &reshard)
+        checking_data.check::<H>(index, &weak_shard)
     }
 
     fn decode(
@@ -758,7 +769,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
-        let mut evaluation = EvaluationVector::empty(encoded_rows.ilog2() as usize, data_cols);
+        let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
@@ -790,18 +801,22 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodecConfig, Config};
-    use bytes::BytesMut;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use crate::Config;
+    use commonware_cryptography::Sha256;
+    use commonware_math::{
+        algebra::{FieldNTT as _, Ring as _},
+        ntt::PolynomialVector,
+    };
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
 
     const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
         let config = Config {
-            minimum_shards: 3,
-            extra_shards: 1,
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(1),
         };
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
@@ -820,44 +835,16 @@ mod tests {
     }
 
     #[test]
-    fn reshard_roundtrip_handles_field_packing() {
-        let config = Config {
-            minimum_shards: 3,
-            extra_shards: 2,
-        };
-        let data = vec![0xAA; 64];
-
-        let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-        let shard = shards.into_iter().next().unwrap();
-
-        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
-
-        let mut buf = BytesMut::new();
-        reshard.write(&mut buf);
-        let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256Digest>::read_cfg(
-            &mut bytes,
-            &CodecConfig {
-                maximum_shard_size: data.len(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(decoded, reshard);
-    }
-
-    #[test]
     fn decode_rejects_duplicate_indices() {
         let config = Config {
-            minimum_shards: 2,
-            extra_shards: 0,
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
         let shard0 = shards[0].clone();
-        let (checking_data, checked_shard0, _reshard0) =
-            Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
+        let (checking_data, checked_shard0, _weak_shard0) =
+            Zoda::<Sha256>::weaken(&config, &commitment, 0, shard0).unwrap();
         let duplicate = CheckedShard {
             index: checked_shard0.index,
             shard: checked_shard0.shard.clone(),
@@ -873,14 +860,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checksum_malleability() {
+        /// Construct the vanishing polynomial over specific indices.
+        ///
+        /// When encoded, this will be 0 at those indices, and non-zero elsewhere.
+        fn vanishing(lg_domain: u8, vanish_indices: &[u32]) -> PolynomialVector<F> {
+            let w = F::root_of_unity(lg_domain).expect("domain too large for Goldilocks");
+            let mut domain = Vec::with_capacity(1usize << lg_domain);
+            let mut x = F::one();
+            for _ in 0..(1usize << lg_domain) {
+                domain.push(x);
+                x *= &w;
+            }
+            let roots: Vec<F> = vanish_indices.iter().map(|&i| domain[i as usize]).collect();
+            let mut out = EvaluationVector::empty(lg_domain as usize, 1);
+            domain.into_iter().enumerate().for_each(|(i, x)| {
+                let mut acc = F::one();
+                for root in &roots {
+                    acc *= &(x - root);
+                }
+                out.fill_row(i, &[acc]);
+            });
+            out.recover()
+        }
+
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = vec![0x5Au8; 256 * 1024];
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+
+        let leader_i = 0usize;
+        let a_i = 1usize;
+        let b_i = 2usize;
+
+        // Apply a shift to the checksums
+        {
+            let (checking_data, _, _) = Zoda::<Sha256>::weaken(
+                &config,
+                &commitment,
+                leader_i as u16,
+                shards[leader_i].clone(),
+            )
+            .unwrap();
+
+            let samples = checking_data.topology.samples;
+            let a_indices =
+                checking_data.shuffled_indices[a_i * samples..(a_i + 1) * samples].to_vec();
+            let lg_rows = checking_data.topology.encoded_rows.ilog2() as usize;
+            let shift = vanishing(lg_rows as u8, &a_indices);
+            let mut checksum = (*shards[1].checksum).clone();
+            for (i, shift_i) in shift.coefficients_up_to(checksum.rows()).enumerate() {
+                for j in 0..checksum.cols() {
+                    checksum[(i, j)] += &shift_i[0];
+                }
+            }
+            shards[1].checksum = Arc::new(checksum);
+            shards[2].checksum = shards[1].checksum.clone();
+        }
+
+        assert!(matches!(
+            Zoda::<Sha256>::weaken(&config, &commitment, b_i as u16, shards[b_i].clone()),
+            Err(Error::InvalidWeakShard)
+        ));
+
+        // Without robust Fiat-Shamir, this will succeed.
+        // This should be rejected once follower-specific challenge binding is fixed.
+        assert!(matches!(
+            Zoda::<Sha256>::weaken(&config, &commitment, a_i as u16, shards[a_i].clone()),
+            Err(Error::InvalidWeakShard)
+        ));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<Sha256Digest>>,
-            CodecConformance<ReShard<Sha256Digest>>,
+            CodecConformance<StrongShard<Sha256Digest>>,
+            CodecConformance<WeakShard<Sha256Digest>>,
         }
     }
 }

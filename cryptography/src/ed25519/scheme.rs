@@ -1,9 +1,8 @@
-use crate::{BatchVerifier, Secret};
+#[cfg(feature = "std")]
+use crate::BatchVerifier;
+use crate::Secret;
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::{Cow, ToOwned},
-    vec::Vec,
-};
+use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -349,7 +348,9 @@ pub struct Batch {
 }
 
 #[cfg(feature = "std")]
-impl BatchVerifier<PublicKey> for Batch {
+impl BatchVerifier for Batch {
+    type PublicKey = PublicKey;
+
     fn new() -> Self {
         Self {
             verifier: ed25519_consensus::batch::Verifier::new(),

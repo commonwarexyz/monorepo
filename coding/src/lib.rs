@@ -14,7 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
-    use std::fmt::Debug;
+    use std::{fmt::Debug, num::NonZeroU16};
 
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
@@ -27,27 +27,26 @@ commonware_macros::stability_scope!(ALPHA {
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct Config {
         /// The minimum number of shards needed to encode the data.
-        pub minimum_shards: u16,
+        pub minimum_shards: NonZeroU16,
         /// Extra shards beyond the minimum number.
         ///
         /// Alternatively, one can think of the configuration as having a total number
         /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
         /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
-        pub extra_shards: u16,
+        pub extra_shards: NonZeroU16,
     }
 
     impl Config {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
-            u32::from(self.minimum_shards) + u32::from(self.extra_shards)
+            u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards.get())
         }
     }
 
     impl FixedSize for Config {
-        const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
+        const SIZE: usize = 2 * <NonZeroU16 as FixedSize>::SIZE;
     }
 
     impl Write for Config {
@@ -62,8 +61,20 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             Ok(Self {
-                minimum_shards: u16::read_cfg(buf, cfg)?,
-                extra_shards: u16::read_cfg(buf, cfg)?,
+                minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
+                extra_shards: NonZeroU16::read_cfg(buf, cfg)?,
+            })
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    impl<'a> arbitrary::Arbitrary<'a> for Config {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let minimum_shards = commonware_utils::NZU16!(u.int_in_range(1..=u16::MAX)?);
+            let extra_shards = commonware_utils::NZU16!(u.int_in_range(1..=u16::MAX)?);
+            Ok(Self {
+                minimum_shards,
+                extra_shards,
             })
         }
     }
@@ -85,25 +96,29 @@ commonware_macros::stability_scope!(ALPHA {
     /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
     /// use commonware_cryptography::Sha256;
     /// use commonware_parallel::Sequential;
+    /// use commonware_utils::NZU16;
     ///
     /// const STRATEGY: Sequential = Sequential;
     ///
     /// type RS = ReedSolomon<Sha256>;
     ///
-    /// let config = Config { minimum_shards: 2, extra_shards: 1 };
+    /// let config = Config {
+    ///     minimum_shards: NZU16!(2),
+    ///     extra_shards: NZU16!(1),
+    /// };
     /// let data = b"Hello!";
     /// // Turn the data into shards, and a commitment to those shards.
     /// let (commitment, shards) =
     ///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     ///
-    /// // Each person produces reshards, their own checked shard, and checking data
-    /// // to check other peoples reshards.
-    /// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
+    /// // Each person produces weak shards, their own checked shard, and checking data
+    /// // to check other peoples weak shards.
+    /// let (mut checking_data_w_shard, weak_shards): (Vec<_>, Vec<_>) = shards
     ///         .into_iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, i as u16, shard).unwrap();
-    ///             ((checking_data, checked_shard), reshard)
+    ///             let (checking_data, checked_shard, weak_shard) = RS::weaken(&config, &commitment, i as u16, shard).unwrap();
+    ///             ((checking_data, checked_shard), weak_shard)
     ///         })
     ///         .collect();
     /// // Let's pretend that the last item is "ours"
@@ -111,8 +126,8 @@ commonware_macros::stability_scope!(ALPHA {
     /// // We can use this checking_data to check the other shards.
     /// let mut checked_shards = Vec::new();
     /// checked_shards.push(checked_shard);
-    /// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
-    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
+    /// for (i, weak_shard) in weak_shards.into_iter().enumerate().skip(1) {
+    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, weak_shard).unwrap())
     /// }
     ///
     /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
@@ -122,25 +137,47 @@ commonware_macros::stability_scope!(ALPHA {
     /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
+    ///
+    /// # Guarantees
+    ///
+    /// Here are additional properties that implementors of this trait need to
+    /// consider, and that users of this trait can rely on.
+    ///
+    /// ## Weaken vs Check
+    ///
+    /// [`Scheme::weaken`] and [`Scheme::check`] should agree, even for malicious encoders.
+    ///
+    /// It should not be possible for parties A and B to call `weaken` successfully,
+    /// but then have either of them fail on the other's shard when calling `check`.
+    ///
+    /// In other words, if an honest party considers their shard to be correctly
+    /// formed, then other honest parties which have successfully constructed their
+    /// checking data will also agree with the shard being correct.
+    ///
+    /// A violation of this property would be, for example, if a malicious payload
+    /// could convince two parties that they both have valid shards, but then the
+    /// checking data they produce from the malicious payload reports issues with
+    /// those shards.
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
-        /// A shard of data, to be received by a participant.
-        type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-        /// A shard shared with other participants, to aid them in reconstruction.
+        /// A strong shard of data, to be received by a participant.
+        type StrongShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// A weak shard shared with other participants, to aid them in reconstruction.
         ///
-        /// In most cases, this will be the same as `Shard`, but some schemes might
-        /// have extra information in `Shard` that may not be necessary to reconstruct
+        /// In most cases, this will be the same as `StrongShard`, but some schemes might
+        /// have extra information in `StrongShard` that may not be necessary to reconstruct
         /// the data.
-        type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// Data which can assist in checking shards.
-        type CheckingData: Clone + Send;
+        type CheckingData: Clone + Send + Sync;
         /// A shard that has been checked for inclusion in the commitment.
         ///
-        /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
+        /// This allows excluding [Scheme::WeakShard]s which are invalid, and shouldn't
         /// be considered as progress towards meeting the minimum number of shards.
-        type CheckedShard;
-        type Error: std::fmt::Debug;
+        type CheckedShard: Clone + Send + Sync;
+        /// The type of errors that can occur during encoding, weakening, checking, and decoding.
+        type Error: std::fmt::Debug + Send;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
@@ -151,9 +188,9 @@ commonware_macros::stability_scope!(ALPHA {
             config: &Config,
             data: impl Buf,
             strategy: &impl Strategy,
-        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
+        ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
-        /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
+        /// Take your own shard, check it, and produce a [Scheme::WeakShard] to forward to others.
         ///
         /// This takes in an index, which is the index you expect the shard to be.
         ///
@@ -163,25 +200,25 @@ commonware_macros::stability_scope!(ALPHA {
         /// You also get [Scheme::CheckingData], which has information you can use to check
         /// the shards you receive from others.
         #[allow(clippy::type_complexity)]
-        fn reshard(
+        fn weaken(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
-            shard: Self::Shard,
-        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error>;
+            shard: Self::StrongShard,
+        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
 
-        /// Check the integrity of a reshard, producing a checked shard.
+        /// Check the integrity of a weak shard, producing a checked shard.
         ///
-        /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
+        /// This requires the [Scheme::CheckingData] produced by [Scheme::weaken].
         ///
-        /// This takes in an index, to make sure that the reshard you're checking
+        /// This takes in an index, to make sure that the weak shard you're checking
         /// is associated with the participant you expect it to be.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             checking_data: &Self::CheckingData,
             index: u16,
-            reshard: Self::ReShard,
+            weak_shard: Self::WeakShard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -215,170 +252,164 @@ commonware_macros::stability_scope!(ALPHA {
 mod test {
     use super::*;
     use crate::reed_solomon::ReedSolomon;
+    use arbitrary::Unstructured;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_invariants::minifuzz;
+    use commonware_macros::test_group;
     use commonware_parallel::Sequential;
-    use std::cmp::Reverse;
+    use commonware_utils::NZU16;
 
-    const MAX_DATA_BYTES: usize = 1 << 31;
+    const MAX_SHARD_SIZE: usize = 1 << 31;
+    const MAX_SHARDS: u16 = 32;
+    const MAX_DATA: usize = 1024;
+    const MIN_EXTRA_SHARDS: u16 = 1;
 
-    fn general_test<S: Scheme>(
-        name: &str,
-        data: &[u8],
-        min_shards: u16,
-        total_shards: u16,
-        indices: &[u16],
-    ) {
-        // If the indices reference some larger shard, use that as the total.
-        let total_shards = indices
-            .iter()
-            .map(|&x| x + 1)
-            .max()
-            .map_or(total_shards, |x| x.max(total_shards));
-        assert!(min_shards >= 1, "min_shards must be at least 1");
-        assert!(
-            indices.len() >= min_shards as usize,
-            "you need to supply at least {min_shards} indices"
-        );
-        assert!(
-            total_shards >= min_shards,
-            "total_shards ({total_shards}) must be >= min_shards ({min_shards})"
-        );
-
-        let config = Config {
-            minimum_shards: min_shards,
-            extra_shards: total_shards - min_shards,
-        };
+    fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
+        // Encode data into shards.
+        let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
         let read_cfg = CodecConfig {
-            maximum_shard_size: MAX_DATA_BYTES,
+            maximum_shard_size: MAX_SHARD_SIZE,
         };
-        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
-        // Pick out the packets we want, in reverse order.
-        let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
-            let mut out = shards
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, shard)| {
-                    let shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                    let i = i as u16;
-                    let pos_of_i = indices.iter().position(|&x| x == i)?;
-                    let (x0, x1, x2) = S::reshard(&config, &commitment, i, shard).unwrap();
-                    Some((pos_of_i, i, x0, x1, x2))
-                })
-                .collect::<Vec<_>>();
-            out.sort_by_key(|&(pos_of_i, _, _, _, _)| Reverse(pos_of_i));
-            let first = out.pop().unwrap();
-            (first, out)
-        };
-        let checked_shards = {
-            let mut others = other_packets
-                .into_iter()
-                .map(|(_, i, _, _, reshard)| {
-                    let reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
-                    S::check(&config, &commitment, &checking_data, i, reshard).unwrap()
-                })
-                .collect::<Vec<_>>();
-            others.push(my_checked_shard);
-            others
-        };
+        for (i, shard) in shards.iter().enumerate() {
+            // Strong shard codec roundtrip.
+            let decoded_shard = S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+            assert_eq!(decoded_shard, *shard);
+
+            // Weak shard codec roundtrip.
+            let (_, _, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard.clone()).unwrap();
+            let decoded_weak_shard =
+                S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
+            assert_eq!(decoded_weak_shard, weak_shard);
+        }
+
+        // Collect selected shards for decoding. The first selected shard
+        // goes through `weaken`, the rest go through `check`.
+        let mut checked_shards = Vec::new();
+        let mut checking_data = None;
+        for (i, shard) in shards.into_iter().enumerate() {
+            if !selected.contains(&(i as u16)) {
+                continue;
+            }
+            let (cd, checked, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard).unwrap();
+            if let Some(cd) = &checking_data {
+                let checked = S::check(config, &commitment, cd, i as u16, weak_shard).unwrap();
+                checked_shards.push(checked);
+            } else {
+                checking_data = Some(cd);
+                checked_shards.push(checked);
+            }
+        }
+
+        // Shuffle the checked shards to verify decode is order-independent.
+        checked_shards.reverse();
+
+        // Decode from the selected shards and verify data integrity.
         let decoded = S::decode(
-            &config,
+            config,
             &commitment,
-            checking_data,
+            checking_data.unwrap(),
             &checked_shards,
             &Sequential,
         )
         .unwrap();
-        assert_eq!(&decoded, data, "{name} failed");
+        assert_eq!(decoded, data);
     }
 
-    fn test_basic<S: Scheme>() {
-        general_test::<S>("test_basic", b"Hello, Reed-Solomon!", 4, 7, &[0, 1, 2, 3]);
+    fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
+        let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
+        let extra_shards =
+            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
+        let total_shards = minimum_shards + extra_shards;
+
+        let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
+        let data = u.bytes(data_len)?.to_vec();
+
+        let selected_len = usize::from(minimum_shards)
+            + (usize::from(u.arbitrary::<u16>()?) % (usize::from(extra_shards) + 1));
+        let mut selected: Vec<u16> = (0..total_shards).collect();
+        for i in 0..selected_len {
+            let remaining = usize::from(total_shards) - i;
+            let j = i + (usize::from(u.arbitrary::<u16>()?) % remaining);
+            selected.swap(i, j);
+        }
+        selected.truncate(selected_len);
+
+        Ok((
+            Config {
+                minimum_shards: NZU16!(minimum_shards),
+                extra_shards: NZU16!(extra_shards),
+            },
+            data,
+            selected,
+        ))
     }
 
-    fn test_moderate<S: Scheme>() {
-        general_test::<S>(
-            "test_moderate",
-            b"Testing with more pieces than minimum",
-            4,
-            10,
-            &[0, 1, 2, 8, 9],
-        );
-    }
+    #[test]
+    fn roundtrip_empty_data() {
+        let config = Config {
+            minimum_shards: NZU16!(30),
+            extra_shards: NZU16!(70),
+        };
+        let selected: Vec<u16> = (0..30).collect();
 
-    fn test_odd_shard_len<S: Scheme>() {
-        general_test::<S>("test_odd_shard_len", b"?", 2, 3, &[0, 1]);
-    }
-
-    fn test_recovery<S: Scheme>() {
-        general_test::<S>(
-            "test_recovery",
-            b"Testing recovery pieces",
-            3,
-            8,
-            &[5, 6, 7],
-        );
-    }
-
-    fn test_empty_data<S: Scheme>() {
-        general_test::<S>(
-            "test_empty_data",
-            b"",
-            30,
-            100,
-            (0..30u16).collect::<Vec<_>>().as_slice(),
-        );
-    }
-
-    fn test_large_data<S: Scheme>() {
-        general_test::<S>(
-            "test_large_data",
-            vec![42u8; 1000].as_slice(),
-            3,
-            4,
-            &[0, 1, 2],
-        );
-    }
-
-    fn test_no_data_two_shards<S: Scheme>() {
-        general_test::<S>("test_no_data_one_shard", b"", 1, 2, &[0]);
+        roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+        roundtrip::<NoCoding<Sha256>>(&config, b"", &selected);
+        roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
     }
 
     // This exercises an edge case in ZODA, but is also useful for other schemes.
-    fn test_2_pow_16_25_total_shards<S: Scheme>() {
-        general_test::<S>(
-            "test_2_pow_16_25_total_shards",
-            vec![0x67; 1 << 16].as_slice(),
-            8,
-            25,
-            &(0..8).collect::<Vec<_>>(),
-        );
-    }
+    #[test]
+    fn roundtrip_2_pow_16_25_total_shards() {
+        let config = Config {
+            minimum_shards: NZU16!(8),
+            extra_shards: NZU16!(17),
+        };
+        let data = vec![0x67; 1 << 16];
+        let selected: Vec<u16> = (0..8).collect();
 
-    fn test_suite<S: Scheme>() {
-        test_basic::<S>();
-        test_moderate::<S>();
-        test_odd_shard_len::<S>();
-        test_recovery::<S>();
-        test_empty_data::<S>();
-        test_large_data::<S>();
-        test_no_data_two_shards::<S>();
-        test_2_pow_16_25_total_shards::<S>();
+        roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+        roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+        roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
     }
 
     #[test]
-    fn test_suite_reed_solomon() {
-        test_suite::<ReedSolomon<Sha256>>();
+    fn minifuzz_roundtrip_reed_solomon() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
     }
 
     #[test]
-    fn test_suite_no_coding() {
-        test_suite::<NoCoding<Sha256>>();
+    fn minifuzz_roundtrip_no_coding() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
     }
 
+    #[test_group("slow")]
     #[test]
-    fn test_suite_zoda() {
-        test_suite::<Zoda<Sha256>>();
+    fn minifuzz_roundtrip_zoda() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
     }
 
     #[cfg(feature = "arbitrary")]

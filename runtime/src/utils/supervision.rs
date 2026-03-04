@@ -1,7 +1,8 @@
 use super::Aborter;
+use commonware_utils::sync::Mutex;
 use std::{
     mem,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 
 /// Tracks the relationship between runtime contexts.
@@ -73,7 +74,7 @@ impl Tree {
 
     /// Creates a new child node registered under the provided parent.
     pub(crate) fn child(parent: &Arc<Self>) -> (Arc<Self>, bool) {
-        let mut parent_inner = parent.inner.lock().unwrap();
+        let mut parent_inner = parent.inner.lock();
         let aborted = parent_inner.aborted;
         let child = Arc::new(Self {
             inner: Mutex::new(TreeInner::new(Some(parent.clone()), aborted)),
@@ -89,7 +90,7 @@ impl Tree {
     /// Records an [Aborter] on the node.
     pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
         let result = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             inner.register(aborter)
         };
 
@@ -102,7 +103,7 @@ impl Tree {
     /// Aborts the task and all descendants rooted at this node.
     pub(crate) fn abort(self: &Arc<Self>) {
         let result = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             inner.abort()
         };
         let Some((task, children)) = result else {

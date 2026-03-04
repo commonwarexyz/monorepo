@@ -12,10 +12,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::channel::{
+    fallible::{AsyncFallibleExt, OneshotExt},
+    mpsc, oneshot,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -138,6 +137,10 @@ pub enum Certifier<D: Digest> {
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
     Cancel,
+    /// Hold the sender alive without ever responding, simulating a certify that
+    /// hangs indefinitely (e.g., block never arrives for reconstruction because
+    /// the proposer is dead and shard gossip didn't deliver enough shards).
+    Pending,
 }
 
 pub struct Config<H: Hasher, P: PublicKey> {
@@ -175,11 +178,17 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     certify_latency: Normal<f64>,
 
     fail_verification: bool,
+    drop_proposals: bool,
+    drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
+
+    /// Senders held alive to simulate certifications that hang indefinitely
+    /// (used by [`Certifier::Pending`]).
+    pending_certifications: Vec<oneshot::Sender<bool>>,
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
@@ -210,10 +219,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 certify_latency,
 
                 fail_verification: false,
+                drop_proposals: false,
+                drop_verifications: false,
                 should_certify: cfg.should_certify,
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
+                pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
         )
@@ -223,6 +235,15 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.fail_verification = fail;
     }
 
+    pub const fn set_drop_proposals(&mut self, drop: bool) {
+        self.drop_proposals = drop;
+    }
+
+    pub const fn set_drop_verifications(&mut self, drop: bool) {
+        self.drop_verifications = drop;
+    }
+
+    #[cfg(not(feature = "mocks"))]
     fn panic(&self, msg: &str) -> ! {
         panic!("[{:?}] {}", self.me, msg);
     }
@@ -276,15 +297,35 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
 
         // Verify contents
-        let (parsed_round, parent, _) =
-            <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
+        let Ok((parsed_round, parent, _)) = <(Round, H::Digest, u64)>::decode(&mut contents) else {
+            #[cfg(feature = "mocks")]
+            {
+                // During fuzzing, return false for invalid payloads
+                return false;
+            }
+            #[cfg(not(feature = "mocks"))]
+            panic!("[{:?}] invalid payload", self.me);
+        };
+
         if parsed_round != context.round {
+            #[cfg(feature = "mocks")]
+            {
+                // During fuzzing, return false for round mismatches
+                return false;
+            }
+            #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
                 "invalid round (in payload): {} != {}",
                 parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {
+            #[cfg(feature = "mocks")]
+            {
+                // During fuzzing, return false for parent mismatches
+                return false;
+            }
+            #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",
                 parent, context.parent.1
@@ -307,13 +348,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             Certifier::Always => Some(true),
             Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
             Certifier::Custom(func) => Some(func(payload)),
-            Certifier::Cancel => None,
+            Certifier::Cancel | Certifier::Pending => None,
         }
     }
 
-    async fn broadcast(&mut self, payload: H::Digest) {
+    fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay.broadcast(&self.me, (payload, contents)).await;
+        self.relay.broadcast(&self.me, (payload, contents));
     }
 
     pub fn start(mut self) -> Handle<()> {
@@ -335,17 +376,16 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             on_stopped => {
                 debug!("context shutdown, stopping application");
             },
-            message = self.mailbox.next() => {
-                let message = match message {
-                    Some(message) => message,
-                    None => break,
-                };
+            Some(message) = self.mailbox.recv() else break => {
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
                         response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
+                        if self.drop_proposals {
+                            continue;
+                        }
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
@@ -354,6 +394,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
+                        if self.drop_verifications {
+                            continue;
+                        }
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
@@ -370,20 +413,23 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response,
                     } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        // If certify returns None (Cancel mode), drop the sender without
-                        // responding, causing the receiver to return Err(Canceled).
                         if let Some(certified) = self.certify(payload, contents).await {
                             response.send_lossy(certified);
+                        } else if matches!(self.should_certify, Certifier::Pending) {
+                            // Hold the sender alive so the receiver never resolves.
+                            // This simulates a certify that hangs indefinitely (e.g.,
+                            // block never arrives for reconstruction).
+                            self.pending_certifications.push(response);
                         }
+                        // Cancel: drop sender -> immediate RecvError on receiver.
                     }
                     Message::Broadcast { payload } => {
-                        self.broadcast(payload).await;
+                        self.broadcast(payload);
                     }
                 }
             },
-            broadcast = self.broadcast.next() => {
+            Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
                 seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter

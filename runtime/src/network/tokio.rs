@@ -1,4 +1,4 @@
-use crate::{network::proxy::ProxyConfig, Error, IoBufMut, IoBufs};
+use crate::{network::proxy::ProxyConfig, BufferPool, Error, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -16,14 +16,37 @@ pub struct Sink {
     sink: OwnedWriteHalf,
 }
 
+impl Sink {
+    async fn send_single(&mut self, buf: &[u8]) -> Result<(), Error> {
+        self.sink
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+
+    async fn send_vectored(&mut self, bufs: &mut IoBufs) -> Result<(), Error> {
+        self.sink
+            .write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
+}
+
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let write_timeout = self.write_timeout;
+        let bufs = bufs.into();
+        let send = async {
+            match bufs.try_into_single() {
+                Ok(buf) => self.send_single(buf.as_ref()).await,
+                Err(mut bufs) => self.send_vectored(&mut bufs).await,
+            }
+        };
+
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf.into()))
+        timeout(write_timeout, send)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
-        Ok(())
     }
 }
 
@@ -34,13 +57,14 @@ impl crate::Sink for Sink {
 pub struct Stream {
     read_timeout: Duration,
     stream: BufReader<OwnedReadHalf>,
+    pool: BufferPool,
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
-        let len = len as usize;
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let read_fut = async {
-            let mut buf = IoBufMut::zeroed(len);
+            // SAFETY: `len` bytes are written by read_exact below.
+            let mut buf = unsafe { self.pool.alloc_len(len) };
             self.stream
                 .read_exact(buf.as_mut())
                 .await
@@ -54,8 +78,7 @@ impl crate::Stream for Stream {
             .map_err(|_| Error::Timeout)?
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
-        let max_len = max_len as usize;
+    fn peek(&self, max_len: usize) -> &[u8] {
         let buffered = self.stream.buffer();
         let len = std::cmp::min(buffered.len(), max_len);
         &buffered[..len]
@@ -66,6 +89,7 @@ impl crate::Stream for Stream {
 pub struct Listener {
     cfg: Config,
     listener: TcpListener,
+    pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
@@ -83,6 +107,13 @@ impl crate::Listener for Listener {
             }
         }
 
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.cfg.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
         // Split the stream
         let (read_half, write_half) = stream.into_split();
         let mut buf_reader = BufReader::with_capacity(self.cfg.read_buffer_size, read_half);
@@ -97,7 +128,6 @@ impl crate::Listener for Listener {
         } else {
             tcp_addr
         };
-
         Ok((
             client_addr,
             Sink {
@@ -107,6 +137,7 @@ impl crate::Listener for Listener {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: buf_reader,
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -126,10 +157,16 @@ pub struct Config {
     /// be efficient on slow, congested networks. However, to do so the algorithm introduces
     /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
     /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
     tcp_nodelay: Option<bool>,
+    /// Whether or not to set the `SO_LINGER` socket option.
+    ///
+    /// When `None`, the system default is used. When
+    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
+    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// `TIME_WAIT` state. This is useful in adversarial environments to
+    /// reclaim socket resources immediately when closing connections to
+    /// misbehaving peers.
+    so_linger: Option<Duration>,
     /// Read timeout for connections, after which the connection will be closed
     read_timeout: Duration,
     /// Write timeout for connections, after which the connection will be closed
@@ -152,6 +189,11 @@ impl Config {
     /// See [Config]
     pub const fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
         self.tcp_nodelay = tcp_nodelay;
+        self
+    }
+    /// See [Config]
+    pub const fn with_so_linger(mut self, so_linger: Option<Duration>) -> Self {
+        self.so_linger = so_linger;
         self
     }
     /// See [Config]
@@ -182,6 +224,10 @@ impl Config {
         self.tcp_nodelay
     }
     /// See [Config]
+    pub const fn so_linger(&self) -> Option<Duration> {
+        self.so_linger
+    }
+    /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
@@ -203,6 +249,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tcp_nodelay: None,
+            so_linger: None,
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
@@ -211,21 +258,17 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// [crate::Network] implementation that uses the [tokio] runtime.
 pub struct Network {
     cfg: Config,
+    pool: BufferPool,
 }
 
-impl From<Config> for Network {
-    fn from(cfg: Config) -> Self {
-        Self { cfg }
-    }
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Self::from(Config::default())
+impl Network {
+    /// Creates a new Network with the given configuration and buffer pool.
+    pub const fn new(cfg: Config, pool: BufferPool) -> Self {
+        Self { cfg, pool }
     }
 }
 
@@ -239,6 +282,7 @@ impl crate::Network for Network {
             .map(|listener| Listener {
                 cfg: self.cfg.clone(),
                 listener,
+                pool: self.pool.clone(),
             })
     }
 
@@ -258,6 +302,13 @@ impl crate::Network for Network {
             }
         }
 
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.cfg.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
         Ok((
@@ -268,6 +319,7 @@ impl crate::Network for Network {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -277,18 +329,24 @@ impl crate::Network for Network {
 mod tests {
     use crate::{
         network::{proxy::ProxyConfig, tests, tokio as TokioNetwork},
-        Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
+    use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
@@ -298,10 +356,11 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
@@ -311,10 +370,11 @@ mod tests {
     async fn test_small_send_read_quickly() {
         // Use a long read timeout to ensure we're not just waiting for timeout
         let read_timeout = Duration::from_secs(30);
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(read_timeout)
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -353,10 +413,11 @@ mod tests {
     async fn test_read_timeout_with_partial_data() {
         // Use a short read timeout to make the test fast
         let read_timeout = Duration::from_millis(100);
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(read_timeout)
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -391,11 +452,12 @@ mod tests {
     #[tokio::test]
     async fn test_unbuffered_mode() {
         // Set read_buffer_size to 0 to disable buffering
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_buffer_size(0)
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -437,10 +499,11 @@ mod tests {
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
         // Use default buffer size to enable buffering
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -493,11 +556,12 @@ mod tests {
             .with_trusted_proxy_cidr("127.0.0.0/8")
             .unwrap();
 
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5))
                 .with_proxy(proxy_config),
+            test_pool(),
         );
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -548,11 +612,12 @@ mod tests {
             .with_trusted_proxy_cidr("10.0.0.0/8")
             .unwrap();
 
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5))
                 .with_proxy(proxy_config),
+            test_pool(),
         );
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();

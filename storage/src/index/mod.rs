@@ -218,12 +218,9 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_utils::sync::Mutex;
     use rand::Rng;
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-        thread,
-    };
+    use std::{collections::HashMap, sync::Arc, thread};
 
     fn run_index_basic<I: Unordered<Value = u64>>(index: &mut I) {
         // Generate a collision and check metrics to make sure it's captured
@@ -1209,7 +1206,7 @@ mod tests {
     {
         // Insert some initial data
         {
-            let mut index = index.lock().unwrap();
+            let mut index = index.lock();
             index.insert(b"test_key1", 100);
             index.insert(b"test_key2", 200);
         }
@@ -1219,7 +1216,7 @@ mod tests {
         let handle = thread::spawn(move || {
             // Limit the lifetime of the lock and the cursor so they drop before returning
             let result = {
-                let mut index = index_clone.lock().unwrap();
+                let mut index = index_clone.lock();
                 let mut updated = false;
                 if let Some(mut cursor) = index.get_mut(b"test_key2") {
                     if cursor.find(|&value| value == 200) {
@@ -1238,7 +1235,7 @@ mod tests {
 
         // Verify the update was applied (and collision retained)
         {
-            let index = index.lock().unwrap();
+            let index = index.lock();
             let values: Vec<u64> = index.get(b"test_key2").copied().collect();
             assert!(values.contains(&100));
             assert!(values.contains(&250));

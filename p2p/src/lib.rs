@@ -15,9 +15,11 @@ stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
-    use commonware_runtime::{IoBuf, IoBufMut};
-    use commonware_utils::ordered::Set;
-    use futures::channel::mpsc;
+    use commonware_runtime::{IoBuf, IoBufs};
+    use commonware_utils::{
+        channel::mpsc,
+        ordered::{Map, Set},
+    };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
     pub mod authenticated;
@@ -77,7 +79,7 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -145,7 +147,7 @@ stability_scope!(BETA {
         /// that the caller can act upon.
         fn send(
             self,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -184,7 +186,7 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<
             Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,
@@ -215,33 +217,71 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
-    /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
-    pub trait Manager: Debug + Clone + Send + 'static {
+    /// Alias for the subscription type returned by [`Provider::subscribe`].
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
+
+    /// Interface for reading peer set information.
+    pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
-        /// The type for the peer set in registration.
-        type Peers;
-
-        /// Update the peer set.
-        ///
-        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
-        fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
-
         /// Fetch the ordered set of peers for a given ID.
-        fn peer_set(&mut self, id: u64) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
+        fn peer_set(
+            &mut self,
+            id: u64,
+        ) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver that will receive the peer set ID whenever a new peer set
-        /// is registered via `update`.
+        /// Returns a receiver that will receive tuples of:
+        /// - The peer set ID
+        /// - The peers in the new set
+        /// - All currently tracked peers (union of recent peer sets)
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
-        ) -> impl Future<
-            Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
-        > + Send;
+        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
+    }
+
+    /// Interface for managing peer set membership (where peer addresses are not known).
+    pub trait Manager: Provider {
+        /// Track a peer set with the given ID and peers.
+        ///
+        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        ///
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        fn track(
+            &mut self,
+            id: u64,
+            peers: Set<Self::PublicKey>,
+        ) -> impl Future<Output = ()> + Send;
+    }
+
+    /// Interface for managing peer set membership (where peer addresses are known).
+    pub trait AddressableManager: Provider {
+        /// Track a peer set with the given ID and peer<PublicKey, Address> pairs.
+        ///
+        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        ///
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        fn track(
+            &mut self,
+            id: u64,
+            peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
+
+        /// Update addresses for multiple peers without creating a new peer set.
+        ///
+        /// For each peer that is tracked and has a changed address:
+        /// - Any existing connection to the peer is severed (it was on the old IP)
+        /// - The listener's allowed IPs are updated to reflect the new egress IP
+        /// - Future connections will use the new address
+        fn overwrite(
+            &mut self,
+            peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Interface for blocking other peers.
@@ -253,3 +293,42 @@ stability_scope!(BETA {
         fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
     }
 });
+
+/// Logs a warning and blocks a peer in a single call.
+///
+/// This macro combines a [`tracing::warn!`] with a [`Blocker::block`] call
+/// to ensure consistent logging at every block site. The peer is always
+/// included as a `peer` field in the log output.
+///
+/// # Examples
+///
+/// ```ignore
+/// block!(self.blocker, sender, "invalid message");
+/// block!(self.blocker, sender, ?err, "invalid ack signature");
+/// block!(self.blocker, sender, %view, "blocking peer for epoch mismatch");
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! block {
+    ($blocker:expr, $peer:expr, $($arg:tt)+) => {
+        let peer = $peer;
+        tracing::warn!(peer = ?peer, $($arg)+);
+        #[allow(clippy::disallowed_methods)]
+        $blocker.block(peer).await;
+    };
+}
+
+/// Block a peer without logging.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test helper that bypasses the block! macro"
+)]
+#[cfg(test)]
+pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
+    blocker.block(peer).await;
+}

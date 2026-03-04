@@ -5,25 +5,49 @@ use commonware_codec::{
 };
 use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
 
+/// Sends a frame with a varint length prefix, delegating frame assembly to the caller.
+///
+/// The `assemble` closure receives the varint prefix and must combine it with
+/// the payload. This allows callers to choose between:
+/// - Chunked: prepend the prefix as a separate buffer
+/// - Contiguous: write the prefix directly into a pre-allocated buffer
+///
+/// Returns an error if the message is too large or the sink is closed.
+pub(crate) async fn send_frame_with<S: Sink>(
+    sink: &mut S,
+    payload_len: usize,
+    max_message_size: u32,
+    assemble: impl FnOnce(UInt<u32>) -> Result<IoBufs, Error>,
+) -> Result<(), Error> {
+    // Validate frame size
+    if payload_len > max_message_size as usize {
+        return Err(Error::SendTooLarge(payload_len));
+    }
+    let prefix = UInt(payload_len as u32);
+
+    let frame = assemble(prefix)?;
+    sink.send(frame).await.map_err(Error::SendFailed)
+}
+
 /// Sends data to the sink with a varint length prefix.
-/// Returns an error if the message is too large or the stream is closed.
+///
+/// The varint length prefix is prepended to the buffer(s), which results in a
+/// chunked `IoBufs`.
+///
+/// Returns an error if the message is too large or the sink is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    buf: impl Into<IoBufs> + Send,
+    bufs: impl Into<IoBufs> + Send,
     max_message_size: u32,
 ) -> Result<(), Error> {
-    let mut bufs = buf.into();
+    let mut bufs = bufs.into();
 
-    // Validate frame size
-    let n = bufs.remaining();
-    if n > max_message_size as usize {
-        return Err(Error::SendTooLarge(n));
-    }
-
-    // Prepend varint-encoded length
-    let len = UInt(n as u32);
-    bufs.prepend(IoBuf::from(len.encode()));
-    sink.send(bufs).await.map_err(Error::SendFailed)
+    send_frame_with(sink, bufs.len(), max_message_size, |prefix| {
+        // Prepend varint-encoded length
+        bufs.prepend(IoBuf::from(prefix.encode()));
+        Ok(bufs)
+    })
+    .await
 }
 
 /// Receives data from the stream with a varint length prefix.
@@ -31,15 +55,15 @@ pub async fn send_frame<S: Sink>(
 /// stream is closed.
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
     let (len, skip) = recv_length(stream).await?;
-    if len > max_message_size {
-        return Err(Error::RecvTooLarge(len as usize));
+    if len > max_message_size as usize {
+        return Err(Error::RecvTooLarge(len));
     }
 
     stream
-        .recv(skip as u64 + len as u64)
+        .recv(skip + len)
         .await
         .map(|mut bufs| {
-            bufs.advance(skip as usize);
+            bufs.advance(skip);
             bufs
         })
         .map_err(Error::RecvFailed)
@@ -49,15 +73,15 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
 /// Returns (payload_len, bytes_to_skip) where bytes_to_skip is:
 /// - varint_len if decoded from peek buffer (bytes not yet consumed)
 /// - 0 if decoded via recv (bytes already consumed)
-async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
+async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error> {
     let mut decoder = Decoder::<u32>::new();
 
     // Fast path: decode from peek buffer without blocking
     let peeked = {
-        let peeked = stream.peek(MAX_U32_VARINT_SIZE as u64);
+        let peeked = stream.peek(MAX_U32_VARINT_SIZE);
         for (i, byte) in peeked.iter().enumerate() {
             match decoder.feed(*byte) {
-                Ok(Some(len)) => return Ok((len, i as u32 + 1)),
+                Ok(Some(len)) => return Ok((len as usize, i + 1)),
                 Ok(None) => continue,
                 Err(_) => return Err(Error::InvalidVarint),
             }
@@ -66,15 +90,12 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
     };
 
     // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
-    let mut buf = stream
-        .recv(peeked as u64 + 1)
-        .await
-        .map_err(Error::RecvFailed)?;
+    let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
     buf.advance(peeked);
 
     loop {
         match decoder.feed(buf.get_u8()) {
-            Ok(Some(len)) => return Ok((len, 0)),
+            Ok(Some(len)) => return Ok((len as usize, 0)),
             Ok(None) => {}
             Err(_) => return Err(Error::InvalidVarint),
         }
@@ -151,8 +172,43 @@ mod tests {
             // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08] (2 bytes)
             let read = stream.recv(2).await.unwrap();
             assert_eq!(read.coalesce(), &[0x80, 0x08]); // 1024 as varint
-            let read = stream.recv(MAX_MESSAGE_SIZE as u64).await.unwrap();
+            let read = stream.recv(MAX_MESSAGE_SIZE as usize).await.unwrap();
             assert_eq!(read.coalesce(), buf);
+        });
+    }
+
+    #[test]
+    fn test_send_frame_with_closure_error() {
+        let (mut sink, _) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = send_frame_with(&mut sink, 10, MAX_MESSAGE_SIZE, |_prefix| {
+                Err(Error::HandshakeError(
+                    commonware_cryptography::handshake::Error::EncryptionFailed,
+                ))
+            })
+            .await;
+            assert!(matches!(&result, Err(Error::HandshakeError(_))));
+        });
+    }
+
+    #[test]
+    fn test_send_frame_with_too_large() {
+        let (mut sink, _) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = send_frame_with(
+                &mut sink,
+                MAX_MESSAGE_SIZE as usize + 1,
+                MAX_MESSAGE_SIZE,
+                |_prefix| unreachable!(),
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE as usize + 1)
+            );
         });
     }
 

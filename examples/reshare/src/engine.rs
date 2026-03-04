@@ -2,15 +2,19 @@
 
 use crate::{
     application::{Application, Block, EpochProvider, Provider},
-    dkg::{self, UpdateCallBack},
+    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
+    marshal::{
+        self,
+        core::Actor as MarshalActor,
+        resolver::handler,
+        standard::{Deferred, Standard},
+    },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
@@ -24,12 +28,12 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner,
-    Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
-use futures::{channel::mpsc, future::try_join_all};
+use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
+use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
@@ -38,7 +42,7 @@ use std::{
 };
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 10;
+const MAILBOX_SIZE: usize = 1024;
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -53,10 +57,11 @@ const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
+const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
 pub struct Config<C, P, B, V, T>
 where
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -76,9 +81,9 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -94,9 +99,9 @@ where
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     #[allow(clippy::type_complexity)]
-    marshal: marshal::Actor<
+    marshal: MarshalActor<
         E,
-        Block<H, C, V>,
+        Standard<Block<H, C, V>>,
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
@@ -110,7 +115,7 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
+        Deferred<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
         T,
@@ -120,9 +125,9 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -131,12 +136,12 @@ where
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
-        let page_cache = CacheRef::new(PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
+    pub async fn new(context: E, mut config: Config<C, P, B, V, T>) -> Self {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
-        let (dkg, dkg_mailbox) = dkg::Actor::init(
+        let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
@@ -144,9 +149,9 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                max_supported_mode: MAX_SUPPORTED_MODE,
             },
-        )
-        .await;
+        );
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.with_label("buffer"),
@@ -156,6 +161,7 @@ where
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
+                peer_set_subscription: config.manager.subscribe().await,
             },
         );
 
@@ -252,8 +258,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-
-        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
+        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -274,12 +279,13 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
+                max_pending_acks: MAX_PENDING_ACKS,
                 strategy: config.strategy.clone(),
             },
         )
         .await;
 
-        let application = Marshaled::new(
+        let application = Deferred::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
@@ -338,8 +344,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -382,8 +388,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<Block<H, C, V>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
+            mpsc::Receiver<handler::Message<H::Digest>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {

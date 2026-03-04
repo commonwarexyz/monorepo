@@ -21,19 +21,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{select, stability_scope};
-use prometheus_client::registry::Metric;
-use std::{
-    future::Future,
-    io::Error as IoError,
-    net::SocketAddr,
-    num::NonZeroUsize,
-    time::{Duration, SystemTime},
-};
-use thiserror::Error;
-
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
+use commonware_macros::stability_scope;
 
 #[macro_use]
 mod macros;
@@ -43,8 +31,8 @@ mod process;
 mod storage;
 
 stability_scope!(ALPHA {
-    pub mod mocks;
     pub mod deterministic;
+    pub mod mocks;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
@@ -59,17 +47,30 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
+    use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    use iobuf::PoolError;
+    use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
+    use std::{
+        future::Future,
+        io::Error as IoError,
+        net::SocketAddr,
+        num::NonZeroUsize,
+        time::{Duration, SystemTime},
+    };
+    use thiserror::Error;
 
-    /// Re-export of [governor::Quota] for rate limiting configuration.
-    pub use governor::Quota;
+    /// Prefix for runtime metrics.
+    pub(crate) const METRICS_PREFIX: &str = "runtime";
 
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
+    /// Re-export of [governor::Quota] for rate limiting configuration.
+    pub use governor::Quota;
 
     pub mod iobuf;
-    pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -135,6 +136,8 @@ stability_scope!(BETA {
         ImmutableBlob,
         #[error("io error: {0}")]
         Io(#[from] IoError),
+        #[error("buffer pool: {0}")]
+        Pool(#[from] PoolError),
     }
 
     /// Interface that any task scheduler must implement to start
@@ -256,7 +259,7 @@ stability_scope!(BETA {
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
-    pub trait RayonPoolSpawner: Spawner + Metrics {
+    pub trait ThreadPooler: Spawner + Metrics {
         /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
         ///
         /// # Arguments
@@ -265,7 +268,10 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
         /// be built.
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError>;
 
         /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
         ///
@@ -275,8 +281,11 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
         /// built.
-        fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
-            self.create_pool(concurrency).map(Rayon::with_pool)
+        fn create_strategy(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<Rayon, ThreadPoolBuildError> {
+            self.create_thread_pool(concurrency).map(Rayon::with_pool)
         }
     }
 
@@ -382,22 +391,6 @@ stability_scope!(BETA {
         /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
         fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
-        /// Prefix the given label with the current context's label.
-        ///
-        /// Unlike `with_label`, this method does not create a new context.
-        fn scoped_label(&self, label: &str) -> String {
-            let label = if self.label().is_empty() {
-                label.to_string()
-            } else {
-                format!("{}_{}", self.label(), label)
-            };
-            assert!(
-                !label.starts_with(METRICS_PREFIX),
-                "using runtime label is not allowed"
-            );
-            label
-        }
-
         /// Register a metric with the runtime.
         ///
         /// Any registered metric will include (as a prefix) the label of the current context.
@@ -408,10 +401,42 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         ///
         /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
-        /// by using `with_label` to create new context instances (ensures all context instances are
-        /// namespaced).
+        /// (via the concatenation of nested `with_label` and `register` calls). This can be
+        /// avoided by using `with_label` and `with_attribute` to create new context instances
+        /// (ensures all context instances are namespaced).
         fn encode(&self) -> String;
+
+        /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
+        /// consensus engines). All metrics registered through the returned context (and
+        /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
+        /// a separate registry that is automatically removed when all clones of the scoped
+        /// context are dropped.
+        ///
+        /// If the context is already scoped, returns a clone with the same scope (scopes
+        /// nest by inheritance, not by creating new independent scopes).
+        ///
+        /// # Uniqueness
+        ///
+        /// Scoped metrics share the same global uniqueness constraint as
+        /// [`Metrics::register`]: each (prefixed_name, attributes) pair must be unique.
+        /// Callers should use [`Metrics::with_attribute`] to distinguish metrics across
+        /// scopes (e.g., an "epoch" attribute) rather than re-registering identical keys.
+        ///
+        /// # Example
+        ///
+        /// ```ignore
+        /// let scoped = context
+        ///     .with_label("engine")
+        ///     .with_attribute("epoch", epoch)
+        ///     .with_scope();
+        ///
+        /// // Register metrics into the scoped registry
+        /// let counter = Counter::default();
+        /// scoped.register("votes", "vote count", counter.clone());
+        ///
+        /// // Metrics are removed when all clones of `scoped` are dropped.
+        /// ```
+        fn with_scope(&self) -> Self;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -491,12 +516,8 @@ stability_scope!(BETA {
         {
             async move {
                 select! {
-                    result = future => {
-                        Ok(result)
-                    },
-                    _ = self.sleep(duration) => {
-                        Err(Error::Timeout)
-                    },
+                    result = future => Ok(result),
+                    _ = self.sleep(duration) => Err(Error::Timeout),
                 }
             }
         }
@@ -572,7 +593,7 @@ stability_scope!(BETA {
         /// If the sink returns an error, part of the message may still be delivered.
         fn send(
             &mut self,
-            buf: impl Into<IoBufs> + Send,
+            bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
@@ -586,7 +607,7 @@ stability_scope!(BETA {
         /// # Warning
         ///
         /// If the stream returns an error, partially read data may be discarded.
-        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
         /// Peek at buffered data without consuming.
         ///
@@ -595,7 +616,7 @@ stability_scope!(BETA {
         ///
         /// This is useful e.g. for parsing length prefixes without committing to a read
         /// or paying the cost of async.
-        fn peek(&self, max_len: u64) -> &[u8];
+        fn peek(&self, max_len: usize) -> &[u8];
     }
 
     /// Interface to interact with storage.
@@ -664,7 +685,8 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Return all blobs in a given partition.
-        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        fn scan(&self, partition: &str)
+            -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
     /// Interface to read and write to a blob.
@@ -683,27 +705,43 @@ stability_scope!(BETA {
     /// before dropping to ensure all changes are durably persisted.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read into caller-provided buffer(s) at the given offset.
+        /// Read `len` bytes at `offset` into caller-provided buffer(s).
         ///
-        /// The caller provides the buffer, and the implementation fills it with data
-        /// read from the blob starting at `offset`. Returns the same buffer, filled
-        /// with data.
+        /// The caller provides the buffer(s), and the implementation fills it with
+        /// exactly `len` bytes of data read from the blob starting at `offset`.
+        /// Returns the same buffer(s), filled with data.
         ///
         /// # Contract
         ///
-        /// - The output `IoBufsMut` is the same as the input, with data filled from offset
-        /// - The total bytes read equals the total initialized length of the input buffer(s)
+        /// - The returned buffers reuse caller-provided storage, with exactly `len`
+        ///   bytes filled from `offset`.
+        /// - Caller-provided chunk layout is preserved.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `bufs`.
+        fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
+        /// of data read from the blob starting at `offset`.
+        ///
+        /// To reuse a buffer(s), use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,
-            buf: impl Into<IoBufsMut> + Send,
+            len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `buf` to the blob at the given offset.
+        /// Write `bufs` to the blob at the given offset.
         fn write_at(
             &self,
             offset: u64,
-            buf: impl Into<IoBufs> + Send,
+            bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Resize the blob to the given length.
@@ -715,8 +753,17 @@ stability_scope!(BETA {
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
     }
+
+    /// Interface that any runtime must implement to provide buffer pools.
+    pub trait BufferPooler: Clone + Send + Sync + 'static {
+        /// Returns the network [BufferPool].
+        fn network_buffer_pool(&self) -> &BufferPool;
+
+        /// Returns the storage [BufferPool].
+        fn storage_buffer_pool(&self) -> &BufferPool;
+    }
 });
-stability_scope!(ALPHA, cfg(feature = "external") {
+stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
     pub trait Pacer: Clock + Clone + Send + Sync + 'static {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
@@ -777,14 +824,17 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
-    use commonware_utils::NZUsize;
-    use futures::{
+    use commonware_utils::{
         channel::{mpsc, oneshot},
+        sync::Mutex,
+        NZUsize,
+    };
+    use futures::{
         future::{pending, ready},
-        join, pin_mut, FutureExt, SinkExt, StreamExt,
+        join, pin_mut, FutureExt,
     };
     use prometheus_client::{
-        encoding::EncodeLabelSet,
+        encoding::{EncodeLabelKey, EncodeLabelSet, EncodeLabelValue},
         metrics::{counter::Counter, family::Family},
     };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -795,7 +845,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -803,6 +853,7 @@ mod tests {
     use utils::reschedule;
 
     fn test_error_future<R: Runner>(runner: R) {
+        #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }
@@ -1013,24 +1064,24 @@ mod tests {
             let output = Mutex::new(0);
             select! {
                 v1 = ready(1) => {
-                    *output.lock().unwrap() = v1;
+                    *output.lock() = v1;
                 },
                 v2 = ready(2) => {
-                    *output.lock().unwrap() = v2;
+                    *output.lock() = v2;
                 },
             };
-            assert_eq!(*output.lock().unwrap(), 1);
+            assert_eq!(*output.lock(), 1);
 
             // Test second branch
             select! {
                 v1 = std::future::pending::<i32>() => {
-                    *output.lock().unwrap() = v1;
+                    *output.lock() = v1;
                 },
                 v2 = ready(2) => {
-                    *output.lock().unwrap() = v2;
+                    *output.lock() = v2;
                 },
             };
-            assert_eq!(*output.lock().unwrap(), 2);
+            assert_eq!(*output.lock(), 2);
         });
     }
 
@@ -1041,10 +1092,10 @@ mod tests {
     {
         runner.start(|context| async move {
             // Should hit timeout
-            let (mut sender, mut receiver) = mpsc::unbounded();
+            let (sender, mut receiver) = mpsc::unbounded_channel();
             for _ in 0..2 {
                 select! {
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         panic!("unexpected value: {v:?}");
                     },
                     _ = context.sleep(Duration::from_millis(100)) => {
@@ -1054,15 +1105,15 @@ mod tests {
             }
 
             // Populate channel
-            sender.send(0).await.unwrap();
-            sender.send(1).await.unwrap();
+            sender.send(0).unwrap();
+            sender.send(1).unwrap();
 
             // Prefer not reading channel without losing messages
             select! {
                 _ = async {} => {
                     // Skip reading from channel even though populated
                 },
-                v = receiver.next() => {
+                v = receiver.recv() => {
                     panic!("unexpected value: {v:?}");
                 },
             };
@@ -1073,7 +1124,7 @@ mod tests {
                     _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timeout");
                     },
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         assert_eq!(v.unwrap(), i);
                     },
                 };
@@ -1107,7 +1158,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, IoBufMut::zeroed(data.len()))
+                .read_at(0, data.len())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1130,10 +1181,7 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let read = blob
-                .read_at(7, IoBufMut::zeroed(7))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(7, 7).await.expect("Failed to read data");
             assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
@@ -1189,16 +1237,13 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let read = blob
-                .read_at(0, IoBufMut::zeroed(10))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(0, 10).await.expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(10, 10).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
@@ -1208,16 +1253,13 @@ mod tests {
                 .expect("Failed to write data3");
 
             // Read data back
-            let read = blob
-                .read_at(0, IoBufMut::zeroed(10))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(0, 10).await.expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(10, 10).await;
             assert!(result.is_err());
         });
     }
@@ -1258,14 +1300,11 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read_buf = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
-            let extended_part = blob
-                .read_at(data.len() as u64, IoBufMut::zeroed(data.len()))
-                .await
-                .unwrap();
+            let extended_part = blob.read_at(data.len() as u64, data.len()).await.unwrap();
             assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
@@ -1277,7 +1316,7 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read_buf = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
@@ -1322,7 +1361,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(0, IoBufMut::zeroed(10 + additional))
+                    .read_at(0, 10 + additional)
                     .await
                     .expect("Failed to read data");
                 let read = read.coalesce();
@@ -1347,7 +1386,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(0, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(0, 10).await;
             assert!(result.is_err());
 
             // Write data to the blob
@@ -1357,7 +1396,7 @@ mod tests {
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(0, IoBufMut::zeroed(20)).await;
+            let result = blob.read_at(0, 20).await;
             assert!(result.is_err());
         })
     }
@@ -1391,7 +1430,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, IoBufMut::zeroed(data_len))
+                        .read_at(0, data_len)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1402,7 +1441,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, IoBufMut::zeroed(data_len))
+                        .read_at(0, data_len)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1416,7 +1455,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, IoBufMut::zeroed(data.len()))
+                .read_at(0, data.len())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1480,7 +1519,7 @@ mod tests {
             let task = |cleanup_duration: Duration| {
                 let context = context.clone();
                 let counter = counter.clone();
-                let mut started_tx = started_tx.clone();
+                let started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
                     // Wait for signal to be acquired
                     let mut signal = context.stopped();
@@ -1503,7 +1542,7 @@ mod tests {
 
             // Give tasks time to start
             for _ in 0..3 {
-                started_rx.next().await.unwrap();
+                started_rx.recv().await.unwrap();
             }
 
             // Stop and verify all cleanup completed
@@ -1653,7 +1692,7 @@ mod tests {
                 let handle = context.spawn(|_| async {});
 
                 // Store child handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 parent_initialized_tx.send(()).unwrap();
 
@@ -1665,7 +1704,7 @@ mod tests {
             parent_initialized_rx.await.unwrap();
 
             // Child task completes successfully
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(child_handle.await.is_ok());
 
             // Complete the parent task
@@ -1690,7 +1729,7 @@ mod tests {
                 let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 parent_initialized_tx.send(()).unwrap();
 
@@ -1706,7 +1745,7 @@ mod tests {
             assert!(matches!(parent_handle.await, Err(Error::Closed)));
 
             // Child task should also resolve with error since its parent aborted
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
@@ -1725,7 +1764,7 @@ mod tests {
                 let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 // Parent task completes
                 parent_complete_rx.await.unwrap();
@@ -1738,7 +1777,7 @@ mod tests {
             assert!(parent_handle.await.is_ok());
 
             // Child task should resolve with error since its parent has completed
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
@@ -1769,7 +1808,7 @@ mod tests {
 
             // Spawn tasks
             let handles = Arc::new(Mutex::new(Vec::new()));
-            let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
+            let (initialized_tx, mut initialized_rx) = mpsc::channel(9);
             let root_task = context.spawn({
                 let handles = handles.clone();
                 move |_| async move {
@@ -1777,20 +1816,20 @@ mod tests {
                     {
                         let handle = context.spawn({
                             let handles = handles.clone();
-                            let mut initialized_tx = initialized_tx.clone();
+                            let initialized_tx = initialized_tx.clone();
                             move |_| async move {
                                 for grandchild in grandchildren {
                                     let handle = grandchild.spawn(|_| async {
                                         pending::<()>().await;
                                     });
-                                    handles.lock().unwrap().push(handle);
+                                    handles.lock().push(handle);
                                     initialized_tx.send(()).await.unwrap();
                                 }
 
                                 pending::<()>().await;
                             }
                         });
-                        handles.lock().unwrap().push(handle);
+                        handles.lock().push(handle);
                         initialized_tx.send(()).await.unwrap();
                     }
 
@@ -1800,18 +1839,18 @@ mod tests {
 
             // Wait for tasks to initialize
             for _ in 0..9 {
-                initialized_rx.next().await.unwrap();
+                initialized_rx.recv().await.unwrap();
             }
 
             // Verify we have all 9 handles (3 children + 6 grandchildren)
-            assert_eq!(handles.lock().unwrap().len(), 9);
+            assert_eq!(handles.lock().len(), 9);
 
             // Abort root task
             root_task.abort();
             assert!(matches!(root_task.await, Err(Error::Closed)));
 
             // All handles should resolve with error due to cascading abort
-            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+            let handles = handles.lock().drain(..).collect::<Vec<_>>();
             for handle in handles {
                 assert!(matches!(handle.await, Err(Error::Closed)));
             }
@@ -2033,22 +2072,22 @@ mod tests {
                 let dropper = dropper.clone();
                 move |context| async move {
                     // Create tasks with circular dependencies through channels
-                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
-                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
-                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+                    let (setup_tx, mut setup_rx) = mpsc::unbounded_channel::<()>();
+                    let (tx1, mut rx1) = mpsc::unbounded_channel::<()>();
+                    let (tx2, mut rx2) = mpsc::unbounded_channel::<()>();
 
                     // Task 1 holds tx2 and waits on rx1
                     context.with_label("task1").spawn({
-                        let mut setup_tx = setup_tx.clone();
+                        let setup_tx = setup_tx.clone();
                         let dropper = dropper.clone();
                         move |_| async move {
                             // Setup deadlock and mark ready
-                            tx2.send(()).await.unwrap();
-                            rx1.next().await.unwrap();
-                            setup_tx.send(()).await.unwrap();
+                            tx2.send(()).unwrap();
+                            rx1.recv().await.unwrap();
+                            setup_tx.send(()).unwrap();
 
                             // Wait forever
-                            while rx1.next().await.is_some() {}
+                            while rx1.recv().await.is_some() {}
                             drop(tx2);
                             drop(dropper);
                         }
@@ -2057,19 +2096,19 @@ mod tests {
                     // Task 2 holds tx1 and waits on rx2
                     context.with_label("task2").spawn(move |_| async move {
                         // Setup deadlock and mark ready
-                        tx1.send(()).await.unwrap();
-                        rx2.next().await.unwrap();
-                        setup_tx.send(()).await.unwrap();
+                        tx1.send(()).unwrap();
+                        rx2.recv().await.unwrap();
+                        setup_tx.send(()).unwrap();
 
                         // Wait forever
-                        while rx2.next().await.is_some() {}
+                        while rx2.recv().await.is_some() {}
                         drop(tx1);
                         drop(dropper);
                     });
 
                     // Wait for tasks to start
-                    setup_rx.next().await.unwrap();
-                    setup_rx.next().await.unwrap();
+                    setup_rx.recv().await.unwrap();
+                    setup_rx.recv().await.unwrap();
                 }
             });
 
@@ -2664,6 +2703,433 @@ mod tests {
     fn test_tokio_metrics_family_with_attributes() {
         let runner = tokio::Runner::default();
         test_metrics_family_with_attributes(runner);
+    }
+
+    fn test_with_scope_register_and_encode<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").with_scope();
+            let counter = Counter::<u64>::default();
+            scoped.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "scoped metric should appear in encode: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_register_and_encode() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_register_and_encode(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_register_and_encode() {
+        let runner = tokio::Runner::default();
+        test_with_scope_register_and_encode(runner);
+    }
+
+    fn test_with_scope_drop_removes_metrics<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Register a permanent metric
+            let permanent = Counter::<u64>::default();
+            context.with_label("permanent").register(
+                "counter",
+                "permanent counter",
+                permanent.clone(),
+            );
+            permanent.inc();
+
+            // Register a scoped metric
+            let scoped = context.with_label("engine").with_scope();
+            let counter = Counter::<u64>::default();
+            scoped.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            // Both should appear
+            let buffer = context.encode();
+            assert!(buffer.contains("permanent_counter_total 1"));
+            assert!(buffer.contains("engine_votes_total 1"));
+
+            // Drop the scoped context
+            drop(scoped);
+
+            // Only permanent metric should remain
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("permanent_counter_total 1"),
+                "permanent metric should survive scope drop: {buffer}"
+            );
+            assert!(
+                !buffer.contains("engine_votes"),
+                "scoped metric should be removed after scope drop: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_drop_removes_metrics() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_drop_removes_metrics(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_drop_removes_metrics() {
+        let runner = tokio::Runner::default();
+        test_with_scope_drop_removes_metrics(runner);
+    }
+
+    fn test_with_scope_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Simulate epoch lifecycle
+            let epoch1 = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .with_scope();
+            let c1 = Counter::<u64>::default();
+            epoch1.register("votes", "vote count", c1.clone());
+            c1.inc();
+
+            let epoch2 = context
+                .with_label("engine")
+                .with_attribute("epoch", 2)
+                .with_scope();
+            let c2 = Counter::<u64>::default();
+            epoch2.register("votes", "vote count", c2.clone());
+            c2.inc();
+            c2.inc();
+
+            // Both epochs visible
+            let buffer = context.encode();
+            assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
+            assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
+
+            // HELP/TYPE lines should be deduplicated across scopes
+            assert_eq!(
+                buffer.matches("# HELP engine_votes").count(),
+                1,
+                "HELP should appear once: {buffer}"
+            );
+            assert_eq!(
+                buffer.matches("# TYPE engine_votes").count(),
+                1,
+                "TYPE should appear once: {buffer}"
+            );
+
+            // Drop epoch 1 context
+            drop(epoch1);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("epoch=\"1\""),
+                "epoch 1 should be gone: {buffer}"
+            );
+            assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
+
+            // Drop epoch 2 context
+            drop(epoch2);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_votes"),
+                "all epoch metrics should be gone: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_attributes() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_attributes() {
+        let runner = tokio::Runner::default();
+        test_with_scope_attributes(runner);
+    }
+
+    fn test_with_scope_inherits_on_with_label<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").with_scope();
+
+            // Child context inherits scope
+            let child = scoped.with_label("batcher");
+            let counter = Counter::<u64>::default();
+            child.register("msgs", "message count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(buffer.contains("engine_batcher_msgs_total 1"));
+
+            // Dropping all scoped contexts removes all metrics in the scope
+            drop(child);
+            drop(scoped);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_batcher_msgs"),
+                "child metric should be removed with scope: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_inherits_on_with_label() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_inherits_on_with_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_inherits_on_with_label() {
+        let runner = tokio::Runner::default();
+        test_with_scope_inherits_on_with_label(runner);
+    }
+
+    fn test_multiple_scopes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let ctx_a = context.with_label("a").with_scope();
+            let ctx_b = context.with_label("b").with_scope();
+
+            let ca = Counter::<u64>::default();
+            ctx_a.register("counter", "a counter", ca.clone());
+            ca.inc();
+
+            let cb = Counter::<u64>::default();
+            ctx_b.register("counter", "b counter", cb.clone());
+            cb.inc();
+            cb.inc();
+
+            let buffer = context.encode();
+            assert!(buffer.contains("a_counter_total 1"));
+            assert!(buffer.contains("b_counter_total 2"));
+
+            // Drop only scope a
+            drop(ctx_a);
+            let buffer = context.encode();
+            assert!(!buffer.contains("a_counter"));
+            assert!(buffer.contains("b_counter_total 2"));
+
+            // Drop scope b
+            drop(ctx_b);
+            let buffer = context.encode();
+            assert!(!buffer.contains("b_counter"));
+        });
+    }
+
+    #[test]
+    fn test_deterministic_multiple_scopes() {
+        let executor = deterministic::Runner::default();
+        test_multiple_scopes(executor);
+    }
+
+    #[test]
+    fn test_tokio_multiple_scopes() {
+        let runner = tokio::Runner::default();
+        test_multiple_scopes(runner);
+    }
+
+    fn test_encode_single_eof<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let root_counter = Counter::<u64>::default();
+            context.register("root", "root metric", root_counter.clone());
+            root_counter.inc();
+
+            let scoped = context.with_label("engine").with_scope();
+            let scoped_counter = Counter::<u64>::default();
+            scoped.register("ops", "scoped metric", scoped_counter.clone());
+            scoped_counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("root_total 1"),
+                "root metric missing: {buffer}"
+            );
+            assert!(
+                buffer.contains("engine_ops_total 1"),
+                "scoped metric missing: {buffer}"
+            );
+            assert_eq!(
+                buffer.matches("# EOF").count(),
+                1,
+                "expected exactly one EOF marker: {buffer}"
+            );
+            assert!(
+                buffer.ends_with("# EOF\n"),
+                "EOF must be the last line: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_encode_single_eof() {
+        let executor = deterministic::Runner::default();
+        test_encode_single_eof(executor);
+    }
+
+    #[test]
+    fn test_tokio_encode_single_eof() {
+        let runner = tokio::Runner::default();
+        test_encode_single_eof(runner);
+    }
+
+    fn test_with_scope_nested_inherits<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").with_scope();
+
+            // Calling with_scope() on an already-scoped context inherits the scope
+            let nested = scoped.with_scope();
+            let counter = Counter::<u64>::default();
+            nested.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "nested scope should inherit parent scope: {buffer}"
+            );
+
+            // Dropping the nested context alone should NOT clean up metrics
+            // because the parent scoped context still holds the Arc
+            drop(nested);
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "metrics should survive as long as any scope clone exists: {buffer}"
+            );
+
+            // Dropping the parent scoped context cleans up
+            drop(scoped);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_votes"),
+                "metrics should be removed when all scope clones are dropped: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_nested_inherits() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_nested_inherits(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_nested_inherits() {
+        let runner = tokio::Runner::default();
+        test_with_scope_nested_inherits(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate metric:")]
+    fn test_deterministic_reregister_after_scope_drop() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let scoped = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .with_scope();
+            let c1 = Counter::<u64>::default();
+            scoped.register("votes", "vote count", c1);
+            drop(scoped);
+
+            // Re-registering the same key after scope drop is not allowed
+            let scoped2 = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .with_scope();
+            let c2 = Counter::<u64>::default();
+            scoped2.register("votes", "vote count", c2);
+        });
+    }
+
+    fn test_with_scope_family_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+        struct Peer {
+            name: String,
+        }
+        impl EncodeLabelSet for Peer {
+            fn encode(
+                &self,
+                encoder: &mut prometheus_client::encoding::LabelSetEncoder<'_>,
+            ) -> Result<(), std::fmt::Error> {
+                let mut label = encoder.encode_label();
+                let mut key = label.encode_label_key()?;
+                EncodeLabelKey::encode(&"peer", &mut key)?;
+                let mut value = key.encode_label_value()?;
+                EncodeLabelValue::encode(&self.name.as_str(), &mut value)?;
+                value.finish()
+            }
+        }
+
+        runner.start(|context| async move {
+            let scoped = context
+                .with_label("batcher")
+                .with_attribute("epoch", 1)
+                .with_scope();
+
+            let family: Family<Peer, Counter> = Family::default();
+            scoped.register("votes", "votes per peer", family.clone());
+            family
+                .get_or_create(&Peer {
+                    name: "alice".into(),
+                })
+                .inc();
+            family.get_or_create(&Peer { name: "bob".into() }).inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("batcher_votes_total{epoch=\"1\",peer=\"alice\"} 1"),
+                "family with attributes should combine labels: {buffer}"
+            );
+            assert!(
+                buffer.contains("batcher_votes_total{epoch=\"1\",peer=\"bob\"} 1"),
+                "family with attributes should combine labels: {buffer}"
+            );
+
+            drop(scoped);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("batcher_votes"),
+                "family metrics should be removed: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_family_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_family_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_family_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_with_scope_family_with_attributes(runner);
     }
 
     #[test]
@@ -3365,7 +3831,7 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let received = stream.recv(content_length as u64).await?;
+                let received = stream.recv(content_length).await?;
                 String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 
@@ -3429,11 +3895,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_tokio() {
+    fn test_create_thread_pool_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3446,11 +3915,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_deterministic() {
+    fn test_create_thread_pool_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3460,5 +3932,65 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    fn test_buffer_pooler<R: Runner>(
+        runner: R,
+        expected_network_max_per_class: usize,
+        expected_storage_max_per_class: usize,
+    ) where
+        R::Context: BufferPooler,
+    {
+        runner.start(|context| async move {
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
+            assert!(net_buf.capacity() >= 1024);
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
+            assert!(storage_buf.capacity() >= 4096);
+
+            // Verify pools have expected configurations
+            assert_eq!(
+                context.network_buffer_pool().config().max_per_class.get(),
+                expected_network_max_per_class
+            );
+            assert_eq!(
+                context.storage_buffer_pool().config().max_per_class.get(),
+                expected_storage_max_per_class
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_buffer_pooler() {
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 32);
+
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
+    }
+
+    #[test]
+    fn test_tokio_buffer_pooler() {
+        test_buffer_pooler(tokio::Runner::default(), 4096, 32);
+
+        let runner = tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
     }
 }

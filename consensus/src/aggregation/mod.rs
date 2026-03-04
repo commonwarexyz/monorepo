@@ -105,9 +105,10 @@ mod tests {
         Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{
-        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+        channel::{fallible::OneshotExt, oneshot},
+        test_rng, NZUsize, NonZeroDuration, NZU16,
     };
-    use futures::{channel::oneshot, future::join_all};
+    use futures::future::join_all;
     use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
@@ -249,7 +250,7 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -352,6 +353,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -493,7 +495,11 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                                journal_page_cache: CacheRef::from_pooler(
+                                    &context,
+                                    PAGE_SIZE,
+                                    PAGE_CACHE_SIZE,
+                                ),
                                 strategy: Sequential,
                             },
                         );
@@ -557,6 +563,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_byzantine_shutdown() {
         unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -642,7 +649,11 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                            journal_page_cache: CacheRef::from_pooler(
+                                &context,
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            ),
                             strategy: Sequential,
                         },
                     );
@@ -725,7 +736,11 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                            journal_page_cache: CacheRef::from_pooler(
+                                &context,
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            ),
                             strategy: Sequential,
                         },
                     );
@@ -753,6 +768,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(f2);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_shutdown_with_unsigned_height() {
         unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinPk, _>);
@@ -811,6 +827,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -921,6 +938,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_one_offline() {
         one_offline(bls12381_threshold::fixture::<MinPk, _>);
@@ -1066,7 +1084,11 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                         strategy: Sequential,
                     },
                 );

@@ -9,18 +9,16 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
-    pub mod aggregation;
-    pub mod ordered_broadcast;
-});
-commonware_macros::stability_scope!(BETA {
-    use commonware_codec::Codec;
-    use commonware_cryptography::{Committable, Digestible};
+use commonware_macros::stability_scope;
+
+stability_scope!(BETA {
+    use commonware_codec::{Codec, Encode};
+    use commonware_cryptography::Digestible;
 
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View, Round};
+    use types::{Epoch, Height, View};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -46,9 +44,9 @@ commonware_macros::stability_scope!(BETA {
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
-    pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
-        fn parent(&self) -> Self::Commitment;
+        fn parent(&self) -> Self::Digest;
     }
 
     /// CertifiableBlock extends [Block] with consensus context information.
@@ -58,31 +56,28 @@ commonware_macros::stability_scope!(BETA {
     /// needs to participate in certification but never verified the block locally (necessary for liveness).
     pub trait CertifiableBlock: Block {
         /// The consensus context type stored in this block.
-        type Context: Clone;
+        type Context: Clone + Encode;
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::types::Round;
     use commonware_cryptography::Digest;
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_utils::channels::fallible::OneshotExt;
-    use futures::channel::{oneshot, mpsc};
+    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
-    use commonware_runtime::{Spawner, Metrics, Clock};
-    use rand::Rng;
 
     pub mod marshal;
-    use crate::marshal::ingress::mailbox::AncestorStream;
 
     mod reporter;
     pub use reporter::*;
 
     /// Histogram buckets for measuring consensus latency.
     const LATENCY: [f64; 36] = [
-        0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35,
-        0.36, 0.37, 0.38, 0.39, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+        0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26,
+        0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.4, 0.45,
+        0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
     ];
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
@@ -139,6 +134,11 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// This is particularly useful for applications that employ erasure coding, which
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        ///
+        /// # Determinism Requirement
+        ///
+        /// The decision returned by `certify` must be deterministic and consistent across
+        /// all honest participants to ensure liveness.
         fn certify(
             &mut self,
             _round: Round,
@@ -195,17 +195,26 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Index;
 
         /// Create a channel that will receive updates when the latest index (also provided) changes.
-        fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        fn subscribe(
+            &mut self,
+        ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
-commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    pub mod application;
+stability_scope!(ALPHA {
+    pub mod aggregation;
+    pub mod ordered_broadcast;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
+    use commonware_cryptography::certificate::Scheme;
+    use commonware_runtime::{Clock, Metrics, Spawner};
+    use rand::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     pub trait Application<E>: Clone + Send + 'static
     where
-        E: Rng + Spawner + Metrics + Clock
+        E: Rng + Spawner + Metrics + Clock,
     {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;
@@ -223,10 +232,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose(
+        fn propose<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
     }
 
@@ -238,13 +247,13 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     /// hidden from the application.
     pub trait VerifyingApplication<E>: Application<E>
     where
-        E: Rng + Spawner + Metrics + Clock
+        E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
-        fn verify(
+        fn verify<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

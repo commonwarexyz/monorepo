@@ -143,7 +143,7 @@ where
     C: Signer,
     V: Variant,
 {
-    fn parent(&self) -> Self::Commitment {
+    fn parent(&self) -> Self::Digest {
         self.parent
     }
 }

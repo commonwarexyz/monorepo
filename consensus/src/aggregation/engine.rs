@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -71,7 +71,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D> + Clone,
@@ -154,7 +154,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D> + Clone,
@@ -234,7 +234,12 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) {
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let (mut sender, mut receiver) = wrap(
+            (),
+            self.context.network_buffer_pool().clone(),
+            network.0,
+            network.1,
+        );
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
@@ -298,13 +303,10 @@ impl<
                 debug!("shutdown");
             },
             // Handle refresh epoch deadline
-            epoch = epoch_updates.next() => {
-                // Error handling
-                let Some(epoch) = epoch else {
-                    error!("epoch subscription failed");
-                    break;
-                };
-
+            Some(epoch) = epoch_updates.recv() else {
+                error!("epoch subscription failed");
+                break;
+            } => {
                 // Refresh the epoch
                 debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                 assert!(epoch >= self.epoch);
@@ -321,10 +323,10 @@ impl<
                 self.pending
                     .iter_mut()
                     .for_each(|(_, pending)| match pending {
-                        Pending::Unverified(acks) => {
+                        self::Pending::Unverified(acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
-                        Pending::Verified(_, acks) => {
+                        self::Pending::Verified(_, acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                     });
@@ -368,8 +370,7 @@ impl<
                 let TipAck { ack, tip } = match msg {
                     Ok(peer_ack) => peer_ack,
                     Err(err) => {
-                        warn!(?err, ?sender, "ack decode failed, blocking peer");
-                        self.blocker.block(sender).await;
+                        commonware_p2p::block!(self.blocker, sender, ?err, "ack decode failed");
                         continue;
                     }
                 };
@@ -386,8 +387,12 @@ impl<
                 // Validate that we need to process the ack
                 if let Err(err) = self.validate_ack(&ack, &sender) {
                     if err.blockable() {
-                        warn!(?sender, ?err, "blocking peer for validation failure");
-                        self.blocker.block(sender).await;
+                        commonware_p2p::block!(
+                            self.blocker,
+                            sender,
+                            ?err,
+                            "ack validation failure"
+                        );
                     } else {
                         debug!(?sender, ?err, "ack validate failed");
                     }

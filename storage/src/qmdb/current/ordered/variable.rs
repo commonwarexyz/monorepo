@@ -8,42 +8,45 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::CleanBitMap,
+    index::ordered::Index,
     journal::contiguous::variable::Journal,
-    mmr::{Location, StandardHasher},
+    mmr::Location,
     qmdb::{
-        any::{
-            ordered::variable::{Db as AnyDb, Operation},
-            value::VariableEncoding,
-            VariableValue,
-        },
-        current::{
-            db::{merkleize_grafted_bitmap, root},
-            VariableConfig as Config,
-        },
-        Durable, Error, Merkleized,
+        any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
+        current::{db::Merkleized, VariableConfig as Config},
+        operation::Key,
+        Durable, Error,
     },
     translator::Translator,
 };
-use commonware_codec::{FixedSize, Read};
-use commonware_cryptography::Hasher;
+use commonware_codec::{Codec, Read};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
+    super::db::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        K,
+        VariableEncoding<V>,
+        Index<T, Location>,
+        H,
+        N,
+        S,
+        D,
+    >;
 
-// Functionality for the Clean state - init only.
+// Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
-    Operation<K, V>: Read,
+    Operation<K, V>: Codec,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
@@ -51,114 +54,114 @@ where
         context: E,
         config: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            // A compile-time assertion that the chunk size is some multiple of digest size. A
-            // multiple of 1 is optimal with respect to proof size, but a higher multiple allows for
-            // a smaller (RAM resident) merkle tree over the structure.
-            assert!(
-                N.is_multiple_of(H::Digest::SIZE),
-                "chunk size must be some multiple of the digest size",
-            );
-            // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-            // the status bitmap tree to be aligned with the underlying operations MMR.
-            assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-        }
+        crate::qmdb::current::init_variable(context, config, |ctx, t| Index::new(ctx, t)).await
+    }
+}
 
-        let thread_pool = config.thread_pool.clone();
-        let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+pub mod partitioned {
+    //! A variant of [super] that uses a partitioned index for the snapshot.
 
-        let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::init(
-            context.with_label("bitmap"),
-            &bitmap_metadata_partition,
-            thread_pool,
-            &mut hasher,
-        )
-        .await?
-        .into_dirty();
-
-        // Initialize the anydb with a callback that initializes the status bitmap.
-        let last_known_inactivity_floor = Location::new_unchecked(status.len());
-        let any = AnyDb::init_with_callback(
-            context.with_label("any"),
-            config.into(),
-            Some(last_known_inactivity_floor),
-            |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
+    pub use super::KeyValueProof;
+    use crate::{
+        index::partitioned::ordered::Index,
+        journal::contiguous::variable::Journal,
+        mmr::Location,
+        qmdb::{
+            any::{
+                ordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
-        )
-        .await?;
+            current::{db::Merkleized, VariableConfig as Config},
+            operation::Key,
+            Durable, Error,
+        },
+        translator::Translator,
+    };
+    use commonware_codec::{Codec, Read};
+    use commonware_cryptography::{DigestOf, Hasher};
+    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+    /// A partitioned variant of [super::Db].
+    ///
+    /// The const generic `P` specifies the number of prefix bytes used for partitioning:
+    /// - `P = 1`: 256 partitions
+    /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
+    pub type Db<
+        E,
+        K,
+        V,
+        H,
+        T,
+        const P: usize,
+        const N: usize,
+        S = Merkleized<DigestOf<H>>,
+        D = Durable,
+    > = crate::qmdb::current::ordered::db::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        K,
+        VariableEncoding<V>,
+        Index<T, Location, P>,
+        H,
+        N,
+        S,
+        D,
+    >;
 
-        // Compute and cache the root
-        let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
-
-        Ok(Self {
-            any,
-            status,
-            cached_root,
-        })
+    impl<
+            E: RStorage + Clock + Metrics,
+            K: Key,
+            V: VariableValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+            const N: usize,
+        > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
+    where
+        Operation<K, V>: Codec,
+    {
+        /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
+        /// the bitmap MMR if a thread pool is provided.
+        pub async fn init(
+            context: E,
+            config: Config<T, <Operation<K, V> as Read>::Cfg>,
+        ) -> Result<Self, Error> {
+            crate::qmdb::current::init_variable(context, config, |ctx, t| Index::new(ctx, t)).await
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::{
-        bitmap::CleanBitMap,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, StandardHasher},
         qmdb::{
             any::ordered::variable::Operation,
             current::{
+                db::{Merkleized, Unmerkleized},
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
-                tests::{self, apply_random_ops},
-                VariableConfig as Config,
+                tests::{apply_random_ops, variable_config},
             },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore,
             },
-            Durable, Error, Merkleized, NonDurable, Unmerkleized,
+            Durable, Error, NonDurable,
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
-    use std::num::{NonZeroU16, NonZeroUsize};
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
-
-    fn current_db_config(partition_prefix: &str) -> Config<OneCap, ()> {
-        Config {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}_log_partition"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
-            translator: OneCap,
-            thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Sha256>, Durable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Digest>, Durable>;
 
     /// A type alias for the Mutable variant of CurrentTest (Unmerkleized, NonDurable state).
     type MutableCurrentTest =
@@ -169,30 +172,8 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, current_db_config(&partition_prefix))
-            .await
-            .unwrap()
-    }
-
-    #[test_traced("DEBUG")]
-    pub fn test_current_db_build_small_close_reopen() {
-        super::super::tests::test_build_small_close_reopen::<CleanCurrentTest, _, _>(open_db);
-    }
-
-    #[test_traced("WARN")]
-    fn test_current_db_build_big() {
-        // Expected values after commit + merkleize + prune for ordered variant.
-        tests::test_current_db_build_big::<CleanCurrentTest, _, _>(open_db, 4241, 3383);
-    }
-
-    // Test that merkleization state changes don't reset `steps`.
-    #[test_traced("DEBUG")]
-    fn test_current_ordered_variable_db_steps_not_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context, "steps_test".to_string()).await;
-            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
-        });
+        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        CleanCurrentTest::init(context, cfg).await.unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
@@ -203,13 +184,13 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            db.update(k, v1).await.unwrap();
+            db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
 
@@ -248,7 +229,7 @@ mod test {
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_mutable();
-            db.update(k, v2).await.unwrap();
+            db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -326,10 +307,8 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *proof_inactive.proof.loc
-                )
+                BitMap::<32>::to_chunk_index(*active_loc),
+                BitMap::<32>::to_chunk_index(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
@@ -369,7 +348,7 @@ mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".into();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await;
             let root = db.root();
@@ -379,11 +358,12 @@ mod test {
             let proof = RangeProof {
                 proof: crate::mmr::Proof::default(),
                 partial_chunk_digest: None,
+                ops_root: Digest::EMPTY,
             };
             assert!(!CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof,
-                Location::new_unchecked(0),
+                Location::new(0),
                 &[],
                 &[],
                 &root,
@@ -400,11 +380,11 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.op_count();
+            let end_loc = db.size().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
-                let loc = Location::new_unchecked(loc);
+                let loc = Location::new(loc);
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
@@ -441,7 +421,7 @@ mod test {
     pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition.clone())
                 .await
@@ -465,7 +445,7 @@ mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
+                let op = db.any.log.read(Location::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
                     Operation::CommitFloor(_, _) => continue,
@@ -526,13 +506,6 @@ mod test {
         });
     }
 
-    /// This test builds a random database, and makes sure that its state is correctly restored
-    /// after closing and re-opening.
-    #[test_traced("WARN")]
-    pub fn test_current_db_build_random_close_reopen() {
-        crate::qmdb::current::tests::test_build_random_close_reopen(open_db);
-    }
-
     /// Repeatedly update the same key to a new value and ensure we can prove its current value
     /// after each update.
     #[test_traced("WARN")]
@@ -540,7 +513,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await;
 
             // Add one key.
@@ -549,7 +522,7 @@ mod test {
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_mutable();
-                dirty_db.update(k, v).await.unwrap();
+                dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
                 let clean_db = dirty_db.into_merkleized().await.unwrap();
@@ -580,28 +553,11 @@ mod test {
         });
     }
 
-    /// This test builds a random database and simulates we can recover from different types of
-    /// failure scenarios.
-    #[test_traced("WARN")]
-    pub fn test_current_db_simulate_write_failures() {
-        crate::qmdb::current::tests::test_simulate_write_failures(open_db);
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_current_db_different_pruning_delays_same_root() {
-        tests::test_different_pruning_delays_same_root::<CleanCurrentTest, _, _>(open_db);
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
-        tests::test_sync_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
-    }
-
     #[test_traced("DEBUG")]
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let prefix = format!("current_ordered_variable_batch_{seed}");
+            let prefix = format!("current-ordered-variable-batch-{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
     }
@@ -612,7 +568,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion_proofs".to_string();
+            let partition = "exclusion-proofs".into();
             let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
@@ -633,7 +589,7 @@ mod test {
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
             let mut db = db.into_mutable();
-            db.update(key_exists_1, v1).await.unwrap();
+            db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -683,7 +639,7 @@ mod test {
             let v2 = Sha256::fill(0xB2);
 
             let mut db = db.into_mutable();
-            db.update(key_exists_2, v2).await.unwrap();
+            db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -776,16 +732,16 @@ mod test {
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
             let mut db = db.into_mutable();
-            db.delete(key_exists_1).await.unwrap();
-            db.delete(key_exists_2).await.unwrap();
+            db.write_batch([(key_exists_1, None)]).await.unwrap();
+            db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.op_count(), 0);
+            assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
             let proof = db
@@ -838,9 +794,7 @@ mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableCurrentTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
         assert_batchable(db, key, value);
     }
 

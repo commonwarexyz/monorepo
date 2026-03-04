@@ -164,6 +164,10 @@ where
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         Self::Present(self.as_present().with_attribute(key, value))
     }
+
+    fn with_scope(&self) -> Self {
+        Self::Present(self.as_present().with_scope())
+    }
 }
 
 impl<C> crate::Clock for Cell<C>
@@ -202,12 +206,15 @@ commonware_macros::stability_scope!(BETA {
     use commonware_parallel::ThreadPool;
     use rayon::ThreadPoolBuildError;
 
-    impl<C> crate::RayonPoolSpawner for Cell<C>
+    impl<C> crate::ThreadPooler for Cell<C>
     where
-        C: crate::RayonPoolSpawner,
+        C: crate::ThreadPooler,
     {
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-            self.as_present().create_pool(concurrency)
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError> {
+            self.as_present().create_thread_pool(concurrency)
         }
     }
 
@@ -255,7 +262,10 @@ commonware_macros::stability_scope!(BETA {
             self.as_present().remove(partition, name)
         }
 
-        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+        fn scan(
+            &self,
+            partition: &str,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
             self.as_present().scan(partition)
         }
     }
@@ -308,3 +318,16 @@ where
 }
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
+
+impl<C> crate::BufferPooler for Cell<C>
+where
+    C: crate::BufferPooler,
+{
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().storage_buffer_pool()
+    }
+}

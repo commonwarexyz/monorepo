@@ -2,8 +2,8 @@
 
 use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
-use futures::channel::oneshot;
-use std::sync::{Arc, Mutex};
+use commonware_utils::{channel::oneshot, sync::Mutex};
+use std::sync::Arc;
 
 /// Default read buffer size for the stream's local buffer (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
@@ -61,16 +61,16 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let (os_send, data) = {
-            let mut channel = self.channel.lock().unwrap();
+            let mut channel = self.channel.lock();
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
                 return Err(Error::Closed);
             }
 
-            channel.buffer.put(buf.into());
+            channel.buffer.put(bufs.into());
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
@@ -101,7 +101,7 @@ impl SinkTrait for Sink {
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock().unwrap();
+        let mut channel = self.channel.lock();
         channel.sink_alive = false;
 
         // If there is a waiter, resolve it by dropping the oneshot sender.
@@ -117,11 +117,9 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
-        let len = len as usize;
-
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let os_recv = {
-            let mut channel = self.channel.lock().unwrap();
+            let mut channel = self.channel.lock();
 
             // Pull data from channel buffer into local buffer.
             if !channel.buffer.is_empty() {
@@ -162,15 +160,15 @@ impl StreamTrait for Stream {
         Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
-        let len = (max_len as usize).min(self.buffer.len());
+    fn peek(&self, max_len: usize) -> &[u8] {
+        let len = max_len.min(self.buffer.len());
         &self.buffer[..len]
     }
 }
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock().unwrap();
+        let mut channel = self.channel.lock();
         channel.stream_alive = false;
     }
 }
@@ -190,7 +188,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             sink.send(data.as_slice()).await.unwrap();
-            let received = stream.recv(data.len() as u64).await.unwrap();
+            let received = stream.recv(data.len()).await.unwrap();
             assert_eq!(received.coalesce(), data);
         });
     }
@@ -221,7 +219,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (received, _) = futures::try_join!(stream.recv(data.len() as u64), async {
+            let (received, _) = futures::try_join!(stream.recv(data.len()), async {
                 sleep(Duration::from_millis(50));
                 sink.send(data.as_slice()).await
             })
@@ -365,7 +363,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Spawn recv that will block waiting
-            let (tx, rx) = futures::channel::oneshot::channel();
+            let (tx, rx) = oneshot::channel();
             let recv_handle = context.clone().spawn(|_| async move {
                 let data = stream.recv(3).await.unwrap();
                 tx.send(stream).ok();

@@ -6,14 +6,13 @@ use crate::{
         Mailbox,
     },
     types::Address,
-    Ingress,
+    Ingress, PeerSetSubscription,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::fallible::FallibleExt,
+    channel::{fallible::FallibleExt, mpsc, oneshot},
     ordered::{Map, Set},
 };
-use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
@@ -22,6 +21,9 @@ pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     Register { index: u64, peers: Map<C, Address> },
+
+    /// Update addresses for multiple peers without creating a new peer set.
+    Overwrite { peers: Map<C, Address> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -34,8 +36,7 @@ pub enum Message<C: PublicKey> {
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
-        #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Set<C>, Set<C>)>>,
+        responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -166,7 +167,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
 }
 
 /// Allows releasing reservations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -198,21 +199,8 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Manager for Oracle<C> {
+impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
-    type Peers = Map<C, Address>;
-
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Should be monotonically increasing.
-    /// * `peers` - Vector of authorized peers at an `index`.
-    ///   Each element contains the public key and address specification of the peer.
-    async fn update(&mut self, index: u64, peers: Self::Peers) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
@@ -225,17 +213,25 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
             .flatten()
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.sender
             .0
             .request(|responder| Message::Subscribe { responder })
             .await
             .unwrap_or_else(|| {
-                let (_, rx) = mpsc::unbounded();
+                let (_, rx) = mpsc::unbounded_channel();
                 rx
             })
+    }
+}
+
+impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
+    async fn track(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
+        self.sender.0.send_lossy(Message::Register { index, peers });
+    }
+
+    async fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) {
+        self.sender.0.send_lossy(Message::Overwrite { peers });
     }
 }
 

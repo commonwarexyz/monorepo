@@ -1,7 +1,7 @@
 //! Mock implementations for testing.
 
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
-use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Digestible, Hasher, Sha256};
 use commonware_runtime::{Buf, BufMut};
 
 /// A simple test message.
@@ -32,13 +32,6 @@ impl Digestible for TestMessage {
     type Digest = Digest;
     fn digest(&self) -> Digest {
         Sha256::hash(&self.content)
-    }
-}
-
-impl Committable for TestMessage {
-    type Commitment = Digest;
-    fn commitment(&self) -> Digest {
-        Sha256::hash(&self.commitment)
     }
 }
 

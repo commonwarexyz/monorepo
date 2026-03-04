@@ -8,6 +8,15 @@ use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
+///
+/// # Warning
+///
+/// Any height the marshal is asked to sync must be covered by both the
+/// [epocher](Self::epocher) and the [provider](Self::provider). If the epocher
+/// cannot map a height to an epoch, or the provider cannot supply a scheme for
+/// that epoch, the marshal will silently drop the sync request. Callers are
+/// responsible for ensuring both are configured for the full range of heights
+/// they intend to sync.
 pub struct Config<B, P, ES, T>
 where
     B: Block,
@@ -16,9 +25,13 @@ where
     T: Strategy,
 {
     /// Provider for epoch-specific signing schemes.
+    ///
+    /// Must cover every epoch that contains heights the marshal will sync.
     pub provider: P,
 
     /// Configuration for epoch lengths across block height ranges.
+    ///
+    /// Must cover every height the marshal will sync.
     pub epocher: ES,
 
     /// The prefix to use for all partitions.
@@ -52,6 +65,11 @@ where
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
+
+    /// Maximum number of blocks dispatched to the application that have not
+    /// yet been acknowledged. Increasing this value allows the application
+    /// to buffer work while marshal continues dispatching, hiding ack latency.
+    pub max_pending_acks: NonZeroUsize,
 
     /// Strategy for parallel operations.
     pub strategy: T,

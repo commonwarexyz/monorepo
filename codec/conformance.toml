@@ -46,6 +46,18 @@ hash = "47690f612a06889add1b8c3e908aef0a7acfc6ab7f9f1382017ae91a8ef843dc"
 n_cases = 65536
 hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
 
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<NonZeroU16>"]
+n_cases = 65536
+hash = "e79efcd86ba75d6ab3d6ba33a20a090472850ea3335c2c8d04a3ae57a1ce8976"
+
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<NonZeroU32>"]
+n_cases = 65536
+hash = "505d2870142542a0a694544ace6649dabb39189fbbf064e7efaa3b9b4196479a"
+
+["commonware_codec::types::primitives::tests::conformance::CodecConformance<NonZeroU64>"]
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
+
 ["commonware_codec::types::primitives::tests::conformance::CodecConformance<Option<u64>>"]
 n_cases = 65536
 hash = "56298a7f298dfae99947dbdb5691aea48e3a183733d93964b53de858d448ecd2"

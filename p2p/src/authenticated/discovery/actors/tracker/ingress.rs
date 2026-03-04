@@ -1,15 +1,20 @@
 use super::Reservation;
-use crate::authenticated::{
-    discovery::{
-        actors::{peer, tracker::Metadata},
-        types,
+use crate::{
+    authenticated::{
+        discovery::{
+            actors::{peer, tracker::Metadata},
+            types,
+        },
+        mailbox::UnboundedMailbox,
+        Mailbox,
     },
-    mailbox::UnboundedMailbox,
-    Mailbox,
+    PeerSetSubscription,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channel::{fallible::FallibleExt, mpsc, oneshot},
+    ordered::Set,
+};
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -29,8 +34,7 @@ pub enum Message<C: PublicKey> {
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
-        #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Set<C>, Set<C>)>>,
+        responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -217,7 +221,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
 }
 
 /// Allows releasing reservations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -249,24 +253,8 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Manager for Oracle<C> {
+impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
-    type Peers = Set<C>;
-
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// These peer sets are used to construct a bit vector (sorted by public key)
-    /// to share knowledge about dialable IPs. If a peer does not yet have an index
-    /// associated with a bit vector, the discovery message will be dropped.
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Must be monotonically increasing, per the rules of [Set].
-    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    async fn update(&mut self, index: u64, peers: Self::Peers) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
@@ -279,17 +267,21 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
             .flatten()
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.sender
             .0
             .request(|responder| Message::Subscribe { responder })
             .await
             .unwrap_or_else(|| {
-                let (_, rx) = mpsc::unbounded();
+                let (_, rx) = mpsc::unbounded_channel();
                 rx
             })
+    }
+}
+
+impl<C: PublicKey> crate::Manager for Oracle<C> {
+    async fn track(&mut self, index: u64, peers: Set<Self::PublicKey>) {
+        self.sender.0.send_lossy(Message::Register { index, peers });
     }
 }
 

@@ -17,7 +17,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef},
-    deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
+    deterministic, Blob, Buf, Error, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -94,7 +94,11 @@ fn fuzz(input: FuzzInput) {
         let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
         let cache_capacity = input.cache_capacity as usize;
-        let cache_ref = CacheRef::new(NZU16!(page_size as u16), NZUsize!(cache_capacity));
+        let cache_ref = CacheRef::from_pooler(
+            &context,
+            NZU16!(page_size as u16),
+            NZUsize!(cache_capacity),
+        );
 
         // Compute logical size from number of pages.
         let logical_size = input.num_pages as u64 * page_size;
@@ -135,7 +139,7 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(corrupt_offset, IoBufMut::zeroed(1))
+            .read_at(corrupt_offset, 1)
             .await
             .expect("cannot read byte to corrupt")
             .coalesce();
@@ -252,7 +256,7 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let read_result = append.read_at(offset, IoBufMut::zeroed(len)).await;
+                let read_result = append.read_at(offset, len).await;
 
                 match read_result {
                     Ok(buf) => {

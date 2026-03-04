@@ -54,8 +54,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
-        let bufs = data.into();
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+        let bufs = bufs.into();
         let len = bufs.len();
         self.inner.send(bufs).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
@@ -70,13 +70,13 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
         let bufs = self.inner.recv(len).await?;
-        self.metrics.inbound_bandwidth.inc_by(len);
+        self.metrics.inbound_bandwidth.inc_by(len as u64);
         Ok(bufs)
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
+    fn peek(&self, max_len: usize) -> &[u8] {
         self.inner.peek(max_len)
     }
 }
@@ -205,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics() {
-        const MSG_SIZE: u64 = 100;
+        const MSG_SIZE: usize = 100;
 
         // Create a registry and network
         let mut registry = Registry::default();
@@ -228,11 +228,11 @@ mod tests {
         let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
 
         // Send fixed-size data and receive response
-        let msg = vec![42u8; MSG_SIZE as usize];
+        let msg = vec![42u8; MSG_SIZE];
         client_sink.send(msg.clone()).await.unwrap();
 
         let response = client_stream.recv(MSG_SIZE).await.unwrap().coalesce();
-        assert_eq!(response.len(), MSG_SIZE as usize);
+        assert_eq!(response.len(), MSG_SIZE);
         assert_eq!(response, msg.as_slice());
 
         // Wait for server to complete
@@ -243,12 +243,12 @@ mod tests {
         assert_eq!(network.metrics.outbound_connections.get(), 1,);
         assert_eq!(
             network.metrics.inbound_bandwidth.get(),
-            2 * MSG_SIZE,
+            2 * MSG_SIZE as u64,
             "client and server should both have received MSG_SIZE"
         );
         assert_eq!(
             network.metrics.outbound_bandwidth.get(),
-            2 * MSG_SIZE,
+            2 * MSG_SIZE as u64,
             "client and server should both have sent MSG_SIZE"
         );
     }

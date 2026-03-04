@@ -5,7 +5,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::CleanMmr, Location, StandardHasher as Standard},
+    mmr::{mem::DirtyMmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
@@ -124,14 +124,15 @@ fn fuzz(input: FuzzInput) {
     match input.proof {
         ProofType::Mmr => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = DirtyMmr::new();
             for digest in &digests {
                 mmr.add(&mut hasher, digest);
             }
+            let mmr = mmr.merkleize(&mut hasher, None);
             let root = mmr.root();
 
             for (leaf, element) in digests.iter().enumerate() {
-                let loc = Location::new(leaf as u64).unwrap();
+                let loc = Location::new(leaf as u64);
                 let original_proof = mmr.proof(loc).unwrap();
                 assert!(original_proof.verify_element_inclusion(&mut hasher, element, loc, root));
 
@@ -151,10 +152,11 @@ fn fuzz(input: FuzzInput) {
         }
         ProofType::MmrMulti => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = DirtyMmr::new();
             for digest in &digests {
                 mmr.add(&mut hasher, digest);
             }
+            let mmr = mmr.merkleize(&mut hasher, None);
             let root = mmr.root();
 
             let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
@@ -167,7 +169,7 @@ fn fuzz(input: FuzzInput) {
                 let i2 = (input.positions[1] as usize) % digests.len();
                 (i1.min(i2), i1.abs_diff(i2) + 1)
             };
-            let start_loc = Location::new(start_idx as u64).unwrap();
+            let start_loc = Location::new(start_idx as u64);
             let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
             else {
                 return;

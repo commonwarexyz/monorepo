@@ -31,7 +31,8 @@ fuzz_target!(|input: FuzzInput| {
         digests,
     };
 
-    if let Some(start_loc) = Location::new(input.start_loc) {
+    let start_loc = Location::new(input.start_loc);
+    if start_loc.is_valid() {
         _ = extract_pinned_nodes(&proof, start_loc, input.operations_len);
     }
 });

@@ -19,9 +19,8 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, RwLock, Storage};
-use commonware_utils::Array;
-use futures::channel::oneshot;
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Result from a fetch operation
@@ -98,7 +97,8 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<RwLock<$db<E, K, V, H, T, Merkleized<H>, Durable>>>
+        impl<E, K, V, H, T> Resolver
+            for Arc<AsyncRwLock<$db<E, K, V, H, T, Merkleized<H>, Durable>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -129,7 +129,7 @@ macro_rules! impl_resolver {
         }
 
         impl<E, K, V, H, T> Resolver
-            for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
+            for Arc<AsyncRwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,

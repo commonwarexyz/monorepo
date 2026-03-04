@@ -81,9 +81,11 @@ All public primitives are annotated with stability levels that constrain what ch
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
+**When modifying code at ALPHA**: Breaking changes to APIs, wire formats, and storage formats are permitted without a migration path. Do not add backwards-compatibility shims or preserve old behavior.
+
 **When modifying code at BETA or higher**: You must not introduce breaking changes to wire or storage formats without providing a migration path.
 
-All public API items must have stability annotations. CI enforces this via `./scripts/find_unstable_public.sh`. The script uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
+All public API items must have stability annotations. CI enforces this via the `Stability` and `Unstable-Public` workflows (`just check-stability` and `just unstable-public`). The annotation check uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
 
 **To annotate public items**, use one of:
 - `#[stability(LEVEL)]` for individual items (structs, functions, traits, etc.)
@@ -124,7 +126,7 @@ The repository uses GitHub Actions with three main workflows: **Fast** (every pu
 Run these commands locally before pushing to avoid CI failures:
 
 ```bash
-# 1. Format and lint (REQUIRED)
+# 1. Format, lint, check stability (REQUIRED)
 just lint
 
 # 2. Run tests (REQUIRED)
@@ -142,9 +144,6 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 
 # 6. Unsafe code (if adding unsafe blocks)
 just miri <module>::
-
-# 7. Stability coverage (if adding public API)
-./scripts/find_unstable_public.sh
 ```
 
 _Always use `just` commands for testing (uses `nextest` for parallel execution)._
@@ -173,12 +172,100 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Testing Strategy
 
-- Unit tests: Core logic validation
-- Integration tests: Cross-primitive interaction
-- Fuzz tests: Input validation and edge cases
-- MIRI tests: Memory safety verification for unsafe code
+- Property: Core logic and invariant validation (use "minifuzz" from the invariants crate)
+- Unit: Testing edge cases or particular scenarios.
+- Integration: Cross-primitive interaction
+- Fuzz: Extending property tests (cf. "Plan" pattern in dkg.rs or the math crate).
+- MIRI: Memory safety verification for unsafe code
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
+
+## Benchmarks
+
+Benchmarks use [Criterion](https://docs.rs/criterion) and are organized per-module with one file per operation. Benchmark names are parsed by the [benchmarks dashboard](https://commonware.xyz/benchmarks) and must follow the format `module::operation/key=value key=value`.
+
+### Directory Structure
+
+Each module that has benchmarks places them in a `benches/` directory alongside the module code:
+
+```
+crate/src/module/
+  mod.rs
+  benches/
+    bench.rs          # criterion_main! entry point
+    operation_a.rs    # one file per benchmarked operation
+    operation_b.rs
+```
+
+### Adding a New Benchmark
+
+#### 1. Create the benchmark file
+
+Create `crate/src/module/benches/operation_name.rs`:
+
+```rust
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
+
+fn bench_operation_name(c: &mut Criterion) {
+    for n in [10, 100, 1000] {
+        c.bench_function(
+            &format!("{}/n={n}", module_path!()),
+            |b| {
+                b.iter(|| black_box(/* benchmarked call */));
+            },
+        );
+    }
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_operation_name,
+}
+```
+
+#### 2. Create or update the entry point
+
+Create `crate/src/module/benches/bench.rs` (or add to an existing one):
+
+```rust
+use criterion::criterion_main;
+
+mod operation_name;
+
+criterion_main!(operation_name::benches);
+```
+
+#### 3. Register the benchmark binary in `Cargo.toml`
+
+```toml
+[[bench]]
+name = "module"
+harness = false
+path = "src/module/benches/bench.rs"
+```
+
+The `name` field becomes the first segment of the benchmark name (e.g., `module::operation_name/...`).
+
+### Naming Rules
+
+These are enforced by CI (`lint_benchmark_names.py`):
+
+1. Use `module_path!()` macro to include the `module::operation` prefix
+2. Use `key=value` format for parameters (e.g., `size=1024`, not just `1024`)
+3. Separate parameters with spaces, not commas
+4. Use only one `/` separator (between the operation name and parameters)
+
+### Examples from the Codebase
+
+```
+bls12381::combine_signatures/sigs=100
+ed25519::signature_generation/ns_len=9 msg_len=32
+bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%
+bitmap::count_ones/size=1024 chunk_size=8
+rational::log2_ceil/value=1:2 precision=4
+```
 
 ## Development Workflow
 
@@ -188,7 +275,7 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
 5. Run `just pre-pr` before creating a PR
 
-_Avoid running tests for the entire workspace unless absolutely necessary. This can take a LONG time to run._
+_Avoid building or testing the entire workspace unless absolutely necessary. The repository is large and full workspace builds/tests can take a VERY long time. Prefer targeting specific crates (e.g., `cargo build -p commonware-runtime`, `just test -p commonware-runtime`)._
 
 ## Reviewing PRs
 
@@ -658,6 +745,17 @@ pub enum Error {
 - Document `# Safety` for any unsafe code usage
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
+
+### `lib.rs` Headers
+
+- For crates that allow `no_std`, enable `std` with an `std` feature flag or with `cfg(test)`. Example: `#![cfg_attr(not(any(feature = "std", test)), no_std)]`
+- Add the `commonware` logos with the doc attribute:
+```
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+```
 
 ### Naming Conventions
 

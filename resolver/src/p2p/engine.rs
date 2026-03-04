@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Blocker, Manager, Receiver, Recipients, Sender,
+    Blocker, Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -18,14 +18,14 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Span};
-use futures::{
+use commonware_utils::{
     channel::{mpsc, oneshot},
-    future::{self, Either},
-    StreamExt,
+    futures::Pool as FuturesPool,
+    Span,
 };
+use futures::future::{self, Either};
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
@@ -35,14 +35,14 @@ struct Serve<E: Clock, P: PublicKey> {
     timer: histogram::Timer<E>,
     peer: P,
     id: u64,
-    result: Result<Bytes, oneshot::Canceled>,
+    result: Result<Bytes, oneshot::error::RecvError>,
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + Spawner + Rng + Metrics,
+    E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Manager<PublicKey = P>,
+    D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    manager: D,
+    provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     blocker: B,
@@ -94,9 +94,9 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + Metrics,
+        E: BufferPooler + Clock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: Manager<PublicKey = P>,
+        D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
@@ -128,7 +128,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                manager: cfg.manager,
+                provider: cfg.provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
@@ -154,10 +154,15 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let peer_set_subscription = &mut self.manager.subscribe().await;
+        let peer_set_subscription = &mut self.provider.subscribe().await;
 
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let (mut sender, mut receiver) = wrap(
+            (),
+            self.context.network_buffer_pool().clone(),
+            network.0,
+            network.1,
+        );
 
         select_loop! {
             self.context,
@@ -191,12 +196,10 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            peer_set_update = peer_set_subscription.next() => {
-                let Some((id, _, all)) = peer_set_update else {
-                    debug!("peer set subscription closed");
-                    return;
-                };
-
+            Some((id, _, all)) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                return;
+            } => {
                 // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
                 // reconcile with all tracked peers).
                 if self.last_peer_set_id < Some(id) {
@@ -217,11 +220,10 @@ impl<
                 self.fetcher.fetch(&mut sender).await;
             },
             // Handle mailbox messages
-            msg = self.mailbox.next() => {
-                let Some(msg) = msg else {
-                    error!("mailbox closed");
-                    return;
-                };
+            Some(msg) = self.mailbox.recv() else {
+                error!("mailbox closed");
+                return;
+            } => {
                 match msg {
                     Message::Fetch(requests) => {
                         for FetchRequest { key, targets } in requests {
@@ -324,7 +326,7 @@ impl<
                     Ok(_) => {
                         self.metrics.serve.inc(Status::Success);
                     }
-                    Err(err) => {
+                    Err(ref err) => {
                         debug!(?err, ?peer, ?id, "serve failed");
                         timer.cancel();
                         self.metrics.serve.inc(Status::Failure);
@@ -355,13 +357,11 @@ impl<
                     }
                 };
                 match msg.payload {
-                    wire::Payload::Request(key) => {
-                        self.handle_network_request(peer, msg.id, key).await
-                    }
+                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
                     wire::Payload::Response(response) => {
                         self.handle_network_response(peer, msg.id, response).await
                     }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
+                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
         }
@@ -373,7 +373,7 @@ impl<
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
-        response: Result<Bytes, oneshot::Canceled>,
+        response: Result<Bytes, oneshot::error::RecvError>,
         priority: bool,
     ) {
         // Encode message
@@ -397,7 +397,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
+    fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
@@ -437,14 +437,14 @@ impl<
 
         // If the data is invalid, we need to block the peer and try again
         // (blocking the peer also removes any targets associated with it)
-        self.blocker.block(peer.clone()).await;
+        commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
+    fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any

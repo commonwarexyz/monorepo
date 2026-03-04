@@ -11,6 +11,7 @@
 //! - This key material should be stored securely (e.g., encrypted at rest)
 //! - Old shares should be securely deleted after successful resharing
 
+use crate::dkg::ModeVersion;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
@@ -26,7 +27,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage,
+    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
 };
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
@@ -75,7 +76,7 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
@@ -171,7 +172,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+pub struct Storage<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -180,17 +181,24 @@ pub struct Storage<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
+impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey>
+    Storage<E, V, P>
+{
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
-    pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_CAPACITY);
+    pub async fn init(
+        context: E,
+        partition_prefix: &str,
+        max_read_size: NonZeroU32,
+        max_supported_mode: ModeVersion,
+    ) -> Self {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                codec_config: max_read_size,
+                codec_config: (max_read_size, max_supported_mode),
             },
         )
         .await
@@ -475,24 +483,25 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
         Some(Dealer::new(Some(crypto_dealer), pub_msg, unsent))
     }
 
-    /// Create a Player for the given epoch, replaying any stored dealer messages.
+    /// Create a Player for the given epoch by resuming from persisted state.
     pub fn create_player<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
         round_info: Info<V, P>,
     ) -> Option<Player<V, C>> {
-        let crypto_player =
-            CryptoPlayer::new(round_info, signer).expect("should be able to create player");
-        let mut player = Player::new(crypto_player);
-
-        // Replay persisted dealer messages
-        for (dealer, pub_msg, priv_msg) in self.dealings(epoch) {
-            player.replay::<M>(dealer.clone(), pub_msg, priv_msg);
-            debug!(?epoch, ?dealer, "replayed committed dealer message");
+        let logs = self.logs(epoch);
+        let dealings = self.dealings(epoch);
+        let (crypto_player, acks) = CryptoPlayer::resume::<M>(round_info, signer, &logs, dealings)
+            .expect("should be able to resume player");
+        for dealer in acks.keys() {
+            debug!(?epoch, ?dealer, "restored committed dealer message");
         }
 
-        Some(player)
+        Some(Player {
+            player: crypto_player,
+            acks,
+        })
     }
 }
 
@@ -522,7 +531,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -591,17 +600,10 @@ pub struct Player<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> Player<V, C> {
-    pub const fn new(player: CryptoPlayer<V, C>) -> Self {
-        Self {
-            player,
-            acks: BTreeMap::new(),
-        }
-    }
-
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics, M: Faults>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -626,24 +628,6 @@ impl<V: Variant, C: Signer> Player<V, C> {
             return Some(ack);
         }
         None
-    }
-
-    /// Replay an already-persisted dealer message (updates in-memory state only).
-    fn replay<M: Faults>(
-        &mut self,
-        dealer: C::PublicKey,
-        pub_msg: DealerPubMsg<V>,
-        priv_msg: DealerPrivMsg,
-    ) {
-        if self.acks.contains_key(&dealer) {
-            return;
-        }
-        if let Some(ack) = self
-            .player
-            .dealer_message::<M>(dealer.clone(), pub_msg, priv_msg)
-        {
-            self.acks.insert(dealer, ack);
-        }
     }
 
     /// Finalize the player's participation in the DKG round.
@@ -710,6 +694,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -751,6 +736,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -792,6 +778,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -841,6 +828,7 @@ mod tests {
                 context.with_label("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
 

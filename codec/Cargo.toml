@@ -15,7 +15,13 @@ workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "bytes/std", "rand?/std", "rand_chacha?/std", "thiserror/std" ]
+std = [
+	"bytes/std",
+	"commonware-macros/std",
+	"rand?/std",
+	"rand_chacha?/std",
+	"thiserror/std",
+]
 arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",

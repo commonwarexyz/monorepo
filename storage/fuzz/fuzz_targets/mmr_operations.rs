@@ -12,7 +12,6 @@ enum MmrOperation {
     Pop,
     UpdateLeaf { location: u8, new_data: Vec<u8> },
     GetNode { pos: u64 },
-    GetLastLeafPos,
     GetSize,
     GetRoot,
     Proof { location: u64 },
@@ -79,10 +78,6 @@ impl ReferenceMmr {
         }
     }
 
-    fn last_leaf_pos(&self) -> Option<Position> {
-        self.leaf_positions.last().copied()
-    }
-
     fn leaf_count(&self) -> usize {
         self.leaf_positions.len()
     }
@@ -145,7 +140,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::Add { data } => {
                     // Skip adding if we're fully pruned (pruned_to_pos == size)
                     // because the MMR needs access to previous nodes to compute parent hashes
-                    if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
+                    if mmr.bounds().start == mmr.size() && mmr.size() > 0 {
                         continue;
                     }
 
@@ -157,7 +152,9 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let mmr_pos = mmr.add(&mut hasher, limited_data);
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let mmr_pos = dirty_mmr.add(&mut hasher, limited_data);
+                    mmr = dirty_mmr.merkleize(&mut hasher, None);
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
@@ -167,7 +164,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     assert_eq!(
-                        mmr.last_leaf_pos(),
+                        Some(Position::try_from(mmr.leaves() - 1).unwrap()),
                         Some(mmr_pos),
                         "Operation {op_idx}: Last leaf position should be the added position"
                     );
@@ -179,8 +176,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrOperation::Pop => {
+                    let leaves_before = mmr.leaves();
                     let size_before = mmr.size();
-                    let mmr_result = mmr.pop(&mut hasher);
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let mmr_result = dirty_mmr.pop();
+                    mmr = dirty_mmr.merkleize(&mut hasher, None);
                     let ref_result = reference.pop();
 
                     assert_eq!(
@@ -193,10 +193,10 @@ fn fuzz(input: FuzzInput) {
                             mmr.size() < size_before,
                             "Operation {op_idx}: Size should decrease after successful pop"
                         );
-
                         assert_eq!(
-                            mmr.last_leaf_pos(), reference.last_leaf_pos(),
-                            "Operation {op_idx}: Last leaf position mismatch after pop"
+                            mmr.leaves(),
+                            leaves_before - 1,
+                            "Operation {op_idx}: Leaves should decrease after successful pop"
                         );
                     }
                 }
@@ -247,27 +247,17 @@ fn fuzz(input: FuzzInput) {
                         let node = mmr.get_node(safe_pos);
 
                         // Check if the node is pruned
-                        if safe_pos < mmr.pruned_to_pos() {
+                        if safe_pos < mmr.bounds().start {
                             // Node is pruned, so it's expected to be None (unless it's pinned)
                             // We don't panic here as this is expected behavior
                         } else {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
                                 panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})",
-                                    mmr.size(), mmr.pruned_to_pos());
+                                    mmr.size(), mmr.bounds().start);
                             }
                         }
                     }
-                }
-
-                MmrOperation::GetLastLeafPos => {
-                    let mmr_last = mmr.last_leaf_pos();
-                    let ref_last = reference.last_leaf_pos();
-
-                    assert_eq!(
-                        mmr_last, ref_last,
-                        "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}",
-                    );
                 }
 
                 MmrOperation::GetSize => {
@@ -297,8 +287,8 @@ fn fuzz(input: FuzzInput) {
                     }
                     let location_idx = (*location as usize) % reference.leaf_positions.len();
                     let test_element_pos = reference.leaf_positions[location_idx];
-                    let loc = Location::new(location_idx as u64).unwrap();
-                    if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
+                    let loc = Location::new(location_idx as u64);
+                    if test_element_pos >= mmr.size() || test_element_pos < mmr.bounds().start {
                         continue;
                     }
 
@@ -315,7 +305,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::PruneAll => {
                     // Skip prune_all if we're already fully pruned to avoid issues with subsequent adds
-                    if mmr.pruned_to_pos() == mmr.size() {
+                    if mmr.bounds().start == mmr.size() {
                         continue;
                     }
 
@@ -332,7 +322,7 @@ fn fuzz(input: FuzzInput) {
 
                     // Pruned position should be updated
                     assert_eq!(
-                        mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
+                        mmr.bounds().start, reference.get_pruned_to_pos(),
                         "Operation {op_idx}: Pruned position mismatch after prune_all"
                     );
 
@@ -350,7 +340,7 @@ fn fuzz(input: FuzzInput) {
                         let pos = Position::new((*pos_idx) % (*mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
-                        if pos <= mmr.pruned_to_pos() {
+                        if pos <= mmr.bounds().start {
                             continue;
                         }
 
@@ -360,7 +350,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         let size_before = mmr.size();
-                        let pruned_to_pos_before = mmr.pruned_to_pos();
+                        let pruned_to_pos_before = mmr.bounds().start;
 
                         mmr.prune_to_pos(pos);
                         reference.prune_to_pos(pos);
@@ -373,13 +363,13 @@ fn fuzz(input: FuzzInput) {
 
                         // Pruned position should be updated correctly
                         assert_eq!(
-                            mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
+                            mmr.bounds().start, reference.get_pruned_to_pos(),
                             "Operation {op_idx}: Pruned position mismatch after prune_to_pos"
                         );
 
                         // Pruned position should not decrease
                         assert!(
-                            mmr.pruned_to_pos() >= pruned_to_pos_before,
+                            mmr.bounds().start >= pruned_to_pos_before,
                             "Operation {op_idx}: Pruned position should not decrease"
                         );
 
@@ -393,22 +383,6 @@ fn fuzz(input: FuzzInput) {
                 }
             }
 
-            // Global invariants
-            if mmr.size() > 0 {
-                // Last leaf position should be valid
-                if let Some(last_pos) = mmr.last_leaf_pos() {
-                    assert!(
-                        last_pos < mmr.size(),
-                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
-                         mmr.size()
-                    );
-                }
-            } else {
-                assert!(
-                    mmr.last_leaf_pos().is_none(),
-                    "Operation {op_idx}: Empty MMR should have no last leaf"
-                );
-            }
         }
     });
 }

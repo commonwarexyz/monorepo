@@ -49,6 +49,7 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
         ip = new_ip.as_str(),
         "adding IP to existing security groups"
     );
+    let cidr = exact_cidr(&new_ip);
 
     // Determine all regions involved
     let mut all_regions = HashSet::new();
@@ -77,7 +78,7 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
                     && perm.to_port() == Some(DEPLOYER_MAX_PORT)
                 {
                     for ip_range in perm.ip_ranges() {
-                        if ip_range.cidr_ip() == Some(&exact_cidr(&new_ip)) {
+                        if ip_range.cidr_ip() == Some(&cidr) {
                             already_allowed = true;
                             break;
                         }
@@ -101,7 +102,7 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
                         .ip_protocol(DEPLOYER_PROTOCOL)
                         .from_port(DEPLOYER_MIN_PORT)
                         .to_port(DEPLOYER_MAX_PORT)
-                        .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(&new_ip)).build())
+                        .ip_ranges(IpRange::builder().cidr_ip(&cidr).build())
                         .build(),
                 )
                 .send()

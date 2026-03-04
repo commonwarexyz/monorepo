@@ -15,6 +15,7 @@ commonware-collector.workspace = true
 commonware-cryptography.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
+commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true

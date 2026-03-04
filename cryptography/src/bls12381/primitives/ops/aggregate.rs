@@ -12,8 +12,6 @@ use super::{
     super::{variant::Variant, Error},
     hash_with_namespace,
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;

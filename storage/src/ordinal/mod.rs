@@ -67,7 +67,7 @@
 //! executor.start(|context| async move {
 //!     // Create a store for 32-byte values
 //!     let cfg = Config {
-//!         partition: "ordinal_store".into(),
+//!         partition: "ordinal-store".into(),
 //!         items_per_blob: NZU64!(10000),
 //!         write_buffer: NZUsize!(4096),
 //!         replay_buffer: NZUsize!(1024 * 1024),
@@ -152,7 +152,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -205,13 +205,46 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_concurrent_sync_does_not_report_success_while_flush_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            store
+                .put(0, FixedBytes::new([42u8; 32]))
+                .await
+                .expect("Failed to put data");
+
+            // Force flush failure by removing the underlying blob before sync.
+            let section = 0u64.to_be_bytes();
+            context
+                .remove(&cfg.partition, Some(&section))
+                .await
+                .expect("Failed to remove blob");
+
+            // Both concurrent sync calls must observe the in-flight durability failure.
+            let (first, second) = futures::future::join(store.sync(), store.sync()).await;
+            assert!(first.is_err(), "first sync unexpectedly succeeded");
+            assert!(second.is_err(), "second sync unexpectedly succeeded");
+        });
+    }
+
+    #[test_traced]
     fn test_multiple_indices() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -258,7 +291,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100), // Smaller blobs for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -309,7 +342,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -358,7 +391,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -434,7 +467,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -499,7 +532,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -522,7 +555,7 @@ mod tests {
             // Corrupt the data
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 // Corrupt the CRC by changing a byte
@@ -554,7 +587,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the store
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -578,7 +611,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -626,7 +659,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -653,7 +686,7 @@ mod tests {
             // Corrupt by writing partial record (only value, no CRC)
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
@@ -695,7 +728,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -722,7 +755,7 @@ mod tests {
             // Corrupt the value portion of a record
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
@@ -758,7 +791,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(10), // Small blob size for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -783,7 +816,7 @@ mod tests {
             {
                 // Corrupt CRC in first blob
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 blob.write_at(32, vec![0xFF]).await.unwrap(); // Corrupt CRC of index 0
@@ -791,7 +824,7 @@ mod tests {
 
                 // Corrupt value in second blob (which will invalidate CRC)
                 let (blob, _) = context
-                    .open("test_ordinal", &1u64.to_be_bytes())
+                    .open("test-ordinal", &1u64.to_be_bytes())
                     .await
                     .unwrap();
                 blob.write_at(5, vec![0xFF; 4]).await.unwrap(); // Corrupt value of index 10
@@ -830,7 +863,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -857,7 +890,7 @@ mod tests {
             // Add extra bytes at the end of blob
             {
                 let (blob, size) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 // Add garbage data that forms a complete but invalid record
@@ -906,7 +939,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -915,7 +948,7 @@ mod tests {
             // Create blob with zero-filled space
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
 
@@ -958,7 +991,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100), // Smaller blobs to test multiple blob handling
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1066,7 +1099,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100), // Small blobs to test multiple blob handling
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1145,7 +1178,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1197,7 +1230,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1238,7 +1271,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1263,7 +1296,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1330,7 +1363,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(50), // Smaller blobs for more granular testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1387,7 +1420,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1438,7 +1471,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1500,7 +1533,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1552,7 +1585,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(10), // Small blob size for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1622,7 +1655,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(10),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1667,7 +1700,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(10),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1764,7 +1797,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1818,7 +1851,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1865,7 +1898,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1953,7 +1986,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
@@ -1977,7 +2010,7 @@ mod tests {
             // Corrupt record at index 2
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
                 // Corrupt the CRC of record at index 2
@@ -2046,7 +2079,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_ordinal".into(),
+                partition: "test-ordinal".into(),
                 items_per_blob: NZU64!(1),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),

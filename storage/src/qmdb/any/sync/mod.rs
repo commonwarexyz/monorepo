@@ -6,7 +6,7 @@ use crate::{
     index::{ordered, unordered},
     journal::{
         authenticated,
-        contiguous::{fixed, variable, MutableContiguous},
+        contiguous::{fixed, variable, Mutable},
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Position, StandardHasher},
     qmdb::{
@@ -34,12 +34,12 @@ use crate::{
             },
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
-        operation::{Committable, Operation},
+        operation::{Committable, Key, Operation},
         Durable, Merkleized,
     },
     translator::Translator,
 };
-use commonware_codec::CodecShared;
+use commonware_codec::{CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -64,7 +64,7 @@ where
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
     U: Send + Sync + 'static,
-    C: MutableContiguous<Item = O>,
+    C: Mutable<Item = O>,
 {
     let mut hasher = StandardHasher::<H>::new();
 
@@ -72,7 +72,7 @@ where
         context.with_label("mmr"),
         crate::mmr::journaled::SyncConfig {
             config: mmr_config,
-            range: Position::try_from(range.start)?..Position::try_from(range.end + 1)?,
+            range: Position::try_from(range.start)?..Position::try_from(range.end)?,
             pinned_nodes,
         },
         &mut hasher,
@@ -161,16 +161,17 @@ impl<E, K, V, H, T> qmdb::sync::Database
     for UnorderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
+    UnorderedVariableOp<K, V>: CodecShared,
 {
     type Context = E;
     type Op = UnorderedVariableOp<K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, V::Cfg>;
+    type Config = VariableConfig<T, <UnorderedVariableOp<K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(
@@ -246,16 +247,17 @@ impl<E, K, V, H, T> qmdb::sync::Database
     for OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
+    OrderedVariableOp<K, V>: CodecShared,
 {
     type Context = E;
     type Op = OrderedVariableOp<K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, V::Cfg>;
+    type Config = VariableConfig<T, <OrderedVariableOp<K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(

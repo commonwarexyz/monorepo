@@ -4,20 +4,23 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
+commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
+    pub mod rng;
+    pub use rng::{test_rng, test_rng_seeded, FuzzRng};
 
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{BufMut, BytesMut};
-use core::{
-    fmt::{Debug, Write as FmtWrite},
-    time::Duration,
-};
-
+    pub mod thread_local;
+    pub use thread_local::Cached;
+});
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    extern crate alloc;
+
+    #[cfg(not(feature = "std"))]
+    use alloc::{boxed::Box, string::String, vec::Vec};
+    use bytes::{BufMut, BytesMut};
+    use core::{fmt::Write as FmtWrite, time::Duration};
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 
@@ -120,7 +123,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Converts bytes to a hexadecimal string.
     pub fn hex(bytes: &[u8]) -> String {
-        let mut hex = String::new();
+        let mut hex = String::with_capacity(bytes.len() * 2);
         for byte in bytes.iter() {
             write!(hex, "{byte:02x}").expect("writing to string should never fail");
         }
@@ -166,7 +169,8 @@ commonware_macros::stability_scope!(BETA {
     pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
         use commonware_codec::EncodeSize;
         let len_prefix = namespace.len();
-        let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
+        let mut buf =
+            BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
         len_prefix.write(&mut buf);
         BufMut::put_slice(&mut buf, namespace);
         BufMut::put_slice(&mut buf, msg);
@@ -241,24 +245,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     mod priority_set;
     pub use priority_set::PrioritySet;
 
-    pub mod channels;
+    pub mod channel;
     pub mod concurrency;
     pub mod futures;
-
-    /// Returns a seeded RNG for deterministic testing.
-    ///
-    /// Uses seed 0 by default to ensure reproducible test results.
-    pub fn test_rng() -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(0)
-    }
-
-    /// Returns a seeded RNG with a custom seed for deterministic testing.
-    ///
-    /// Use this when you need multiple independent RNG streams in the same test,
-    /// or when a helper function needs its own RNG that won't collide with the caller's.
-    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(seed)
-    }
+    pub mod sync;
 });
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -275,6 +265,7 @@ pub mod hex_literal;
 )))] // BETA
 pub mod vec;
 
+#[commonware_macros::stability(BETA)]
 #[inline]
 const fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {

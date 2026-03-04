@@ -10,15 +10,16 @@ use commonware_cryptography::{sha256, Hasher, Sha256};
 /// Build a test MMR by adding `elements` elements using the provided hasher.
 pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
     hasher: &mut H,
-    mut mmr: CleanMmr<sha256::Digest>,
+    mmr: CleanMmr<sha256::Digest>,
     elements: u64,
 ) -> CleanMmr<sha256::Digest> {
+    let mut mmr = mmr.into_dirty();
     for i in 0u64..elements {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
         mmr.add(hasher, &element);
     }
-    mmr
+    mmr.merkleize(hasher, None)
 }
 
 /// Tests stability of MMR root computation.

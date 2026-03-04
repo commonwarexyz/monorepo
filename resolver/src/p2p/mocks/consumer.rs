@@ -1,6 +1,5 @@
 use crate::Span;
-use commonware_utils::channels::fallible::FallibleExt;
-use futures::channel::mpsc;
+use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use std::collections::HashMap;
 
 /// An event that indicates the messages that were sent to the consumer
@@ -30,7 +29,7 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
     ///
     /// Returns the consumer and a receiver that can be used to get the events
     pub fn new() -> (Self, mpsc::UnboundedReceiver<Event<K, V>>) {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 sender,
@@ -42,7 +41,7 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
 
     /// Create a dummy consumer that is not expected to be used
     pub fn dummy() -> Self {
-        let (sender, _) = mpsc::unbounded();
+        let (sender, _) = mpsc::unbounded_channel();
         Self {
             sender,
             expected: HashMap::new(),

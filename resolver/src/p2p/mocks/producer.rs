@@ -1,7 +1,6 @@
 use crate::Span;
 use bytes::Bytes;
-use commonware_utils::channels::fallible::OneshotExt;
-use futures::channel::oneshot;
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use std::collections::HashMap;
 
 /// A producer that can be used for testing

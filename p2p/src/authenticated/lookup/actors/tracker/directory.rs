@@ -139,7 +139,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<Vec<C>> {
+    ///
+    /// Returns `Some((deleted_peers, changed_peers))` on success, where:
+    /// - `deleted_peers`: peers removed due to max_sets eviction
+    /// - `changed_peers`: existing peers whose addresses were updated
+    ///
+    /// The caller should sever connections for `changed_peers` since those
+    /// connections were established to the old address and must be replaced.
+    ///
+    /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
+    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -155,11 +164,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
+        let mut changed_peers = Vec::new();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr.clone());
+                    if entry.update(addr.clone()) {
+                        changed_peers.push(peer.clone());
+                    }
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -192,7 +204,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // future peer set additions.
         self.rate_limiter.retain_recent();
 
-        Some(deleted_peers)
+        Some((deleted_peers, changed_peers))
+    }
+
+    /// Update a tracked peer's address.
+    ///
+    /// Returns `true` if the peer exists and the address actually changed.
+    /// The caller should sever any existing connection to this peer since it
+    /// was established to the old address.
+    ///
+    /// Returns `false` if the peer is not tracked, is ourselves, or the
+    /// new address is identical to the existing one.
+    pub fn overwrite(&mut self, peer: &C, address: Address) -> bool {
+        let Some(record) = self.peers.get_mut(peer) else {
+            return false;
+        };
+        record.update(address)
     }
 
     /// Gets a peer set by index.
@@ -447,7 +474,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
@@ -460,7 +487,7 @@ mod tests {
                 "No peers should be deleted on first set"
             );
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     1,
                     [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
@@ -471,13 +498,13 @@ mod tests {
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
@@ -485,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_set_update_address() {
+    fn test_add_set_overwrite() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
@@ -552,25 +579,25 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(3, [(my_pk.clone(), addr(my_addr))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(4, [(my_pk.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
 
-            let deleted = directory.add_set(
+            let result = directory.add_set(
                 0,
                 [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
                     .unwrap(),
             );
-            assert!(deleted.is_none());
+            assert!(result.is_none());
         });
     }
 
@@ -682,7 +709,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             // Add set with asymmetric addresses
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
@@ -777,7 +804,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both socket and DNS addresses
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
@@ -840,7 +867,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both public and private egress IPs
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
@@ -1641,6 +1668,207 @@ mod tests {
                 directory.eligible(&pk_1),
                 "Peer should be eligible after unblock"
             );
+        });
+    }
+
+    #[test]
+    fn test_overwrite_basic() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_1))
+            );
+
+            let success = directory.overwrite(&pk_1, addr(addr_2));
+            assert!(success);
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+        });
+    }
+
+    #[test]
+    fn test_overwrite_untracked_peer() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            let success = directory.overwrite(&pk_1, addr(addr_1));
+            assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_overwrite_peer_not_in_set() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
+
+            let success = directory.overwrite(&pk_1, addr(addr_3));
+            assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_overwrite_blocked_peer() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.block(&pk_1);
+
+            let success = directory.overwrite(&pk_1, addr(addr_2));
+            assert!(success);
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+            assert!(directory.dialable().contains(&pk_1));
+        });
+    }
+
+    #[test]
+    fn test_overwrite_myself() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            let success = directory.overwrite(&my_pk, addr(addr_1));
+            assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_overwrite_same_address() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // First update with different address should succeed
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+            assert!(directory.overwrite(&pk_1, addr(addr_2)));
+
+            // Update with same address should return false (no change)
+            assert!(!directory.overwrite(&pk_1, addr(addr_2)));
+
+            // Update with different address should succeed again
+            let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
+            assert!(directory.overwrite(&pk_1, addr(addr_3)));
         });
     }
 }

@@ -20,6 +20,12 @@
 //!
 //! ## Protocol Description
 //!
+//! ### Genesis
+//!
+//! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
+//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
+//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
@@ -32,15 +38,17 @@
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
+//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
-//! * Enter `v+1`
+//! * Attempt to certify `c` (see [Certification](#certification))
+//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
+//!     * On failure: broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
@@ -62,9 +70,47 @@
 //!
 //! ### Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! This means that a new participant joining consensus will immediately jump ahead on the previous
+//! view's nullification or finalization and begin participating in consensus at the current view.
+//!
+//! ### Vote Broadcast
+//!
+//! Honest participants opportunistically broadcast votes for all views they are actively tracking. This
+//! includes views that are no longer current (i.e. sending a `notarize(c,v)` for view `v-1` while in view `v`).
+//!
+//! This is particularly useful for applications that wish to reward participants for actively participating in consensus
+//! (by including their votes onchain) and want to ensure their reward mechanism doesn't penalize decentralized participants
+//! that may not be able to issue a vote within the latest view consistently in a timely manner (say that there is a quorum
+//! in one data center and one participant is in another data center).
+//!
+//! _We only parse and verify votes necessary to drive consensus forward, so applications that do not require this functionality
+//! will incur negligible overhead._
+//!
+//! ### Certification
+//!
+//! After a payload is notarized, the application can optionally delay or prevent finalization via the
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. By default, `certify`
+//! returns `true` for all payloads, meaning finalization proceeds immediately after notarization.
+//!
+//! Customizing `certify` is useful for systems that employ erasure coding, where participants may want
+//! to wait until they have received enough shards to reconstruct and validate the full block before
+//! voting to finalize.
+//!
+//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
+//! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
+//! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
+//! Thus, a payload can only be finalized if a quorum of participants certify it.
+//!
+//! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
+//! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
+//! attempting to complete certification. This increases the likelihood that we can vote on the next honest proposer's block (which
+//! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
+//! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
+//!
+//! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
+//! liveness._
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -73,10 +119,65 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
+//! * Skip "leader timeout" and "certification timeout" if a designated leader hasn't participated in
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
+//! * Treat local verification failure as immediate timeout expiry and broadcast `nullify(v)`.
+//! * Consider the current leader's `nullify(v)` as immediate timeout expiry and broadcast `nullify(v)`.
+//! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
+//!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
+//!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//!
+//! ## Protocol Properties
+//!
+//! ### Forced Inclusion (Tail-Forking Resistance)
+//!
+//! A notarized payload in view `v` must appear in the canonical chain if no nullification
+//! certificate exists for `v`. This follows directly from the protocol rules:
+//!
+//! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
+//!    and possess nullification certificates for every view between `v_p` and `v+k`.
+//! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
+//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
+//!    or when certification fails.
+//!
+//! Therefore, if view `v` completes without timeout and certification succeeds, no honest
+//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
+//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
+//! that certificate, no future leader can skip view `v`, and the notarized payload must be
+//! included as an ancestor in all subsequent proposals.
+//!
+//! ### Optimistic Finality
+//!
+//! The forced inclusion property provides a weaker but faster form of finality: once a
+//! notarization certificate is observed for view `v` (without any timeout having fired),
+//! the notarized payload can be treated as speculatively final. No future sequence of
+//! proposals can exclude it from the canonical chain.
+//!
+//! This "speculative finality" is available after just 2 network hops (proposal + notarization),
+//! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
+//! A notarized-but-not-yet-finalized payload can only be excluded in two scenarios:
+//! `f+1` or more honest participants timed out, or certification failed. Because
+//! certification is deterministic, it either fails for all honest participants or none,
+//! so a certification failure always produces a nullification. In the common case
+//! (no faults, no timeouts), exclusion cannot happen.
+//!
+//! ### Unchained Finalization
+//!
+//! Finalization does not require consecutive honest views. When a participant certifies
+//! `notarization(c,v)`, it broadcasts `finalize(c,v)` and immediately enters `v+1`,
+//! regardless of what happens in subsequent views. These `finalize(c,v)` votes accumulate
+//! independently of the current view: even if views `v+1` through `v+k` all time out
+//! (producing nullifications), the `finalize(c,v)` votes still count toward the `2f+1`
+//! threshold needed to form `finalization(c,v)`.
+//!
+//! This means a payload notarized in view `v` can be finalized while the network is
+//! in view `v+k` for any `k >= 1`. There is no requirement that a particular view
+//! after `v` succeeds or that any subsequent leader cooperates. As long as `2f+1`
+//! participants eventually certify and broadcast `finalize(c,v)`, the finalization
+//! certificate will form.
 //!
 //! ## Architecture
 //!
@@ -218,21 +319,6 @@
 //! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
 //! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
 //!
-//! ## Certification
-//!
-//! After a payload is notarized, the application can optionally delay or prevent finalization via the
-//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
-//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
-//! and validate the full block before voting to finalize.
-//!
-//! If `certify` returns `false`, the participant will not broadcast a `finalize` vote for the payload.
-//! Because finalization requires `2f+1` `finalize` votes, a payload will only be finalized if a quorum
-//! of participants certify it. By default, `certify` returns `true` for all payloads, meaning finalization
-//! proceeds immediately after notarization.
-//!
-//! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
-//! liveness._
-//!
 //! ## Persistence
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
@@ -256,12 +342,14 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
 
 /// The minimum view we are tracking both in-memory and on-disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
@@ -269,6 +357,7 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
 /// Whether or not a view is interesting to us. This is a function
 /// of both `min_active` and whether or not the view is too far
 /// in the future (based on the view we are currently in).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn interesting(
     activity_timeout: ViewDelta,
     last_finalized: View,
@@ -339,14 +428,14 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
-    use futures::{future::join_all, StreamExt};
+    use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
     use tracing::{debug, info, warn};
@@ -657,15 +746,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -682,7 +771,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -693,19 +782,19 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure certificates for all views
                 {
-                    let certified = reporter.certified.lock().unwrap();
+                    let certified = reporter.certified.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure certificate for every view
                         if !certified.contains(&view) {
@@ -718,7 +807,7 @@ mod tests {
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
@@ -738,7 +827,7 @@ mod tests {
                     }
                 }
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
@@ -751,7 +840,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
@@ -776,7 +865,7 @@ mod tests {
                         }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -790,7 +879,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
@@ -810,6 +899,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_online() {
         all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -927,15 +1017,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -952,7 +1042,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -962,11 +1052,11 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -977,6 +1067,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_observer() {
         observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1096,15 +1187,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1121,7 +1212,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -1133,19 +1224,19 @@ mod tests {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
                         {
-                            let mut shutdowns = shutdowns.lock().unwrap();
+                            let mut shutdowns = shutdowns.lock();
                             debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                             *shutdowns += 1;
                         }
-                        supervised.lock().unwrap().push(reporters);
+                        supervised.lock().push(reporters);
                         false
                     },
                     _ = join_all(finalizers) => {
                         // Check reporters for faults activity
-                        let supervised = supervised.lock().unwrap();
+                        let supervised = supervised.lock();
                         for reporters in supervised.iter() {
                             for (_, reporter) in reporters.iter() {
-                                let faults = reporter.faults.lock().unwrap();
+                                let faults = reporter.faults.lock();
                                 assert!(faults.is_empty());
                             }
                         }
@@ -1288,15 +1379,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1313,7 +1404,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1408,15 +1499,15 @@ mod tests {
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1429,7 +1520,7 @@ mod tests {
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = reporter.subscribe().await;
             while latest < required_containers {
-                latest = monitor.next().await.expect("event missing");
+                latest = monitor.recv().await.expect("event missing");
             }
 
             // Ensure no blocked connections
@@ -1438,6 +1529,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_backfill() {
         backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1551,15 +1643,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1576,7 +1668,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1588,20 +1680,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure offline node is never active
                 let mut exceptions = 0;
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
@@ -1611,7 +1703,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifies = reporter.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
                             panic!("view: {view}");
@@ -1619,7 +1711,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
@@ -1632,7 +1724,7 @@ mod tests {
                 // Identify offline views
                 let mut offline_views = Vec::new();
                 {
-                    let leaders = reporter.leaders.lock().unwrap();
+                    let leaders = reporter.leaders.lock();
                     for (view, leader) in leaders.iter() {
                         if leader == offline {
                             offline_views.push(*view);
@@ -1643,7 +1735,7 @@ mod tests {
 
                 // Ensure nullifies/nullification collected for offline node
                 {
-                    let nullifies = reporter.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
                         if nullifies < quorum {
@@ -1653,7 +1745,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifications = reporter.nullifications.lock().unwrap();
+                    let nullifications = reporter.nullifications.lock();
                     for view in offline_views.iter() {
                         if !nullifications.contains_key(view) {
                             warn!("missing expected view nullifies: {}", view);
@@ -1671,19 +1763,22 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure online nodes are recording skips/nullifications for the offline leader
+            // Ensure online nodes are recording timeouts/nullifications for the offline leader
             let encoded = context.encode();
-            let peer_label = format!("peer=\"{}\"", offline);
-            for metric in ["_skips_per_leader", "_nullifications_per_leader"] {
-                assert_eq!(
-                    count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
-                    n - 1,
-                    "expected all online nodes to record {metric} for offline leader"
-                );
-            }
+            let leader_label = format!("leader=\"{}\"", offline);
+            assert!(
+                count_nonzero_metric_lines(&encoded, &["_timeouts", &leader_label]) >= n - 1,
+                "expected timeout metrics for offline leader"
+            );
+            assert_eq!(
+                count_nonzero_metric_lines(&encoded, &["_nullifications", &leader_label]),
+                n - 1,
+                "expected all online nodes to record _nullifications for offline leader"
+            );
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_one_offline() {
         one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1796,15 +1891,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1821,7 +1916,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1832,20 +1927,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
                 let mut observed = false;
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for (_, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
@@ -1856,7 +1951,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for (_, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
@@ -1875,6 +1970,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_validator() {
         slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1975,15 +2071,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2004,7 +2100,7 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
                                 },
                             }
@@ -2022,7 +2118,7 @@ mod tests {
             // Get latest view
             let mut latest = View::zero();
             for reporter in reporters.iter() {
-                let nullifies = reporter.nullifies.lock().unwrap();
+                let nullifies = reporter.nullifies.lock();
                 let max = nullifies.keys().max().unwrap();
                 if *max > latest {
                     latest = *max;
@@ -2043,7 +2139,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2053,13 +2149,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -2072,7 +2168,7 @@ mod tests {
                     // We don't check for finalization since some of the blocks may fail to be
                     // certified for the purposes of testing.
                     let mut found = 0;
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(latest, latest.saturating_add(activity_timeout)) {
                         if notarizations.contains_key(&view) {
                             found += 1;
@@ -2091,6 +2187,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_recovery() {
         all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -2191,15 +2288,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2216,7 +2313,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2242,7 +2339,7 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
                                 },
                             }
@@ -2267,7 +2364,7 @@ mod tests {
                 let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2277,13 +2374,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2404,15 +2501,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2429,7 +2526,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2439,13 +2536,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2458,6 +2555,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -2671,15 +2769,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2692,7 +2790,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2704,7 +2802,7 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -2724,7 +2822,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2848,6 +2946,13 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+                let leader_timeout = if idx_scheme == 0 {
+                    // Force the wrong-namespace byzantine node to timeout quickly so
+                    // honest nodes deterministically observe at least one invalid vote.
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(1)
+                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2859,16 +2964,16 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    leader_timeout,
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -2883,7 +2988,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2894,13 +2999,13 @@ mod tests {
             for reporter in reporters.iter().skip(1) {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Count invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     if *invalid > 0 {
                         invalid_count += 1;
                     }
@@ -3041,15 +3146,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3062,7 +3167,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3073,13 +3178,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3218,15 +3323,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -3239,7 +3344,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3260,7 +3365,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 2) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3308,15 +3413,15 @@ mod tests {
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -3327,7 +3432,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 3) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3542,15 +3647,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3563,7 +3668,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3574,13 +3679,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3711,15 +3816,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3732,7 +3837,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3744,7 +3849,7 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -3761,7 +3866,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3894,15 +3999,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3915,7 +4020,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3925,13 +4030,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -4046,15 +4151,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4071,7 +4176,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4081,13 +4186,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -4225,15 +4330,15 @@ mod tests {
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_millis(50),
-                notarization_timeout: Duration::from_millis(100),
-                nullify_retry: Duration::from_millis(250),
+                certification_timeout: Duration::from_millis(100),
+                timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4284,6 +4389,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
         for seed in 0..10 {
@@ -4322,6 +4428,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_graceful_shutdown() {
         for seed in 0..10 {
@@ -4450,15 +4557,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4475,7 +4582,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4485,20 +4592,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults (normal operation)
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty(), "No faults should be reported");
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0, "No invalid signatures");
                 }
 
                 // Check that we have certificates reported
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
+                    let finalizations = reporter.finalizations.lock();
                     assert!(
                         !notarizations.is_empty() || !finalizations.is_empty(),
                         "Certificates should be reported"
@@ -4506,7 +4613,7 @@ mod tests {
                 }
 
                 // Check notarizes
-                let notarizes = reporter.notarizes.lock().unwrap();
+                let notarizes = reporter.notarizes.lock();
                 let last_view = notarizes.keys().max().cloned().unwrap_or_default();
                 for (view, payloads) in notarizes.iter() {
                     if *view == last_view {
@@ -4525,7 +4632,7 @@ mod tests {
                 }
 
                 // Check finalizes
-                let finalizes = reporter.finalizes.lock().unwrap();
+                let finalizes = reporter.finalizes.lock();
                 for (_, payloads) in finalizes.iter() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
@@ -4629,89 +4736,6 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // ========== Create engines ==========
-
-            // Do not link validators yet; we will inject certificates first, then link everyone.
-
-            // Create engines: 7 honest engines, 3 byzantine
-            let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut honest_reporters = Vec::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                let participant_type = get_type(idx);
-                if matches!(participant_type, ParticipantType::Byzantine) {
-                    // Byzantine engines
-                    let cfg = mocks::nullify_only::Config {
-                        scheme: schemes[idx].clone(),
-                    };
-                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
-                        mocks::nullify_only::NullifyOnly::new(
-                            context.with_label(&format!("byzantine_{}", *validator)),
-                            cfg,
-                        );
-                    engine.start(pending);
-                    // Recovered/resolver channels are unused for byzantine actors.
-                    drop(recovered);
-                    drop(resolver);
-                } else {
-                    // Honest engines
-                    let reporter_config = mocks::reporter::Config {
-                        participants: participants.clone().try_into().unwrap(),
-                        scheme: schemes[idx].clone(),
-                        elector: elector.clone(),
-                    };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.with_label(&format!("reporter_{}", *validator)),
-                        reporter_config,
-                    );
-                    honest_reporters.push(reporter.clone());
-
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
-                        relay: relay.clone(),
-                        me: validator.clone(),
-                        propose_latency: (10.0, 5.0),
-                        verify_latency: (10.0, 5.0),
-                        certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::Certifier::Sometimes,
-                    };
-                    let (actor, application) = mocks::application::Application::new(
-                        context.with_label(&format!("application_{}", *validator)),
-                        application_cfg,
-                    );
-                    actor.start();
-                    let blocker = oracle.control(validator.clone());
-                    let cfg = config::Config {
-                        scheme: schemes[idx].clone(),
-                        elector: elector.clone(),
-                        blocker,
-                        automaton: application.clone(),
-                        relay: application.clone(),
-                        reporter: reporter.clone(),
-                        strategy: Sequential,
-                        partition: validator.to_string(),
-                        mailbox_size: 1024,
-                        epoch: Epoch::new(333),
-                        leader_timeout: Duration::from_secs(10),
-                        notarization_timeout: Duration::from_secs(10),
-                        nullify_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
-                        skip_timeout,
-                        fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
-                    let engine =
-                        Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
-                    engine.start(pending, recovered, resolver);
-                }
-            }
-
             // ========== Build the certificates manually ==========
 
             // Helper: assemble finalization from explicit signer indices
@@ -4788,32 +4812,6 @@ mod tests {
 
             // ========== Broadcast certificates over recovered network. ==========
 
-            // Broadcasts are in reverse order of views to make the tests easier by preventing the
-            // proposer from making a proposal in F+1 or F+2, as it may panic when it proposes
-            // something but generates a certificate for a different proposal.
-
-            // View F+2:
-            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
-            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
-            for (i, participant) in participants.iter().enumerate() {
-                let recipient = Recipients::One(participant.clone());
-                let msg = match get_type(i) {
-                    ParticipantType::Group2 => notarization_msg.encode(),
-                    _ => nullification_msg.encode(),
-                };
-                injector_sender.send(recipient, msg, true).await.unwrap();
-            }
-            // View F+1:
-            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
-            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
-            for (i, participant) in participants.iter().enumerate() {
-                let recipient = Recipients::One(participant.clone());
-                let msg = match get_type(i) {
-                    ParticipantType::Group1 => notarization_msg.encode(),
-                    _ => nullification_msg.encode(),
-                };
-                injector_sender.send(recipient, msg, true).await.unwrap();
-            }
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
@@ -4825,12 +4823,114 @@ mod tests {
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
+            // View F+1:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group1 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F+2:
+            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group2 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
 
-            // Wait for a while to let the certificates propagate, but not so long that we
-            // nullify view F+2.
-            debug!("waiting for certificates to propagate");
-            context.sleep(Duration::from_secs(5)).await;
-            debug!("certificates propagated");
+            // ========== Create engines ==========
+
+            // Start engines after preloading certificates into each participant's
+            // recovered channel (ensuring processing before any leader attempts to issue a
+            // conflicting vote).
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut honest_reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let participant_type = get_type(idx);
+                if matches!(participant_type, ParticipantType::Byzantine) {
+                    // Byzantine engines
+                    let cfg = mocks::nullify_only::Config {
+                        scheme: schemes[idx].clone(),
+                    };
+                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
+                        mocks::nullify_only::NullifyOnly::new(
+                            context.with_label(&format!("byzantine_{}", *validator)),
+                            cfg,
+                        );
+                    engine.start(pending);
+                    // Recovered/resolver channels are unused for byzantine actors.
+                    drop(recovered);
+                    drop(resolver);
+                } else {
+                    // Honest engines
+                    let reporter_config = mocks::reporter::Config {
+                        participants: participants.clone().try_into().unwrap(),
+                        scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label(&format!("reporter_{}", *validator)),
+                        reporter_config,
+                    );
+                    honest_reporters.push(reporter.clone());
+
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (250.0, 50.0), // ensure we process certificates first
+                        verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label(&format!("application_{}", *validator)),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        strategy: Sequential,
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        leader_timeout: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(10),
+                        timeout_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine =
+                        Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Allow started engines to consume preloaded certificates.
+            context.sleep(Duration::from_secs(2)).await;
 
             // ========== Assert the exact certificates are seen in each view ==========
 
@@ -4838,7 +4938,7 @@ mod tests {
             // All participants should have finalized B_0
             let view = View::new(f_view);
             for reporter in honest_reporters.iter() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(finalizations.contains_key(&view));
             }
 
@@ -4847,10 +4947,10 @@ mod tests {
             // All other participants should have nullified F+1
             let view = View::new(f_view + 1);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(!finalizations.contains_key(&view));
-                let nullifications = reporter.nullifications.lock().unwrap();
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let nullifications = reporter.nullifications.lock();
+                let notarizations = reporter.notarizations.lock();
                 match get_type(i) {
                     ParticipantType::Group1 => {
                         assert!(notarizations.contains_key(&view));
@@ -4868,10 +4968,10 @@ mod tests {
             // All other participants should have nullified F+2
             let view = View::new(f_view + 2);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(!finalizations.contains_key(&view));
-                let nullifications = reporter.nullifications.lock().unwrap();
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let nullifications = reporter.nullifications.lock();
+                let notarizations = reporter.notarizations.lock();
                 match get_type(i) {
                     ParticipantType::Group2 => {
                         assert!(notarizations.contains_key(&view));
@@ -4887,7 +4987,7 @@ mod tests {
             // Assert no members have yet nullified view F+3
             let next_view = View::new(f_view + 3);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let nullifies = reporter.nullifies.lock().unwrap();
+                let nullifies = reporter.nullifies.lock();
                 assert!(!nullifies.contains_key(&next_view), "reporter {i}");
             }
 
@@ -4905,7 +5005,7 @@ mod tests {
                     finalizers.push(context.with_label("resume_finalizer").spawn(
                         move |_| async move {
                             while latest < target {
-                                latest = monitor.next().await.expect("event missing");
+                                latest = monitor.recv().await.expect("event missing");
                             }
                         },
                     ));
@@ -4916,19 +5016,20 @@ mod tests {
             // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.iter() {
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty());
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_split_views_no_lockup() {
         split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -5002,7 +5103,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 if idx == 0 {
-                    *monitor_reporter.lock().unwrap() = Some(reporter.clone());
+                    *monitor_reporter.lock() = Some(reporter.clone());
                 }
 
                 // Configure application
@@ -5033,15 +5134,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_millis(100),
-                    notarization_timeout: Duration::from_millis(200),
-                    nullify_retry: Duration::from_millis(500),
+                    certification_timeout: Duration::from_millis(200),
+                    timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5060,11 +5161,11 @@ mod tests {
             let ciphertext = schemes[0].encrypt(&mut context, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
-            let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
+            let reporter = monitor_reporter.lock().clone().unwrap();
             loop {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let notarizations = reporter.notarizations.lock();
                 let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };
@@ -5183,15 +5284,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5214,7 +5315,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5236,7 +5337,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5279,15 +5380,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -5298,7 +5399,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5311,13 +5412,13 @@ mod tests {
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -5325,7 +5426,7 @@ mod tests {
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
@@ -5339,7 +5440,7 @@ mod tests {
                     }
                 }
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
@@ -5352,7 +5453,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
@@ -5370,7 +5471,7 @@ mod tests {
                         }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -5384,7 +5485,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
@@ -5723,15 +5824,15 @@ mod tests {
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
@@ -5780,15 +5881,15 @@ mod tests {
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5804,7 +5905,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -5814,7 +5915,7 @@ mod tests {
             let honest_start = faults as usize * 2; // Each twin produces 2 reporters
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter().skip(honest_start) {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     let digest = finalization.proposal.payload;
                     if let Some(existing) = finalized_at_view.get(view) {
@@ -5830,14 +5931,14 @@ mod tests {
 
             // Verify no invalid signatures were observed
             for reporter in reporters.iter().skip(honest_start) {
-                let invalid = reporter.invalid.lock().unwrap();
+                let invalid = reporter.invalid.lock();
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
             // Ensure faults are attributable to twins
             let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
             for reporter in reporters.iter().skip(honest_start) {
-                let faults = reporter.faults.lock().unwrap();
+                let faults = reporter.faults.lock();
                 for (faulter, _) in faults.iter() {
                     assert!(
                         twin_identities.contains(&faulter),

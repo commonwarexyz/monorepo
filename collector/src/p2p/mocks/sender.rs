@@ -2,7 +2,7 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
-use commonware_runtime::IoBufMut;
+use commonware_runtime::IoBufs;
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -49,7 +49,7 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
 
     async fn send(
         self,
-        _message: impl Into<IoBufMut> + Send,
+        _message: impl Into<IoBufs> + Send,
         _priority: bool,
     ) -> Result<Vec<P>, Self::Error> {
         Err(Error::Failed)

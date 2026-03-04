@@ -13,16 +13,15 @@ const TOTAL_SIZE: usize = PAGE_SIZE_USIZE * TOTAL_PAGES;
 
 pub fn bench(c: &mut Criterion) {
     for read_size in [64, 256, 1024, 4096] {
-        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
         let name = format!("read_{read_size}").into_bytes();
 
         c.bench_function(&format!("{}/size={}", module_path!(), read_size), |b| {
             b.iter_custom(|iters| {
-                let cache_ref = cache_ref.clone();
                 let name = name.clone();
 
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
+                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     // Setup: populate the blob
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];

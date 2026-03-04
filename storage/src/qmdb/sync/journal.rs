@@ -1,4 +1,4 @@
-use crate::mmr::Location;
+use crate::{journal::contiguous::Contiguous, mmr::Location};
 use std::{future::Future, ops::Range};
 
 /// Journal of operations used by a [super::Database]
@@ -62,7 +62,7 @@ where
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if Contiguous::size(self).await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -74,7 +74,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Contiguous::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -97,11 +97,27 @@ where
         config: Self::Config,
         range: Range<Location>,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config, *range.start..*range.end).await
+        assert!(!range.is_empty(), "range must not be empty");
+
+        let journal = Self::init(context, config).await?;
+        let size = Contiguous::size(&journal).await;
+
+        if size > *range.end {
+            return Err(crate::journal::Error::ItemOutOfRange(size));
+        }
+        if size <= *range.start {
+            if *range.start != 0 {
+                journal.clear_to_size(*range.start).await?;
+            }
+        } else {
+            journal.prune(*range.start).await?;
+        }
+
+        Ok(journal)
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if Contiguous::size(self).await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -113,7 +129,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Contiguous::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {

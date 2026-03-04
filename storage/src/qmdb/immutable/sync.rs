@@ -1,6 +1,9 @@
 use crate::{
     index::unordered::Index,
-    journal::{authenticated, contiguous::variable},
+    journal::{
+        authenticated,
+        contiguous::{variable, Reader as _},
+    },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, StandardHasher,
@@ -71,8 +74,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     page_cache: db_config.page_cache.clone(),
                 },
-                range: Position::try_from(range.start)?
-                    ..Position::try_from(range.end.saturating_add(1))?,
+                range: Position::try_from(range.start)?..Position::try_from(range.end)?,
                 pinned_nodes,
             },
             &mut hasher,
@@ -90,13 +92,22 @@ where
         let mut snapshot: Index<T, Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
-        // Get the start of the log.
-        let start_loc = journal.pruning_boundary();
+        let last_commit_loc = {
+            // Get the start of the log.
+            let reader = journal.journal.reader().await;
+            let start_loc = Location::new(reader.bounds().start);
 
-        // Build snapshot from the log
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+            // Build snapshot from the log
+            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
+            Location::new(
+                reader
+                    .bounds()
+                    .end
+                    .checked_sub(1)
+                    .expect("commit should exist"),
+            )
+        };
 
         let mut db = Self {
             journal,
@@ -133,10 +144,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Metrics, Runner as _, RwLock,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
-    use futures::{channel::mpsc, SinkExt as _};
+    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{
@@ -166,31 +176,34 @@ mod tests {
     >;
 
     /// Create a simple config for sync tests
-    fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
+    fn create_sync_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> immutable::Config<crate::translator::TwoCap, ()> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         immutable::Config {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_{suffix}"),
+            log_partition: format!("log-{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: (),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let config = create_sync_config(&format!("sync_test_{seed}"));
+        let config = create_sync_config(&format!("sync-test-{seed}"), &context);
         ImmutableSyncTest::init(context, config).await.unwrap()
     }
 
@@ -254,8 +267,9 @@ mod tests {
             let metadata = Some(Sha256::fill(1));
             let (durable_db, _) = target_db.commit(metadata).await.unwrap();
             let target_db = durable_db.into_merkleized();
-            let target_op_count = target_db.op_count();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc();
+            let bounds = target_db.bounds().await;
+            let target_op_count = bounds.end;
+            let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
 
             // Capture target database state before moving into config
@@ -266,9 +280,10 @@ mod tests {
                 }
             }
 
-            let db_config = create_sync_config(&format!("sync_client_{}", context.next_u64()));
+            let db_config =
+                create_sync_config(&format!("sync_client_{}", context.next_u64()), &context);
 
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
@@ -285,8 +300,9 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.op_count(), target_op_count);
-            assert_eq!(got_db.oldest_retained_loc(), target_oldest_retained_loc);
+            let bounds = got_db.bounds().await;
+            assert_eq!(bounds.end, target_op_count);
+            assert_eq!(bounds.start, target_oldest_retained_loc);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(), target_root);
@@ -313,7 +329,7 @@ mod tests {
             apply_ops(&mut got_db, new_ops.clone()).await;
             let mut target_db = Arc::try_unwrap(target_db).map_or_else(
                 |_| panic!("target_db should have no other references"),
-                |rw_lock| rw_lock.into_inner().into_mutable(),
+                |db| db.into_mutable(),
             );
             apply_ops(&mut target_db, new_ops.clone()).await;
 
@@ -343,12 +359,14 @@ mod tests {
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
             let target_db = durable_db.into_merkleized();
 
-            let target_op_count = target_db.op_count();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc();
+            let bounds = target_db.bounds().await;
+            let target_op_count = bounds.end;
+            let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
 
-            let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
-            let target_db = Arc::new(RwLock::new(target_db));
+            let db_config =
+                create_sync_config(&format!("empty_sync_{}", context.next_u64()), &context);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
@@ -365,16 +383,15 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.op_count(), target_op_count);
-            assert_eq!(got_db.oldest_retained_loc(), target_oldest_retained_loc);
+            let bounds = got_db.bounds().await;
+            assert_eq!(bounds.end, target_op_count);
+            assert_eq!(bounds.start, target_oldest_retained_loc);
             assert_eq!(got_db.root(), target_root);
             assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
             got_db.destroy().await.unwrap();
-            let target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("Failed to unwrap Arc - still has references"),
-                |rw_lock| rw_lock.into_inner(),
-            );
+            let target_db = Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("Failed to unwrap Arc - still has references"));
             target_db.destroy().await.unwrap();
         });
     }
@@ -394,13 +411,14 @@ mod tests {
 
             // Capture target state
             let target_root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc();
-            let op_count = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let op_count = bounds.end;
 
             // Perform sync
-            let db_config = create_sync_config("persistence_test");
+            let db_config = create_sync_config("persistence-test", &context);
             let client_context = context.with_label("client");
-            let target_db = Arc::new(RwLock::new(target_db));
+            let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
@@ -421,8 +439,9 @@ mod tests {
 
             // Save state before closing
             let expected_root = synced_db.root();
-            let expected_op_count = synced_db.op_count();
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
+            let bounds = synced_db.bounds().await;
+            let expected_op_count = bounds.end;
+            let expected_oldest_retained_loc = bounds.start;
 
             // Drop & reopen the database to test persistence
             synced_db.sync().await.unwrap();
@@ -433,11 +452,9 @@ mod tests {
 
             // Verify state is preserved
             assert_eq!(reopened_db.root(), expected_root);
-            assert_eq!(reopened_db.op_count(), expected_op_count);
-            assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                expected_oldest_retained_loc
-            );
+            let bounds = reopened_db.bounds().await;
+            assert_eq!(bounds.end, expected_op_count);
+            assert_eq!(bounds.start, expected_oldest_retained_loc);
 
             // Verify data integrity
             for op in &target_ops {
@@ -448,10 +465,8 @@ mod tests {
             }
 
             reopened_db.destroy().await.unwrap();
-            let target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("Failed to unwrap Arc - still has references"),
-                |rw_lock| rw_lock.into_inner(),
-            );
+            let target_db = Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("Failed to unwrap Arc - still has references"));
             target_db.destroy().await.unwrap();
         });
     }
@@ -470,8 +485,9 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture the state after first commit
-            let initial_lower_bound = target_db.oldest_retained_loc();
-            let initial_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let initial_lower_bound = bounds.start;
+            let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
 
             // Add more operations to create the extended target
@@ -481,18 +497,21 @@ mod tests {
             apply_ops(&mut target_db, additional_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
-            let final_upper_bound = target_db.op_count();
+            let final_upper_bound = target_db.bounds().await.end;
             let final_root = target_db.root();
 
             // Wrap target database for shared mutable access
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(target_db);
 
             // Create client with initial smaller target and very small batch size
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let client = {
                 let config = Config {
                     context: context.with_label("client"),
-                    db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
+                    db_config: create_sync_config(
+                        &format!("update_test_{}", context.next_u64()),
+                        &context,
+                    ),
                     target: Target {
                         root: initial_root,
                         range: initial_lower_bound..initial_upper_bound,
@@ -510,7 +529,8 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size();
+                    let log_size =
+                        crate::journal::contiguous::Contiguous::size(client.journal()).await;
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -533,16 +553,13 @@ mod tests {
             assert_eq!(synced_db.root(), final_root);
 
             // Verify the target database matches the synced database
-            let target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("Failed to unwrap Arc - still has references"),
-                |rw_lock| rw_lock.into_inner(),
-            );
+            let target_db = Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("Failed to unwrap Arc - still has references"));
             {
-                assert_eq!(synced_db.op_count(), target_db.op_count());
-                assert_eq!(
-                    synced_db.oldest_retained_loc(),
-                    target_db.oldest_retained_loc()
-                );
+                let bounds = synced_db.bounds().await;
+                let target_bounds = target_db.bounds().await;
+                assert_eq!(bounds.end, target_bounds.end);
+                assert_eq!(bounds.start, target_bounds.start);
                 assert_eq!(synced_db.root(), target_db.root());
             }
 
@@ -566,16 +583,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.with_label("target")).await;
-            let db_config = create_sync_config(&format!("invalid_bounds_{}", context.next_u64()));
+            let db_config =
+                create_sync_config(&format!("invalid_bounds_{}", context.next_u64()), &context);
             let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new_unchecked(31)..Location::new_unchecked(31),
+                    range: Location::new(31)..Location::new(31),
                 },
                 context: context.with_label("client"),
-                resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
+                resolver: Arc::new(target_db),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
@@ -586,8 +604,8 @@ mod tests {
                     lower_bound_pos,
                     upper_bound_pos,
                 })) => {
-                    assert_eq!(lower_bound_pos, Location::new_unchecked(31));
-                    assert_eq!(upper_bound_pos, Location::new_unchecked(31));
+                    assert_eq!(lower_bound_pos, Location::new(31));
+                    assert_eq!(upper_bound_pos, Location::new(31));
                 }
                 _ => panic!("Expected InvalidTarget error"),
             }
@@ -609,8 +627,9 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             let target_root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc();
-            let op_count = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let op_count = bounds.end;
 
             // Add final op after capturing the range
             let mut target_db = target_db.into_mutable();
@@ -618,9 +637,9 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
 
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(target_db);
             let config = Config {
-                db_config: create_sync_config(&format!("subset_{}", context.next_u64())),
+                db_config: create_sync_config(&format!("subset_{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
@@ -636,13 +655,12 @@ mod tests {
 
             // Verify state matches the specified range
             assert_eq!(synced_db.root(), target_root);
-            assert_eq!(synced_db.op_count(), op_count);
+            assert_eq!(synced_db.bounds().await.end, op_count);
 
             synced_db.destroy().await.unwrap();
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -657,7 +675,8 @@ mod tests {
             // Create two databases
             let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
-            let sync_db_config = create_sync_config(&format!("partial_{}", context.next_u64()));
+            let sync_db_config =
+                create_sync_config(&format!("partial_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
@@ -683,11 +702,12 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
             let root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc();
-            let upper_bound = target_db.op_count(); // Up to the last operation
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let upper_bound = bounds.end; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -704,14 +724,13 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(sync_db.op_count(), upper_bound);
+            assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -725,7 +744,8 @@ mod tests {
             // Create two databases
             let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
-            let sync_config = create_sync_config(&format!("exact_{}", context.next_u64()));
+            let sync_config =
+                create_sync_config(&format!("exact_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_config.clone())
@@ -745,11 +765,12 @@ mod tests {
 
             // Prepare target
             let root = target_db.root();
-            let lower_bound = target_db.oldest_retained_loc();
-            let upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let upper_bound = bounds.end;
 
             // Sync should complete immediately without fetching
-            let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let resolver = Arc::new(target_db);
             let config = Config {
                 db_config: sync_config,
                 fetch_batch_size: NZU64!(10),
@@ -765,14 +786,13 @@ mod tests {
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
-            assert_eq!(sync_db.op_count(), upper_bound);
+            assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
                 Arc::try_unwrap(resolver).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -789,19 +809,20 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
 
-            target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc();
-            let initial_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let initial_lower_bound = bounds.start;
+            let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let (update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64())),
+                db_config: create_sync_config(&format!("lb-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -833,8 +854,7 @@ mod tests {
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -852,16 +872,17 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc();
-            let initial_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let initial_lower_bound = bounds.start;
+            let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let (update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64())),
+                db_config: create_sync_config(&format!("ub-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -893,8 +914,7 @@ mod tests {
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -912,8 +932,9 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc();
-            let initial_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let initial_lower_bound = bounds.start;
+            let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
 
             // Apply more operations to the target database
@@ -924,14 +945,15 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
 
-            target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
 
             // Capture final target state
-            let final_lower_bound = target_db.oldest_retained_loc();
-            let final_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let final_lower_bound = bounds.start;
+            let final_upper_bound = bounds.end;
             let final_root = target_db.root();
 
             // Assert we're actually updating the bounds
@@ -939,11 +961,14 @@ mod tests {
             assert_ne!(final_upper_bound, initial_upper_bound);
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let (update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("bounds_inc_{}", context.next_u64()),
+                    &context,
+                ),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
@@ -969,14 +994,13 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), final_root);
-            assert_eq!(synced_db.op_count(), final_upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc(), final_lower_bound);
+            let bounds = synced_db.bounds().await;
+            assert_eq!(bounds.end, final_upper_bound);
+            assert_eq!(bounds.start, final_lower_bound);
 
             synced_db.destroy().await.unwrap();
-            let target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("Failed to unwrap Arc - still has references"),
-                |rw_lock| rw_lock.into_inner(),
-            );
+            let target_db = Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("Failed to unwrap Arc - still has references"));
             target_db.destroy().await.unwrap();
         });
     }
@@ -995,16 +1019,20 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let initial_lower_bound = target_db.oldest_retained_loc();
-            let initial_upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let initial_lower_bound = bounds.start;
+            let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let (update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("invalid_update_{}", context.next_u64()),
+                    &context,
+                ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -1034,8 +1062,7 @@ mod tests {
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            let inner = target_db.into_inner();
-            inner.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -1053,16 +1080,17 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture target state
-            let lower_bound = target_db.oldest_retained_loc();
-            let upper_bound = target_db.op_count();
+            let bounds = target_db.bounds().await;
+            let lower_bound = bounds.start;
+            let upper_bound = bounds.end;
             let root = target_db.root();
 
             // Create client with target that will complete immediately
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let (update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("done_{}", context.next_u64())),
+                db_config: create_sync_config(&format!("done_{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
@@ -1087,13 +1115,13 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), root);
-            assert_eq!(synced_db.op_count(), upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc(), lower_bound);
+            let bounds = synced_db.bounds().await;
+            assert_eq!(bounds.end, upper_bound);
+            assert_eq!(bounds.start, lower_bound);
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
-                .into_inner()
                 .destroy()
                 .await
                 .unwrap();

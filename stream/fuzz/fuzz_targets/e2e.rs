@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, Signer};
+use commonware_cryptography::{ed25519::PrivateKey, handshake::TAG_SIZE, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
     encrypted::{dial, listen, Config, Error, Receiver, Sender},
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
+const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + TAG_SIZE as u32;
 
 #[derive(Debug)]
 enum Direction {
@@ -39,8 +40,15 @@ enum Message {
 impl<'a> arbitrary::Arbitrary<'a> for Message {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let direction = Direction::arbitrary(u)?;
-        let msg = Vec::arbitrary(u)?;
-        let out = if bool::arbitrary(u)? {
+        let authenticated = bool::arbitrary(u)?;
+        let max_len = if authenticated {
+            MAX_MESSAGE_SIZE as usize
+        } else {
+            MAX_CIPHERTEXT_SIZE as usize
+        };
+        let len = u.int_in_range(0..=max_len.min(u.len()))?;
+        let msg = u.bytes(len)?.to_vec();
+        let out = if authenticated {
             Self::Authenticated(direction, msg)
         } else {
             Self::Unauthenticated(direction, msg)
@@ -216,9 +224,17 @@ fn fuzz(input: FuzzInput) {
         // Importantly, make sure that if we've gotten to this point, no data corruption
         // has happened!
         assert!(!sent_corrupted_data);
+        let mut d2l_corrupted = false;
+        let mut l2d_corrupted = false;
         for msg in messages {
             match msg {
                 Message::Authenticated(direction, data) => {
+                    if matches!(&direction, Direction::D2L) && d2l_corrupted {
+                        continue;
+                    }
+                    if matches!(&direction, Direction::L2D) && l2d_corrupted {
+                        continue;
+                    }
                     let (sender, a_in, a_out, receiver): (
                         &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
@@ -238,13 +254,24 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
+
+                    // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
-                    let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
+                    // Intercept the resulting ciphertext frame from the wire.
+                    let frame = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Forward the exact ciphertext frame unchanged.
+                    send_frame(a_out, frame, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Receiver should decrypt and deliver the original plaintext.
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
                 Message::Unauthenticated(direction, data) => {
+                    if matches!(&direction, Direction::D2L) && d2l_corrupted {
+                        continue;
+                    }
+                    if matches!(&direction, Direction::L2D) && l2d_corrupted {
+                        continue;
+                    }
                     let (sender, a_in, a_out, receiver): (
                         &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
@@ -264,11 +291,23 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(Vec::new()).await.unwrap();
-                    let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, data, MAX_MESSAGE_SIZE).await.unwrap();
+
+                    // Trigger one legitimate encrypted frame so nonce/state advance as normal.
+                    sender.send(vec![0u8]).await.unwrap();
+                    // Adversary intercepts and drops that frame.
+                    let _ = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Adversary injects forged unauthenticated bytes instead.
+                    send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Receiver must reject the forged frame.
                     let res = receiver.recv().await;
                     assert!(res.is_err());
+
+                    // After unauthenticated injection, this direction's stream state is corrupted.
+                    if matches!(&direction, Direction::D2L) {
+                        d2l_corrupted = true;
+                    } else {
+                        l2d_corrupted = true;
+                    }
                 }
             }
         }

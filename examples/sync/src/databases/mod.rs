@@ -9,12 +9,14 @@ use commonware_storage::{
 use std::{future::Future, num::NonZeroU64};
 
 pub mod any;
+pub mod current;
 pub mod immutable;
 
 /// Database type to sync.
 #[derive(Debug, Clone, Copy)]
 pub enum DatabaseType {
     Any,
+    Current,
     Immutable,
 }
 
@@ -24,9 +26,10 @@ impl std::str::FromStr for DatabaseType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "any" => Ok(Self::Any),
+            "current" => Ok(Self::Current),
             "immutable" => Ok(Self::Immutable),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'any' or 'immutable'",
+                "Invalid database type: '{s}'. Must be 'any', 'current', or 'immutable'",
             )),
         }
     }
@@ -36,6 +39,7 @@ impl DatabaseType {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Any => "any",
+            Self::Current => "current",
             Self::Immutable => "immutable",
         }
     }
@@ -60,11 +64,11 @@ pub trait Syncable: Sized {
     /// Get the database's root digest.
     fn root(&self) -> Key;
 
-    /// Get the operation count of the database.
-    fn op_count(&self) -> Location;
+    /// Get the total number of operations in the database (including pruned operations).
+    fn size(&self) -> impl Future<Output = Location> + Send;
 
-    /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound(&self) -> Location;
+    /// Get the inactivity floor, the location below which all operations are inactive.
+    fn inactivity_floor(&self) -> impl Future<Output = Location> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(

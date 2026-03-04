@@ -13,15 +13,18 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::ring, NZUsize};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_runtime::{spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::{
+    channel::{mpsc, ring},
+    NZUsize,
+};
+use futures::SinkExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
-pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
+pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     control: mpsc::Receiver<Message<P>>,
@@ -31,12 +34,13 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
+impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
+        let pool = context.network_buffer_pool().clone();
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
@@ -56,7 +60,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 messages_dropped,
             },
             control_sender.clone(),
-            Messenger::new(control_sender),
+            Messenger::new(pool, control_sender),
         )
     }
 
@@ -94,12 +98,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
             on_stopped => {
                 debug!("context shutdown, stopping router");
             },
-            msg = self.control.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping router");
-                    break;
-                };
-
+            Some(msg) = self.control.recv() else {
+                debug!("mailbox closed, stopping router");
+                break;
+            } => {
                 match msg {
                     Message::Ready {
                         peer,

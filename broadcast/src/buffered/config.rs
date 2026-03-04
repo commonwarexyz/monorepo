@@ -1,4 +1,5 @@
 use commonware_cryptography::PublicKey;
+use commonware_p2p::PeerSetSubscription;
 
 /// Configuration for the [super::Engine].
 pub struct Config<P: PublicKey, MCfg> {
@@ -16,4 +17,8 @@ pub struct Config<P: PublicKey, MCfg> {
 
     /// The configuration for the codec item.
     pub codec_config: MCfg,
+
+    /// Subscription to peer set changes. Per-peer caches are freed when a
+    /// peer leaves all tracked peer sets.
+    pub peer_set_subscription: PeerSetSubscription<P>,
 }

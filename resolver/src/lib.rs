@@ -26,13 +26,20 @@ commonware_macros::stability_scope!(BETA {
         /// Deliver data to the consumer.
         ///
         /// Returns `true` if the data is valid.
-        fn deliver(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = bool> + Send;
+        fn deliver(
+            &mut self,
+            key: Self::Key,
+            value: Self::Value,
+        ) -> impl Future<Output = bool> + Send;
 
         /// Let the consumer know that the data is not being fetched anymore.
         ///
         /// The failure is used to indicate why.
-        fn failed(&mut self, key: Self::Key, failure: Self::Failure)
-            -> impl Future<Output = ()> + Send;
+        fn failed(
+            &mut self,
+            key: Self::Key,
+            failure: Self::Failure,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.

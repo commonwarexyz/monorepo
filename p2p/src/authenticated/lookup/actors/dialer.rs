@@ -17,7 +17,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -26,6 +27,10 @@ use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
+
+// Mailbox for the spawner actor.
+type SupervisorMailbox<E, C> =
+    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
@@ -49,7 +54,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -67,7 +72,11 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<
+        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        C: Signer,
+    > Actor<E, C>
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(
@@ -87,12 +96,11 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
     }
 
     /// Dial a peer for which we have a reservation.
-    #[allow(clippy::type_complexity)]
-    async fn dial_peer(
+    fn dial_peer(
         &mut self,
         reservation: Reservation<C::PublicKey>,
         ingress: Ingress,
-        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: &mut SupervisorMailbox<E, C>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer) = reservation.metadata().clone() else {
@@ -148,20 +156,18 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
     }
 
     /// Start the dialer actor.
-    #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
-    #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
@@ -181,7 +187,7 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                     let Some((reservation, ingress)) = tracker.dial(peer).await else {
                         continue;
                     };
-                    self.dial_peer(reservation, ingress, &mut supervisor).await;
+                    self.dial_peer(reservation, ingress, &mut supervisor);
                     break;
                 }
             },
@@ -210,7 +216,6 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use futures::StreamExt;
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
@@ -261,7 +266,7 @@ mod tests {
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
                 .with_label("supervisor")
-                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
             let _handle = dialer.start(tracker_mailbox, supervisor);
@@ -271,7 +276,7 @@ mod tests {
             let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
-                    msg = tracker_rx.next() => match msg {
+                    msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
                             let _ = responder.send(peers.clone());
                         }

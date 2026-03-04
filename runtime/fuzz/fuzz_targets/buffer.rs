@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, IoBufMut, Runner, Storage,
+    deterministic, Blob, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -130,7 +130,12 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    read_buffer = Some(Read::new(blob, blob_size.min(size), NZUsize!(buffer_size)));
+                    read_buffer = Some(Read::from_pooler(
+                        &context,
+                        blob,
+                        blob_size.min(size),
+                        NZUsize!(buffer_size),
+                    ));
                 }
 
                 FuzzOperation::CreateWrite {
@@ -144,7 +149,12 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
-                    write_buffer = Some(Write::new(blob, initial_size as u64, NZUsize!(capacity)));
+                    write_buffer = Some(Write::from_pooler(
+                        &context,
+                        blob,
+                        initial_size as u64,
+                        NZUsize!(capacity),
+                    ));
                 }
 
                 FuzzOperation::CreateAppend {
@@ -166,7 +176,11 @@ fn fuzz(input: FuzzInput) {
                     // in the CRC records.
                     if cache_ref.is_none() {
                         let cache_page_size = cache_page_size.clamp(1, u16::MAX);
-                        cache_ref = Some(CacheRef::new(NZU16!(cache_page_size), cache_capacity));
+                        cache_ref = Some(CacheRef::from_pooler(
+                            &context,
+                            NZU16!(cache_page_size),
+                            cache_capacity,
+                        ));
                         cache_page_size_ref = Some(cache_page_size);
                     }
 
@@ -275,7 +289,7 @@ fn fuzz(input: FuzzInput) {
                             if let Some(cache_page_size) = cache_page_size_ref {
                                 let aligned_offset =
                                     (offset / cache_page_size as u64) * cache_page_size as u64;
-                                let _ = cache.cache(blob_id as u64, data, aligned_offset).await;
+                                let _ = cache.cache(blob_id as u64, data, aligned_offset);
                             }
                         }
                     }
@@ -316,7 +330,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let _ = writer.read_at(offset, IoBufMut::zeroed(size)).await;
+                            let _ = writer.read_at(offset, size).await;
                         }
                     }
                 }
@@ -344,7 +358,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let _ = append.read_at(offset, IoBufMut::zeroed(size)).await;
+                            let _ = append.read_at(offset, size).await;
                         }
                     }
                 }

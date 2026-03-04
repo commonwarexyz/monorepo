@@ -54,7 +54,7 @@
 //!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+//!         page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!     };
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
@@ -145,13 +145,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.with_label("first"), cfg.clone())
                 .await
@@ -168,13 +168,13 @@ mod tests {
 
             // Initialize the cache again without compression
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(
@@ -191,13 +191,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(1), // no mask - each item is its own section
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -253,13 +253,13 @@ mod tests {
             // Initialize the cache
             let items_per_blob = 256u64;
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.with_label("init1"), cfg.clone())
                 .await
@@ -297,13 +297,13 @@ mod tests {
 
             // Reinitialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::<_, [u8; 1024]>::init(context.with_label("init2"), cfg.clone())
                 .await
@@ -369,13 +369,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -423,13 +423,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -502,13 +502,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Insert data and sync
@@ -551,13 +551,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for easier testing
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -603,13 +603,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for testing
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -661,13 +661,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -714,13 +714,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await

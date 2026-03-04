@@ -17,6 +17,7 @@ commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
 commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+crc.workspace = true
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 num-rational.workspace = true
@@ -133,6 +134,13 @@ bench = false
 [[bin]]
 name = "bls12381_dkg"
 path = "fuzz_targets/bls12381_dkg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crc32_hasher"
+path = "fuzz_targets/crc32_hasher.rs"
 test = false
 doc = false
 bench = false

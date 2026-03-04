@@ -5,7 +5,10 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
-    qmdb::current::{unordered::fixed::Db as Current, FixedConfig as Config},
+    qmdb::{
+        current::{unordered::fixed::Db as Current, FixedConfig as Config},
+        store::LogStore as _,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -80,16 +83,20 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
         let cfg = Config {
-            mmr_journal_partition: "fuzz_current_mmr_journal".into(),
-            mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
+            mmr_journal_partition: "fuzz-current-mmr-journal".into(),
+            mmr_metadata_partition: "fuzz-current-mmr-metadata".into(),
             mmr_items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
             mmr_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            log_journal_partition: "fuzz_current_log_journal".into(),
+            log_journal_partition: "fuzz-current-log-journal".into(),
             log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
+            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(
+                &context,
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
             thread_pool: None,
         };
 
@@ -100,7 +107,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = Location::new(1).unwrap();
+        let mut last_committed_op_count = Location::new(1);
 
         for op in &data.operations {
             match op {
@@ -108,7 +115,7 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    db.update(k, v).await.expect("Update should not fail");
+                    db.write_batch([(k, Some(v))]).await.expect("Update should not fail");
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -119,7 +126,7 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     // Check if key exists before deletion
                     let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some();
-                    db.delete(k).await.expect("Delete should not fail");
+                    db.write_batch([(k, None)]).await.expect("Delete should not fail");
                     if key_existed {
                         expected_state.insert(*key, None);
                         all_keys.insert(*key);
@@ -150,7 +157,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.op_count();
+                    let actual_count = db.bounds().await.end;
                     let expected_count = last_committed_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count}, got {actual_count}");
@@ -159,7 +166,7 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    last_committed_op_count = clean_db.bounds().await.end;
                     uncommitted_ops = 0;
                     db = clean_db.into_mutable();
                 }
@@ -171,22 +178,29 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::Root => {
-                    let clean_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let _root = clean_db.root();
                     db = clean_db.into_mutable();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
-                    let current_op_count = db.op_count();
+                    let current_op_count = db.bounds().await.end;
                     if current_op_count == 0 {
                         continue;
                     }
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let current_root = merkleized_db.root();
 
                     // Adjust start_loc and max_ops to be within the valid range
-                    let start_loc = Location::new(start_loc % *current_op_count).unwrap();
+                    let current_op_count = merkleized_db.bounds().await.end;
+                    let start_loc = Location::new(start_loc % *current_op_count);
                     let oldest_loc = merkleized_db.inactivity_floor_loc();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = merkleized_db
@@ -210,13 +224,17 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
-                    let current_op_count = db.op_count();
+                    let current_op_count = db.bounds().await.end;
                     if current_op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
 
-                    let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
+                    let current_op_count = merkleized_db.bounds().await.end;
+                    let start_loc = Location::new(start_loc % current_op_count.as_u64());
                     let root = merkleized_db.root();
 
                     if let Ok((range_proof, ops, chunks)) = merkleized_db
@@ -255,7 +273,10 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    last_committed_op_count = durable_db.bounds().await.end;
+                    uncommitted_ops = 0;
+                    let merkleized_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     let current_root = merkleized_db.root();
 
                     match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {

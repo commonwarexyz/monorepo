@@ -7,7 +7,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
-    use futures::channel::oneshot;
+    use commonware_utils::channel::oneshot;
     use std::future::Future;
 
     pub mod buffered;
@@ -31,7 +31,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Attempt to broadcast a message to the associated recipients.
         fn broadcast(
-            &mut self,
+            &self,
             recipients: Self::Recipients,
             message: Self::Message,
         ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;

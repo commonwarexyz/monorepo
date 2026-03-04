@@ -14,7 +14,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
+use commonware_runtime::{tokio, Metrics, Quota, ThreadPooler};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -105,7 +105,7 @@ pub async fn run<S, L>(
     // Create a static resolver for marshal
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
-        manager: oracle.clone(),
+        provider: oracle.clone(),
         blocker: oracle.clone(),
         mailbox_size: 200,
         initial: Duration::from_secs(1),
@@ -179,12 +179,11 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Quota, Runner as _, Spawner,
+        Clock, Handle, Metrics, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, N3f1, TryCollect};
-    use futures::{
+    use commonware_utils::{
         channel::{mpsc, oneshot},
-        SinkExt, StreamExt,
+        union, N3f1, TryCollect,
     };
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
@@ -245,7 +244,7 @@ mod test {
             &mut self,
             update: Update<MinSig, PublicKey>,
         ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
-            let mut sender = self.sender.clone();
+            let sender = self.sender.clone();
             let pk = self.pk.clone();
             Box::pin(async move {
                 let (callback_sender, callback_receiver) = oneshot::channel();
@@ -374,7 +373,7 @@ mod test {
             *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
-                manager: oracle.manager(),
+                provider: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
                 mailbox_size: 200,
                 initial: Duration::from_secs(1),
@@ -555,7 +554,7 @@ mod test {
                 HashSet::new()
             };
 
-            let (updates_in, mut updates_out) = mpsc::channel(0);
+            let (updates_in, mut updates_out) = mpsc::channel(1);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
             team.start(
                 &ctx,
@@ -576,7 +575,7 @@ mod test {
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(Crash::Random { frequency, .. }) = &self.crash {
                 let frequency = *frequency;
-                let mut crash_sender = crash_sender.clone();
+                let crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
                         ctx.sleep(frequency).await;
@@ -590,7 +589,7 @@ mod test {
             let mut success_target_reached_epoch = None;
             loop {
                 select! {
-                    update = updates_out.next() => {
+                    update = updates_out.recv() => {
                         let Some(update) = update else {
                             return Err(anyhow!("update channel closed unexpectedly"));
                         };
@@ -717,7 +716,7 @@ mod test {
                         }
                         delayed_started = true;
                     },
-                    pk = restart_receiver.next() => {
+                    pk = restart_receiver.recv() => {
                         let Some(pk) = pk else {
                             continue;
                         };
@@ -741,7 +740,7 @@ mod test {
                             .await;
                         }
                     },
-                    _ = crash_receiver.next() => {
+                    _ = crash_receiver.recv() => {
                         // Crash ticker fired (only for Random crashes)
                         let Some(Crash::Random {
                             count, downtime, ..
@@ -768,7 +767,7 @@ mod test {
                             info!(pk = ?pk, "crashed participant");
 
                             // Schedule restart after downtime
-                            let mut restart_sender = restart_sender.clone();
+                            let restart_sender = restart_sender.clone();
                             let downtime = *downtime;
                             let pk_clone = pk.clone();
                             ctx.clone().spawn(move |ctx| async move {
@@ -1350,5 +1349,87 @@ mod test {
         }
         .run()
         .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_scoped_metrics_cleanup() {
+        Runner::seeded(0).start(|mut ctx| async move {
+            let (network, mut oracle) = Network::<_, PublicKey>::new(
+                ctx.with_label("network"),
+                simulated::Config {
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            let (updates_in, mut updates_out) = mpsc::channel(1);
+            let mut team = Team::reshare(&mut ctx, 4, &[4]);
+            team.start(&ctx, &mut oracle, link, updates_in.clone(), &HashSet::new())
+                .await;
+
+            // Run through 2 successful reshares (epochs 0 and 1)
+            let target = 2u64;
+            let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
+            let mut status = BTreeMap::<PublicKey, Epoch>::new();
+            let mut successes = 0u64;
+            let mut success_target_reached_epoch = None;
+            loop {
+                let update = updates_out.recv().await.unwrap();
+                let (epoch, output) = match update.update {
+                    Update::Failure { epoch } => (epoch, None),
+                    Update::Success { epoch, output, .. } => (epoch, Some(output)),
+                };
+                status.insert(update.pk, epoch);
+                if let Some(o) = outputs.get(epoch.get() as usize) {
+                    assert_eq!(o.as_ref(), output.as_ref());
+                } else {
+                    if output.is_some() {
+                        successes += 1;
+                    }
+                    outputs.push(output);
+                }
+                if successes >= target {
+                    success_target_reached_epoch = Some(epoch);
+                }
+
+                let post_update =
+                    success_target_reached_epoch.map_or(PostUpdate::Continue, |target_epoch| {
+                        let all_reached =
+                            status.values().filter(|e| **e >= target_epoch).count() >= 4;
+                        if all_reached {
+                            PostUpdate::Stop
+                        } else {
+                            PostUpdate::Continue
+                        }
+                    });
+                let done = matches!(post_update, PostUpdate::Stop);
+                let _ = update.callback.send(post_update);
+                if done {
+                    break;
+                }
+            }
+
+            // Allow the orchestrator to process the epoch exit
+            ctx.sleep(Duration::from_secs(1)).await;
+
+            // Verify scoped metrics: epoch 0 should be gone, epoch 1 should be present
+            let buffer = ctx.encode();
+            assert!(
+                !buffer.contains("epoch=\"0\""),
+                "epoch 0 metrics should be cleaned up: {buffer}"
+            );
+            assert!(
+                buffer.contains("epoch=\"1\""),
+                "epoch 1 metrics should still be present: {buffer}"
+            );
+        });
     }
 }

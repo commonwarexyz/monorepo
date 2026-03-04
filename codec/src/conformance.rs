@@ -22,6 +22,9 @@ const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
 /// Uses the [`arbitrary`] crate with a seeded ChaCha RNG for reproducible
 /// value generation. If the initial buffer is insufficient, the buffer size
 /// is doubled until generation succeeds or the maximum size is reached.
+/// On `IncorrectFormat` (e.g. `NonZeroU16` rejecting zero bytes), the
+/// rejected bytes are already consumed so retrying reads fresh bytes from
+/// the same deterministic buffer.
 pub fn generate_value<T>(seed: u64) -> T
 where
     T: for<'a> Arbitrary<'a>,
@@ -37,20 +40,22 @@ where
 
         // Try to generate the arbitrary value
         let mut unstructured = Unstructured::new(&buffer);
-        match T::arbitrary(&mut unstructured) {
-            Ok(value) => return value,
-            Err(arbitrary::Error::NotEnoughData) => {
-                // Give up if we've already tried the maximum size
-                if buffer_size >= MAX_BUFFER_SIZE {
-                    panic!(
-                        "failed to generate arbitrary value: NotEnoughData with {buffer_size} bytes"
-                    );
-                }
-                // Double the buffer size (capped at MAX) and retry
-                buffer_size = (buffer_size * 2).min(MAX_BUFFER_SIZE);
+        loop {
+            match T::arbitrary(&mut unstructured) {
+                Ok(value) => return value,
+                Err(arbitrary::Error::IncorrectFormat) => continue,
+                Err(arbitrary::Error::NotEnoughData) => break,
+                Err(e) => panic!("failed to generate arbitrary value: {e}"),
             }
-            Err(e) => panic!("failed to generate arbitrary value: {e}"),
         }
+
+        // Give up if we've already tried the maximum size
+        if buffer_size >= MAX_BUFFER_SIZE {
+            panic!("failed to generate arbitrary value: NotEnoughData with {buffer_size} bytes");
+        }
+
+        // Double the buffer size (capped at MAX) and retry
+        buffer_size = (buffer_size * 2).min(MAX_BUFFER_SIZE);
     }
 }
 

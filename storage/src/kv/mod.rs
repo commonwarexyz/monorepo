@@ -1,7 +1,6 @@
 //! Traits for interacting with a key/value store.
 
-use commonware_macros::stability;
-use commonware_macros::stability_mod;
+use commonware_macros::{stability, stability_mod};
 
 stability_mod!(ALPHA, mod batch);
 #[stability(ALPHA)]
@@ -120,6 +119,6 @@ pub(crate) mod tests {
 
     #[allow(dead_code)]
     pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
-        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
+        assert_send(db.write_batch(vec![(key, Some(value))]));
     }
 }

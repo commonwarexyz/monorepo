@@ -62,7 +62,6 @@ mod tests {
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
-    use futures::StreamExt;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -143,7 +142,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    async fn setup_and_spawn_engine(
+    fn setup_and_spawn_engine(
         context: &deterministic::Context,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
@@ -204,8 +203,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -220,8 +218,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -232,13 +229,13 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
-            let processed = handler_out.next().await.unwrap();
+            let processed = handler_out.recv().await.unwrap();
             assert_eq!(processed.origin, peers[0]);
             assert_eq!(processed.request, request);
             assert!(processed.responded);
 
             // Verify peer 1's monitor collected the response
-            let collected = mon_out.next().await.unwrap();
+            let collected = mon_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response.id, 1);
             assert_eq!(collected.response.result, 2);
@@ -271,8 +268,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -287,8 +283,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -304,7 +299,7 @@ mod tests {
 
             // Wait a bit and verify no response collected
             select! {
-                _ = mon_out.next() => {
+                _ = mon_out.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
@@ -340,8 +335,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -356,8 +350,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3
             let scheme3 = schemes.next().unwrap();
@@ -372,8 +365,7 @@ mod tests {
                 (req_conn3, res_conn3),
                 MockMonitor::dummy(),
                 handler3,
-            )
-            .await;
+            );
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
@@ -391,7 +383,7 @@ mod tests {
             let mut peer3_responded = false;
 
             for _ in 0..2 {
-                let collected = mon_out1.next().await.unwrap();
+                let collected = mon_out1.recv().await.unwrap();
                 assert_eq!(collected.response.id, 3);
                 assert_eq!(collected.response.result, 6);
                 responses_collected += 1;
@@ -434,8 +426,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -450,8 +441,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send the same request multiple times
             let request = Request { id: 5, data: 5 };
@@ -464,14 +454,14 @@ mod tests {
             }
 
             // Should only receive one response
-            let collected = mon_out1.next().await.unwrap();
+            let collected = mon_out1.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response.id, 5);
             assert_eq!(collected.count, 1);
 
             // Wait and verify no more responses
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive duplicate responses");
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
@@ -506,8 +496,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -524,8 +513,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send multiple concurrent requests
             let request1 = Request { id: 10, data: 10 };
@@ -543,7 +531,7 @@ mod tests {
             let mut response10_received = false;
             let mut response20_received = false;
             for _ in 0..2 {
-                let collected = mon_out1.next().await.unwrap();
+                let collected = mon_out1.recv().await.unwrap();
                 assert_eq!(collected.handler, peers[1]);
                 assert_eq!(collected.count, 1);
                 match collected.response.id {
@@ -589,8 +577,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 with handler that doesn't respond
             let scheme2 = schemes.next().unwrap();
@@ -605,8 +592,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send request
             let request = Request { id: 100, data: 100 };
@@ -617,14 +603,14 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
-            let processed = handler_out2.next().await.unwrap();
+            let processed = handler_out2.recv().await.unwrap();
             assert_eq!(processed.origin, peers[0]);
             assert_eq!(processed.request, request);
             assert!(!processed.responded);
 
             // Verify no response collected
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
@@ -655,8 +641,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
@@ -668,7 +653,7 @@ mod tests {
 
             // Verify no responses collected
             select! {
-                _ = mon_out.next() => {
+                _ = mon_out.recv() => {
                     panic!("Should not receive any monitor events");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
@@ -791,8 +776,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 (legitimate responder)
             let scheme2 = schemes.next().unwrap();
@@ -807,8 +791,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3 (will respond with same commitment as peer 2's request)
             let conn3 = connections.next().unwrap();
@@ -838,7 +821,7 @@ mod tests {
             context.sleep(Duration::from_millis(1_000)).await;
 
             // Should only receive one response (from peer 2, not peer 3)
-            let collected = mon_out1.next().await.unwrap();
+            let collected = mon_out1.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]); // Response from peer 2
             assert_eq!(collected.response.id, 42);
             assert_eq!(collected.response.result, 84); // 42 * 2 (default mock behavior)
@@ -846,7 +829,7 @@ mod tests {
 
             // Verify no additional responses (peer 3's response should be ignored)
             select! {
-                _ = mon_out1.next() => {
+                _ = mon_out1.recv() => {
                     panic!("Should not receive response from unknown peer");
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {

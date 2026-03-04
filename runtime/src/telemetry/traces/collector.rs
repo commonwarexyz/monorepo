@@ -1,9 +1,10 @@
 //! In-memory [tracing_subscriber::Layer] to collect spans and events for testing purposes.
 
+use commonware_utils::sync::Mutex;
 use std::{
     fmt,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{field, span, Event, Level, Subscriber};
@@ -267,7 +268,6 @@ impl TraceStorage {
     pub fn get_by_level(&self, level: Level) -> RecordedEvents {
         self.0
             .lock()
-            .unwrap()
             .iter()
             .filter_map(|event| (event.level == level).then_some(event.clone()))
             .collect::<Vec<_>>()
@@ -276,12 +276,12 @@ impl TraceStorage {
 
     /// Returns all [RecordedEvent]s in the storage.
     pub fn get_all(&self) -> RecordedEvents {
-        self.0.lock().unwrap().clone()
+        self.0.lock().clone()
     }
 
     /// Returns if the storage is empty.
     pub fn is_empty(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
+        self.0.lock().is_empty()
     }
 }
 
@@ -334,7 +334,7 @@ where
             }
         }
 
-        let mut storage = self.0 .0.lock().unwrap();
+        let mut storage = self.0 .0.lock();
         storage.push(RecordedEvent {
             level,
             target: metadata.target().to_string(),

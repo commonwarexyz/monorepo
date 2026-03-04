@@ -1,14 +1,12 @@
 //! Utilities for managing concurrency.
 
+use crate::sync::Mutex;
 use core::{
     hash::Hash,
     num::NonZeroU32,
     sync::atomic::{AtomicU32, Ordering},
 };
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, sync::Arc};
 
 /// Limit the concurrency of some operation without blocking.
 pub struct Limiter {
@@ -67,7 +65,7 @@ impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
     /// Attempt to reserve a slot for a given key. Returns `None` when the limiter is saturated or
     /// the key is already reserved.
     pub fn try_acquire(&self, key: K) -> Option<KeyedReservation<K>> {
-        let mut current = self.current.lock().unwrap();
+        let mut current = self.current.lock();
         if current.len() >= self.max as usize {
             return None;
         }
@@ -91,7 +89,7 @@ pub struct KeyedReservation<K: Eq + Hash + Clone> {
 
 impl<K: Eq + Hash + Clone> Drop for KeyedReservation<K> {
     fn drop(&mut self) {
-        self.current.lock().unwrap().remove(&self.key);
+        self.current.lock().remove(&self.key);
     }
 }
 

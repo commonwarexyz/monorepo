@@ -169,7 +169,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, validators.clone()).await;
+        oracle.track(0, validators.clone()).await;
 
         // Register consensus channels
         //
@@ -218,13 +218,13 @@ fn main() {
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
-            notarization_timeout: Duration::from_secs(2),
-            nullify_retry: Duration::from_secs(10),
+            certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);

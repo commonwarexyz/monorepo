@@ -1,4 +1,4 @@
-use crate::{Blob, Error, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBufMut};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
+///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -46,24 +46,38 @@ pub struct Read<B: Blob> {
     buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
+    /// Buffer pool used for internal allocations.
+    pool: BufferPool,
 }
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buffer_size` is zero.
-    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: IoBufMut::with_capacity(buffer_size.get()),
+            buffer: pool.alloc(buffer_size.get()),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
             buffer_size: buffer_size.get(),
+            pool,
         }
+    }
+
+    /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        blob: B,
+        blob_size: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Self {
+        Self::new(
+            blob,
+            blob_size,
+            buffer_size,
+            pooler.storage_buffer_pool().clone(),
+        )
     }
 
     /// Returns how many valid bytes are remaining in the buffer.
@@ -99,11 +113,19 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Resize buffer and pass directly to read_at (avoids copy)
+        // Reuse existing buffer if it has enough capacity, otherwise allocate new
         let mut buf = std::mem::take(&mut self.buffer);
-        buf.resize(bytes_to_read, 0);
-        let read_result = self.blob.read_at(self.blob_position, buf).await?;
-        self.buffer = read_result.coalesce();
+        buf.clear();
+        let buf = if buf.capacity() >= bytes_to_read {
+            buf
+        } else {
+            self.pool.alloc(bytes_to_read)
+        };
+        let read_result = self
+            .blob
+            .read_at_buf(self.blob_position, bytes_to_read, buf)
+            .await?;
+        self.buffer = read_result.coalesce_with_pool(&self.pool);
         self.buffer_valid_len = bytes_to_read;
 
         Ok(bytes_to_read)
@@ -121,8 +143,8 @@ impl<B: Blob> Read<B> {
             "provided buffer is too small for requested size"
         );
 
-        // Quick check if we have enough bytes total before attempting reads
-        if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
+        // Quick check against total remaining bytes at current position.
+        if self.blob_remaining() < size as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 

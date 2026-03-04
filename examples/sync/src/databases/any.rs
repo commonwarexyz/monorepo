@@ -2,7 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_runtime::{buffer, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
@@ -15,6 +15,7 @@ use commonware_storage::{
             FixedConfig as Config,
         },
         operation::Committable,
+        store::LogStore,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -28,18 +29,18 @@ pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config() -> Config<Translator> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
     Config {
-        mmr_journal_partition: "mmr_journal".into(),
-        mmr_metadata_partition: "mmr_metadata".into(),
+        mmr_journal_partition: "mmr-journal".into(),
+        mmr_metadata_partition: "mmr-metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: "log_journal".into(),
+        mmr_write_buffer: NZUsize!(4096),
+        log_journal_partition: "log-journal".into(),
         log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(1024),
+        log_write_buffer: NZUsize!(4096),
         translator: Translator::default(),
         thread_pool: None,
-        page_cache: buffer::paged::CacheRef::new(NZU16!(1024), NZUsize!(10)),
+        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 
@@ -92,10 +93,10 @@ where
         for (i, operation) in operations.into_iter().enumerate() {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    db.update(key, value).await?;
+                    db.write_batch([(key, Some(value))]).await?;
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await?;
+                    db.write_batch([(key, None)]).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
                     let (durable_db, _) = db.commit(metadata).await?;
@@ -115,11 +116,11 @@ where
         self.root()
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn size(&self) -> Location {
+        LogStore::bounds(self).await.end
     }
 
-    fn lower_bound(&self) -> Location {
+    async fn inactivity_floor(&self) -> Location {
         self.inactivity_floor_loc()
     }
 

@@ -1,6 +1,9 @@
-use crate::authenticated::data::Data;
+use crate::{
+    authenticated::data::{Data, EncodedData},
+    Channel,
+};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::{Buf, BufMut, BufferPool, IoBufs};
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -22,6 +25,13 @@ pub const PING_PREFIX: u8 = 1;
 pub enum Message {
     Data(Data),
     Ping,
+}
+
+impl Message {
+    /// Encode `Message::Data` bytes for transmission using pooled header allocation.
+    pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
+        EncodedData::new(pool, DATA_PREFIX, channel, message)
+    }
 }
 
 impl From<Data> for Message {

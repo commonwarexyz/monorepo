@@ -2,11 +2,10 @@ use super::{Config, Error};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, IoBufMut, Metrics,
-    Storage,
+    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::Span;
-use futures::{future::try_join_all, lock::Mutex};
+use commonware_utils::{sync::AsyncMutex, Span};
+use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
@@ -74,7 +73,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
 
     map: BTreeMap<K, V>,
     partition: String,
-    state: Mutex<State<E::Blob, K>>,
+    state: AsyncMutex<State<E::Blob, K>>,
 
     sync_overwrites: Counter,
     sync_rewrites: Counter,
@@ -128,7 +127,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
             map,
             partition: cfg.partition,
-            state: Mutex::new(State {
+            state: AsyncMutex::new(State {
                 cursor,
                 next_version,
                 key_order_changed: next_version, // rewrite on startup because we don't have a diff record
@@ -154,10 +153,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Read blob
-        let buf = blob
-            .read_at(0, IoBufMut::zeroed(len as usize))
-            .await?
-            .coalesce();
+        let len: usize = len.try_into().expect("blob too large for platform");
+        let buf = blob.read_at(0, len).await?.coalesce();
 
         // Verify integrity.
         //

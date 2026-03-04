@@ -3,7 +3,10 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
-use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
+use commonware_storage::journal::contiguous::{
+    fixed::{Config as JournalConfig, Journal},
+    Reader,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
@@ -11,6 +14,7 @@ use std::num::NonZeroU16;
 
 const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
+const MAX_OPERATIONS: usize = 50;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
     let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
@@ -30,7 +34,7 @@ enum JournalOperation {
     Rewind {
         size: u64,
     },
-    OldestRetainedPos,
+    Bounds,
     Prune {
         min_pos: u64,
     },
@@ -47,9 +51,19 @@ enum JournalOperation {
     MultipleSync,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
-    operations: Vec<JournalOperation>,
+    ops: Vec<JournalOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let ops = (0..num_ops)
+            .map(|_| JournalOperation::arbitrary(u))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { ops })
+    }
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(57);
@@ -60,10 +74,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = JournalConfig {
-            partition: "fixed_journal_operations_fuzz_test".to_string(),
+            partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -73,7 +87,7 @@ fn fuzz(input: FuzzInput) {
         let mut oldest_retained_pos = 0u64;
         let mut restarts = 0usize;
 
-        for op in input.operations.iter() {
+        for op in input.ops.iter() {
             match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
@@ -83,12 +97,12 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Read { pos } => {
                     if *pos >= oldest_retained_pos && *pos < journal_size {
-                        journal.read(*pos).await.unwrap();
+                        journal.reader().await.read(*pos).await.unwrap();
                     }
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -104,8 +118,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                JournalOperation::OldestRetainedPos => {
-                    let _pos = journal.oldest_retained_pos();
+                JournalOperation::Bounds => {
+                    let _bounds = journal.reader().await.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -116,8 +130,19 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    let start_pos = *start_pos % (journal_size + 1);
-                    match journal.replay(NZUsize!(*buffer), start_pos).await {
+                    // Ensure start_pos is within valid range [oldest_retained_pos, journal_size]
+                    let start_pos = if journal_size > oldest_retained_pos {
+                        oldest_retained_pos
+                            + (*start_pos % (journal_size - oldest_retained_pos + 1))
+                    } else {
+                        oldest_retained_pos
+                    };
+                    match journal
+                        .reader()
+                        .await
+                        .replay(NZUsize!(*buffer), start_pos)
+                        .await
+                    {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -146,8 +171,9 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size();
-                    oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
+                    journal_size = journal.size().await;
+                    let bounds = journal.reader().await.bounds();
+                    oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 
                 JournalOperation::Destroy => {

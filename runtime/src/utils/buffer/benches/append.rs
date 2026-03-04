@@ -10,12 +10,12 @@ pub fn bench(c: &mut Criterion) {
     for chunk_size in [64, 256, 1024, 4096] {
         c.bench_function(&format!("{}/chunk={}", module_path!(), chunk_size), |b| {
             b.iter_custom(|iters| {
-                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
                 let name = format!("append_seq_{chunk_size}").into_bytes();
                 let data = vec![0xABu8; chunk_size];
 
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
+                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();

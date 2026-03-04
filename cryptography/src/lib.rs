@@ -8,16 +8,12 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use rand::SeedableRng as _;
-use rand_chacha::ChaCha20Rng;
-use rand_core::CryptoRngCore;
-
-// Modules containing #[macro_export] macros must remain outside stability_scope!.
+// Modules containing #[macro_export] macros must use verbose cfg.
 // See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -44,15 +40,18 @@ pub mod secp256r1;
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
-    pub mod lthash;
-
     pub use crate::bloomfilter::BloomFilter;
+
+    pub mod lthash;
     pub use crate::lthash::LtHash;
 });
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_utils::Array;
+    use rand::SeedableRng as _;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::CryptoRngCore;
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -64,7 +63,9 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::sha256::{CoreSha256, Sha256};
     pub mod blake3;
     pub use crate::blake3::{Blake3, CoreBlake3};
+    #[cfg(feature = "std")]
     pub mod crc32;
+    #[cfg(feature = "std")]
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
@@ -143,7 +144,10 @@ commonware_macros::stability_scope!(BETA {
     }
 
     /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
-    pub trait BatchVerifier<K: PublicKey> {
+    pub trait BatchVerifier {
+        /// The type of public keys that this verifier can accept.
+        type PublicKey: PublicKey;
+
         /// Create a new batch verifier.
         fn new() -> Self;
 
@@ -160,8 +164,8 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             namespace: &[u8],
             message: &[u8],
-            public_key: &K,
-            signature: &K::Signature,
+            public_key: &Self::PublicKey,
+            signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool;
 
         /// Verify all items added to the batch.

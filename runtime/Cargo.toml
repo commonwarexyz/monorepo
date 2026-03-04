@@ -15,15 +15,15 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
-async-lock.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
 commonware-conformance = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, features = ["std"] }
-commonware-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+crossbeam-queue.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
@@ -74,7 +74,6 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "buffer_paged"

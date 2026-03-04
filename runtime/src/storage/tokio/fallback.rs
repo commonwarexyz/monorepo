@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Error, IoBufs, IoBufsMut};
+use crate::{BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
@@ -16,26 +16,44 @@ pub struct Blob {
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
+    pool: BufferPool,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: fs::File) -> Self {
+    pub fn new(partition: String, name: &[u8], file: fs::File, pool: BufferPool) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
+            pool,
         }
+    }
+
+    async fn write_single_at(file: &mut fs::File, buf: &[u8]) -> Result<(), Error> {
+        file.write_all(buf).await.map_err(|_| Error::WriteFailed)
+    }
+
+    async fn write_vectored_at(file: &mut fs::File, bufs: &mut IoBufs) -> Result<(), Error> {
+        file.write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::WriteFailed)
     }
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let len = buf.len();
+        let mut bufs = bufs.into();
+        // SAFETY: `len` bytes are filled via read_exact below.
+        unsafe { bufs.set_len(len) };
         let mut file = self.file.lock().await;
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -44,34 +62,26 @@ impl crate::Blob for Blob {
             .await
             .map_err(|_| Error::ReadFailed)?;
 
-        match buf {
-            IoBufsMut::Single(mut single) => {
-                // Read directly into the single buffer
-                file.read_exact(single.as_mut())
-                    .await
-                    .map_err(|_| Error::ReadFailed)?;
-                Ok(IoBufsMut::Single(single))
-            }
-            IoBufsMut::Chunked(mut chunks) => {
-                // Read into a temporary buffer and copy to preserve the chunked structure
-                let mut temp = vec![0u8; len];
-                file.read_exact(&mut temp)
-                    .await
-                    .map_err(|_| Error::ReadFailed)?;
-                let mut offset = 0;
-                for chunk in chunks.iter_mut() {
-                    let chunk_len = chunk.len();
-                    chunk
-                        .as_mut()
-                        .copy_from_slice(&temp[offset..offset + chunk_len]);
-                    offset += chunk_len;
-                }
-                Ok(IoBufsMut::Chunked(chunks))
-            }
+        if let Some(buf) = bufs.as_single_mut() {
+            // Read directly into the single buffer.
+            file.read_exact(buf.as_mut())
+                .await
+                .map_err(|_| Error::ReadFailed)?;
+            Ok(bufs)
+        } else {
+            // Read into a temporary contiguous buffer and copy back to preserve structure.
+            // SAFETY: `len` bytes are filled via read_exact below.
+            let mut temp = unsafe { self.pool.alloc_len(len) };
+            file.read_exact(temp.as_mut())
+                .await
+                .map_err(|_| Error::ReadFailed)?;
+            bufs.copy_from_slice(temp.as_ref());
+            Ok(bufs)
         }
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut bufs = bufs.into();
         let mut file = self.file.lock().await;
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -79,10 +89,12 @@ impl crate::Blob for Blob {
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        file.write_all_buf(&mut buf.into())
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        Ok(())
+
+        if let Some(buf) = bufs.as_single() {
+            Self::write_single_at(&mut file, buf.as_ref()).await
+        } else {
+            Self::write_vectored_at(&mut file, &mut bufs).await
+        }
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
