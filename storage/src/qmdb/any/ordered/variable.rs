@@ -216,7 +216,11 @@ pub(crate) mod test {
             log_codec_config: ((), ((0..=10000).into(), ())),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler_physical(
+                pooler,
+                NZU16!(PAGE_SIZE),
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
         }
     }
 

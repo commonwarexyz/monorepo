@@ -1,8 +1,17 @@
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
+///
+/// # Allocation Semantics
+///
+/// - The internal read buffer is allocated eagerly in [Self::new].
+/// - Refills try to reclaim mutable ownership of that same backing allocation.
+/// - If backing is still shared (for example, previously returned slices are alive), a pooled
+///   replacement is allocated and existing backing is left alive until all aliases drop.
+/// - [Self::read] returns zero-copy slices into refill buffers. Holding those slices may
+///   force allocation on subsequent refills.
 ///
 /// # Example
 ///
@@ -23,9 +32,8 @@ use std::num::NonZeroUsize;
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
-///     let mut header = [0u8; 16];
-///     reader.read_exact(&mut header, 16).await.expect("unable to read data");
-///     println!("Read header: {:?}", header);
+///     let header = reader.read(16).await.expect("unable to read data");
+///     println!("Read header: {:?}", header.coalesce().as_ref());
 ///
 ///     // Position is still at 16 (after header)
 ///     assert_eq!(reader.position(), 16);
@@ -35,7 +43,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: IoBufMut,
+    buffer: IoBuf,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -55,7 +63,7 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: pool.alloc(buffer_size.get()),
+            buffer: pool.alloc(buffer_size.get()).freeze(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -113,62 +121,67 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Reuse existing buffer if it has enough capacity, otherwise allocate new
-        let mut buf = std::mem::take(&mut self.buffer);
-        buf.clear();
-        let buf = if buf.capacity() >= bytes_to_read {
-            buf
-        } else {
-            self.pool.alloc(bytes_to_read)
+        // Reuse existing allocation when uniquely owned. If readers still hold slices from
+        // previous reads, allocate a pooled replacement and leave old memory alive until dropped.
+        let current = std::mem::take(&mut self.buffer);
+        let buf = match current.try_into_mut() {
+            Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {
+                reusable.clear();
+                reusable
+            }
+            Ok(_) | Err(_) => self.pool.alloc(self.buffer_size),
         };
         let read_result = self
             .blob
             .read_at_buf(self.blob_position, bytes_to_read, buf)
             .await?;
-        self.buffer = read_result.coalesce_with_pool(&self.pool);
-        self.buffer_valid_len = bytes_to_read;
+        self.buffer = read_result.coalesce_with_pool(&self.pool).freeze();
+        self.buffer_valid_len = self.buffer.len();
 
-        Ok(bytes_to_read)
+        Ok(self.buffer_valid_len)
     }
 
-    /// Reads exactly `size` bytes into the provided buffer. Returns an error if not enough bytes
-    /// are available.
+    /// Reads exactly `len` bytes and returns them as immutable bytes.
     ///
-    /// # Panics
+    /// Returned bytes are composed of zero-copy slices from the internal read buffer.
+    /// Holding returned slices can keep the current backing shared, which may require
+    /// allocation on later refills.
     ///
-    /// Panics if `size` is greater than the length of `buf`.
-    pub async fn read_exact(&mut self, buf: &mut [u8], size: usize) -> Result<(), Error> {
-        assert!(
-            size <= buf.len(),
-            "provided buffer is too small for requested size"
-        );
+    /// Returns an error if not enough bytes are available.
+    pub async fn read(&mut self, len: usize) -> Result<IoBufs, Error> {
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
 
         // Quick check against total remaining bytes at current position.
-        if self.blob_remaining() < size as u64 {
+        if self.blob_remaining() < len as u64 {
             return Err(Error::BlobInsufficientLength);
         }
 
+        let mut out = IoBufs::default();
+        let mut remaining = len;
+
         // Read until we have enough bytes
-        let mut bytes_read = 0;
-        while bytes_read < size {
+        while remaining > 0 {
             // Check if we need to refill
             if self.buffer_position >= self.buffer_valid_len {
                 self.refill().await?;
             }
 
-            // Calculate how many bytes we can copy from the buffer
-            let bytes_to_copy = std::cmp::min(size - bytes_read, self.buffer_remaining());
+            // Calculate how many bytes we can take from the buffer
+            let bytes_to_take = std::cmp::min(remaining, self.buffer_remaining());
 
-            // Copy bytes from buffer to output
-            buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+            // Append bytes from buffer to output
+            out.append(
+                self.buffer
+                    .slice(self.buffer_position..(self.buffer_position + bytes_to_take)),
             );
 
-            self.buffer_position += bytes_to_copy;
-            bytes_read += bytes_to_copy;
+            self.buffer_position += bytes_to_take;
+            remaining -= bytes_to_take;
         }
 
-        Ok(())
+        Ok(out)
     }
 
     /// Returns the current absolute position in the blob.

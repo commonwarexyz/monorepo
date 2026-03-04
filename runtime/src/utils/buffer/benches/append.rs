@@ -15,13 +15,15 @@ pub fn bench(c: &mut Criterion) {
 
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref =
+                        CacheRef::from_pooler_physical(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let logical_page_size = cache_ref.logical_page_size() as usize;
                     let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {
                         // Write double the bytes that can be held by the cache.
-                        for _ in 0..(CACHE_SIZE * PAGE_SIZE.get() as usize / chunk_size) * 2 {
+                        for _ in 0..(CACHE_SIZE * logical_page_size / chunk_size) * 2 {
                             append.append(&data).await.unwrap();
                         }
                     }

@@ -54,7 +54,11 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
         grafted_mmr_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
         thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
+        page_cache: buffer::paged::CacheRef::from_pooler_physical(
+            context,
+            NZU16!(2048),
+            NZUsize!(10),
+        ),
     }
 }
 

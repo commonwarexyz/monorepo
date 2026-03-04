@@ -1,11 +1,18 @@
-use crate::{
-    buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut,
-};
+use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
+///
+/// # Allocation Semantics
+///
+/// - [Self::new] allocates tip backing eagerly at `capacity`.
+/// - Most writes reuse that backing, copy-on-write allocation only occurs when buffered data is
+///   shared (for example, after handing out immutable views) or a merge needs more capacity.
+/// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
+/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) drain
+///   logical bytes to the blob while keeping tip backing available for reuse.
 ///
 /// # Example
 ///
@@ -32,9 +39,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
-///     let mut buf = vec![0u8; size as usize];
-///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
-///     assert_eq!(&buf, b"hello world!");
+///     let buf = reader.read(size as usize).await.expect("read failed");
+///     assert_eq!(buf.coalesce().as_ref(), b"hello world!");
 /// });
 /// ```
 #[derive(Clone)]
@@ -44,9 +50,6 @@ pub struct Write<B: Blob> {
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
     buffer: Arc<AsyncRwLock<Buffer>>,
-
-    /// Buffer pool used for internal allocations.
-    pool: BufferPool,
 }
 
 impl<B: Blob> Write<B> {
@@ -55,12 +58,7 @@ impl<B: Blob> Write<B> {
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: Arc::new(AsyncRwLock::new(Buffer::new(
-                size,
-                capacity.get(),
-                pool.clone(),
-            ))),
-            pool,
+            buffer: Arc::new(AsyncRwLock::new(Buffer::new(size, capacity.get(), pool))),
         }
     }
 
@@ -82,24 +80,12 @@ impl<B: Blob> Write<B> {
         let buffer = self.buffer.read().await;
         buffer.size()
     }
-}
 
-impl<B: Blob> Blob for Write<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
-    }
-
-    async fn read_at_buf(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-    ) -> Result<IoBufsMut, Error> {
-        let mut bufs = bufs.into();
-        // SAFETY: Uninitialized bytes are never read. On success, all `len`
-        // bytes are filled via extract + blob read. On error, the buffer is
-        // dropped without being read.
-        unsafe { bufs.set_len(len) };
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
 
         // Ensure the read doesn't overflow.
         let end_offset = offset
@@ -114,49 +100,35 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // For single buffers, work directly to avoid copies.
-        if let Some(buf) = bufs.as_single_mut() {
-            // Extract any bytes from the buffer that overlap with the requested range.
-            let remaining = buffer.extract(buf.as_mut(), offset);
-
-            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-            // of the range.
-            if remaining > 0 {
-                let blob_result = self
-                    .blob
-                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
-                    .await?;
-                // `remaining` starts at `len` and only decreases, so this prefix slice
-                // is always in-bounds and exactly matches the blob bytes we just read.
-                buf.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-            }
-            Ok(bufs)
-        } else {
-            // For multi-chunk buffers, read into temp and copy back to preserve structure.
-            // SAFETY: Uninitialized bytes are never read. On success, all bytes
-            // are initialized via extract + blob read before copying out. On
-            // error, the buffer is dropped without being read.
-            let mut temp = unsafe { self.pool.alloc_len(len) };
-            // Extract any bytes from the buffer that overlap with the
-            // requested range, into a temporary contiguous buffer.
-            let remaining = buffer.extract(temp.as_mut(), offset);
-
-            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-            // of the range.
-            if remaining > 0 {
-                let blob_result = self
-                    .blob
-                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
-                    .await?;
-                temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-            }
-            // Copy back to original chunks.
-            bufs.copy_from_slice(temp.as_ref());
-            Ok(bufs)
+        // Entirely in buffered tip.
+        if offset >= buffer.offset {
+            let start = (offset - buffer.offset) as usize;
+            let end = start + len;
+            return Ok(buffer.slice(start..end).into());
         }
+
+        // Entirely in blob.
+        if end_offset <= buffer.offset {
+            return Ok(self.blob.read_at(offset, len).await?.freeze());
+        }
+
+        // Overlaps blob and buffered tip.
+        let blob_len = (buffer.offset - offset) as usize;
+        let tip_len = len - blob_len;
+        let tip = buffer.slice(..tip_len);
+
+        let mut blob = self.blob.read_at(offset, blob_len).await?.freeze();
+        blob.append(tip);
+        Ok(blob)
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    /// Write bytes from `buf` at `offset`.
+    ///
+    /// Data is merged into the in-memory tip buffer when possible, otherwise buffered data may be
+    /// flushed and chunks are written directly to the underlying blob.
+    ///
+    /// Returns [Error::OffsetOverflow] when `offset + bufs.len()` overflows.
+    pub async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
@@ -199,10 +171,8 @@ impl<B: Blob> Blob for Write<B> {
             // write directly. Note that we may end up writing an intersecting range twice:
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
-            self.blob
-                .write_at(current_offset, IoBuf::copy_from_slice(chunk))
-                .await?;
-            bufs.advance(chunk_len);
+            let direct = bufs.split_to(chunk_len);
+            self.blob.write_at(current_offset, direct).await?;
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
@@ -213,7 +183,11 @@ impl<B: Blob> Blob for Write<B> {
         Ok(())
     }
 
-    async fn resize(&self, len: u64) -> Result<(), Error> {
+    /// Resize the logical blob to `len`.
+    ///
+    /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
+    /// before resizing the underlying blob.
+    pub async fn resize(&self, len: u64) -> Result<(), Error> {
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
 
@@ -230,7 +204,8 @@ impl<B: Blob> Blob for Write<B> {
         Ok(())
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    /// Flush buffered bytes and durably sync the underlying blob.
+    pub async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
         if let Some((buf, offset)) = buffer.take() {
             self.blob.write_at(offset, buf).await?;

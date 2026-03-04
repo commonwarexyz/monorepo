@@ -48,7 +48,7 @@ fn keyless_cfg(
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler_physical(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

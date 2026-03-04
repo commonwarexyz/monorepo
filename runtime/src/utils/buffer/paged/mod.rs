@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf, IoBufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
@@ -39,19 +39,42 @@ use tracing::{debug, error};
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
+/// Read the designated page from the underlying blob and return its logical bytes as an `IoBuf` if
+/// it passes the integrity check, returning error otherwise. Safely handles partial pages. Caller
+/// can check the length of the returned buffer to determine if the page was partial vs full.
+async fn read_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
+    pool: &BufferPool,
+) -> Result<IoBuf, Error> {
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+    read_page_from_blob_into(
+        blob,
+        page_num,
+        logical_page_size,
+        pool.alloc(physical_page_size as usize),
+    )
+    .await
+}
+
+/// Read the designated page from the underlying blob into the provided buffer and return its
+/// logical bytes as an `IoBuf` if it passes the integrity check, returning error otherwise. Safely
+/// handles partial pages. Caller can check the length of the returned buffer to determine if the
+/// page was partial or full.
+///
+/// The returned [`IoBuf`] is a frozen slice that aliases the provided `buf` allocation.
+async fn read_page_from_blob_into(
+    blob: &impl Blob,
+    page_num: u64,
+    logical_page_size: u64,
+    buf: IoBufMut,
 ) -> Result<IoBuf, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
+        .read_at_buf(physical_page_start, physical_page_size as usize, buf)
         .await?
         .coalesce();
 

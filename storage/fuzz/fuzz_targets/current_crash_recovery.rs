@@ -110,7 +110,7 @@ fn make_config(
         log_codec_config: ((), ()),
         grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
         translator: TwoCap,
-        page_cache: CacheRef::from_pooler(ctx, page_size, page_cache_size),
+        page_cache: CacheRef::from_pooler_physical(ctx, page_size, page_cache_size),
         thread_pool: None,
     }
 }

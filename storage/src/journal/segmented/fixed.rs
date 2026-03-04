@@ -158,7 +158,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
 
         let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
-        A::decode(buf.coalesce()).map_err(Error::Codec)
+        A::decode(buf).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -183,7 +183,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
         let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
-        A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
+        A::decode(buf).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
@@ -379,7 +379,7 @@ mod tests {
     fn test_cfg(pooler: &impl BufferPooler) -> Config {
         Config {
             partition: "test-partition".into(),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1095,7 +1095,7 @@ mod tests {
         // Test that truncating a single byte from a blob that has items straddling a page boundary
         // correctly recovers by removing the incomplete item.
         //
-        // With PAGE_SIZE=44 and ITEM_SIZE=32:
+        // This test uses physical page size 56 (logical page size 44) and ITEM_SIZE=32:
         // - Item 0: bytes 0-31
         // - Item 1: bytes 32-63 (straddles page boundary at 44)
         // - Item 2: bytes 64-95 (straddles page boundary at 88)
@@ -1105,7 +1105,8 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let mut cfg = test_cfg(&context);
+            cfg.page_cache = CacheRef::from_pooler_physical(&context, NZU16!(56), PAGE_CACHE_SIZE);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1172,7 +1173,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler_physical(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

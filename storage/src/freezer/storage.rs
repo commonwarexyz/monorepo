@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, IoBuf, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -431,11 +431,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(buf: &[u8]) -> Result<(Entry, Entry), Error> {
-        let mut buf1 = &buf[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &buf[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
+    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
+        let entry1 = Entry::read(&mut buf)?;
+        let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))
     }
 
@@ -444,7 +442,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let offset = Self::table_offset(table_index);
         let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
-        Self::parse_entries(read_buf.coalesce().as_ref())
+        Self::parse_entries(read_buf)
     }
 
     /// Recover a single table entry and update tracking.
@@ -510,10 +508,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
-            // Read both entries from the buffer
-            let mut buf = [0u8; Entry::FULL_SIZE];
-            reader.read_exact(&mut buf, Entry::FULL_SIZE).await?;
-            let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
+            // Read both entries from the buffer.
+            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(
@@ -1009,22 +1006,13 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = self
-            .table
-            .read_at(read_offset, chunk_bytes)
-            .await?
-            .coalesce();
+        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
-        for i in 0..chunk_size {
-            // Get the entry
-            let entry_offset = i as usize * Entry::FULL_SIZE;
-            let entry_end = entry_offset + Entry::FULL_SIZE;
-            let entry_buf = &read_buf.as_ref()[entry_offset..entry_end];
-
-            // Parse the two slots
-            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
+        for _ in 0..chunk_size {
+            // Parse the next two slots directly from the read stream.
+            let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
 
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);
@@ -1045,7 +1033,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
-        // Put the writes into the table
+        // Put the writes into the table.
+        let writes = IoBuf::from(writes);
         let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
         let new_write = self.table.write_at(new_offset, writes);
@@ -1227,7 +1216,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler_physical(
+                    &context,
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1282,7 +1275,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler_physical(
+                    &context,
+                    NZU16!(1024),
+                    NZUsize!(10),
+                ),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

@@ -50,7 +50,7 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             translator: EightCap,
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(
+            key_page_cache: CacheRef::from_pooler_physical(
                 &context,
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,

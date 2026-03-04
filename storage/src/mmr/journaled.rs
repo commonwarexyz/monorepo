@@ -1085,7 +1085,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler_physical(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1454,8 +1454,8 @@ mod tests {
                 .open(&partition, &71u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            // A full page w/ CRC should have been written on sync.
-            assert_eq!(len, PAGE_SIZE.get() as u64 + 12);
+            // A full physical page should have been written on sync.
+            assert_eq!(len, PAGE_SIZE.get() as u64);
 
             // truncate the blob by one byte to corrupt the page CRC.
             blob.resize(len - 1).await.expect("Failed to corrupt blob");
@@ -1806,7 +1806,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -1856,7 +1860,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -1883,7 +1891,11 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler_physical(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                 },
             )
             .await
@@ -2259,7 +2271,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(64),
                 thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler_physical(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create MMR with enough elements to span multiple sections.
