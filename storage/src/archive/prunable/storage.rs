@@ -17,6 +17,64 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
+/// Position(s) in the index journal associated with a single archive index.
+enum IndexPositions {
+    Single(u64),
+    Multi(Vec<u64>),
+}
+
+impl IndexPositions {
+    const fn from_single(position: u64) -> Self {
+        Self::Single(position)
+    }
+
+    fn push(&mut self, position: u64) {
+        match self {
+            Self::Single(existing) => {
+                *self = Self::Multi(vec![*existing, position]);
+            }
+            Self::Multi(positions) => positions.push(position),
+        }
+    }
+
+    fn first(&self) -> u64 {
+        match self {
+            Self::Single(position) => *position,
+            Self::Multi(positions) => positions[0],
+        }
+    }
+
+    const fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Multi(positions) => positions.len(),
+        }
+    }
+
+    fn iter(&self) -> IndexPositionsIter<'_> {
+        match self {
+            Self::Single(position) => IndexPositionsIter::Single(Some(position)),
+            Self::Multi(positions) => IndexPositionsIter::Multi(positions.iter()),
+        }
+    }
+}
+
+enum IndexPositionsIter<'a> {
+    Single(Option<&'a u64>),
+    Multi(std::slice::Iter<'a, u64>),
+}
+
+impl Iterator for IndexPositionsIter<'_> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(position) => position.take().copied(),
+            Self::Multi(positions) => positions.next().copied(),
+        }
+    }
+}
+
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
 struct Record<K: Array> {
@@ -119,7 +177,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     ///
     /// Each index may have multiple positions when used via [crate::archive::MultiArchive].
     /// When used via [crate::archive::Archive], each index has exactly one position.
-    indices: BTreeMap<u64, Vec<u64>>,
+    indices: BTreeMap<u64, IndexPositions>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,
@@ -160,7 +218,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
-        let mut indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut indices: BTreeMap<u64, IndexPositions> = BTreeMap::new();
         let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
@@ -171,7 +229,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal)
-                indices.entry(entry.index).or_default().push(position);
+                indices
+                    .entry(entry.index)
+                    .and_modify(|positions| positions.push(position))
+                    .or_insert_with(|| IndexPositions::from_single(position));
 
                 // Store index in keys
                 keys.insert(&entry.key, entry.index);
@@ -233,10 +294,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Get first position at this index
         let position = match self.indices.get(&index) {
-            Some(positions) => match positions.first() {
-                Some(pos) => *pos,
-                None => return Ok(None),
-            },
+            Some(positions) => positions.first(),
             None => return Ok(None),
         };
 
@@ -270,9 +328,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             let positions = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section(*index);
 
-            for position in positions {
+            for position in positions.iter() {
                 // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, *position).await?;
+                let entry = self.oversized.get(section, position).await?;
 
                 // Verify key matches
                 if entry.key.as_ref() == key.as_ref() {
@@ -320,7 +378,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
-        self.indices.entry(index).or_default().push(position);
+        self.indices
+            .entry(index)
+            .and_modify(|positions| positions.push(position))
+            .or_insert_with(|| IndexPositions::from_single(position));
 
         // Store interval
         self.intervals.insert(index);
@@ -465,8 +526,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         };
         let section = self.section(index);
         let mut values = Vec::with_capacity(positions.len());
-        for position in positions {
-            let entry = self.oversized.get(section, *position).await?;
+        for position in positions.iter() {
+            let entry = self.oversized.get(section, position).await?;
             let (value_offset, value_size) = entry.value_location();
             let value = self
                 .oversized
