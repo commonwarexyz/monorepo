@@ -147,7 +147,6 @@ where
             network.0,
             network.1,
         );
-
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
