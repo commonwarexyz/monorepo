@@ -131,6 +131,8 @@
 //! To mitigate this issue, we shuffle peer dial order on each dial queue refresh. This ensures we eventually dial a poisoned
 //! IP with the correct public key before hitting the rate limit imposed by the listener at said IP.
 //!
+//! _If you want to entirely prevent this class of attack, consider migrating to [crate::authenticated::lookup]._
+//!
 //! ## Message Delivery
 //!
 //! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
