@@ -26,31 +26,47 @@
 //! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
 //! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
 //!
+//! ### Timer semantics
+//! * `t_x = Some(d)` means timer `t_x` is armed with deadline `d`
+//! * `t_x = None` means timer `t_x` is canceled
+//! * Setting `t_x` to `0` is shorthand for `t_x = Some(now)` (immediate expiry)
+//! * Timer `t_x` fires iff `t_x = Some(d)` and `now >= d`
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
+//! * Set timer for leader proposal `t_l = now+2Δ` and advance (certification) `t_a = now+3Δ`
+//! * If leader `l` has not been active in last `r` views, set `t_l` and `t_a` to 0
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
+//!   * On failure: set `t_l` to 0
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
-//! * Cancel `t_l`
+//! * Set `t_l` to `None`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
 //!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
-//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
+//!     * If can't verify `c` in view `v` because missing notarization/nullification for a
+//!       previous view `v_m`, request `v_m`
+//!     * If verification of `c` fails: set `t_l` to `0`
+//!
+//! Upon receiving first `nullify(v)` from `l`:
+//!   * Set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
-//! * Cancel `t_a`
+//! * Set `t_a` to `None`
 //! * Mark `c` as notarized
-//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * Construct `notarization(c,v)` (even if we have not verified `c`)
+//!
+//! Upon constructing or receiving the first `notarization(c,v)`:
+//! * Broadcast `notarization(c,v)`
 //! * Attempt to certify `c` (see [Certification](#certification))
 //!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
-//!     * On failure: broadcast `nullify(v)`
+//!     * On failure: set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
+//! * Set `t_r` to `None`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
@@ -59,11 +75,13 @@
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T` // TODO: define `T`
 //!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! Upon `t_r` firing:
+//! * Broadcast `nullify(v)` and either `finalization(c, v-1)`, `notarization(c, v-1)` or `nullification(v-1)`
+//! * Set `t_r` to `now+T`
+//!
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
@@ -119,7 +137,7 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "certification timeout" if a designated leader hasn't participated in
+//! * Skip "leader timeout" and "advance timeout" if a designated leader hasn't participated in
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
@@ -140,7 +158,7 @@
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
 //!    and possess nullification certificates for every view between `v_p` and `v+k`.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
+//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l`, `t_r` or `t_a`)
 //!    or when certification fails.
 //!
 //! Therefore, if view `v` completes without timeout and certification succeeds, no honest
