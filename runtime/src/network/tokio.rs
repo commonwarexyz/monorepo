@@ -1,4 +1,4 @@
-use crate::{network::proxy::ProxyConfig, BufferPool, Error, IoBufs};
+use crate::{BufferPool, Error, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -92,6 +92,37 @@ pub struct Listener {
     pool: BufferPool,
 }
 
+commonware_macros::stability_scope!(ALPHA {
+    impl Listener {
+        async fn client_addr(
+            &self,
+            tcp_addr: SocketAddr,
+            buf_reader: &mut BufReader<OwnedReadHalf>,
+        ) -> Result<SocketAddr, Error> {
+            if let Some(ref proxy_cfg) = self.cfg.proxy {
+                if proxy_cfg.is_trusted(tcp_addr.ip()) {
+                    crate::network::proxy::parse(buf_reader).await
+                } else {
+                    Ok(tcp_addr)
+                }
+            } else {
+                Ok(tcp_addr)
+            }
+        }
+    }
+} else {
+    impl Listener {
+        async fn client_addr(
+            &self,
+            tcp_addr: SocketAddr,
+            buf_reader: &mut BufReader<OwnedReadHalf>,
+        ) -> Result<SocketAddr, Error> {
+            let _ = buf_reader;
+            Ok(tcp_addr)
+        }
+    }
+});
+
 impl crate::Listener for Listener {
     type Sink = Sink;
     type Stream = Stream;
@@ -117,17 +148,8 @@ impl crate::Listener for Listener {
         // Split the stream
         let (read_half, write_half) = stream.into_split();
         let mut buf_reader = BufReader::with_capacity(self.cfg.read_buffer_size, read_half);
+        let client_addr = self.client_addr(tcp_addr, &mut buf_reader).await?;
 
-        // Parse PROXY header if configured and connection is from trusted proxy
-        let client_addr = if let Some(ref proxy_cfg) = self.cfg.proxy {
-            if proxy_cfg.is_trusted(tcp_addr.ip()) {
-                crate::network::proxy::parse(&mut buf_reader).await?
-            } else {
-                tcp_addr
-            }
-        } else {
-            tcp_addr
-        };
         Ok((
             client_addr,
             Sink {
@@ -180,7 +202,14 @@ pub struct Config {
     ///
     /// When set, connections from trusted proxy IPs will have PROXY headers
     /// parsed to obtain the real client address.
-    proxy: Option<ProxyConfig>,
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
+    proxy: Option<crate::network::proxy::ProxyConfig>,
 }
 
 #[cfg_attr(feature = "iouring-network", allow(dead_code))]
@@ -211,12 +240,6 @@ impl Config {
         self.read_buffer_size = read_buffer_size;
         self
     }
-    /// Enable PROXY protocol support.
-    /// Only connections from trusted proxies will have headers parsed.
-    pub fn with_proxy(mut self, config: ProxyConfig) -> Self {
-        self.proxy = Some(config);
-        self
-    }
 
     // Getters
     /// See [Config]
@@ -239,11 +262,23 @@ impl Config {
     pub const fn read_buffer_size(&self) -> usize {
         self.read_buffer_size
     }
-    /// See [Config]
-    pub const fn proxy(&self) -> Option<&ProxyConfig> {
-        self.proxy.as_ref()
-    }
 }
+
+commonware_macros::stability_scope!(ALPHA {
+    impl Config {
+        /// Enable PROXY protocol support.
+        /// Only connections from trusted proxies will have headers parsed.
+        pub fn with_proxy(mut self, config: crate::network::proxy::ProxyConfig) -> Self {
+            self.proxy = Some(config);
+            self
+        }
+
+        /// See [Config]
+        pub const fn proxy(&self) -> Option<&crate::network::proxy::ProxyConfig> {
+            self.proxy.as_ref()
+        }
+    }
+});
 
 impl Default for Config {
     fn default() -> Self {
@@ -253,6 +288,13 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))] // ALPHA
             proxy: None,
         }
     }
