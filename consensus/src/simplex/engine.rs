@@ -125,7 +125,8 @@ impl<
 
     /// Start the `simplex` consensus engine.
     ///
-    /// This will also rebuild the state of the engine from provided `Journal`.
+    /// When started, the underlying voter actor replays its persistent journal
+    /// to rebuild in-memory consensus state before processing new traffic.
     ///
     /// # Network Channels
     ///
