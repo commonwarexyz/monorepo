@@ -296,6 +296,47 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.indices.contains_key(&index)
     }
 
+    async fn put_internal(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+        skip_if_index_exists: bool,
+    ) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if index < oldest_allowed {
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+        }
+
+        // Check for existing index when enforcing single-item semantics.
+        if skip_if_index_exists && self.indices.contains_key(&index) {
+            return Ok(());
+        }
+
+        // Write value and index entry atomically (glob first, then index)
+        let section = self.section(index);
+        let entry = Record::new(index, key.clone(), 0, 0);
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
+
+        // Store index location
+        self.indices.entry(index).or_default().push(position);
+
+        // Store interval
+        self.intervals.insert(index);
+
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
+
+        // Add section to pending
+        self.pending.insert(section);
+
+        // Update metrics
+        let _ = self.items_tracked.try_set(self.indices.len());
+        Ok(())
+    }
+
     /// Prune `Archive` to the provided `min` (masked by the configured
     /// section mask).
     ///
@@ -356,38 +397,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     type Value = V;
 
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
-        }
-
-        // Check for existing index (single-item semantics)
-        if self.indices.contains_key(&index) {
-            return Ok(());
-        }
-
-        // Write value and index entry atomically (glob first, then index)
-        let section = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
-
-        // Store index location
-        self.indices.entry(index).or_default().push(position);
-
-        // Store interval
-        self.intervals.insert(index);
-
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
-
-        // Add section to pending
-        self.pending.insert(section);
-
-        // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        self.put_internal(index, key, data, true).await
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
@@ -468,33 +478,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
-        }
-
-        // Write value and index entry atomically (glob first, then index)
-        let section = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
-
-        // Store index location
-        self.indices.entry(index).or_default().push(position);
-
-        // Store interval
-        self.intervals.insert(index);
-
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
-
-        // Add section to pending
-        self.pending.insert(section);
-
-        // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        self.put_internal(index, key, data, false).await
     }
 }
 
