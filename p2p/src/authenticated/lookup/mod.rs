@@ -70,17 +70,21 @@
 //!
 //! ## IP Poisoning
 //!
-//! Lookup assumes the application layer is the source of truth for peer addresses. If the
-//! application provides poisoned data (wrong or duplicate addresses), the network may spend time
-//! dialing invalid endpoints.
+//! Lookup assumes the application layer is the source of truth for peer addresses.
+//! A malicious peer can be mapped to an ingress that collides with an honest peer's ingress
+//! (duplicate or spoofed address), so dial attempts are drawn to the wrong identity.
 //!
 //! Connections are still authenticated at handshake time against the expected public key, so a
 //! peer at a reused IP cannot silently impersonate a different authorized identity. Once the
 //! application publishes corrected mappings via `track` or `overwrite`, periodic dialing and
-//! incoming connection acceptance let the network converge back to honest peers. In practice,
-//! convergence delay is commonly ingress-side IP/subnet handshake throttling
+//! incoming connection acceptance let the network converge back to honest peers. We mitigate
+//! collision cases by shuffling dial order on each dial queue refresh, so retries should
+//! eventually reach the honest peer.
+//! In practice, convergence delay is commonly ingress-side IP/subnet handshake throttling
 //! (`allowed_handshake_rate_per_ip` and `allowed_handshake_rate_per_subnet`) when many attempts
 //! converge on the same advertised IP.
+//!
+//! Applications can assert uniqueness of ingress socket address to entirely mitigate this attack.
 //!
 //! ## Message Delivery
 //!

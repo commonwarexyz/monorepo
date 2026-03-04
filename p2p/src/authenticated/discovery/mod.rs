@@ -125,10 +125,11 @@
 //! A connection is only accepted after the remote proves ownership of the expected public key,
 //! so an attacker cannot permanently impersonate another peer by reusing or spoofing an IP.
 //!
-//! A malicious peer can still advertise an unreachable ingress (or an ingress that collides with
-//! another peer) for itself, which may temporarily delay liveness by causing failed dial attempts.
-//! Recovery relies on dial retries, signed `Info` updates, and gossip propagation from connected
-//! honest peers. In practice, the delay is often caused by ingress-side handshake throttling
+//! A malicious peer can still advertise an ingress that collides with an honest peer's ingress.
+//! We mitigate this by continuously retrying dials and shuffling dial order, so attempts are not
+//! pinned to one colliding identity and should eventually reach the honest peer.
+//! Signed `Info` updates and gossip from connected honest peers further help convergence. Delay is
+//! often caused by ingress-side handshake throttling
 //! (`allowed_handshake_rate_per_ip` and `allowed_handshake_rate_per_subnet`) when multiple attempts
 //! target the same advertised IP.
 //!
@@ -2189,7 +2190,8 @@ mod tests {
             let peer1 = ed25519::PrivateKey::from_seed(1);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
             let peer2 = ed25519::PrivateKey::from_seed(2);
-            let addresses: Vec<_> = vec![peer0.public_key(), peer1.public_key(), peer2.public_key()];
+            let addresses: Vec<_> =
+                vec![peer0.public_key(), peer1.public_key(), peer2.public_key()];
 
             // Start peer 0 with duplicate bootstrapper addresses.
             // Both peer 1 (honest) and peer 2 (spoofed) advertise socket1.
@@ -2207,7 +2209,9 @@ mod tests {
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
-            oracle0.track(0, addresses.clone().try_into().unwrap()).await;
+            oracle0
+                .track(0, addresses.clone().try_into().unwrap())
+                .await;
 
             // Wait for connection attempts.
             context.sleep(Duration::from_secs(30)).await;
@@ -2273,7 +2277,8 @@ mod tests {
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
             let peer2 = ed25519::PrivateKey::from_seed(2);
             let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 2);
-            let addresses: Vec<_> = vec![peer0.public_key(), peer1.public_key(), peer2.public_key()];
+            let addresses: Vec<_> =
+                vec![peer0.public_key(), peer1.public_key(), peer2.public_key()];
 
             // Start peer 0 with duplicate bootstrapper addresses.
             // Both peer 1 (honest) and peer 2 (spoofed) advertise socket1.
@@ -2305,8 +2310,12 @@ mod tests {
                 network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network2.start();
 
-            oracle0.track(0, addresses.clone().try_into().unwrap()).await;
-            oracle2.track(0, addresses.clone().try_into().unwrap()).await;
+            oracle0
+                .track(0, addresses.clone().try_into().unwrap())
+                .await;
+            oracle2
+                .track(0, addresses.clone().try_into().unwrap())
+                .await;
 
             // Wait for initial connections.
             context.sleep(Duration::from_secs(30)).await;
