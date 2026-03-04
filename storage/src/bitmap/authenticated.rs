@@ -487,7 +487,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         }
 
         let range = chunk_loc..chunk_loc + 1;
-        let mut proof = verification::range_proof(&self.mmr, range).await?;
+        let mut proof = verification::range_proof(&self.mmr, hasher, range).await?;
         proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.

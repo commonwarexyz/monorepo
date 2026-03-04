@@ -1,6 +1,6 @@
 //! Shared [Proof] structure for Merkle-family data structures (MMR, MMB).
 
-use super::{Location, MerkleFamily};
+use super::{Location, MerkleFamily, Position};
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
@@ -30,16 +30,30 @@ pub enum ReconstructionError {
     InvalidSize,
 }
 
+/// A blueprint for building a range proof. The positions are split into two groups so that the
+/// proof generator cannot accidentally fetch a raw digest where a folded accumulator is needed.
+pub(crate) struct ProofBlueprint<F: MerkleFamily> {
+    /// Peak positions that precede the range (oldest-to-newest). The proof generator must fetch
+    /// each digest and left-fold them starting from `Hash(leaves)` to produce a single proof
+    /// digest. Empty when the range starts in the oldest peak.
+    pub fold_prefix: Vec<Position<F>>,
+
+    /// Positions whose raw digests are fetched directly: after-peak digests followed by sibling
+    /// nodes in DFS order matching the reconstruction traversal.
+    pub fetch_nodes: Vec<Position<F>>,
+}
+
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in a Merkle-family data structure from its root digest.
 ///
-/// The `digests` vector contains:
+/// The `digests` vector uses a folded-peak layout:
 ///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
+/// `[folded_prefix? | after_peak_oldest | ... | after_peak_newest | siblings...]`
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
+/// - `folded_prefix`: single digest = fold of Hash(leaves) with all preceding peak digests
+///   (present only when there are peaks before the range)
+/// - `after_peaks`: raw digests of peaks newer than the range
+/// - `siblings`: nodes needed to reconstruct range-containing peaks
 pub struct Proof<F: MerkleFamily, D: Digest> {
     /// The total number of leaves in the data structure. Other authenticated data structures may
     /// override the meaning of this field. For example, the authenticated [crate::AuthenticatedBitMap]

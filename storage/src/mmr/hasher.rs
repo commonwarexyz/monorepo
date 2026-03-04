@@ -1,6 +1,6 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
-use super::{Location, Mmr};
+use super::Mmr;
 use crate::merkle;
 use commonware_cryptography::Hasher as CHasher;
 pub use merkle::hasher::Hasher;
@@ -21,18 +21,7 @@ impl<H: CHasher> Hasher<Mmr> for Standard<H> {
         Self::new()
     }
 
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest {
-        let inner = self.inner();
-        inner.update(&leaves.to_be_bytes());
-        for digest in peak_digests {
-            inner.update(digest.as_ref());
-        }
-        inner.finalize()
-    }
+    // root() uses the default fold-based implementation from the trait.
 }
 
 #[cfg(test)]

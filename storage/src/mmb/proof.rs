@@ -45,18 +45,8 @@ fn collect_siblings_dfs(
     collect_siblings_dfs(right_step, height - 1, mid, range, positions);
 }
 
-/// A blueprint for building a range proof. The positions are split into two groups so that the
-/// proof generator cannot accidentally fetch a raw digest where a folded accumulator is needed.
-pub(crate) struct ProofBlueprint {
-    /// Peak positions that precede the range (oldest-to-newest). The proof generator must fetch
-    /// each digest and left-fold them starting from `Hash(leaves)` to produce a single proof
-    /// digest. Empty when the range starts in the oldest peak.
-    pub fold_prefix: Vec<Position>,
-
-    /// Positions whose raw digests are fetched directly: after-peak digests followed by sibling
-    /// nodes in left-first DFS order.
-    pub fetch_nodes: Vec<Position>,
-}
+/// A blueprint for building a range proof for this Merkle family.
+pub(crate) type ProofBlueprint = crate::merkle::proof::ProofBlueprint<super::Mmb>;
 
 /// Return the blueprint for building a range proof for the specified range of elements in an
 /// MMB with the given number of leaves.

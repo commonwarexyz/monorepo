@@ -14,11 +14,20 @@ pub trait Hasher<F: MerkleFamily>: Send + Sync {
     type Inner: CHasher<Digest = Self::Digest>;
 
     /// Computes the root for the structure given its leaf count and an iterator over peak digests.
+    ///
+    /// The default implementation left-folds `Hash(leaves)` with each peak digest using
+    /// [`fold_peak`](Self::fold_peak). Both MMR and MMB use this computation.
     fn root<'a>(
         &mut self,
         leaves: Location<F>,
         peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest;
+    ) -> Self::Digest {
+        let mut acc = self.digest(&leaves.as_u64().to_be_bytes());
+        for digest in peak_digests {
+            acc = self.fold_peak(&acc, digest);
+        }
+        acc
+    }
 
     /// Access the inner cryptographic hasher.
     fn inner(&mut self) -> &mut Self::Inner;

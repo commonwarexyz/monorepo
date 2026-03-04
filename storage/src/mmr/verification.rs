@@ -19,9 +19,19 @@ use std::collections::{BTreeSet, HashMap};
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
+///
+/// Stores individual node digests extracted during proof verification. For peaks that were folded
+/// in the original proof, the folded accumulator is stored so that sub-proofs can reuse it.
 pub struct ProofStore<D> {
     digests: HashMap<Position, D>,
+    leaves: Location,
     size: Position,
+    /// The fold accumulator covering the original proof's fold_prefix peaks and Hash(leaves).
+    /// When generating sub-proofs whose fold_prefix is a superset of the original, this
+    /// accumulator serves as the starting point.
+    fold_acc: D,
+    /// The set of peak positions whose digests were folded into `fold_acc`.
+    folded_peaks: Vec<Position>,
 }
 
 impl<D: Digest> ProofStore<D> {
@@ -42,22 +52,87 @@ impl<D: Digest> ProofStore<D> {
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
-        Self::new_from_digests(proof.leaves, digests)
+        let bp = proof::nodes_required_for_range_proof(
+            proof.leaves,
+            start_loc..start_loc + elements.len() as u64,
+        )?;
+
+        let fold_acc = if !bp.fold_prefix.is_empty() {
+            proof.digests[0]
+        } else {
+            hasher.digest(&proof.leaves.as_u64().to_be_bytes())
+        };
+
+        Ok(Self {
+            size: Position::try_from(proof.leaves)?,
+            leaves: proof.leaves,
+            digests: digests.into_iter().collect(),
+            fold_acc,
+            folded_peaks: bp.fold_prefix,
+        })
     }
 
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(leaves: Location, digests: Vec<(Position, D)>) -> Result<Self, Error> {
+    pub fn new_from_digests<H: Hasher<Mmr, Digest = D>>(
+        hasher: &mut H,
+        leaves: Location,
+        digests: Vec<(Position, D)>,
+    ) -> Result<Self, Error> {
+        let size = Position::try_from(leaves)?;
+        let fold_acc = hasher.digest(&leaves.as_u64().to_be_bytes());
         Ok(Self {
-            size: Position::try_from(leaves)?,
+            size,
+            leaves,
             digests: digests.into_iter().collect(),
+            fold_acc,
+            folded_peaks: Vec::new(),
         })
     }
 
     /// Return a range proof for the nodes corresponding to the given location range.
-    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
-        range_proof(self, range).await
+    pub fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Mmr, Digest = D>,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        let bp = proof::nodes_required_for_range_proof(self.leaves, range)?;
+
+        let mut digests = Vec::new();
+
+        // Build the fold prefix. The sub-range's fold_prefix may include peaks that were
+        // already folded in the original proof. Use the stored fold_acc as the starting point
+        // and fold any additional peaks from our digest map.
+        if !bp.fold_prefix.is_empty() {
+            let mut acc = self.fold_acc;
+            for &peak_pos in &bp.fold_prefix {
+                if self.folded_peaks.contains(&peak_pos) {
+                    // Already folded into fold_acc.
+                    continue;
+                }
+                let peak_d = self
+                    .digests
+                    .get(&peak_pos)
+                    .ok_or(Error::ElementPruned(peak_pos))?;
+                acc = hasher.fold_peak(&acc, peak_d);
+            }
+            digests.push(acc);
+        }
+
+        // Fetch raw digests for after-peaks and siblings.
+        for &pos in &bp.fetch_nodes {
+            let d = self
+                .digests
+                .get(&pos)
+                .ok_or(Error::ElementPruned(pos))?;
+            digests.push(*d);
+        }
+
+        Ok(Proof {
+            leaves: self.leaves,
+            digests,
+        })
     }
 
     /// Return a multi proof for the elements corresponding to the given locations.
@@ -86,10 +161,11 @@ impl<D: Digest> Storage<Mmr, D> for ProofStore<D> {
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<D: Digest, S: Storage<Mmr, D>>(
     mmr: &S,
+    hasher: &mut impl Hasher<Mmr, Digest = D>,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     let leaves = Location::try_from(mmr.size().await)?;
-    historical_range_proof(mmr, leaves, range).await
+    historical_range_proof(mmr, hasher, leaves, range).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
@@ -103,22 +179,35 @@ pub async fn range_proof<D: Digest, S: Storage<Mmr, D>>(
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<Mmr, D>>(
     mmr: &S,
+    hasher: &mut impl Hasher<Mmr, Digest = D>,
     leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    // Get the positions of all nodes needed to generate the proof.
-    let positions = proof::nodes_required_for_range_proof(leaves, range)?;
+    let bp = proof::nodes_required_for_range_proof(leaves, range)?;
 
-    // Fetch the digest of each.
-    let mut digests: Vec<D> = Vec::new();
-    let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
-    let hash_results = try_join_all(node_futures).await?;
+    let mut digests = Vec::new();
 
-    for (i, hash_result) in hash_results.into_iter().enumerate() {
-        match hash_result {
-            Some(hash) => digests.push(hash),
-            None => return Err(Error::ElementPruned(positions[i])),
-        };
+    // Fold preceding peaks into a single accumulator digest.
+    if !bp.fold_prefix.is_empty() {
+        let mut acc = hasher.digest(&leaves.as_u64().to_be_bytes());
+        for &peak_pos in &bp.fold_prefix {
+            let peak_d = mmr
+                .get_node(peak_pos)
+                .await?
+                .ok_or(Error::ElementPruned(peak_pos))?;
+            acc = hasher.fold_peak(&acc, &peak_d);
+        }
+        digests.push(acc);
+    }
+
+    // Fetch raw digests for after-peaks and siblings.
+    let node_futures = bp.fetch_nodes.iter().map(|pos| mmr.get_node(*pos));
+    let results = try_join_all(node_futures).await?;
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Some(d) => digests.push(d),
+            None => return Err(Error::ElementPruned(bp.fetch_nodes[i])),
+        }
     }
 
     Ok(Proof { leaves, digests })
@@ -202,7 +291,7 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
@@ -219,7 +308,9 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],

@@ -18,6 +18,7 @@ use crate::{
     merkle::{
         hasher::Hasher,
         mem::{CleanMem, Config as MemConfig, DirtyMem},
+        storage::Storage,
         Error, Location, MerkleFamily, Position,
     },
     metadata::{Config as MConfig, Metadata},
@@ -943,5 +944,550 @@ where
         clean.journal.sync().await?;
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage trait impls (generic over MerkleFamily)
+// ---------------------------------------------------------------------------
+
+impl<F, E, D, C> Storage<F, D> for Clean<F, E, D, C>
+where
+    F: MerkleFamily,
+    E: RStorage + Clock + Metrics + Sync,
+    D: Digest,
+    C: CleanMem<F, D>,
+{
+    async fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        self.get_node(position).await
+    }
+}
+
+impl<F, E, D, C> Storage<F, D> for Dirty<F, E, D, C>
+where
+    F: MerkleFamily,
+    E: RStorage + Clock + Metrics + Sync,
+    D: Digest,
+    C: CleanMem<F, D>,
+{
+    async fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        Self::get_node(self, position).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dirty: get_node with merkleization boundary + proof validation
+// ---------------------------------------------------------------------------
+
+impl<F, E, D, C> Dirty<F, E, D, C>
+where
+    F: MerkleFamily,
+    E: RStorage + Clock + Metrics,
+    D: Digest,
+    C: CleanMem<F, D>,
+{
+    /// Return the node digest at `position`, respecting the merkleization boundary.
+    ///
+    /// Nodes at or beyond the merkleized frontier return `None`. For nodes within the merkleized
+    /// region, the in-memory cache is checked first, then the metadata and journal.
+    pub async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        let (merkleized_size, mem_bounds) = self.merkleized_size_and_mem_bounds();
+
+        if position >= merkleized_size {
+            return Ok(None);
+        }
+
+        if position >= mem_bounds.start && position < mem_bounds.end {
+            return Ok(Some(self.get_node_in_mem_unchecked(position)));
+        }
+
+        match self.get_from_metadata_or_journal(position).await {
+            Ok(digest) => Ok(Some(digest)),
+            Err(Error::MissingNode(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Validate parameters for a historical range proof on a dirty (unmerkleized) structure.
+    ///
+    /// Checks bounds, pruning, emptiness, and merkleization status. Returns `Ok(())` if valid.
+    pub fn validate_dirty_historical_range_proof(
+        &self,
+        leaves: Location<F>,
+        range: &std::ops::Range<Location<F>>,
+    ) -> Result<(), Error<F>> {
+        let size = self.size();
+        let merkleized_size = self.merkleized_size();
+        let pruned_to_pos = self.pruned_to_pos();
+
+        let requested_size = Position::try_from(leaves)?;
+        let end_pos = Position::try_from(range.end)?;
+        if requested_size > size {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        if range.is_empty() {
+            return Err(Error::Empty);
+        }
+        if range.end > leaves {
+            return Err(Error::RangeOutOfBounds(range.end));
+        }
+        if end_pos > size {
+            return Err(Error::RangeOutOfBounds(range.end));
+        }
+        let start_pos = Position::try_from(range.start)?;
+        if start_pos < pruned_to_pos {
+            return Err(Error::ElementPruned(start_pos));
+        }
+        if requested_size > merkleized_size {
+            return Err(Error::Unmerkleized);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clean: proof validation
+// ---------------------------------------------------------------------------
+
+impl<F, E, D, C> Clean<F, E, D, C>
+where
+    F: MerkleFamily,
+    E: RStorage + Clock + Metrics,
+    D: Digest,
+    C: CleanMem<F, D>,
+{
+    /// Validate `leaves` for a historical range proof on a clean (merkleized) structure.
+    ///
+    /// Returns `Ok(())` if `leaves` does not exceed the structure's current leaf count.
+    pub fn validate_historical_leaves(&self, leaves: Location<F>) -> Result<(), Error<F>> {
+        if leaves > self.leaves() {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::merkle::{hasher::Hasher as MHasher, mem::CleanMem};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Storage as RStorage,
+    };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    pub(crate) fn test_digest(v: usize) -> sha256::Digest {
+        Sha256::hash(&v.to_be_bytes())
+    }
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(111);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
+
+    pub(crate) fn test_config(pooler: &impl BufferPooler) -> Config {
+        Config {
+            journal_partition: "journal-partition".into(),
+            metadata_partition: "metadata-partition".into(),
+            items_per_blob: NZU64!(7),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Test `init_sync` when there is no persisted data.
+    pub(crate) async fn test_init_sync_empty<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        let sync_cfg = SyncConfig::<F, sha256::Digest> {
+            config: test_config(&context),
+            range: Position::new(0)..Position::new(100),
+            pinned_nodes: None,
+        };
+
+        let sync_merkle =
+            Clean::<F, E, sha256::Digest, C>::init_sync(context.clone(), sync_cfg, hasher)
+                .await
+                .unwrap();
+
+        assert_eq!(sync_merkle.size(), 0);
+        let bounds = sync_merkle.bounds();
+        assert_eq!(bounds.start, 0);
+        assert!(bounds.is_empty());
+
+        let new_element = test_digest(999);
+        let sync_merkle = sync_merkle.into_dirty();
+        sync_merkle.add(hasher, &new_element).unwrap();
+        let sync_merkle = sync_merkle.merkleize(hasher);
+
+        let _root = sync_merkle.root();
+
+        sync_merkle.destroy().await.unwrap();
+    }
+
+    /// Test `init_sync` where persisted nodes match the sync boundaries exactly.
+    pub(crate) async fn test_init_sync_nonempty_exact_match<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, test_config(&context))
+                .await
+                .unwrap();
+        let merkle = merkle.into_dirty();
+        for i in 0..50 {
+            merkle.add(hasher, &test_digest(i)).unwrap();
+        }
+        let merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+        let original_size = merkle.size();
+        let original_leaves = merkle.leaves();
+        let original_root = merkle.root();
+
+        let lower_bound_pos = merkle.bounds().start;
+        let upper_bound_pos = merkle.size();
+        let mut expected_nodes = std::collections::BTreeMap::new();
+        for i in *lower_bound_pos..*upper_bound_pos {
+            expected_nodes.insert(
+                Position::new(i),
+                merkle.get_node(Position::new(i)).await.unwrap().unwrap(),
+            );
+        }
+        let sync_cfg = SyncConfig::<F, sha256::Digest> {
+            config: test_config(&context),
+            range: lower_bound_pos..upper_bound_pos,
+            pinned_nodes: None,
+        };
+
+        merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let sync_merkle =
+            Clean::<F, E, sha256::Digest, C>::init_sync(context.with_label("sync"), sync_cfg, hasher)
+                .await
+                .unwrap();
+
+        assert_eq!(sync_merkle.size(), original_size);
+        assert_eq!(sync_merkle.leaves(), original_leaves);
+        let bounds = sync_merkle.bounds();
+        assert_eq!(bounds.start, lower_bound_pos);
+        assert!(!bounds.is_empty());
+        assert_eq!(sync_merkle.root(), original_root);
+        for pos in *lower_bound_pos..*upper_bound_pos {
+            let pos = Position::new(pos);
+            assert_eq!(
+                sync_merkle.get_node(pos).await.unwrap(),
+                expected_nodes.get(&pos).cloned()
+            );
+        }
+
+        sync_merkle.destroy().await.unwrap();
+    }
+
+    /// Test `init_sync` where persisted data partially overlaps with the sync boundaries.
+    pub(crate) async fn test_init_sync_partial_overlap<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, test_config(&context))
+                .await
+                .unwrap();
+        let merkle = merkle.into_dirty();
+        for i in 0..30 {
+            merkle.add(hasher, &test_digest(i)).unwrap();
+        }
+        let mut merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+        merkle.prune_to_pos(Position::new(10)).await.unwrap();
+
+        let original_size = merkle.size();
+        let original_root = merkle.root();
+        let original_pruned_to = merkle.bounds().start;
+
+        let lower_bound_pos = original_pruned_to;
+        let upper_bound_pos = original_size + 11;
+
+        let mut expected_nodes = std::collections::BTreeMap::new();
+        for pos in *lower_bound_pos..*original_size {
+            let pos = Position::new(pos);
+            expected_nodes.insert(pos, merkle.get_node(pos).await.unwrap().unwrap());
+        }
+
+        let sync_cfg = SyncConfig::<F, sha256::Digest> {
+            config: test_config(&context),
+            range: lower_bound_pos..upper_bound_pos,
+            pinned_nodes: None,
+        };
+
+        merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let sync_merkle =
+            Clean::<F, E, sha256::Digest, C>::init_sync(context.with_label("sync"), sync_cfg, hasher)
+                .await
+                .unwrap();
+
+        assert_eq!(sync_merkle.size(), original_size);
+        let bounds = sync_merkle.bounds();
+        assert_eq!(bounds.start, lower_bound_pos);
+        assert!(!bounds.is_empty());
+        assert_eq!(sync_merkle.root(), original_root);
+
+        for pos in *lower_bound_pos..*original_size {
+            let pos = Position::new(pos);
+            assert_eq!(
+                sync_merkle.get_node(pos).await.unwrap(),
+                expected_nodes.get(&pos).cloned()
+            );
+        }
+
+        sync_merkle.destroy().await.unwrap();
+    }
+
+    /// Regression test: init() handles stale metadata (lower pruning boundary than journal).
+    pub(crate) async fn test_init_stale_metadata_returns_error<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        use crate::metadata::{Config as MConfig, Metadata};
+        use commonware_utils::sequence::prefixed_u64::U64;
+
+        const PRUNE_TO_POS_PREFIX: u8 = 1;
+
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, test_config(&context))
+                .await
+                .unwrap();
+
+        let merkle = merkle.into_dirty();
+        for i in 0..50 {
+            merkle.add(hasher, &test_digest(i)).unwrap();
+        }
+        let mut merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+
+        let prune_pos = Position::new(20);
+        merkle.prune_to_pos(prune_pos).await.unwrap();
+        drop(merkle);
+
+        // Tamper with metadata to have a stale (lower) pruning boundary.
+        let meta_cfg = MConfig {
+            partition: test_config(&context).metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let mut metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("meta_tamper"), meta_cfg)
+                .await
+                .unwrap();
+
+        let key = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        metadata.put(key, 0u64.to_be_bytes().to_vec());
+        metadata.sync().await.unwrap();
+        drop(metadata);
+
+        let result = Clean::<F, E, sha256::Digest, C>::init(
+            context.with_label("reopened"),
+            hasher,
+            test_config(&context),
+        )
+        .await;
+
+        match result {
+            Err(Error::MissingNode(_)) => {}
+            Ok(_) => panic!("expected MissingNode error, got Ok"),
+            Err(e) => panic!("expected MissingNode error, got {:?}", e),
+        }
+    }
+
+    /// Test init() handles metadata pruning boundary ahead of journal (crash during prune).
+    pub(crate) async fn test_init_metadata_ahead<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, test_config(&context))
+                .await
+                .unwrap()
+                .into_dirty();
+
+        for i in 0..50 {
+            merkle.add(hasher, &test_digest(i)).unwrap();
+        }
+        let mut merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+
+        let prune_pos = Position::new(30);
+        merkle.prune_to_pos(prune_pos).await.unwrap();
+        let expected_root = merkle.root();
+        let expected_size = merkle.size();
+        drop(merkle);
+
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("reopened"), hasher, test_config(&context))
+                .await
+                .unwrap();
+
+        assert_eq!(merkle.bounds().start, prune_pos);
+        assert_eq!(merkle.size(), expected_size);
+        assert_eq!(merkle.root(), expected_root);
+
+        merkle.destroy().await.unwrap();
+    }
+
+    /// Regression test: init_sync must compute pinned nodes BEFORE pruning the journal.
+    pub(crate) async fn test_init_sync_computes_pinned_nodes_before_pruning<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        let cfg = Config {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(7),
+            write_buffer: NZUsize!(64),
+            thread_pool: None,
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, cfg.clone())
+                .await
+                .unwrap();
+        let merkle = merkle.into_dirty();
+        for i in 0..100 {
+            merkle.add(hasher, &test_digest(i)).unwrap();
+        }
+        let merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+
+        let original_size = merkle.size();
+        let original_root = merkle.root();
+        drop(merkle);
+
+        let prune_pos = Position::new(50);
+        let sync_cfg = SyncConfig::<F, sha256::Digest> {
+            config: cfg,
+            range: prune_pos..Position::new(200),
+            pinned_nodes: None,
+        };
+
+        let sync_merkle =
+            Clean::<F, E, sha256::Digest, C>::init_sync(context.with_label("sync"), sync_cfg, hasher)
+                .await
+                .unwrap();
+
+        assert_eq!(sync_merkle.size(), original_size);
+        assert_eq!(sync_merkle.root(), original_root);
+        assert_eq!(sync_merkle.bounds().start, prune_pos);
+
+        sync_merkle.destroy().await.unwrap();
+    }
+
+    /// Simulate partial writes after pruning and confirm recovery.
+    pub(crate) async fn test_recovery_with_pruning<F, E, C>(
+        context: E,
+        hasher: &mut impl MHasher<F, Digest = sha256::Digest>,
+    ) where
+        F: MerkleFamily + std::fmt::Debug,
+        E: RStorage + Clock + Metrics + BufferPooler,
+        C: CleanMem<F, sha256::Digest>,
+    {
+        const LEAF_COUNT: usize = 2000;
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("init"), hasher, test_config(&context))
+                .await
+                .unwrap()
+                .into_dirty();
+        let mut leaves = Vec::with_capacity(LEAF_COUNT);
+        for i in 0..LEAF_COUNT {
+            let digest = test_digest(i);
+            leaves.push(digest);
+            merkle.add(hasher, leaves.last().unwrap()).unwrap();
+        }
+        let merkle = merkle.merkleize(hasher);
+        merkle.sync().await.unwrap();
+        drop(merkle);
+
+        for i in 0usize..200 {
+            let label = format!("iter_{i}");
+            let mut merkle =
+                Clean::<F, E, sha256::Digest, C>::init(
+                    context.with_label(&label),
+                    hasher,
+                    test_config(&context),
+                )
+                .await
+                .unwrap();
+            let start_size = merkle.size();
+            let prune_pos = std::cmp::min(i as u64 * 50, *start_size);
+            let prune_pos = Position::new(prune_pos);
+            if i % 5 == 0 {
+                merkle.simulate_pruning_failure(prune_pos).await.unwrap();
+                continue;
+            }
+            merkle.prune_to_pos(prune_pos).await.unwrap();
+
+            for j in 0..10 {
+                let digest = test_digest(100 * (i + 1) + j);
+                leaves.push(digest);
+                let dirty_merkle = merkle.into_dirty();
+                dirty_merkle.add(hasher, leaves.last().unwrap()).unwrap();
+                dirty_merkle.add(hasher, leaves.last().unwrap()).unwrap();
+                merkle = dirty_merkle.merkleize(hasher);
+                let digest = test_digest(LEAF_COUNT + i);
+                leaves.push(digest);
+                let dirty_merkle = merkle.into_dirty();
+                dirty_merkle.add(hasher, leaves.last().unwrap()).unwrap();
+                dirty_merkle.add(hasher, leaves.last().unwrap()).unwrap();
+                merkle = dirty_merkle.merkleize(hasher);
+            }
+            let end_size = merkle.size();
+            let total_to_write = (*end_size - *start_size) as usize;
+            let partial_write_limit = i % total_to_write;
+            merkle
+                .simulate_partial_sync(partial_write_limit)
+                .await
+                .unwrap();
+        }
+
+        let merkle =
+            Clean::<F, E, sha256::Digest, C>::init(context.with_label("final"), hasher, test_config(&context))
+                .await
+                .unwrap();
+        merkle.destroy().await.unwrap();
     }
 }
