@@ -14,66 +14,8 @@ use commonware_runtime::{
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
-
-/// Position(s) in the index journal associated with a single archive index.
-enum IndexPositions {
-    Single(u64),
-    Multi(Vec<u64>),
-}
-
-impl IndexPositions {
-    const fn from_single(position: u64) -> Self {
-        Self::Single(position)
-    }
-
-    fn push(&mut self, position: u64) {
-        match self {
-            Self::Single(existing) => {
-                *self = Self::Multi(vec![*existing, position]);
-            }
-            Self::Multi(positions) => positions.push(position),
-        }
-    }
-
-    fn first(&self) -> u64 {
-        match self {
-            Self::Single(position) => *position,
-            Self::Multi(positions) => positions[0],
-        }
-    }
-
-    const fn len(&self) -> usize {
-        match self {
-            Self::Single(_) => 1,
-            Self::Multi(positions) => positions.len(),
-        }
-    }
-
-    fn iter(&self) -> IndexPositionsIter<'_> {
-        match self {
-            Self::Single(position) => IndexPositionsIter::Single(Some(position)),
-            Self::Multi(positions) => IndexPositionsIter::Multi(positions.iter()),
-        }
-    }
-}
-
-enum IndexPositionsIter<'a> {
-    Single(Option<&'a u64>),
-    Multi(std::slice::Iter<'a, u64>),
-}
-
-impl Iterator for IndexPositionsIter<'_> {
-    type Item = u64;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Single(position) => position.take().copied(),
-            Self::Multi(positions) => positions.next().copied(),
-        }
-    }
-}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,11 +115,12 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
-    /// Maps index to position(s) in index journal.
-    ///
-    /// Each index may have multiple positions when used via [crate::archive::MultiArchive].
-    /// When used via [crate::archive::Archive], each index has exactly one position.
-    indices: BTreeMap<u64, IndexPositions>,
+    /// Maps index to its first position in the index journal.
+    indices: BTreeMap<u64, u64>,
+
+    /// Additional positions for indices that have more than one entry.
+    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
+    extra_indices: BTreeMap<u64, Vec<u64>>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,
@@ -199,6 +142,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
+    /// Iterate over all positions for a given index (first + extras).
+    fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
+        self.indices.get(&index).into_iter().copied().chain(
+            self.extra_indices
+                .get(&index)
+                .into_iter()
+                .flat_map(|v| v.iter().copied()),
+        )
+    }
+
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
@@ -218,7 +171,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
-        let mut indices: BTreeMap<u64, IndexPositions> = BTreeMap::new();
+        let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
@@ -229,10 +183,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal)
-                indices
-                    .entry(entry.index)
-                    .and_modify(|positions| positions.push(position))
-                    .or_insert_with(|| IndexPositions::from_single(position));
+                match indices.entry(entry.index) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(position);
+                    }
+                    btree_map::Entry::Occupied(_) => {
+                        extra_indices.entry(entry.index).or_default().push(position);
+                    }
+                }
 
                 // Store index in keys
                 keys.insert(&entry.key, entry.index);
@@ -277,6 +235,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
+            extra_indices,
             intervals,
             keys,
             items_tracked,
@@ -294,7 +253,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Get first position at this index
         let position = match self.indices.get(&index) {
-            Some(positions) => positions.first(),
+            Some(&position) => position,
             None => return Ok(None),
         };
 
@@ -325,10 +284,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             }
 
             // Get all positions at this index
-            let positions = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            if !self.indices.contains_key(index) {
+                return Err(Error::RecordCorrupted);
+            }
             let section = self.section(*index);
 
-            for position in positions.iter() {
+            for position in self.iter_positions(*index) {
                 // Fetch index entry from index journal to verify key
                 let entry = self.oversized.get(section, position).await?;
 
@@ -378,10 +339,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
-        self.indices
-            .entry(index)
-            .and_modify(|positions| positions.push(position))
-            .or_insert_with(|| IndexPositions::from_single(position));
+        match self.indices.entry(index) {
+            btree_map::Entry::Vacant(e) => {
+                e.insert(position);
+            }
+            btree_map::Entry::Occupied(_) => {
+                self.extra_indices.entry(index).or_default().push(position);
+            }
+        }
 
         // Store interval
         self.intervals.insert(index);
@@ -436,6 +401,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 _ => break,
             };
             self.indices.remove(&next).unwrap();
+            self.extra_indices.remove(&next);
             self.indices_pruned.inc();
         }
 
@@ -520,13 +486,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
         self.gets.inc();
 
-        let positions = match self.indices.get(&index) {
-            Some(positions) => positions,
-            None => return Ok(None),
-        };
+        if !self.indices.contains_key(&index) {
+            return Ok(None);
+        }
         let section = self.section(index);
-        let mut values = Vec::with_capacity(positions.len());
-        for position in positions.iter() {
+        let extra_count = self.extra_indices.get(&index).map_or(0, Vec::len);
+        let mut values = Vec::with_capacity(1 + extra_count);
+        for position in self.iter_positions(index) {
             let entry = self.oversized.get(section, position).await?;
             let (value_offset, value_size) = entry.value_location();
             let value = self
