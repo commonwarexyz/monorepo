@@ -114,6 +114,39 @@ where
     }
 }
 
+// Functionality requiring Mutable journal.
+impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
+where
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Mutable<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+{
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+}
+
 // Functionality requiring Mutable + Persistable journal.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
 where
@@ -198,26 +231,6 @@ where
             .historical_proof(historical_size, start_loc, max_ops)
             .await
             .map_err(Into::into)
-    }
-
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
     }
 
     pub async fn proof(
@@ -443,14 +456,7 @@ where
     Operation<K, V, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        self.log.prune(prune_loc).await?;
-        Ok(())
+        self.prune(prune_loc).await
     }
 
     async fn inactivity_floor_loc(&self) -> Location {
