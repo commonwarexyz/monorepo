@@ -443,14 +443,7 @@ where
     Operation<K, V, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        self.log.prune(prune_loc).await?;
-        Ok(())
+        self.prune(prune_loc).await
     }
 
     async fn inactivity_floor_loc(&self) -> Location {
