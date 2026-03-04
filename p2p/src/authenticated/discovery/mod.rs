@@ -121,17 +121,14 @@
 //!
 //! ## IP Poisoning
 //!
-//! Discovery treats peer addresses as untrusted hints until connection handshake completes.
-//! A connection is only accepted after the remote proves ownership of the expected public key,
-//! so an attacker cannot permanently impersonate another peer by reusing or spoofing an IP.
+//! A malicious peer can claim an ingress that collides with an honest peer's ingress
+//! to increase the number of incorrect dial attempts directed at the honest peer. Connections
+//! are authenticated at handshake time against the expected public key, so a peer at a poisoned
+//! IP cannot silently impersonate a different authorized identity, however, it can delay
+//! connection to the correct peer because of ingress-side IP/subnet handshake rate limiting.
 //!
-//! A malicious peer can still advertise an ingress that collides with an honest peer's ingress.
-//! We mitigate this by continuously retrying dials and shuffling dial order, so attempts are not
-//! pinned to one colliding identity and should eventually reach the honest peer.
-//! Signed `Info` updates and gossip from connected honest peers further help convergence. Delay is
-//! often caused by ingress-side handshake throttling
-//! (`allowed_handshake_rate_per_ip` and `allowed_handshake_rate_per_subnet`) when multiple attempts
-//! target the same advertised IP.
+//! We mitigate this by shuffling dial order on each dial queue refresh, so retries should
+//! eventually reach the targeted honest peer.
 //!
 //! ## Message Delivery
 //!
