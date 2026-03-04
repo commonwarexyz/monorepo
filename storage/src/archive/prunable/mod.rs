@@ -75,6 +75,21 @@
 //! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
 //! the first `8` bytes of a key will use `~40` bytes to index each key.
 //!
+//! ### MultiArchive Overhead
+//!
+//! [Archive] stores index positions in a dual-map layout:
+//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
+//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
+//!   [crate::archive::MultiArchive::put_multi].
+//!
+//! This means the baseline overhead above remains unchanged for the first item at an index. For
+//! indices with duplicates, the additional in-memory payload is:
+//! - one `Vec<u64>` header (`24` bytes), and
+//! - `n * 8` bytes for `n` additional positions.
+//!
+//! Equivalently, this is `24 + (n * 8)` bytes per duplicated index, excluding `BTreeMap` node
+//! overhead for `extra_indices`.
+//!
 //! # Pruning
 //!
 //! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
