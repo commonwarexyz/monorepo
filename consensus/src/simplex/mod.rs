@@ -903,6 +903,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_online() {
         all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1074,6 +1075,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_observer() {
         observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1543,6 +1545,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_backfill() {
         backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1795,6 +1798,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_one_offline() {
         one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -1990,6 +1994,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_validator() {
         slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -2210,6 +2215,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_recovery() {
         all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -2585,6 +2591,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinPk, _>);
@@ -4443,6 +4450,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
         for seed in 0..10 {
@@ -4481,6 +4489,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_graceful_shutdown() {
         for seed in 0..10 {
@@ -5096,6 +5105,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_split_views_no_lockup() {
         split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);

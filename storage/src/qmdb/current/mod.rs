@@ -1067,7 +1067,7 @@ pub mod tests {
 
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
 
     // Type aliases for all 12 variants (all use OneCap for collision coverage).
     type OrderedFixedDb = ordered::fixed::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
@@ -1203,6 +1203,7 @@ pub mod tests {
         test_current_db_build_big::<C, F, Fut>(open_db, 1957, 838);
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_build_random_close_reopen() {
         let executor = deterministic::Runner::default();
@@ -1211,6 +1212,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_simulate_write_failures() {
         let executor = deterministic::Runner::default();
@@ -1219,6 +1221,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_different_pruning_delays_same_root() {
         let executor = deterministic::Runner::default();
@@ -1227,6 +1230,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_sync_persists_bitmap_pruning_boundary() {
         let executor = deterministic::Runner::default();
@@ -1235,6 +1239,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_ordered_variants_build_big() {
         let executor = deterministic::Runner::default();
@@ -1243,6 +1248,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_unordered_variants_build_big() {
         let executor = deterministic::Runner::default();
@@ -1251,6 +1257,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("DEBUG")]
     fn test_all_variants_steps_not_reset() {
         let executor = deterministic::Runner::default();
@@ -1259,6 +1266,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("DEBUG")]
     fn test_ordered_variants_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
@@ -1267,6 +1275,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("DEBUG")]
     fn test_unordered_variants_build_small_close_reopen() {
         let executor = deterministic::Runner::default();

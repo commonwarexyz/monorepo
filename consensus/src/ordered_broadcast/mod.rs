@@ -387,6 +387,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_all_online() {
         all_online(bls12381_threshold::fixture::<MinPk, _>);
@@ -474,6 +475,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::fixture::<MinPk, _>);
@@ -605,6 +607,7 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
@@ -712,6 +715,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_invalid_signature_injection() {
         invalid_signature_injection(bls12381_threshold::fixture::<MinPk, _>);
@@ -1036,6 +1040,7 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
     fn test_external_sequencer() {
         external_sequencer(bls12381_threshold::fixture::<MinPk, _>);

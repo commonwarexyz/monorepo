@@ -28,7 +28,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_utils::{channel::oneshot, from_hex, hex};
-use io_uring::{opcode, types};
+use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
@@ -39,8 +39,8 @@ use std::{
     sync::Arc,
 };
 
-// Cap iovec batch size: larger iovecs reduce syscall count but increase
-// per-write kernel setup overhead.
+/// Cap iovec batch size: larger iovecs reduce syscall count but increase
+/// per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -268,12 +268,11 @@ impl Blob {
         }
     }
 
-    async fn write_single_at(
-        &self,
-        fd: types::Fd,
-        mut offset: u64,
-        mut buf: IoBuf,
-    ) -> Result<(), Error> {
+    fn as_raw_fd(&self) -> Fd {
+        Fd(self.file.as_raw_fd())
+    }
+
+    async fn write_single_at(&self, mut offset: u64, mut buf: IoBuf) -> Result<(), Error> {
         let mut bytes_written = 0;
         let buf_len = buf.len();
         while bytes_written < buf_len {
@@ -287,7 +286,7 @@ impl Blob {
             let remaining_len = buf_len - bytes_written;
 
             // Create an operation to do the write
-            let op = opcode::Write::new(fd, ptr, remaining_len as _)
+            let op = opcode::Write::new(self.as_raw_fd(), ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -305,10 +304,10 @@ impl Blob {
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = match got_buf {
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = match return_buf {
                 Some(OpBuffer::Write(b)) => b,
-                _ => return Err(Error::WriteFailed),
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
             if should_retry(return_value) {
                 continue;
@@ -328,12 +327,7 @@ impl Blob {
         Ok(())
     }
 
-    async fn write_vectored_at(
-        &self,
-        fd: types::Fd,
-        mut offset: u64,
-        mut bufs: IoBufs,
-    ) -> Result<(), Error> {
+    async fn write_vectored_at(&self, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
         while bufs.has_remaining() {
             let (iovecs, iovecs_len) = {
                 // Figure out how much is left to write and where to write from.
@@ -356,7 +350,7 @@ impl Blob {
                 .collect();
 
                 // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                // `raw_iovecs` is initialized with valid empty entries, so `slices`
+                // `raw_iovecs` is initialized with valid empty entries, so `io_slices`
                 // starts in a valid state for `chunks_vectored` to overwrite.
                 let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -374,7 +368,7 @@ impl Blob {
             };
 
             // Create an operation to do the write
-            let op = opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len as _)
+            let op = opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -392,10 +386,10 @@ impl Blob {
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            bufs = match got_bufs {
+            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            bufs = match return_bufs {
                 Some(OpBuffer::WriteVectored(b)) => b,
-                _ => return Err(Error::WriteFailed),
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
             if should_retry(return_value) {
                 continue;
@@ -441,7 +435,6 @@ impl crate::Blob for Blob {
             (tmp, Some(input_bufs))
         };
 
-        let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -458,7 +451,7 @@ impl crate::Blob for Blob {
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, ptr, remaining_len as _)
+            let op = opcode::Read::new(self.as_raw_fd(), ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -476,17 +469,17 @@ impl crate::Blob for Blob {
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            io_buf = match got_buf {
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            io_buf = match return_buf {
                 Some(OpBuffer::Read(b)) => b,
-                _ => return Err(Error::ReadFailed),
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
-            if should_retry(result) {
+            if should_retry(return_value) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            let op_bytes_read: usize = return_value.try_into().map_err(|_| Error::ReadFailed)?;
             if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
@@ -508,14 +501,13 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
-        let fd = types::Fd(self.file.as_raw_fd());
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
 
         match bufs.try_into_single() {
-            Ok(buf) => self.write_single_at(fd, offset, buf).await,
-            Err(bufs) => self.write_vectored_at(fd, offset, bufs).await,
+            Ok(buf) => self.write_single_at(offset, buf).await,
+            Err(bufs) => self.write_vectored_at(offset, bufs).await,
         }
     }
 
@@ -532,7 +524,7 @@ impl crate::Blob for Blob {
     async fn sync(&self) -> Result<(), Error> {
         loop {
             // Create an operation to do the sync
-            let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
+            let op = opcode::Fsync::new(self.as_raw_fd()).build();
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
