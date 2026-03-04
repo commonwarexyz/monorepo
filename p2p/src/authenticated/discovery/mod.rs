@@ -119,6 +119,19 @@
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
+//! ## IP Poisoning
+//!
+//! Discovery treats peer addresses as untrusted hints until connection handshake completes.
+//! A connection is only accepted after the remote proves ownership of the expected public key,
+//! so an attacker cannot permanently impersonate another peer by reusing or spoofing an IP.
+//!
+//! A malicious peer can still advertise an unreachable ingress (or an ingress that collides with
+//! another peer) for itself, which may temporarily delay liveness by causing failed dial attempts.
+//! Recovery relies on dial retries, signed `Info` updates, and gossip propagation from connected
+//! honest peers. In practice, the delay is often caused by ingress-side handshake throttling
+//! (`allowed_handshake_rate_per_ip` and `allowed_handshake_rate_per_subnet`) when multiple attempts
+//! target the same advertised IP.
+//!
 //! ## Message Delivery
 //!
 //! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers

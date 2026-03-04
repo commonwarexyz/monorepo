@@ -68,6 +68,20 @@
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
+//! ## IP Poisoning
+//!
+//! Lookup assumes the application layer is the source of truth for peer addresses. If the
+//! application provides poisoned data (wrong or duplicate addresses), the network may spend time
+//! dialing invalid endpoints.
+//!
+//! Connections are still authenticated at handshake time against the expected public key, so a
+//! peer at a reused IP cannot silently impersonate a different authorized identity. Once the
+//! application publishes corrected mappings via `track` or `overwrite`, periodic dialing and
+//! incoming connection acceptance let the network converge back to honest peers. In practice,
+//! convergence delay is commonly ingress-side IP/subnet handshake throttling
+//! (`allowed_handshake_rate_per_ip` and `allowed_handshake_rate_per_subnet`) when many attempts
+//! converge on the same advertised IP.
+//!
 //! ## Message Delivery
 //!
 //! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
