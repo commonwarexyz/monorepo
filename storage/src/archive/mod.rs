@@ -119,9 +119,8 @@ pub trait Archive: Send {
 ///
 /// Unlike [Archive::put], which is a no-op when the index already exists,
 /// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
-/// at an existing index. Each key must still be globally unique. This is useful
-/// for workloads where a logical grouping (e.g., a consensus view) may contain
-/// multiple entries.
+/// at an existing index. As with [Archive::put], keys are assumed to be globally
+/// unique, but duplicate keys are not rejected.
 pub trait MultiArchive: Archive {
     /// Retrieve all values stored at the given index.
     ///
@@ -133,8 +132,9 @@ pub trait MultiArchive: Archive {
 
     /// Store an item, allowing multiple items at the same index.
     ///
-    /// Multiple items may share the same `index` as long as their keys differ.
-    /// If the same key already exists (at any index), the call is a no-op.
+    /// Multiple items may share the same `index`. If the same key is stored at
+    /// multiple indices, any associated value may be returned when queried with
+    /// [Identifier::Key].
     fn put_multi(
         &mut self,
         index: u64,

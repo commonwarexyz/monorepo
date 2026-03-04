@@ -723,6 +723,47 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_multi_put_duplicate_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let key = test_key("dup");
+            archive.put_multi(5, key.clone(), 10).await.unwrap();
+            archive.put_multi(7, key.clone(), 20).await.unwrap();
+
+            // Duplicate key is allowed across indices.
+            assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(7)).await.unwrap(), Some(20));
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![10]));
+            assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![20]));
+
+            // Like Archive::put, duplicate keys may return any associated value.
+            assert!(matches!(
+                archive.get(Identifier::Key(&key)).await.unwrap(),
+                Some(10 | 20)
+            ));
+
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 2"));
+        });
+    }
+
+    #[test_traced]
     fn test_get_all() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
