@@ -154,8 +154,6 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
-
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
             (),
@@ -163,6 +161,7 @@ impl<
             network.0,
             network.1,
         );
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
