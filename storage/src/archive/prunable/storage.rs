@@ -484,16 +484,24 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     crate::archive::MultiArchive for Archive<T, E, K, V>
 {
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
+        // Update metrics
         self.gets.inc();
 
+        // Check if the index exists.
         if !self.indices.contains_key(&index) {
             return Ok(None);
         }
+
+        // Get all positions at this index
         let section = self.section(index);
         let extra_count = self.extra_indices.get(&index).map_or(0, Vec::len);
+
         let mut values = Vec::with_capacity(1 + extra_count);
         for position in self.iter_positions(index) {
+            // Fetch index entry from index journal to verify key
             let entry = self.oversized.get(section, position).await?;
+
+            // Fetch value directly from blob storage (bypasses page cache)
             let (value_offset, value_size) = entry.value_location();
             let value = self
                 .oversized
