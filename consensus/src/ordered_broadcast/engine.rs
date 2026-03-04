@@ -13,7 +13,7 @@ use super::{
         Ack, Activity, Chunk, ChunkSigner, ChunkVerifier, Context, Error, Lock, Node, Parent,
         Proposal, SequencersProvider,
     },
-    AckManager, Config, TipManager,
+    AckManager, Config, TipManager, Verifier,
 };
 use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -40,7 +40,9 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
+use commonware_utils::{
+    channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum, Faults, N3f1,
+};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -176,6 +178,9 @@ pub struct Engine<
     // This is comprised of votes or certificates.
     ack_manager: AckManager<C::PublicKey, P::Scheme, D>,
 
+    // Buffers incoming acks for batch signature verification.
+    verifier: Verifier<C::PublicKey, P::Scheme, D>,
+
     // The current epoch.
     epoch: Epoch,
 
@@ -243,6 +248,7 @@ impl<
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, P::Scheme, D>::new(),
             ack_manager: AckManager::<C::PublicKey, P::Scheme, D>::new(),
+            verifier: Verifier::<C::PublicKey, P::Scheme, D>::new(0),
             epoch: Epoch::zero(),
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
@@ -303,6 +309,12 @@ impl<
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
         self.epoch = latest;
 
+        // Set verifier quorum for the initial epoch
+        if let Some(scheme) = self.validators_provider.scoped(latest) {
+            let n = scheme.participants().len() as u32;
+            self.verifier.set_quorum(N3f1::quorum(n));
+        }
+
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
         if let Some(ref signer) = self.sequencer_signer {
@@ -348,6 +360,19 @@ impl<
                 debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                 assert!(epoch >= self.epoch);
                 self.epoch = epoch;
+
+                // Update the verifier quorum for the new epoch
+                if let Some(scheme) = self.validators_provider.scoped(epoch) {
+                    let n = scheme.participants().len() as u32;
+                    self.verifier.set_quorum(N3f1::quorum(n));
+                }
+
+                // Prune verifier batches outside the new epoch bounds
+                let (eb_lo, eb_hi) = self.epoch_bounds;
+                self.verifier.prune_epochs(
+                    epoch.saturating_sub(eb_lo),
+                    epoch.saturating_add(eb_hi),
+                );
                 continue;
             },
 
@@ -445,25 +470,20 @@ impl<
                         break;
                     }
                 };
-                let mut guard = self.metrics.acks.guard(Status::Invalid);
                 let ack = match msg {
                     Ok(ack) => ack,
                     Err(err) => {
                         debug!(?err, ?sender, "ack decode failed");
+                        self.metrics.acks.inc(Status::Invalid);
                         continue;
                     }
                 };
                 if let Err(err) = self.validate_ack(&ack, &sender) {
                     debug!(?err, ?sender, "ack validate failed");
+                    self.metrics.acks.inc(Status::Dropped);
                     continue;
                 };
-                if let Err(err) = self.handle_ack(&ack).await {
-                    debug!(?err, ?sender, "ack handle failed");
-                    guard.set(Status::Failure);
-                    continue;
-                }
-                debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "ack");
-                guard.set(Status::Success);
+                self.verifier.add(ack, false);
             },
 
             // Handle completed verification futures.
@@ -492,6 +512,33 @@ impl<
                             .await
                         {
                             debug!(?err, ?context, ?payload, "verified handle failed");
+                        }
+                    }
+                }
+            },
+            on_end => {
+                // Batch-verify buffered acks when ready
+                if self.verifier.ready() {
+                    // Use the scheme for the current epoch for verification
+                    if let Some(scheme) = self.validators_provider.scoped(self.epoch) {
+                        let result = self.verifier.verify(
+                            &mut self.context,
+                            scheme.as_ref(),
+                            &self.strategy,
+                        );
+
+                        // Handle verified acks
+                        for ack in &result.acks {
+                            self.metrics.acks.inc(Status::Success);
+                            if let Err(err) = self.handle_ack(ack).await {
+                                debug!(?err, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "ack handle failed");
+                            }
+                        }
+
+                        // Log invalid signers
+                        for invalid in &result.invalid {
+                            debug!(?invalid, "invalid ack signature");
+                            self.metrics.acks.inc(Status::Invalid);
                         }
                     }
                 }
@@ -570,7 +617,8 @@ impl<
             recipients
         };
 
-        // Handle the ack internally
+        // Handle the ack internally (our own ack, already trusted)
+        self.verifier.add(ack.clone(), true);
         self.handle_ack(&ack).await?;
 
         // Send the ack to the network
@@ -655,6 +703,10 @@ impl<
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
                 .try_set(node.chunk.height.get());
+
+            // Prune verifier batches below the new tip height
+            self.verifier
+                .prune_heights(&node.chunk.sequencer, node.chunk.height);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
@@ -838,7 +890,7 @@ impl<
         Ok(())
     }
 
-    /// Send a  `Node` message to all validators in the given epoch.
+    /// Send a `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
@@ -909,12 +961,13 @@ impl<
         )
     }
 
-    /// Takes a raw ack (from sender) from the p2p network and validates it.
+    /// Validates an ack from the network.
     ///
-    /// Returns the chunk, epoch, and vote if the ack is valid.
-    /// Returns an error if the ack is invalid.
+    /// Checks epoch bounds, sender/signer match, and height range.
+    /// Does NOT verify the cryptographic signature -- that is deferred
+    /// to the batch verifier for efficiency.
     fn validate_ack(
-        &mut self,
+        &self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -960,11 +1013,6 @@ impl<
                     bound_hi,
                 ));
             }
-        }
-
-        // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
-            return Err(Error::InvalidAckSignature);
         }
 
         Ok(())
