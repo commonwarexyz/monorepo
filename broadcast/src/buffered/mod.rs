@@ -43,7 +43,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Provider, Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _,
     };
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, Error, IoBuf, Metrics, Quota, Runner,
@@ -88,7 +88,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: Some(1),
             },
         );
         network.start();
@@ -127,10 +127,14 @@ mod tests {
             }
         }
 
+        // Track all peers so the simulated network allows message delivery.
+        let all_peers = commonware_utils::ordered::Set::from_iter_dedup(peers.clone());
+        oracle.manager().track(0, all_peers).await;
+
         (peers, registrations, oracle)
     }
 
-    async fn spawn_peer_engines(
+    fn spawn_peer_engines(
         context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         registrations: &mut Registrations,
@@ -144,10 +148,10 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
+                Engine::<_, PublicKey, TestMessage, _>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -160,7 +164,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 4, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Send a single broadcast message from the first peer
             let message = TestMessage::shared(b"hello world test message");
@@ -214,7 +218,7 @@ mod tests {
             // Initialize simulation with 1 peer
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 1, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Set up mailbox for Peer A
             let mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
@@ -268,7 +272,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 10, 0.1).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Create a message and grab an arbitrary mailbox
             let message = TestMessage::shared(b"hello world test message");
@@ -313,7 +317,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Broadcast a message
             let message = TestMessage::shared(b"cached message");
@@ -344,7 +348,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Request nonexistent message from two nodes
             let message = TestMessage::shared(b"future message");
@@ -378,7 +382,7 @@ mod tests {
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Broadcast messages exceeding cache size
             let mailbox = mailboxes.get(&peers[0]).unwrap().clone();
@@ -418,7 +422,7 @@ mod tests {
             // Initialize simulation with 3 peers
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 3, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             // Assign mailboxes for peers A, B, C
             let mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
@@ -487,7 +491,7 @@ mod tests {
             let target_peer = peers[1].clone();
             let non_target_peer = peers[2].clone();
 
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
             let sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
 
             let msg = TestMessage::shared(b"selective-broadcast");
@@ -525,7 +529,7 @@ mod tests {
             // three peers so we can observe from a third
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 3, 1.0).await;
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
             let p0 = peers[0].clone();
             let p1 = peers[1].clone();
@@ -581,8 +585,7 @@ mod tests {
             runner.start(|context| async move {
                 let (peers, mut registrations, oracle) =
                     initialize_simulation(context.clone(), 1, 1.0).await;
-                let mailboxes =
-                    spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+                let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
 
                 let sender1 = peers[0].clone();
                 let mb1 = mailboxes.get(&sender1).unwrap().clone();
@@ -634,7 +637,7 @@ mod tests {
             let victim = peers[2].clone();
 
             let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
-            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &oracle, &mut registrations);
             let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
             let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
 
@@ -683,10 +686,10 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage>::new(engine_context.clone(), config);
+                Engine::<_, PublicKey, TestMessage, _>::new(engine_context.clone(), config);
             engine.start((sender, receiver));
 
             let missing = TestMessage::shared(b"never-arrives");
@@ -753,7 +756,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    async fn spawn_peer_engines_with_handles(
+    fn spawn_peer_engines_with_handles(
         context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         registrations: &mut Registrations,
@@ -772,10 +775,10 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage>::new(ctx.clone(), config);
+                Engine::<_, PublicKey, TestMessage, _>::new(ctx.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
@@ -789,7 +792,7 @@ mod tests {
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.clone(), 2, 1.0).await;
             let (mut mailboxes, handles) =
-                spawn_peer_engines_with_handles(context.clone(), &oracle, &mut registrations).await;
+                spawn_peer_engines_with_handles(context.clone(), &oracle, &mut registrations);
 
             // Broadcast a message to verify network is functional
             let message = TestMessage::shared(b"test message");
@@ -843,7 +846,7 @@ mod tests {
                 initialize_simulation(context.clone(), 2, 1.0).await;
 
             let (mailboxes, handles) =
-                spawn_peer_engines_with_handles(context.clone(), &oracle, &mut registrations).await;
+                spawn_peer_engines_with_handles(context.clone(), &oracle, &mut registrations);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(100)).await;
@@ -905,9 +908,7 @@ mod tests {
             let peer_b = peers[1].clone();
             let peer_c = peers[2].clone();
 
-            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
-
-            // Spawn peer B's engine with the peer set subscription.
+            // Spawn peer B's engine with its own manager.
             let network_b = registrations.remove(&peer_b).unwrap();
             let config_b = Config {
                 public_key: peer_b.clone(),
@@ -915,10 +916,10 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: peer_set_rx,
+                peer_provider: oracle.manager(),
             };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage>::new(context.with_label("peer_b"), config_b);
+                Engine::<_, PublicKey, TestMessage, _>::new(context.with_label("peer_b"), config_b);
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -932,9 +933,9 @@ mod tests {
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
-                    peer_set_subscription: oracle.manager().subscribe().await,
+                    peer_provider: oracle.manager(),
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -956,7 +957,7 @@ mod tests {
 
             // Send a peer set update excluding peer A.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
-            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            oracle.manager().track(1, remaining).await;
             context.sleep(A_JIFFY).await;
 
             // Peer A's deque was evicted; the message should be gone.
@@ -978,9 +979,7 @@ mod tests {
             let peer_b = peers[1].clone();
             let peer_c = peers[2].clone();
 
-            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
-
-            // Spawn peer B with subscription.
+            // Spawn peer B with its own manager.
             let network_b = registrations.remove(&peer_b).unwrap();
             let config_b = Config {
                 public_key: peer_b.clone(),
@@ -988,10 +987,10 @@ mod tests {
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_set_subscription: peer_set_rx,
+                peer_provider: oracle.manager(),
             };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage>::new(context.with_label("peer_b"), config_b);
+                Engine::<_, PublicKey, TestMessage, _>::new(context.with_label("peer_b"), config_b);
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1005,9 +1004,9 @@ mod tests {
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
-                    peer_set_subscription: oracle.manager().subscribe().await,
+                    peer_provider: oracle.manager(),
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1027,7 +1026,7 @@ mod tests {
 
             // Evict peer A only; C is still tracked.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
-            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            oracle.manager().track(1, remaining).await;
             context.sleep(A_JIFFY).await;
 
             // Message should still be available (C's deque still holds it).

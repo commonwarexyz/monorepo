@@ -181,7 +181,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
-    Blocker, PeerSetSubscription, Receiver, Recipients, Sender,
+    Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -235,11 +235,12 @@ enum BlockSubscriptionKey<D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, S, X, C, H, B, T>
+pub struct Config<P, S, X, D, C, H, B, T>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
     X: Blocker<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
@@ -281,21 +282,22 @@ where
     /// capacity.
     pub background_channel_capacity: usize,
 
-    /// Subscription to peer set changes. Per-peer shard buffers
+    /// Provider for peer set information. Per-peer shard buffers
     /// are freed when a peer leaves all tracked peer sets.
-    pub peer_set_subscription: PeerSetSubscription<P>,
+    pub peer_provider: D,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
-pub struct Engine<E, S, X, C, H, B, P, T>
+pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
+    D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
@@ -332,8 +334,8 @@ where
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
 
-    /// Subscription to peer set changes.
-    peer_set_subscription: PeerSetSubscription<P>,
+    /// Provider for peer set information.
+    peer_provider: D,
 
     /// Latest union of tracked peers from the peer set subscription.
     tracked_peers: Set<P>,
@@ -361,12 +363,13 @@ where
     metrics: ShardMetrics,
 }
 
-impl<E, S, X, C, H, B, P, T> Engine<E, S, X, C, H, B, P, T>
+impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
@@ -374,7 +377,7 @@ where
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+    pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -389,7 +392,7 @@ where
                 state: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
-                peer_set_subscription: config.peer_set_subscription,
+                peer_provider: config.peer_provider,
                 tracked_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
@@ -429,6 +432,7 @@ where
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
+        let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -455,7 +459,7 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
@@ -1553,7 +1557,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
-        Manager as _, Provider as _,
+        Manager as _,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
@@ -1678,9 +1682,10 @@ mod tests {
     type O = Oracle<P, deterministic::Context>;
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
-    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, S, H, B, P, Sequential>;
+    type D = simulated::Manager<P, deterministic::Context>;
+    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
     type ChurningShardEngine<S> =
-        Engine<deterministic::Context, ChurningProvider, X, S, H, B, P, Sequential>;
+        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -1833,7 +1838,7 @@ mod tests {
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
-                        peer_set_subscription: oracle.manager().subscribe().await,
+                        peer_provider: oracle.manager(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -1870,7 +1875,7 @@ mod tests {
                         mailbox_size: 1024,
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
-                        peer_set_subscription: oracle.manager().subscribe().await,
+                        peer_provider: oracle.manager(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -3794,7 +3799,7 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config: Config<_, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -3805,7 +3810,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
@@ -3929,7 +3934,7 @@ mod tests {
             // and `ingest_buffered_shards`). Strong-shard validation is the third.
             // Any additional lookup for epoch 0 churns to `None`.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
-            let broadcaster_config: Config<_, _, _, C, _, _, _> = Config {
+            let broadcaster_config: Config<_, _, _, _, C, _, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -3940,7 +3945,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
                 ChurningShardEngine::new(context.with_label("broadcaster"), broadcaster_config);
@@ -3952,7 +3957,7 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme should be created");
-            let receiver_config: Config<_, _, _, C, _, _, _> = Config {
+            let receiver_config: Config<_, _, _, _, C, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -3963,7 +3968,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: oracle.manager().subscribe().await,
+                peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
                 ShardEngine::new(context.with_label("receiver"), receiver_config);
@@ -4624,7 +4629,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: Some(1),
                 },
             );
             network.start();
@@ -4658,8 +4663,9 @@ mod tests {
                 .await
                 .expect("link should be added");
 
-            // Create a peer set subscription for the receiver's engine.
-            let (peer_set_tx, peer_set_rx) = commonware_utils::channel::mpsc::unbounded_channel();
+            // Track the full participant set so the engine sees all peers.
+            oracle.manager().track(0, participants.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
@@ -4668,7 +4674,7 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -4679,7 +4685,7 @@ mod tests {
                 mailbox_size: 1024,
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
-                peer_set_subscription: peer_set_rx,
+                peer_provider: oracle.manager(),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.with_label("receiver"), config);
@@ -4713,7 +4719,7 @@ mod tests {
             // Now send a peer set update that excludes the leader.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
-            peer_set_tx.send((1, remaining.clone(), remaining)).unwrap();
+            oracle.manager().track(1, remaining).await;
             context.sleep(Duration::from_millis(10)).await;
 
             // Announce the leader. Buffered shards from the leader should have been
