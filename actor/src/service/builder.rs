@@ -54,6 +54,7 @@ where
 ///
 /// Polling is biased and deterministic:
 /// - shutdown is always checked first
+/// - [`Actor::on_external_priority`] is polled before lanes
 /// - lane polling is declaration-order biased
 /// - the actor-defined [`Actor::on_external`] future is polled after lanes
 ///
@@ -67,8 +68,9 @@ where
 /// - Returning `Err` from [`Actor::on_read_only`] or [`Actor::on_read_write`]
 ///   is fatal: the error is logged, remaining in-flight reads are drained,
 ///   and then [`Actor::on_shutdown`] is called before the loop exits.
-/// - A lane closing (`None`) or [`Actor::on_external`] returning `None`
-///   triggers [`Actor::on_shutdown`] before exiting.
+/// - A lane closing (`None`), [`Actor::on_external_priority`] returning
+///   `None`, or [`Actor::on_external`] returning `None` triggers
+///   [`Actor::on_shutdown`] before exiting.
 ///
 /// For single-lane actors with mailbox ergonomics, use
 /// [`ServiceBuilder::build`] or [`ServiceBuilder::build_with_capacity`].

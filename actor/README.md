@@ -166,6 +166,7 @@ Optional hooks:
 - `on_startup`, `on_shutdown`
 - `preprocess`, `postprocess`
 - `max_lane_batch` to tune same-lane batch size per loop iteration
+- `on_external_priority` to map high-priority external signals into read-write ingress
 - `on_external` to map external signals into read-write ingress
 
 ### External Signals
@@ -287,6 +288,7 @@ let (_mailbox, _service) = ServiceBuilder::new(actor)
 ### Multi lane (priority by declaration order)
 
 Use lanes when you want separate queues (for example, control vs data).
+After the runtime shutdown signal, `on_external_priority` is polled before lanes.
 Lane polling is declaration-order biased.
 When batching is enabled (`max_lane_batch > 1`), the winning lane can process
 multiple ready messages before the loop polls other lanes again.
@@ -313,7 +315,7 @@ let (_lanes, _service) = ServiceBuilder::new(actor)
 
 ### Graceful shutdown behavior
 
-On graceful exits (runtime stop signal, lane closure, or `on_external` exhaustion):
+On graceful exits (runtime stop signal, lane closure, `on_external_priority` exhaustion, or `on_external` exhaustion):
 
 - in-flight read-only tasks are drained first
 - then `on_shutdown` runs once

@@ -107,6 +107,117 @@ fn test_actor_on_external() {
     });
 }
 
+struct ExternalPriorityOrderActor {
+    log: Arc<Mutex<Vec<&'static str>>>,
+    priority_ready: bool,
+    external_ready: bool,
+}
+
+ingress! {
+    ExternalPriorityOrderMailbox,
+
+    pub tell FromLane;
+    tell FromPriority;
+    tell FromExternal;
+}
+
+impl<E: Spawner> Actor<E> for ExternalPriorityOrderActor {
+    type Mailbox = ExternalPriorityOrderMailbox;
+    type Ingress = ExternalPriorityOrderMailboxMessage;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    async fn on_read_only(
+        _context: E,
+        _snapshot: Self::Snapshot,
+        _message: ExternalPriorityOrderMailboxReadOnlyMessage,
+    ) -> Result<(), Self::Error> {
+        unreachable!("external priority ordering mailbox has no read-only ingress")
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: ExternalPriorityOrderMailboxReadWriteMessage,
+    ) -> Result<(), Self::Error> {
+        match message {
+            ExternalPriorityOrderMailboxReadWriteMessage::FromLane => {
+                self.log.lock().push("lane");
+                Ok(())
+            }
+            ExternalPriorityOrderMailboxReadWriteMessage::FromPriority => {
+                self.log.lock().push("priority");
+                Ok(())
+            }
+            ExternalPriorityOrderMailboxReadWriteMessage::FromExternal => {
+                self.log.lock().push("external");
+                Ok(())
+            }
+        }
+    }
+
+    fn on_external_priority(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+    ) -> impl std::future::Future<Output = Option<ExternalPriorityOrderMailboxReadWriteMessage>>
+           + Send
+           + 'static {
+        if self.priority_ready {
+            self.priority_ready = false;
+            futures::future::Either::Left(futures::future::ready(Some(
+                ExternalPriorityOrderMailboxReadWriteMessage::FromPriority,
+            )))
+        } else {
+            futures::future::Either::Right(futures::future::pending())
+        }
+    }
+
+    async fn on_external(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+    ) -> Option<ExternalPriorityOrderMailboxReadWriteMessage> {
+        if self.external_ready {
+            self.external_ready = false;
+            Some(ExternalPriorityOrderMailboxReadWriteMessage::FromExternal)
+        } else {
+            std::future::pending::<Option<ExternalPriorityOrderMailboxReadWriteMessage>>().await
+        }
+    }
+}
+
+#[test]
+fn test_external_priority_polled_before_lanes_and_external() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let actor = ExternalPriorityOrderActor {
+            log: log.clone(),
+            priority_ready: true,
+            external_ready: true,
+        };
+        let (mailbox, service) =
+            ServiceBuilder::new(actor).build(context.with_label("external_priority_order"));
+
+        mailbox.from_lane().await.expect("tell failed");
+        service.start();
+
+        for _ in 0..20 {
+            if log.lock().len() == 3 {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(log.lock().as_slice(), &["priority", "lane", "external"]);
+    });
+}
+
 struct CounterActor {
     counter: u64,
     started: Arc<AtomicBool>,
