@@ -723,6 +723,88 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_get_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Three items at the same index
+            archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
+            archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
+            archive.put_multi(5, test_key("ccc"), 30).await.unwrap();
+
+            // One item at a different index
+            archive.put_multi(7, test_key("ddd"), 40).await.unwrap();
+
+            // get_all returns all values at the index in insertion order
+            let all = archive.get_all(5).await.unwrap();
+            assert_eq!(all, Some(vec![10, 20, 30]));
+
+            // Single-item index returns one element
+            let all = archive.get_all(7).await.unwrap();
+            assert_eq!(all, Some(vec![40]));
+
+            // Missing index returns None
+            let all = archive.get_all(99).await.unwrap();
+            assert_eq!(all, None);
+
+            // Archive::get(Index) still returns only the first
+            assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_get_all_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            archive.put_multi(1, test_key("aaa"), 10).await.unwrap();
+            archive.put_multi(1, test_key("bbb"), 20).await.unwrap();
+            archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
+
+            // Prune below index 3
+            archive.prune(3).await.unwrap();
+
+            // Pruned index returns None
+            let all = archive.get_all(1).await.unwrap();
+            assert_eq!(all, None);
+
+            // Surviving index still works
+            let all = archive.get_all(3).await.unwrap();
+            assert_eq!(all, Some(vec![30]));
+        });
+    }
+
+    #[test_traced]
     fn test_multi_put_preserves_archive_put_semantics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

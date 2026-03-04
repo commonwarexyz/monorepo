@@ -446,6 +446,27 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
     crate::archive::MultiArchive for Archive<T, E, K, V>
 {
+    async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
+        self.gets.inc();
+
+        let positions = match self.indices.get(&index) {
+            Some(positions) => positions,
+            None => return Ok(None),
+        };
+        let section = self.section(index);
+        let mut values = Vec::with_capacity(positions.len());
+        for position in positions {
+            let entry = self.oversized.get(section, *position).await?;
+            let (value_offset, value_size) = entry.value_location();
+            let value = self
+                .oversized
+                .get_value(section, value_offset, value_size)
+                .await?;
+            values.push(value);
+        }
+        Ok(Some(values))
+    }
+
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);

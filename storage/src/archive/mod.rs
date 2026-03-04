@@ -72,6 +72,10 @@ pub trait Archive: Send {
     }
 
     /// Retrieve an item from [Archive].
+    ///
+    /// Note that if the [Archive] is a [MultiArchive], there may be multiple values associated with the
+    /// same [Identifier::Index]. If there are multiple values, the first stored will be returned. Use
+    /// [MultiArchive::get_all] to retrieve all values at an index.
     fn get<'a>(
         &'a self,
         identifier: Identifier<'a, Self::Key>,
@@ -119,6 +123,14 @@ pub trait Archive: Send {
 /// for workloads where a logical grouping (e.g., a consensus view) may contain
 /// multiple entries.
 pub trait MultiArchive: Archive {
+    /// Retrieve all values stored at the given index.
+    ///
+    /// Returns `None` if the index does not exist or has been pruned.
+    fn get_all(
+        &self,
+        index: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
+
     /// Store an item, allowing multiple items at the same index.
     ///
     /// Multiple items may share the same `index` as long as their keys differ.
