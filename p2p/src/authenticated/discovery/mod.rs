@@ -121,14 +121,15 @@
 //!
 //! ## IP Poisoning
 //!
-//! A malicious peer can claim an ingress that collides with an honest peer's ingress
-//! to increase the number of incorrect dial attempts directed at the honest peer. Connections
-//! are authenticated at handshake time against the expected public key, so a peer at a poisoned
-//! IP cannot silently impersonate a different authorized identity, however, it can delay
-//! connection to the correct peer because of ingress-side IP/subnet handshake rate limiting.
+//! A malicious peer can claim an ingress socket address that collides with an honest peer, drawing invalid dial attempts to
+//! the honest peer (where we expect the malicious public key rather than the honest public key).
 //!
-//! We mitigate this by shuffling dial order on each dial queue refresh, so retries should
-//! eventually reach the targeted honest peer.
+//! Because we rate limit inbound connection attempts per IP/subnet, this poisoning can lead to us dropping legitimate
+//! dial attempts (if quota was already exhausted on useless dial attempts). Recall, an honest dialer doesn't know which public
+//! key actually resides at an address and must try all.
+//!
+//! To mitigate this issue, we shuffle peer dial order on each dial queue refresh. This ensures we should eventually dial a poisoned
+//! IP with the correct public key before hitting the rate limit imposed by the listener at said IP.
 //!
 //! ## Message Delivery
 //!
