@@ -152,12 +152,12 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// generated against the grafted MMR are compatible with the ops MMR. This adapter
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
-pub(super) struct GraftedHasher<H: HasherTrait> {
+pub(super) struct GraftedHasher<H: HasherTrait<crate::mmr::Mmr>> {
     inner: H,
     grafting_height: u32,
 }
 
-impl<H: HasherTrait> GraftedHasher<H> {
+impl<H: HasherTrait<crate::mmr::Mmr>> GraftedHasher<H> {
     pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
             inner,
@@ -166,7 +166,7 @@ impl<H: HasherTrait> GraftedHasher<H> {
     }
 }
 
-impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
+impl<H: HasherTrait<crate::mmr::Mmr>> HasherTrait<crate::mmr::Mmr> for GraftedHasher<H> {
     type Digest = H::Digest;
     type Inner = H::Inner;
 
@@ -200,7 +200,7 @@ impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
         self.inner.inner()
     }
 
-    fn fork(&self) -> impl HasherTrait<Digest = Self::Digest> {
+    fn fork(&self) -> impl HasherTrait<crate::mmr::Mmr, Digest = Self::Digest> {
         GraftedHasher {
             inner: self.inner.fork(),
             grafting_height: self.grafting_height,
@@ -243,7 +243,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait for Verifier<'_, H> {
+impl<H: CHasher> HasherTrait<crate::mmr::Mmr> for Verifier<'_, H> {
     type Digest = H::Digest;
     type Inner = H;
 
@@ -251,7 +251,7 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
         self.hasher.leaf_digest(pos, element)
     }
 
-    fn fork(&self) -> impl HasherTrait<Digest = H::Digest> {
+    fn fork(&self) -> impl HasherTrait<crate::mmr::Mmr, Digest = H::Digest> {
         Verifier::<H> {
             hasher: StandardHasher::new(),
             grafting_height: self.grafting_height,

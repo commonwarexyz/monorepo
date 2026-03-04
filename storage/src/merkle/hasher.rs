@@ -2,6 +2,7 @@
 
 use super::{Location, MerkleFamily, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
@@ -69,18 +70,30 @@ pub trait Hasher<F: MerkleFamily>: Send + Sync {
 }
 
 /// The standard hasher for Merkle-family structures. Leverages no external data.
-pub struct Standard<H: CHasher> {
+///
+/// The type parameter `F` selects the Merkle family (e.g. MMR, MMB). Each family provides
+/// its own [`Hasher<F>`] implementation with a family-specific `root()`.
+pub struct Standard<F: MerkleFamily, H: CHasher> {
     hasher: H,
+    _family: PhantomData<F>,
 }
 
-impl<H: CHasher> Standard<H> {
+impl<F: MerkleFamily, H: CHasher> Standard<F, H> {
     /// Creates a new [Standard] hasher.
     pub fn new() -> Self {
-        Self { hasher: H::new() }
+        Self {
+            hasher: H::new(),
+            _family: PhantomData,
+        }
+    }
+
+    /// Access the inner cryptographic hasher (for use by family-specific [`Hasher`] impls).
+    pub(crate) const fn inner_mut(&mut self) -> &mut H {
+        &mut self.hasher
     }
 }
 
-impl<H: CHasher> Default for Standard<H> {
+impl<F: MerkleFamily, H: CHasher> Default for Standard<F, H> {
     fn default() -> Self {
         Self::new()
     }

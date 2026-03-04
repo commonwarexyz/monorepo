@@ -181,7 +181,7 @@ pub(crate) fn build_range_proof<D, H>(
 ) -> Result<Proof<D>, Error>
 where
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: Hasher<super::Mmb, Digest = D>,
 {
     let bp = nodes_required_for_range_proof(leaves, range)?;
 
@@ -223,7 +223,7 @@ fn reconstruct_peak_from_range<'a, D, H, E, S>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: Hasher<super::Mmb, Digest = D>,
     E: Iterator,
     E::Item: AsRef<[u8]>,
     S: Iterator<Item = &'a D>,
@@ -293,7 +293,7 @@ impl<D: Digest> Proof<D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<super::Mmb, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -387,7 +387,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<super::Mmb, Digest = D>,
         E: AsRef<[u8]>,
     {
         self.reconstruct_root(hasher, elements, start_loc)
@@ -404,7 +404,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<super::Mmb, Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }

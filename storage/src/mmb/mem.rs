@@ -226,7 +226,10 @@ impl<D: Digest> CleanMmb<D> {
     /// count for `config.pruned_to_pos`.
     ///
     /// Returns [Error::InvalidSize] if the MMB size is invalid.
-    pub fn init(config: Config<D>, hasher: &mut impl Hasher<Digest = D>) -> Result<Self, Error> {
+    pub fn init(
+        config: Config<D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
+    ) -> Result<Self, Error> {
         // Validate that the total size is valid
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
@@ -255,14 +258,14 @@ impl<D: Digest> CleanMmb<D> {
     }
 
     /// Create a new, empty MMB in the Clean state.
-    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<super::Mmb, Digest = D>) -> Self {
         let mmb: DirtyMmb<D> = Default::default();
         mmb.merkleize(hasher, None)
     }
 
     /// Re-initialize the MMB with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn from_components(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         nodes: Vec<D>,
         pruned_to_pos: Position,
         pinned_nodes: Vec<D>,
@@ -332,7 +335,7 @@ impl<D: Digest> CleanMmb<D> {
     /// This method will change the root and invalidate any previous inclusion proofs.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -351,7 +354,7 @@ impl<D: Digest> CleanMmb<D> {
     /// Returns [Error::MissingNode] if a required node has been pruned.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         range: Range<Location>,
     ) -> Result<crate::mmb::proof::Proof<D>, Error> {
         crate::mmb::proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
@@ -467,7 +470,11 @@ impl<D: Digest> DirtyMmb<D> {
 
     /// Add `element` to the MMB and return its position.
     /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub fn add<H: Hasher<Digest = D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
+    pub fn add<H: Hasher<super::Mmb, Digest = D>>(
+        &mut self,
+        hasher: &mut H,
+        element: &[u8],
+    ) -> Position {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -501,7 +508,7 @@ impl<D: Digest> DirtyMmb<D> {
     /// [CleanMmb].
     pub fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
     ) -> CleanMmb<D> {
         #[cfg(feature = "std")]
@@ -528,7 +535,7 @@ impl<D: Digest> DirtyMmb<D> {
         }
     }
 
-    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
+    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<super::Mmb, Digest = D>) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
         nodes.sort_by_key(|a| a.1);
@@ -550,7 +557,7 @@ impl<D: Digest> DirtyMmb<D> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         pool: ThreadPool,
         min_to_parallelize: usize,
     ) {
@@ -594,7 +601,7 @@ impl<D: Digest> DirtyMmb<D> {
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         pool: ThreadPool,
         same_height: &[Position],
         height: u32,
@@ -683,7 +690,7 @@ impl<D: Digest> DirtyMmb<D> {
     /// Update the leaf at `loc` to `element`.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -698,7 +705,7 @@ impl<D: Digest> DirtyMmb<D> {
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
@@ -743,7 +750,7 @@ impl<D: Digest> DirtyMmb<D> {
     #[cfg(feature = "std")]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
         pool: ThreadPool,
         updates: &[(Location, T)],
         positions: &[Position],
@@ -779,7 +786,7 @@ mod tests {
     use commonware_utils::NZUsize;
 
     /// Build a test MMB by adding `elements` leaves, where leaf i has value hash(i).
-    fn build_test_mmb<H: super::Hasher<Digest = sha256::Digest>>(
+    fn build_test_mmb<H: super::Hasher<crate::mmb::Mmb, Digest = sha256::Digest>>(
         hasher: &mut H,
         mmb: CleanMmb<sha256::Digest>,
         elements: u64,

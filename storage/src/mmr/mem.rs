@@ -223,7 +223,10 @@ impl<D: Digest> CleanMmr<D> {
     /// count for `config.pruned_to_pos`.
     ///
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(config: Config<D>, hasher: &mut impl Hasher<Digest = D>) -> Result<Self, Error> {
+    pub fn init(
+        config: Config<D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
+    ) -> Result<Self, Error> {
         // Validate that the total size is valid
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
@@ -258,14 +261,14 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Create a new, empty MMR in the Clean state.
-    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<super::Mmr, Digest = D>) -> Self {
         let mmr: DirtyMmr<D> = Default::default();
         mmr.merkleize(hasher, None)
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn from_components(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         nodes: Vec<D>,
         pruned_to_pos: Position,
         pinned_nodes: Vec<D>,
@@ -338,7 +341,7 @@ impl<D: Digest> CleanMmr<D> {
     /// Use of this method will prevent using this structure as a base mmr for grafting.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -480,7 +483,11 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Add `element` to the MMR and return its position.
     /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub fn add<H: Hasher<Digest = D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
+    pub fn add<H: Hasher<super::Mmr, Digest = D>>(
+        &mut self,
+        hasher: &mut H,
+        element: &[u8],
+    ) -> Position {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -516,7 +523,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// [CleanMmr].
     pub fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
     ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
@@ -542,7 +549,7 @@ impl<D: Digest> DirtyMmr<D> {
         }
     }
 
-    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
+    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<super::Mmr, Digest = D>) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
         nodes.sort_by_key(|a| a.1);
@@ -570,7 +577,7 @@ impl<D: Digest> DirtyMmr<D> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         pool: ThreadPool,
         min_to_parallelize: usize,
     ) {
@@ -614,7 +621,7 @@ impl<D: Digest> DirtyMmr<D> {
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         pool: ThreadPool,
         same_height: &[Position],
         height: u32,
@@ -675,7 +682,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// Update the leaf at `loc` to `element`.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -691,7 +698,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
@@ -735,7 +742,7 @@ impl<D: Digest> DirtyMmr<D> {
     #[cfg(feature = "std")]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         pool: ThreadPool,
         updates: &[(Location, T)],
         positions: &[Position],

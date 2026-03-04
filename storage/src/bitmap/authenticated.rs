@@ -227,7 +227,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl MmrHasher<crate::mmr::Mmr, Digest = D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -308,7 +308,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl MmrHasher<crate::mmr::Mmr, Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -464,7 +464,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl MmrHasher<crate::mmr::Mmr, Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -565,7 +565,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl MmrHasher<crate::mmr::Mmr, Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;

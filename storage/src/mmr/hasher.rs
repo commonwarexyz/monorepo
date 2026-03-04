@@ -1,29 +1,23 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
-use super::{Location, Mmr, Position};
+use super::{Location, Mmr};
 use crate::merkle;
 use commonware_cryptography::Hasher as CHasher;
+pub use merkle::hasher::Hasher;
 
-/// A trait for computing the various digests of an MMR.
-///
-/// This is a blanket alias for [`merkle::hasher::Hasher<Mmr>`] so that existing code can continue
-/// to write `H: Hasher<Digest = D>` without specifying the family marker.
-pub trait Hasher: merkle::hasher::Hasher<Mmr> {}
-impl<T: merkle::hasher::Hasher<Mmr>> Hasher for T {}
+/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
+/// external data.
+pub type Standard<H> = merkle::hasher::Standard<Mmr, H>;
 
-/// The standard hasher to use with an MMR. Re-exports the shared [`merkle::hasher::Standard`]
-/// with the MMR-specific [`root`](merkle::hasher::Hasher::root) implementation.
-pub type Standard<H> = merkle::hasher::Standard<H>;
-
-impl<H: CHasher> merkle::hasher::Hasher<Mmr> for Standard<H> {
+impl<H: CHasher> Hasher<Mmr> for Standard<H> {
     type Digest = H::Digest;
     type Inner = H;
 
     fn inner(&mut self) -> &mut H {
-        &mut self.hasher
+        self.inner_mut()
     }
 
-    fn fork(&self) -> impl merkle::hasher::Hasher<Mmr, Digest = H::Digest> {
+    fn fork(&self) -> impl Hasher<Mmr, Digest = H::Digest> {
         Self::new()
     }
 
@@ -44,7 +38,7 @@ impl<H: CHasher> merkle::hasher::Hasher<Mmr> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location};
+    use crate::mmr::{mem::Mmr, Location, Position};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 

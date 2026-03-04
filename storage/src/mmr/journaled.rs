@@ -241,7 +241,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         cfg: Config,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -415,7 +415,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
@@ -875,7 +875,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     }
 
     /// Merkleize the MMR and compute the root digest.
-    pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
+    pub fn merkleize(self, h: &mut impl Hasher<super::Mmr, Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();
         CleanMmr {
             inner: RwLock::new(Inner {
@@ -898,7 +898,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     ///   succeeds.
     /// - Memory usage grows by O(log2(n)) with each node added until data is flushed to disk by
     ///   `sync`.
-    pub fn add(&self, h: &mut impl Hasher<Digest = D>, element: &[u8]) -> Result<Position, Error> {
+    pub fn add(
+        &self,
+        h: &mut impl Hasher<super::Mmr, Digest = D>,
+        element: &[u8],
+    ) -> Result<Position, Error> {
         Ok(self.inner.write().mem_mmr.add(h, element))
     }
 
@@ -977,7 +981,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// a partial write for testing failure scenarios.
     pub async fn simulate_partial_sync(
         self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
         write_limit: usize,
     ) -> Result<(), Error> {
         if write_limit == 0 {
