@@ -10,7 +10,7 @@ use crate::{
     mmr::{Location, Position},
     qmdb::{
         self,
-        any::states::DbAny,
+        any::traits::DbAny,
         operation::Operation as OperationTrait,
         store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{

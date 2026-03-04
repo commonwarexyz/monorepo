@@ -4,7 +4,7 @@
 pub mod tests {
     use crate::{
         kv::{Deletable as _, Gettable, Updatable as _},
-        qmdb::{any::states::DbAny, Error},
+        qmdb::{any::traits::DbAny, Error},
     };
     use commonware_codec::Codec;
     use commonware_cryptography::{sha256, Hasher};

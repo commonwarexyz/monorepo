@@ -9,7 +9,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::qmdb::{any::states::DbAny, store::LogStore, Error};
+use commonware_storage::qmdb::{any::traits::DbAny, store::LogStore, Error};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 

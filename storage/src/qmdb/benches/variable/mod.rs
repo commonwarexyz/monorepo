@@ -6,7 +6,7 @@ use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
         any::{
-            ordered::variable::Db as OVariable, states::DbAny,
+            ordered::variable::Db as OVariable, traits::DbAny,
             unordered::variable::Db as UVariable, VariableConfig as AConfig,
         },
         current::{

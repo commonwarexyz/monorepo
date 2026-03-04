@@ -28,7 +28,7 @@ pub mod tests {
     use crate::{
         mmr::Location,
         qmdb::{
-            any::states::DbAny,
+            any::traits::DbAny,
             current::BitmapPrunedBits,
             store::{
                 batch_tests::{TestKey, TestValue},

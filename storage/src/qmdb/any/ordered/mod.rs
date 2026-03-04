@@ -1,5 +1,5 @@
 #[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::any::states::PersistableMutableLog;
+use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
@@ -539,7 +539,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> crate::qmdb::any::states::DbAny for Db<E, C, I, H, Update<K, V>>
+impl<E, K, V, C, I, H> crate::qmdb::any::traits::DbAny for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Key,
@@ -566,7 +566,7 @@ mod test {
     use super::*;
     use crate::{
         kv::Gettable,
-        qmdb::{any::states::DbAny, store::LogStore},
+        qmdb::{any::traits::DbAny, store::LogStore},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::deterministic::Context;

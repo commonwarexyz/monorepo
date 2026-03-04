@@ -37,7 +37,7 @@ use tracing::warn;
 pub(crate) mod db;
 pub(crate) mod operation;
 #[cfg(any(test, feature = "test-traits"))]
-pub mod states;
+pub mod traits;
 pub(crate) mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
@@ -285,7 +285,7 @@ pub(crate) mod test {
 
     use crate::{
         mmr::Location,
-        qmdb::{any::states::DbAny, store::MerkleizedStore},
+        qmdb::{any::traits::DbAny, store::MerkleizedStore},
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};

@@ -13,7 +13,7 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _,
 };
-use commonware_storage::qmdb::{any::states::DbAny, store::LogStore};
+use commonware_storage::qmdb::{any::traits::DbAny, store::LogStore};
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 

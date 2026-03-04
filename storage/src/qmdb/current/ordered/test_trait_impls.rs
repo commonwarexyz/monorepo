@@ -5,7 +5,7 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{
-            ordered::variable::Operation as VariableOperation, states::DbAny, FixedValue,
+            ordered::variable::Operation as VariableOperation, traits::DbAny, FixedValue,
             VariableValue,
         },
         current::BitmapPrunedBits,

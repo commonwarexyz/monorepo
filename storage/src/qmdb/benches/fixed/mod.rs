@@ -11,7 +11,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            states::DbAny,
+            traits::DbAny,
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },

@@ -509,7 +509,7 @@ pub mod tests {
     use super::{ordered, unordered, FixedConfig, VariableConfig};
     use crate::{
         qmdb::{
-            any::states::DbAny,
+            any::traits::DbAny,
             store::{
                 batch_tests::{TestKey, TestValue},
                 LogStore,
