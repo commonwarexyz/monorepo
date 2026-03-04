@@ -28,12 +28,11 @@
 //! from trusted proxies cause the connection to be rejected.
 
 use crate::Error;
+/// Re-export for convenience so users don't need to add ipnet as a dependency.
+pub use ipnet::IpNet;
 use proxy_header::{ParseConfig, ProxyHeader};
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncBufReadExt;
-
-/// Re-export for convenience so users don't need to add ipnet as a dependency.
-pub use ipnet::IpNet;
 
 /// Configuration for PROXY protocol support.
 ///
@@ -118,4 +117,3 @@ pub fn parse_from_bytes(data: &[u8]) -> Result<ParseResult, Error> {
         Err(_) => Err(Error::ReadFailed),
     }
 }
-
