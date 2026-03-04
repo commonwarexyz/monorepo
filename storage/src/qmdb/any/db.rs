@@ -354,7 +354,7 @@ where
     }
 }
 
-// Funtionality shared across NonDurable states.
+// Functionality shared across NonDurable states.
 impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
     E: Storage + Clock + Metrics,
