@@ -35,7 +35,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle},
-    Manager, Provider,
+    Manager,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner};
@@ -372,7 +372,7 @@ impl TestHarness for StandardHarness {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_set_subscription: oracle.manager().subscribe().await,
+            peer_provider: oracle.manager(),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
@@ -602,7 +602,7 @@ impl TestHarness for StandardHarness {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_set_subscription: oracle.manager().subscribe().await,
+            peer_provider: oracle.manager(),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
@@ -1210,7 +1210,7 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -1221,7 +1221,7 @@ impl TestHarness for CodingHarness {
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
-            peer_set_subscription: oracle.manager().subscribe().await,
+            peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
@@ -1387,7 +1387,7 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -1398,7 +1398,7 @@ impl TestHarness for CodingHarness {
             mailbox_size: 10,
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
-            peer_set_subscription: oracle.manager().subscribe().await,
+            peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
