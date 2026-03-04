@@ -17,6 +17,9 @@ use crate::{
     },
     Persistable,
 };
+
+/// Helper type alias: the journaled MMR type for a given mem state `S` and digest `D`.
+type JournaledMmr<E, D, S> = <S as State<D>>::JournaledMmr<E>;
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -53,7 +56,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, S>,
+    pub(crate) mmr: JournaledMmr<E, H::Digest, S>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.

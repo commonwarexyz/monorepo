@@ -1,29 +1,15 @@
-//! Defines the abstraction allowing MMRs with differing backends and representations to be
-//! uniformly accessed.
+//! MMR-specific storage trait re-export and implementations.
 
-use crate::mmr::{mem::CleanMmr, Error, Position};
+pub use crate::merkle::storage::Storage;
+use crate::mmr::{mem::CleanMmr, Mmr, Position};
 use commonware_cryptography::Digest;
-use std::future::Future;
 
-/// A trait for accessing MMR digests from storage.
-pub trait Storage<D: Digest>: Send + Sync {
-    /// Return the number of elements in the MMR.
-    fn size(&self) -> impl Future<Output = Position> + Send;
-
-    /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(&self, position: Position)
-        -> impl Future<Output = Result<Option<D>, Error>> + Send;
-}
-
-impl<D> Storage<D> for CleanMmr<D>
-where
-    D: Digest,
-{
+impl<D: Digest> Storage<Mmr, D> for CleanMmr<D> {
     async fn size(&self) -> Position {
         self.size()
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, crate::merkle::Error<Mmr>> {
         Ok(Self::get_node(self, position))
     }
 }

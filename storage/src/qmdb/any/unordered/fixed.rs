@@ -485,12 +485,12 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
+            mmr::{iterator::nodes_to_pin, journaled::CleanMmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+        type TestMmr = CleanMmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Mmr = TestMmr;

@@ -6,8 +6,7 @@ use crate::mmb::{
         child_steps, children, leaves_for_size, nodes_to_pin, peak_birth_step, step_to_pos,
         PeakIterator,
     },
-    Error::{self, *},
-    Location, Position,
+    Error, Location, Position,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -483,7 +482,7 @@ impl<D: Digest> DirtyMmb<D> {
     /// ElementPruned errors otherwise.
     pub fn pop(&mut self) -> Result<Position, Error> {
         if self.size() == 0 {
-            return Err(Empty);
+            return Err(Error::Empty);
         }
 
         // Calculate the exact size of an MMB with N - 1 leaves.
@@ -491,7 +490,7 @@ impl<D: Digest> DirtyMmb<D> {
         let new_size = Position::new(2 * new_leaves - (new_leaves + 1).ilog2() as u64);
 
         if new_size < self.pruned_to_pos {
-            return Err(ElementPruned(new_size));
+            return Err(Error::ElementPruned(new_size));
         }
 
         let num_to_drain = *(self.size() - new_size) as usize;
@@ -777,6 +776,121 @@ impl<D: Digest> DirtyMmb<D> {
     }
 }
 
+impl<D: Digest> crate::merkle::mem::CleanMem<super::Mmb, D> for CleanMmb<D> {
+    type Dirty = DirtyMmb<D>;
+
+    fn size(&self) -> Position {
+        self.size()
+    }
+
+    fn leaves(&self) -> Location {
+        self.leaves()
+    }
+
+    fn bounds(&self) -> Range<Position> {
+        self.bounds()
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        self.get_node(pos)
+    }
+
+    fn get_node_unchecked(&self, pos: Position) -> &D {
+        self.get_node_unchecked(pos)
+    }
+
+    fn add_pinned_nodes(&mut self, pinned: BTreeMap<Position, D>) {
+        Self::add_pinned_nodes(self, pinned)
+    }
+
+    fn prune_to_pos(&mut self, pos: Position) -> Result<(), crate::merkle::Error<super::Mmb>> {
+        self.prune_to_pos(pos)
+    }
+
+    fn prune_all(&mut self) {
+        self.prune_all()
+    }
+
+    fn root(&self) -> &D {
+        self.root()
+    }
+
+    fn into_dirty(self) -> DirtyMmb<D> {
+        Self::into_dirty(self)
+    }
+
+    fn init(
+        config: crate::merkle::mem::Config<super::Mmb, D>,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
+    ) -> Result<Self, crate::merkle::Error<super::Mmb>> {
+        Self::init(
+            Config {
+                nodes: config.nodes,
+                pruned_to_pos: config.pruned_to_pos,
+                pinned_nodes: config.pinned_nodes,
+            },
+            hasher,
+        )
+    }
+
+    #[cfg(test)]
+    fn pinned_nodes(&self) -> BTreeMap<Position, D> {
+        self.pinned_nodes.clone()
+    }
+}
+
+impl<D: Digest> crate::merkle::mem::DirtyMem<super::Mmb, D> for DirtyMmb<D> {
+    type Clean = CleanMmb<D>;
+
+    fn size(&self) -> Position {
+        self.size()
+    }
+
+    fn leaves(&self) -> Location {
+        self.leaves()
+    }
+
+    fn bounds(&self) -> Range<Position> {
+        self.bounds()
+    }
+
+    fn get_node_unchecked(&self, pos: Position) -> &D {
+        self.get_node_unchecked(pos)
+    }
+
+    fn add_pinned_nodes(&mut self, pinned: BTreeMap<Position, D>) {
+        Self::add_pinned_nodes(self, pinned)
+    }
+
+    fn add(
+        &mut self,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
+        element: &[u8],
+    ) -> Position {
+        self.add(hasher, element)
+    }
+
+    fn add_leaf_digest(&mut self, digest: D) -> Position {
+        self.add_leaf_digest(digest)
+    }
+
+    fn pop(&mut self) -> Result<Position, crate::merkle::Error<super::Mmb>> {
+        self.pop()
+    }
+
+    fn merkleize(
+        self,
+        hasher: &mut impl Hasher<super::Mmb, Digest = D>,
+        pool: Option<ThreadPool>,
+    ) -> CleanMmb<D> {
+        self.merkleize(hasher, pool)
+    }
+
+    fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned: Vec<D>) -> Self {
+        Self::from_components(nodes, pruned_to_pos, pinned)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,7 +932,7 @@ mod tests {
             assert_eq!(mmb.get_node(Position::new(0)), None);
             assert_eq!(*mmb.root(), Mmb::empty_mmb_root(hasher.inner()));
             let mut mmb = mmb.into_dirty();
-            assert!(matches!(mmb.pop(), Err(Empty)));
+            assert!(matches!(mmb.pop(), Err(Error::Empty)));
             let mmb = mmb.merkleize(&mut hasher, None);
 
             assert_eq!(*mmb.root(), hasher.root(Location::new(0), [].iter()));
@@ -1120,7 +1234,7 @@ mod tests {
             }
             let mut mmb = mmb.into_dirty();
             assert!(
-                matches!(mmb.pop().unwrap_err(), Empty),
+                matches!(mmb.pop().unwrap_err(), Error::Empty),
                 "pop on empty MMB should fail"
             );
         });

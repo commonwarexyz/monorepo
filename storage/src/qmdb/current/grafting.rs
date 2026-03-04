@@ -43,7 +43,7 @@
 
 use crate::mmr::{
     hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::CleanMmr,
-    storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
+    storage::Storage as StorageTrait, Error, Location, Mmr, Position, StandardHasher,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
@@ -322,13 +322,13 @@ impl<H: CHasher> HasherTrait<crate::mmr::Mmr> for Verifier<'_, H> {
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
-pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
+pub(super) struct Storage<'a, D: Digest, S: StorageTrait<Mmr, D>> {
     grafted_mmr: &'a CleanMmr<D>,
     grafting_height: u32,
     ops_mmr: &'a S,
 }
 
-impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
+impl<'a, D: Digest, S: StorageTrait<Mmr, D>> Storage<'a, D, S> {
     /// Creates a new [Storage] instance.
     pub(super) const fn new(
         grafted_mmr: &'a CleanMmr<D>,
@@ -343,7 +343,7 @@ impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
     }
 }
 
-impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
+impl<D: Digest, S: StorageTrait<Mmr, D>> StorageTrait<Mmr, D> for Storage<'_, D, S> {
     async fn size(&self) -> Position {
         self.ops_mmr.size().await
     }

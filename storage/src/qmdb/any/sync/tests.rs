@@ -48,9 +48,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible
-    for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
-{
+impl Destructible for crate::mmr::journaled::CleanMmr<deterministic::Context, Digest> {
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }

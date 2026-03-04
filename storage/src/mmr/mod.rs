@@ -87,7 +87,6 @@ cfg_if::cfg_if! {
 use crate::merkle::{self, MerkleFamily};
 pub use hasher::Standard as StandardHasher;
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
-use thiserror::Error;
 
 /// Marker type for the MMR family.
 #[derive(Copy, Clone, Debug)]
@@ -143,6 +142,16 @@ impl MerkleFamily for Mmr {
         }
 
         Some(leaf_loc_floor)
+    }
+
+    fn to_nearest_size(size: u64) -> u64 {
+        *iterator::PeakIterator::to_nearest_size(Position::new(size))
+    }
+
+    fn nodes_to_pin(_size: u64, prune_pos: u64) -> alloc::vec::Vec<u64> {
+        iterator::nodes_to_pin(Position::new(prune_pos))
+            .map(|pos| *pos)
+            .collect()
     }
 
     fn is_valid_size(size: u64) -> bool {
@@ -202,70 +211,4 @@ pub type LocationError = merkle::PositionConversionError<Mmr>;
 pub use crate::merkle::LocationRangeExt;
 
 /// Errors that can occur when interacting with an MMR.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[cfg(feature = "std")]
-    #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error),
-    #[cfg(feature = "std")]
-    #[error("journal error: {0}")]
-    JournalError(#[from] crate::journal::Error),
-    #[cfg(feature = "std")]
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
-    #[error("missing node: {0}")]
-    MissingNode(Position),
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("root mismatch")]
-    RootMismatch,
-    #[error("element pruned: {0}")]
-    ElementPruned(Position),
-    #[error("position is not a leaf: {0}")]
-    PositionNotLeaf(Position),
-    #[error("invalid position: {0}")]
-    InvalidPosition(Position),
-    #[error("missing digest: {0}")]
-    MissingDigest(Position),
-    #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Position),
-    #[error("invalid proof length")]
-    InvalidProofLength,
-    #[error("invalid size: {0}")]
-    InvalidSize(u64),
-    #[error("empty")]
-    Empty,
-    #[error("pruned chunks causes u64 overflow")]
-    PrunedChunksOverflow,
-    #[error("location {0} > MAX_LOCATION")]
-    LocationOverflow(Location),
-    #[error("range out of bounds: end location {0} exceeds MMR size")]
-    RangeOutOfBounds(Location),
-    #[error("mmr requires merkleization for requested size")]
-    Unmerkleized,
-    #[error("leaf location out of bounds: {0}")]
-    LeafOutOfBounds(Location),
-    #[error("bit offset {0} out of bounds (size: {1})")]
-    BitOutOfBounds(u64, u64),
-    #[error("invalid pinned nodes")]
-    InvalidPinnedNodes,
-    #[error("data corrupted: {0}")]
-    DataCorrupted(&'static str),
-}
-
-impl From<LocationError> for Error {
-    fn from(err: LocationError) -> Self {
-        match err {
-            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
-            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
-        }
-    }
-}
-
-impl From<merkle::LocationConversionError<Mmr>> for Error {
-    fn from(err: merkle::LocationConversionError<Mmr>) -> Self {
-        match err {
-            merkle::LocationConversionError::Overflow(loc) => Self::LocationOverflow(loc),
-        }
-    }
-}
+pub type Error = merkle::Error<Mmr>;

@@ -5,9 +5,7 @@ use crate::mmr::iterator::pos_to_height;
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
-    proof,
-    Error::{self, *},
-    Location, Position, Proof,
+    proof, Error, Location, Position, Proof,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -412,13 +410,6 @@ impl<D: Digest> CleanMmr<D> {
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }
-
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
-    #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.pinned_nodes.clone()
-    }
 }
 
 /// Implementation for Dirty MMR state.
@@ -496,13 +487,13 @@ impl<D: Digest> DirtyMmr<D> {
     /// ElementPruned errors otherwise.
     pub fn pop(&mut self) -> Result<Position, Error> {
         if self.size() == 0 {
-            return Err(Empty);
+            return Err(Error::Empty);
         }
 
         let mut new_size = self.size() - 1;
         loop {
             if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
+                return Err(Error::ElementPruned(new_size));
             }
             if new_size.is_valid_size() {
                 break;
@@ -769,6 +760,121 @@ impl<D: Digest> DirtyMmr<D> {
     }
 }
 
+impl<D: Digest> crate::merkle::mem::CleanMem<super::Mmr, D> for CleanMmr<D> {
+    type Dirty = DirtyMmr<D>;
+
+    fn size(&self) -> Position {
+        self.size()
+    }
+
+    fn leaves(&self) -> Location {
+        self.leaves()
+    }
+
+    fn bounds(&self) -> Range<Position> {
+        self.bounds()
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        self.get_node(pos)
+    }
+
+    fn get_node_unchecked(&self, pos: Position) -> &D {
+        self.get_node_unchecked(pos)
+    }
+
+    fn add_pinned_nodes(&mut self, pinned: BTreeMap<Position, D>) {
+        Self::add_pinned_nodes(self, pinned)
+    }
+
+    fn prune_to_pos(&mut self, pos: Position) -> Result<(), crate::merkle::Error<super::Mmr>> {
+        self.prune_to_pos(pos)
+    }
+
+    fn prune_all(&mut self) {
+        self.prune_all()
+    }
+
+    fn root(&self) -> &D {
+        self.root()
+    }
+
+    fn into_dirty(self) -> DirtyMmr<D> {
+        Self::into_dirty(self)
+    }
+
+    fn init(
+        config: crate::merkle::mem::Config<super::Mmr, D>,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
+    ) -> Result<Self, crate::merkle::Error<super::Mmr>> {
+        Self::init(
+            Config {
+                nodes: config.nodes,
+                pruned_to_pos: config.pruned_to_pos,
+                pinned_nodes: config.pinned_nodes,
+            },
+            hasher,
+        )
+    }
+
+    #[cfg(test)]
+    fn pinned_nodes(&self) -> BTreeMap<Position, D> {
+        self.pinned_nodes.clone()
+    }
+}
+
+impl<D: Digest> crate::merkle::mem::DirtyMem<super::Mmr, D> for DirtyMmr<D> {
+    type Clean = CleanMmr<D>;
+
+    fn size(&self) -> Position {
+        self.size()
+    }
+
+    fn leaves(&self) -> Location {
+        self.leaves()
+    }
+
+    fn bounds(&self) -> Range<Position> {
+        self.bounds()
+    }
+
+    fn get_node_unchecked(&self, pos: Position) -> &D {
+        self.get_node_unchecked(pos)
+    }
+
+    fn add_pinned_nodes(&mut self, pinned: BTreeMap<Position, D>) {
+        Self::add_pinned_nodes(self, pinned)
+    }
+
+    fn add(
+        &mut self,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
+        element: &[u8],
+    ) -> Position {
+        self.add(hasher, element)
+    }
+
+    fn add_leaf_digest(&mut self, digest: D) -> Position {
+        self.add_leaf_digest(digest)
+    }
+
+    fn pop(&mut self) -> Result<Position, crate::merkle::Error<super::Mmr>> {
+        self.pop()
+    }
+
+    fn merkleize(
+        self,
+        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
+        pool: Option<ThreadPool>,
+    ) -> CleanMmr<D> {
+        self.merkleize(hasher, pool)
+    }
+
+    fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned: Vec<D>) -> Self {
+        Self::from_components(nodes, pruned_to_pos, pinned)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,7 +904,7 @@ mod tests {
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
             let mut mmr = mmr.into_dirty();
-            assert!(matches!(mmr.pop(), Err(Empty)));
+            assert!(matches!(mmr.pop(), Err(Error::Empty)));
             let mut mmr = mmr.merkleize(&mut hasher, None);
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
@@ -902,8 +1008,14 @@ mod tests {
             // fact still be able to generate them for some, but it's not guaranteed. For example,
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
-            assert!(matches!(mmr.proof(Location::new(0)), Err(ElementPruned(_))));
-            assert!(matches!(mmr.proof(Location::new(6)), Err(ElementPruned(_))));
+            assert!(matches!(
+                mmr.proof(Location::new(0)),
+                Err(Error::ElementPruned(_))
+            ));
+            assert!(matches!(
+                mmr.proof(Location::new(6)),
+                Err(Error::ElementPruned(_))
+            ));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
@@ -1114,7 +1226,7 @@ mod tests {
             }
             let mut mmr = mmr.into_dirty();
             assert!(
-                matches!(mmr.pop().unwrap_err(), Empty),
+                matches!(mmr.pop().unwrap_err(), Error::Empty),
                 "pop on empty MMR should fail"
             );
 
@@ -1138,7 +1250,7 @@ mod tests {
             assert_eq!(*mmr.root(), *reference_mmr.root());
             let mut mmr = mmr.into_dirty();
             let result = mmr.pop();
-            assert!(matches!(result, Err(ElementPruned(_))));
+            assert!(matches!(result, Err(Error::ElementPruned(_))));
             assert!(mmr.bounds().is_empty());
         });
     }

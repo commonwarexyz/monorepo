@@ -17,9 +17,7 @@ use crate::{
         iterator::nodes_to_pin,
         mem::{Clean, CleanMmr, Config, Dirty, Mmr, State as MmrState},
         storage::Storage,
-        verification,
-        Error::{self, *},
-        Location, Position, Proof,
+        verification, Error, Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -346,12 +344,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(?mmr_size, ?pos, "missing pinned node");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(?mmr_size, ?pos, "could not convert node bytes to digest");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
@@ -403,12 +401,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(MetadataError)
+        self.metadata.sync().await.map_err(Error::Metadata)
     }
 
     /// Destroy the bitmap metadata from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await.map_err(MetadataError)
+        self.metadata.destroy().await.map_err(Error::Metadata)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.
@@ -610,7 +608,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<crate::mmr::Mmr, D>
     for MerkleizedBitMap<E, D, N>
 {
     async fn size(&self) -> Position {

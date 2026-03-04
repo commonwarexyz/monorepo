@@ -1,642 +1,76 @@
 //! An MMR backed by a fixed-item-length journal.
 //!
-//! A [crate::journal] is used to store all unpruned MMR nodes, and a [crate::metadata] store is
-//! used to preserve digests required for root and proof generation that would have otherwise been
-//! pruned.
+//! Thin wrapper around the generic [`crate::merkle::journaled`] module, fixing the Merkle family
+//! to [`super::Mmr`] and the in-memory representation to [`mem::CleanMmr`].
 
+pub use crate::merkle::journaled::Config;
 use crate::{
-    journal::{
-        contiguous::{
-            fixed::{Config as JConfig, Journal},
-            Reader,
-        },
-        Error as JError,
-    },
-    metadata::{Config as MConfig, Metadata},
-    mmr::{
-        hasher::Hasher,
-        iterator::{nodes_to_pin, PeakIterator},
-        mem::{
-            Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr,
-            State as MemState,
-        },
-        storage::Storage,
-        verification,
-        Error::{self, *},
-        Location, Position, Proof,
-    },
+    merkle::{self},
+    mmr::{mem, storage::Storage, verification, Error, Location, Position, Proof},
 };
-use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{
-    sequence::prefixed_u64::U64,
-    sync::{AsyncMutex, RwLock},
-};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use core::ops::Range;
-use std::{
-    collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
-};
-use tracing::{debug, error, warn};
 
-pub type DirtyMmr<E, D> = Mmr<E, D, Dirty>;
-pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
+/// Sync configuration for a journal-backed MMR.
+pub type SyncConfig<D> = crate::merkle::journaled::SyncConfig<super::Mmr, D>;
 
-/// Trait for valid journaled MMR type states.
-pub trait State<D: Digest>: MemState<D> + Send + Sync {
-    type MerkleizedSize: Send + Sync;
-}
+/// A clean (merkleized) journaled MMR.
+pub type CleanMmr<E, D> = merkle::journaled::Clean<super::Mmr, E, D, mem::CleanMmr<D>>;
 
-impl<D: Digest> State<D> for Dirty {
-    type MerkleizedSize = Position;
-}
+/// A dirty (unmerkleized) journaled MMR.
+pub type DirtyMmr<E, D> = merkle::journaled::Dirty<super::Mmr, E, D, mem::CleanMmr<D>>;
 
-impl<D: Digest> State<D> for Clean<D> {
-    type MerkleizedSize = ();
-}
+/// Backward-compatible alias so callers can write `Mmr::init(...)`.
+pub type Mmr<E, D> = CleanMmr<E, D>;
 
-/// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
-struct Inner<D: Digest, S: State<D>> {
-    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
-    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
-    /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D, S>,
-
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pruned_to_pos: Position,
-
-    /// The historical size up to which this MMR has been merkleized.
-    ///
-    /// In [DirtyMmr] state this is a [Position]. In [CleanMmr] state this is `()`.
-    merkleized_size: S::MerkleizedSize,
-}
-
-/// Configuration for a journal-backed MMR.
-#[derive(Clone)]
-pub struct Config {
-    /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
-    /// the MMR nodes.
-    pub journal_partition: String,
-
-    /// The name of the `commonware-runtime::Storage` storage partition used for the metadata
-    /// containing pruned MMR nodes that are still required to calculate the root and generate
-    /// proofs.
-    pub metadata_partition: String,
-
-    /// The maximum number of items to store in each blob in the backing journal.
-    pub items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the backing journal.
-    pub write_buffer: NonZeroUsize,
-
-    /// Optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
-}
-
-/// Configuration for initializing a journaled MMR for synchronization.
+/// Trait mapping MMR mem state types to the corresponding journaled MMR type.
 ///
-/// Determines how to handle existing persistent data based on sync boundaries:
-/// - **Fresh Start**: Existing data < range start → discard and start fresh
-/// - **Prune and Reuse**: range contains existing data → prune and reuse
-/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
-pub struct SyncConfig<D: Digest> {
-    /// Base MMR configuration (journal, metadata, etc.)
-    pub config: Config,
-
-    /// Sync range - nodes outside this range are pruned/rewound.
-    pub range: std::ops::Range<Position>,
-
-    /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
-    /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
-    /// MMR's metadata/journal.
-    pub pinned_nodes: Option<Vec<D>>,
+/// This is used by [`crate::journal::authenticated::Journal`] to remain generic over the
+/// Clean/Dirty state of the underlying journaled MMR.
+pub trait State<D: Digest>: Send + Sync + 'static {
+    /// The journaled MMR type for this state.
+    type JournaledMmr<E: RStorage + Clock + Metrics>: Send + Sync;
 }
 
-/// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
-    /// Lock-protected mutable state.
-    inner: RwLock<Inner<D, S>>,
-
-    /// Stores all unpruned MMR nodes.
-    journal: Journal<E, D>,
-
-    /// Stores all "pinned nodes" (pruned nodes required for proving & root generation) for the MMR,
-    /// and the corresponding pruning boundary used to generate them. The metadata remains empty
-    /// until pruning is invoked, and its contents change only when the pruning boundary moves.
-    metadata: Metadata<E, U64, Vec<u8>>,
-
-    /// Serializes concurrent sync calls.
-    sync_lock: AsyncMutex<()>,
-
-    /// The thread pool to use for parallelization.
-    pool: Option<ThreadPool>,
+impl<D: Digest> State<D> for mem::Dirty {
+    type JournaledMmr<E: RStorage + Clock + Metrics> = DirtyMmr<E, D>;
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
-    fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
-        let inner = clean.inner.into_inner();
-        let size = inner.mem_mmr.size();
-        Self {
-            inner: RwLock::new(Inner {
-                mem_mmr: inner.mem_mmr.into(),
-                pruned_to_pos: inner.pruned_to_pos,
-                merkleized_size: size,
-            }),
-            journal: clean.journal,
-            metadata: clean.metadata,
-            sync_lock: clean.sync_lock,
-            pool: clean.pool,
-        }
+impl<D: Digest> State<D> for mem::Clean<D> {
+    type JournaledMmr<E: RStorage + Clock + Metrics> = CleanMmr<E, D>;
+}
+
+// ---------------------------------------------------------------------------
+// Storage trait impls
+// ---------------------------------------------------------------------------
+
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<super::Mmr, D> for CleanMmr<E, D> {
+    async fn size(&self) -> Position {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+        self.get_node(position).await
     }
 }
 
-/// Prefix used for nodes in the metadata prefixed U8 key.
-const NODE_PREFIX: u8 = 0;
-
-/// Prefix used for the key storing the prune_to_pos position in the metadata.
-const PRUNE_TO_POS_PREFIX: u8 = 1;
-
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
-    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
-    /// element's position will have this value.
-    pub fn size(&self) -> Position {
-        self.inner.read().mem_mmr.size()
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<super::Mmr, D> for DirtyMmr<E, D> {
+    async fn size(&self) -> Position {
+        self.size()
     }
 
-    /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> Location {
-        self.inner.read().mem_mmr.leaves()
-    }
-
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
-    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
-    /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        pos: Position,
-    ) -> Result<D, Error> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = D::decode(bytes.as_ref());
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::DataCorrupted(
-                    "could not read digest at requested pos",
-                ));
-            };
-            return Ok(digest);
-        }
-
-        // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(?pos, "reading node from journal");
-        let node = journal.reader().await.read(*pos).await;
-        match node {
-            Ok(node) => Ok(node),
-            Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
-            }
-            Err(e) => Err(Error::JournalError(e)),
-        }
-    }
-
-    /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
-    /// retained nodes respectively.
-    pub fn bounds(&self) -> std::ops::Range<Position> {
-        let inner = self.inner.read();
-        inner.pruned_to_pos..inner.mem_mmr.size()
-    }
-
-    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
-    async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<D, S>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        prune_pos: Position,
-    ) -> Result<(), Error> {
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_pos) {
-            let digest =
-                Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(metadata, journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem_mmr.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+        // Delegate to the DirtyMmr-specific get_node which respects merkleization boundary.
+        Self::get_node(self, position).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// CleanMmr-specific methods (proofs)
+// ---------------------------------------------------------------------------
 
 impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
-    /// Initialize a new `Mmr` instance.
-    pub async fn init(
-        context: E,
-        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
-        cfg: Config,
-    ) -> Result<Self, Error> {
-        let journal_cfg = JConfig {
-            partition: cfg.journal_partition,
-            items_per_blob: cfg.items_per_blob,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-        };
-        let journal = Journal::<E, D>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = Position::new(journal.size().await);
-
-        let metadata_cfg = MConfig {
-            partition: cfg.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.with_label("mmr_metadata"), metadata_cfg)
-                .await?;
-
-        if journal_size == 0 {
-            let mem_mmr = MemMmr::init(
-                MemConfig {
-                    nodes: vec![],
-                    pruned_to_pos: Position::new(0),
-                    pinned_nodes: vec![],
-                },
-                hasher,
-            )?;
-            return Ok(Self {
-                inner: RwLock::new(Inner {
-                    mem_mmr,
-                    pruned_to_pos: Position::new(0),
-                    merkleized_size: (),
-                }),
-                journal,
-                metadata,
-                sync_lock: AsyncMutex::new(()),
-                pool: cfg.thread_pool,
-            });
-        }
-
-        // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
-        // location.
-        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        let metadata_prune_pos = metadata.get(&key).map_or(0, |bytes| {
-            u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("metadata prune position is not 8 bytes"),
-            )
-        });
-        let journal_bounds_start = journal.reader().await.bounds().start;
-        if metadata_prune_pos > journal_bounds_start {
-            // Metadata is ahead of journal (crashed before completing journal prune).
-            // Prune the journal to match metadata.
-            journal.prune(metadata_prune_pos).await?;
-            if journal.reader().await.bounds().start != journal_bounds_start {
-                // This should only happen in the event of some failure during the last attempt to
-                // prune the journal.
-                warn!(
-                    journal_bounds_start,
-                    metadata_prune_pos, "journal pruned to match metadata"
-                );
-            }
-        } else if metadata_prune_pos < journal_bounds_start {
-            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
-            // Use the journal's state as authoritative.
-            warn!(
-                metadata_prune_pos,
-                journal_bounds_start, "metadata stale, using journal pruning boundary"
-            );
-        }
-
-        // Use the more restrictive (higher) pruning boundary between metadata and journal.
-        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
-        let effective_prune_pos = std::cmp::max(metadata_prune_pos, journal_bounds_start);
-
-        let last_valid_size = PeakIterator::to_nearest_size(journal_size);
-        let mut orphaned_leaf: Option<D> = None;
-        if last_valid_size != journal_size {
-            warn!(
-                ?last_valid_size,
-                "encountered invalid MMR structure, recovering from last valid size"
-            );
-            // Check if there is an intact leaf following the last valid size, from which we can
-            // recover its missing parents.
-            let recovered_item = journal.reader().await.read(*last_valid_size).await;
-            if let Ok(item) = recovered_item {
-                orphaned_leaf = Some(item);
-            }
-            journal.rewind(*last_valid_size).await?;
-            journal.sync().await?;
-            journal_size = last_valid_size
-        }
-
-        // Initialize the mem_mmr in the "prune_all" state.
-        let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(journal_size) {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            pinned_nodes.push(digest);
-        }
-        let mut mem_mmr = MemMmr::init(
-            MemConfig {
-                nodes: vec![],
-                pruned_to_pos: journal_size,
-                pinned_nodes,
-            },
-            hasher,
-        )?;
-        let prune_pos = Position::new(effective_prune_pos);
-        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
-
-        if let Some(leaf) = orphaned_leaf {
-            // Recover the orphaned leaf and any missing parents.
-            let pos = mem_mmr.size();
-            warn!(?pos, "recovering orphaned leaf");
-            let mut dirty_mmr = mem_mmr.into_dirty();
-            dirty_mmr.add_leaf_digest(leaf);
-            mem_mmr = dirty_mmr.merkleize(hasher, None);
-            assert_eq!(pos, journal_size);
-
-            // Inline sync: flush recovered nodes to journal.
-            for p in journal.size().await..*mem_mmr.size() {
-                let p = Position::new(p);
-                let node = *mem_mmr.get_node_unchecked(p);
-                journal.append(node).await?;
-            }
-            journal.sync().await?;
-            assert_eq!(mem_mmr.size(), journal.size().await);
-
-            // Prune mem_mmr and reinstate pinned nodes.
-            let mut pn = BTreeMap::new();
-            for p in nodes_to_pin(prune_pos) {
-                let d = mem_mmr.get_node_unchecked(p);
-                pn.insert(p, *d);
-            }
-            mem_mmr.prune_all();
-            mem_mmr.add_pinned_nodes(pn);
-        }
-
-        Ok(Self {
-            inner: RwLock::new(Inner {
-                mem_mmr,
-                pruned_to_pos: prune_pos,
-                merkleized_size: (),
-            }),
-            journal,
-            metadata,
-            sync_lock: AsyncMutex::new(()),
-            pool: cfg.thread_pool,
-        })
-    }
-
-    /// Initialize an MMR for synchronization, reusing existing data if possible.
-    ///
-    /// Handles sync scenarios based on existing journal data vs. the given sync range:
-    ///
-    /// 1. **Fresh Start**: existing_size <= range.start
-    ///    - Deletes existing data (if any)
-    ///    - Creates new [Journal] with pruning boundary and size at `range.start`
-    ///
-    /// 2. **Reuse**: range.start < existing_size <= range.end
-    ///    - Keeps existing journal data
-    ///    - Prunes the journal toward `range.start` (section-aligned)
-    ///
-    /// 3. **Error**: existing_size > range.end
-    ///    - Returns [crate::journal::Error::ItemOutOfRange]
-    pub async fn init_sync(
-        context: E,
-        cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
-    ) -> Result<Self, crate::qmdb::Error> {
-        let journal_cfg = JConfig {
-            partition: cfg.config.journal_partition.clone(),
-            items_per_blob: cfg.config.items_per_blob,
-            write_buffer: cfg.config.write_buffer,
-            page_cache: cfg.config.page_cache.clone(),
-        };
-
-        // Open the journal, handling existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
-        let journal: Journal<E, D> =
-            Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let size = journal.size().await;
-
-        if size > *cfg.range.end {
-            return Err(crate::journal::Error::ItemOutOfRange(size).into());
-        }
-        if size <= *cfg.range.start && *cfg.range.start != 0 {
-            journal.clear_to_size(*cfg.range.start).await?;
-        }
-
-        let journal_size = Position::new(journal.size().await);
-
-        // Open the metadata.
-        let metadata_cfg = MConfig {
-            partition: cfg.config.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
-
-        // Write the pruning boundary.
-        let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(
-            pruning_boundary_key,
-            (*cfg.range.start).to_be_bytes().into(),
-        );
-
-        // Write the required pinned nodes to metadata.
-        if let Some(pinned_nodes) = cfg.pinned_nodes {
-            // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted = nodes_to_pin(cfg.range.start);
-            for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
-            }
-        }
-
-        // Create the in-memory MMR with the pinned nodes required for its size. This must be
-        // performed *before* pruning the journal to range.start to ensure all pinned nodes are
-        // present.
-        let nodes_to_pin_mem = nodes_to_pin(journal_size);
-        let mut mem_pinned_nodes = Vec::new();
-        for pos in nodes_to_pin_mem {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            mem_pinned_nodes.push(digest);
-        }
-        let mut mem_mmr = MemMmr::init(
-            MemConfig {
-                nodes: vec![],
-                pruned_to_pos: journal_size,
-                pinned_nodes: mem_pinned_nodes,
-            },
-            hasher,
-        )?;
-
-        // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        // This must also be done before pruning.
-        if cfg.range.start < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
-                .await?;
-        }
-
-        // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
-        metadata.sync().await?;
-
-        // Prune the journal to range.start.
-        journal.prune(*cfg.range.start).await?;
-
-        Ok(Self {
-            inner: RwLock::new(Inner {
-                mem_mmr,
-                pruned_to_pos: cfg.range.start,
-                merkleized_size: (),
-            }),
-            journal,
-            metadata,
-            sync_lock: AsyncMutex::new(()),
-            pool: cfg.config.thread_pool,
-        })
-    }
-
-    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
-    /// disk. Return the computed set of required nodes.
-    async fn update_metadata(
-        &mut self,
-        prune_to_pos: Position,
-    ) -> Result<BTreeMap<Position, D>, Error> {
-        assert!(prune_to_pos >= self.inner.get_mut().pruned_to_pos);
-
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_to_pos) {
-            let digest = self.get_node(pos).await?.expect(
-                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
-            );
-            self.metadata
-                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
-            pinned_nodes.insert(pos, digest);
-        }
-
-        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
-
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
-
-        Ok(pinned_nodes)
-    }
-
-    pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        {
-            let inner = self.inner.read();
-            if let Some(node) = inner.mem_mmr.get_node(position) {
-                return Ok(Some(node));
-            }
-        }
-
-        match self.journal.reader().await.read(*position).await {
-            Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
-        }
-    }
-
-    /// Sync the MMR to disk.
-    pub async fn sync(&self) -> Result<(), Error> {
-        let _sync_guard = self.sync_lock.lock().await;
-
-        let journal_size = Position::new(self.journal.size().await);
-
-        // Snapshot nodes in the mem_mmr that are missing from the journal, along with the pinned
-        // node set for the current pruning boundary.
-        let (size, missing_nodes, pinned_nodes) = {
-            let inner = self.inner.read();
-            let size = inner.mem_mmr.size();
-
-            assert!(
-                journal_size <= size,
-                "journal size should never exceed in-memory MMR size"
-            );
-            if journal_size == size {
-                return Ok(());
-            }
-
-            let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
-            for pos in *journal_size..*size {
-                let node = *inner.mem_mmr.get_node_unchecked(Position::new(pos));
-                missing_nodes.push(node);
-            }
-
-            // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
-            // by pruning the mem_mmr.
-            let mut pinned_nodes = BTreeMap::new();
-            for pos in nodes_to_pin(inner.pruned_to_pos) {
-                let digest = inner.mem_mmr.get_node_unchecked(pos);
-                pinned_nodes.insert(pos, *digest);
-            }
-
-            (size, missing_nodes, pinned_nodes)
-        };
-
-        // Append missing nodes to the journal without holding the mem_mmr read lock.
-        for node in missing_nodes {
-            self.journal.append(node).await?;
-        }
-
-        // Sync the journal while still holding the sync_lock to ensure durability before returning.
-        self.journal.sync().await?;
-
-        // Now that the missing nodes are in the journal, it's safe to prune them from the
-        // mem_mmr.
-        {
-            let mut inner = self.inner.write();
-            inner.mem_mmr.prune_to_pos(size)?;
-            inner.mem_mmr.add_pinned_nodes(pinned_nodes);
-        }
-
-        Ok(())
-    }
-
-    /// Prune all nodes up to but not including the given position and update the pinned nodes.
-    ///
-    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
-    /// requiring it sync the MMR to write any potential unmerkleized updates.
-    pub async fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
-        {
-            let inner = self.inner.get_mut();
-            assert!(pos <= inner.mem_mmr.size());
-            if pos <= inner.pruned_to_pos {
-                return Ok(());
-            }
-        }
-
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
-        self.sync().await?;
-
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
-
-        self.journal.prune(*pos).await?;
-        let inner = self.inner.get_mut();
-        inner.mem_mmr.add_pinned_nodes(pinned_nodes);
-        inner.pruned_to_pos = pos;
-
-        Ok(())
-    }
-
-    /// Return the root of the MMR.
-    pub fn root(&self) -> D {
-        *self.inner.read().mem_mmr.root()
-    }
-
     /// Return an inclusion proof for the element at the location `loc` against a historical MMR
     /// state with `leaves` leaves.
     ///
@@ -713,85 +147,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         self.historical_range_proof(self.leaves(), range).await
     }
-
-    /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
-    /// blob.
-    pub async fn prune_all(&mut self) -> Result<(), Error> {
-        let size = self.inner.get_mut().mem_mmr.size();
-        if size != 0 {
-            self.prune_to_pos(size).await?;
-        }
-        Ok(())
-    }
-
-    /// Close and permanently remove any disk resources.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await?;
-        self.metadata.destroy().await?;
-
-        Ok(())
-    }
-
-    /// Convert this MMR into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> DirtyMmr<E, D> {
-        self.into()
-    }
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
-    /// a partial write for testing failure scenarios.
-    pub async fn simulate_partial_sync(&mut self, write_limit: usize) -> Result<(), Error> {
-        if write_limit == 0 {
-            return Ok(());
-        }
-
-        let inner = self.inner.get_mut();
-        let journal_size = Position::new(self.journal.size().await);
-
-        // Write the nodes cached in the memory-resident MMR to the journal, aborting after
-        // write_count nodes have been written.
-        let mut written_count = 0usize;
-        for i in *journal_size..*inner.mem_mmr.size() {
-            let node = *inner.mem_mmr.get_node_unchecked(Position::new(i));
-            self.journal.append(node).await?;
-            written_count += 1;
-            if written_count >= write_limit {
-                break;
-            }
-        }
-        self.journal.sync().await?;
-
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn get_pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.inner.read().mem_mmr.pinned_nodes()
-    }
-
-    #[cfg(test)]
-    pub async fn simulate_pruning_failure(mut self, prune_to_pos: Position) -> Result<(), Error> {
-        assert!(prune_to_pos <= self.inner.get_mut().mem_mmr.size());
-
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
-        self.sync().await?;
-
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        self.update_metadata(prune_to_pos).await?;
-
-        // Don't actually prune the journal to simulate failure
-        Ok(())
-    }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
-    /// Return the largest fully-merkleized historical size in leaves.
-    pub fn merkleized_leaves(&self) -> Location {
-        let size = self.inner.read().merkleized_size;
-        Location::try_from(size).expect("merkleized size should be valid")
-    }
+// ---------------------------------------------------------------------------
+// DirtyMmr-specific methods (proofs, get_node)
+// ---------------------------------------------------------------------------
 
+impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// Return an inclusion proof for the element at the location `loc` against a historical MMR
     /// state with `leaves` leaves if the MMR is sufficiently merkleized, returning
     /// [Error::Unmerkleized] otherwise.
@@ -839,14 +201,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         // Validate requested range.  Even though historical_range_proof performs most of these
         // validations, we'd like to return the other potential errors if they hold instead of
         // [Error::Unmerkleized] to avoid a fruitless retry after merkleizing.
-        let (size, merkleized_size, pruned_to_pos) = {
-            let inner = self.inner.read();
-            (
-                inner.mem_mmr.size(),
-                inner.merkleized_size,
-                inner.pruned_to_pos,
-            )
-        };
+        let size = self.size();
+        let merkleized_size = self.merkleized_size();
+        let pruned_to_pos = self.pruned_to_pos();
+
         let requested_size = Position::try_from(leaves)?;
         let end_pos = Position::try_from(range.end)?;
         if requested_size > size {
@@ -874,180 +232,26 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         verification::historical_range_proof(self, leaves, range).await
     }
 
-    /// Merkleize the MMR and compute the root digest.
-    pub fn merkleize(self, h: &mut impl Hasher<super::Mmr, Digest = D>) -> CleanMmr<E, D> {
-        let inner = self.inner.into_inner();
-        CleanMmr {
-            inner: RwLock::new(Inner {
-                mem_mmr: inner.mem_mmr.merkleize(h, self.pool.clone()),
-                pruned_to_pos: inner.pruned_to_pos,
-                merkleized_size: (),
-            }),
-            journal: self.journal,
-            metadata: self.metadata,
-            sync_lock: self.sync_lock,
-            pool: self.pool,
-        }
-    }
-
-    /// Add an element to the MMR and return its position in the MMR.
+    /// Return the node digest at `position`, respecting the merkleization boundary.
     ///
-    /// # Warnings
-    ///
-    /// - Added nodes are not guaranteed to be durable until the MMR is merkleized and a `sync` call
-    ///   succeeds.
-    /// - Memory usage grows by O(log2(n)) with each node added until data is flushed to disk by
-    ///   `sync`.
-    pub fn add(
-        &self,
-        h: &mut impl Hasher<super::Mmr, Digest = D>,
-        element: &[u8],
-    ) -> Result<Position, Error> {
-        Ok(self.inner.write().mem_mmr.add(h, element))
-    }
+    /// Nodes at or beyond the merkleized frontier return `None`. For nodes within the merkleized
+    /// region, the in-memory cache is checked first, then the metadata and journal.
+    pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+        let (merkleized_size, mem_bounds) = self.merkleized_size_and_mem_bounds();
 
-    /// Pop elements while staying in Dirty state. No root recomputation occurs until merkleize.
-    pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
-        let new_size = {
-            let inner = self.inner.get_mut();
-
-            // First pop as many leaves as possible from the in-memory MMR.
-            while leaves_to_pop > 0 {
-                match inner.mem_mmr.pop() {
-                    Ok(_) => leaves_to_pop -= 1,
-                    Err(ElementPruned(_)) | Err(Empty) => break,
-                    Err(err) => return Err(err), // propagate unexpected errors
-                }
-            }
-            if leaves_to_pop == 0 {
-                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
-                return Ok(());
-            }
-
-            // Compute the rewind size for the remaining leaves to pop.
-            let destination_leaf = match inner.mem_mmr.leaves().checked_sub(leaves_to_pop as u64) {
-                Some(destination_leaf) => destination_leaf,
-                None => {
-                    let pruned_to_pos = inner.pruned_to_pos;
-                    inner.merkleized_size =
-                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
-                    return Err(if pruned_to_pos == 0 {
-                        Error::Empty
-                    } else {
-                        Error::ElementPruned(pruned_to_pos - 1)
-                    });
-                }
-            };
-            let new_size =
-                Position::try_from(destination_leaf).expect("valid leaf should convert to size");
-
-            if new_size < inner.pruned_to_pos {
-                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
-                return Err(Error::ElementPruned(new_size));
-            }
-            new_size
-        };
-
-        self.journal.rewind(*new_size).await?;
-        self.journal.sync().await?;
-
-        let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(
-                &self.metadata,
-                &self.journal,
-                pos,
-            )
-            .await?;
-            pinned_nodes.push(digest);
+        // Return None for unmerkleized nodes should they be requested.
+        if position >= merkleized_size {
+            return Ok(None);
         }
 
-        let inner = self.inner.get_mut();
-        inner.mem_mmr = DirtyMemMmr::from_components(vec![], new_size, pinned_nodes);
-        Self::add_extra_pinned_nodes(
-            &mut inner.mem_mmr,
-            &self.metadata,
-            &self.journal,
-            inner.pruned_to_pos,
-        )
-        .await?;
-        inner.merkleized_size = std::cmp::min(inner.merkleized_size, new_size);
-
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
-    /// a partial write for testing failure scenarios.
-    pub async fn simulate_partial_sync(
-        self,
-        hasher: &mut impl Hasher<super::Mmr, Digest = D>,
-        write_limit: usize,
-    ) -> Result<(), Error> {
-        if write_limit == 0 {
-            return Ok(());
-        }
-
-        // Snapshot up to `write_limit` pending nodes while holding the read lock, then release
-        // it before performing async journal writes.
-        let clean_mmr = self.merkleize(hasher);
-        let journal_size = clean_mmr.journal.size().await;
-        let pending_nodes = {
-            let inner = clean_mmr.inner.read();
-            let mut pending_nodes = Vec::with_capacity(write_limit);
-            for i in journal_size..*inner.mem_mmr.size() {
-                if pending_nodes.len() >= write_limit {
-                    break;
-                }
-                pending_nodes.push(*inner.mem_mmr.get_node_unchecked(Position::new(i)));
-            }
-            pending_nodes
-        };
-
-        // Write the cached pending nodes to the journal.
-        for node in pending_nodes {
-            clean_mmr.journal.append(node).await?;
-        }
-        clean_mmr.journal.sync().await?;
-
-        Ok(())
-    }
-}
-
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E, D> {
-    async fn size(&self) -> Position {
-        self.size()
-    }
-
-    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        self.get_node(position).await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for DirtyMmr<E, D> {
-    async fn size(&self) -> Position {
-        self.size()
-    }
-
-    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        {
-            let inner = self.inner.read();
-
-            // Return None for unmerkleized nodes should they be requested.
-            if position >= inner.merkleized_size {
-                return Ok(None);
-            }
-
-            // If the requested node is in the mem mmr, use that.
-            let mem_bounds = inner.mem_mmr.bounds();
-            if position >= mem_bounds.start && position < mem_bounds.end {
-                return Ok(Some(*inner.mem_mmr.get_node_unchecked(position)));
-            }
+        // If the requested node is in the mem mmr, use that.
+        if position >= mem_bounds.start && position < mem_bounds.end {
+            return Ok(Some(self.get_node_in_mem_unchecked(position)));
         }
 
         // Otherwise get the node from the metadata+journal. If it's missing it must be due to
         // pruning, so we swallow MissingNode errors.
-        match Self::get_from_metadata_or_journal(&self.metadata, &self.journal, position).await {
+        match self.get_from_metadata_or_journal(position).await {
             Ok(digest) => Ok(Some(digest)),
             Err(Error::MissingNode(_)) => Ok(None),
             Err(e) => Err(e),
@@ -1071,7 +275,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
         Sha256::hash(&v.to_be_bytes())
@@ -2016,7 +1220,7 @@ mod tests {
             // Sync with range.start <= existing_size <= range.end should reuse data
             let lower_bound_pos = mmr.bounds().start;
             let upper_bound_pos = mmr.size();
-            let mut expected_nodes = BTreeMap::new();
+            let mut expected_nodes = std::collections::BTreeMap::new();
             for i in *lower_bound_pos..*upper_bound_pos {
                 expected_nodes.insert(
                     Position::new(i),
@@ -2086,7 +1290,7 @@ mod tests {
             let lower_bound_pos = original_pruned_to;
             let upper_bound_pos = original_size + 11; // Extend beyond existing data
 
-            let mut expected_nodes = BTreeMap::new();
+            let mut expected_nodes = std::collections::BTreeMap::new();
             for pos in *lower_bound_pos..*original_size {
                 let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
@@ -2132,6 +1336,11 @@ mod tests {
     fn test_journaled_mmr_init_stale_metadata_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            use crate::metadata::{Config as MConfig, Metadata};
+            use commonware_utils::sequence::prefixed_u64::U64;
+
+            const PRUNE_TO_POS_PREFIX: u8 = 1;
+
             let mut hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data and prune it
@@ -2497,12 +1706,9 @@ mod tests {
                 .unwrap();
 
             let dirty = clean.into_dirty();
-            let (mem_start, journal_start) = {
-                let inner = dirty.inner.read();
-                (inner.mem_mmr.bounds().start, inner.pruned_to_pos)
-            };
-            assert!(mem_start > journal_start);
 
+            // After sync, the in-memory cache should have been pruned, so the dirty MMR
+            // must read proof nodes from the journal. Verify the proof is still correct.
             let actual = dirty
                 .historical_range_proof(historical_leaves, range)
                 .await

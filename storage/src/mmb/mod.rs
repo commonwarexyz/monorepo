@@ -106,10 +106,15 @@ pub mod iterator;
 pub mod mem;
 pub mod proof;
 
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        pub mod journaled;
+    }
+}
+
 // --- Merkle family marker and type aliases ---
 use crate::merkle::{self, MerkleFamily};
 pub use hasher::Standard as StandardHasher;
-use thiserror::Error;
 
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
@@ -147,6 +152,17 @@ impl MerkleFamily for Mmb {
         }
     }
 
+    fn to_nearest_size(size: u64) -> u64 {
+        *iterator::PeakIterator::to_nearest_size(Position::new(size))
+    }
+
+    fn nodes_to_pin(size: u64, prune_pos: u64) -> alloc::vec::Vec<u64> {
+        iterator::nodes_to_pin(Position::new(size), Position::new(prune_pos))
+            .into_iter()
+            .map(|pos| *pos)
+            .collect()
+    }
+
     fn is_valid_size(size: u64) -> bool {
         iterator::leaves_for_size(size).is_some()
     }
@@ -171,58 +187,4 @@ pub const MAX_LOCATION: Location = Location::MAX;
 pub use crate::merkle::LocationRangeExt;
 
 /// Errors that can occur during MMB operations.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-pub enum Error {
-    #[error("{0} is not a leaf position")]
-    NonLeaf(Position),
-
-    #[error("location {0} out of bounds")]
-    LocOutOfBounds(Location),
-
-    #[error("position {0} out of bounds")]
-    PosOutOfBounds(Position),
-
-    #[error("missing node: {0}")]
-    MissingNode(Position),
-
-    #[error("element pruned: {0}")]
-    ElementPruned(Position),
-
-    #[error("invalid position: {0}")]
-    InvalidPosition(Position),
-
-    #[error("invalid size: {0}")]
-    InvalidSize(u64),
-
-    #[error("empty")]
-    Empty,
-
-    #[error("invalid pinned nodes")]
-    InvalidPinnedNodes,
-
-    #[error("leaf location out of bounds: {0}")]
-    LeafOutOfBounds(Location),
-
-    #[error("location {0} > MAX_LOCATION")]
-    LocationOverflow(Location),
-
-    #[error("range out of bounds: {0}")]
-    RangeOutOfBounds(Location),
-}
-
-impl From<merkle::PositionConversionError<Mmb>> for Error {
-    fn from(err: merkle::PositionConversionError<Mmb>) -> Self {
-        match err {
-            merkle::PositionConversionError::NonLeaf(pos) => Self::NonLeaf(pos),
-            merkle::PositionConversionError::Overflow(pos) => Self::PosOutOfBounds(pos),
-        }
-    }
-}
-
-impl From<merkle::LocationConversionError<Mmb>> for Error {
-    fn from(err: merkle::LocationConversionError<Mmb>) -> Self {
-        match err {
-            merkle::LocationConversionError::Overflow(loc) => Self::LocOutOfBounds(loc),
-        }
-    }
-}
+pub type Error = merkle::Error<Mmb>;
