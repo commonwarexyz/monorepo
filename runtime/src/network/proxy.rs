@@ -74,7 +74,6 @@ impl ProxyConfig {
 
 /// Parse PROXY header from a buffered reader, returning the real client address.
 /// Consumes the header bytes from the reader.
-#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketAddr, Error> {
     let mut parser = IncrementalParser::new();
     loop {
@@ -101,7 +100,6 @@ pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketA
 }
 
 /// Result of attempting to parse a PROXY header from bytes.
-#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 pub enum ParseResult {
     /// Successfully parsed. Contains client address and bytes consumed.
     Complete(SocketAddr, usize),
@@ -114,7 +112,6 @@ pub enum ParseResult {
 /// Returns `ParseResult::Incomplete` if more data is needed, or
 /// `ParseResult::Complete` with the client address and bytes consumed.
 /// Returns an error if the data is definitively invalid.
-#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 pub fn parse_from_bytes(data: &[u8]) -> Result<ParseResult, Error> {
     match ProxyHeader::parse(data, ParseConfig::default()) {
         Ok((header, consumed)) => {
@@ -130,12 +127,10 @@ pub fn parse_from_bytes(data: &[u8]) -> Result<ParseResult, Error> {
 }
 
 /// Incremental PROXY header parser shared by tokio and io_uring network paths.
-#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 pub struct IncrementalParser {
     parsed: Vec<u8>,
 }
 
-#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 impl IncrementalParser {
     /// Create a parser with a small initial buffer for realistic header sizes.
     pub fn new() -> Self {
