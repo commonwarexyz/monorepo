@@ -920,6 +920,22 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_zero_length_read_past_eof_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"zero_len_probe").await.unwrap();
+            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            writer.write_at(0, b"abc").await.unwrap();
+
+            let empty = writer.read_at(3, 0).await.unwrap();
+            assert!(empty.is_empty());
+
+            let err = writer.read_at(4, 0).await.unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+        });
+    }
+
+    #[test_traced]
     fn test_write_read_at_blocks_concurrent_write_until_persisted_read_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

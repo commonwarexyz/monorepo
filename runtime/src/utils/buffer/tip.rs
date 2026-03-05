@@ -9,7 +9,7 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// # Allocation Semantics
 ///
-/// - Backing storage is allocated eagerly in [Self::new] at `capacity` bytes.
+/// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
 /// - Flushing paths ([Self::take] and grow-resize in [Self::resize]) return a cloned `IoBuf` view
 ///   of logical bytes and keep backing allocated for reuse.
@@ -46,11 +46,10 @@ pub(super) struct Buffer {
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
     ///
-    /// The backing buffer is allocated eagerly and starts with zero length.
+    /// The backing buffer starts detached and is allocated on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
-        let data = pool.alloc(capacity).freeze();
         Self {
-            data,
+            data: IoBuf::default(),
             len: 0,
             offset,
             capacity,
@@ -120,7 +119,7 @@ impl Buffer {
         };
         assert!(start <= end, "slice start must be <= end");
         assert!(end <= self.len, "slice out of bounds");
-        self.data.slice(range)
+        self.data.slice(start..end)
     }
 
     /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
@@ -368,8 +367,22 @@ mod tests {
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
         let mut buffer = Buffer::new(0, 16, pool);
         assert!(buffer.data.is_empty());
+        assert!(!buffer.data.is_pooled());
 
         assert!(buffer.merge(b"abc", 0));
         assert_eq!(buffer.data.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn test_tip_slice_uses_resolved_bounds() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(0, 16, pool);
+
+        buffer.append(b"stale");
+        let _ = buffer.take().expect("buffer should contain data");
+
+        assert!(buffer.slice(..).is_empty());
+        assert!(buffer.slice(0..).is_empty());
     }
 }
