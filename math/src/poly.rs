@@ -1,4 +1,6 @@
-use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+use crate::algebra::{
+    msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
+};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
@@ -131,14 +133,38 @@ impl<K> Poly<K> {
         K: Space<R>,
     {
         // Contains 1, r, r^2, ...
+        let weights = powers(r, self.len_usize()).collect::<Vec<_>>();
+        K::msm(&self.coeffs, &weights, strategy)
+    }
+
+    /// Compute `sum_i a_i * self(b_i)`.
+    ///
+    /// This is more efficient than several calls to `eval_msm`, but produces the
+    /// same result.
+    ///
+    /// This returns `0` if the iterator is empty.
+    pub fn lin_comb_eval<'a, R: Ring + 'a>(
+        &self,
+        into_iter: impl IntoIterator<Item = (&'a R, &'a R)>,
+        strategy: &impl Strategy,
+    ) -> K
+    where
+        K: Space<R>,
+    {
+        // Contains a0 + a1 + ..., a0 b0 + a1 b1 + ..., a0 b0^2 + a1 b1^2 + ...
         let weights = {
+            let mut iter = into_iter.into_iter();
+            let Some((a0, b0)) = iter.next() else {
+                return K::zero();
+            };
+
             let len = self.len_usize();
-            let mut out = Vec::with_capacity(len);
-            out.push(R::one());
-            let mut acc = R::one();
-            for _ in 1..len {
-                acc *= r;
-                out.push(acc.clone());
+            let mut out: Vec<_> = powers(b0, len).map(|b0_j| b0_j * a0).collect();
+            for (ai, bi) in iter {
+                powers(bi, len)
+                    .map(|bi_j| bi_j * ai)
+                    .zip(out.iter_mut())
+                    .for_each(|(c_j, o_j)| *o_j += &c_j);
             }
             out
         };
@@ -564,6 +590,7 @@ pub mod fuzz {
         EvalScale(Poly<F>, F, F),
         EvalZero(Poly<F>),
         EvalMsm(Poly<F>, F),
+        LinCombEval(Poly<F>, Vec<(F, F)>),
         Interpolate(Poly<F>),
         InterpolateWithZeroPoint(Poly<F>),
         InterpolateWithZeroPointMiddle(Poly<F>),
@@ -595,6 +622,14 @@ pub mod fuzz {
                 }
                 Self::EvalMsm(f, x) => {
                     assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+                }
+                Self::LinCombEval(f, pairs) => {
+                    let naive_eval = pairs.iter().fold(F::zero(), |mut acc, (a, b)| {
+                        acc += &(*a * &f.eval(b));
+                        acc
+                    });
+                    let lin_comb = f.lin_comb_eval(pairs.iter().map(|(a, b)| (a, b)), &Sequential);
+                    assert_eq!(naive_eval, lin_comb);
                 }
                 Self::Interpolate(f) => {
                     if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
