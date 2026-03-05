@@ -145,8 +145,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             }
 
             debug!(blob = index, len, "found index blob");
-            let wrapped_blob = Write::from_pooler(&context, blob, len, config.write_buffer);
-            blobs.insert(index, wrapped_blob);
+            blobs.insert(index, (blob, len));
         }
 
         // Initialize intervals by scanning existing records
@@ -157,7 +156,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, blob) in &blobs {
+        for (section, (blob, size)) in &blobs {
             // Skip if bits are provided and the section is not in the bits
             if let Some(bits) = &bits {
                 if !bits.contains_key(section) {
@@ -167,14 +166,13 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             }
 
             // Initialize read buffer
-            let size = blob.size().await;
             let mut replay_blob =
-                ReadBuffer::from_pooler(&context, blob.clone(), size, config.replay_buffer);
+                ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
             let items_per_blob = config.items_per_blob.get();
-            while offset < size {
+            while offset < *size {
                 // Calculate index for this record
                 let index = section * items_per_blob + (offset / Record::<V>::SIZE as u64);
 
@@ -221,6 +219,17 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             elapsed = ?context.current().duration_since(start).unwrap_or_default(),
             "rebuilt intervals"
         );
+
+        // Wrap blobs in write buffers
+        let blobs = blobs
+            .into_iter()
+            .map(|(index, (blob, len))| {
+                (
+                    index,
+                    Write::from_pooler(&context, blob, len, config.write_buffer),
+                )
+            })
+            .collect();
 
         // Initialize metrics
         let puts = Counter::default();
