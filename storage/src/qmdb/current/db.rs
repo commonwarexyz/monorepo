@@ -469,7 +469,7 @@ where
         if pruned_chunks > 0 {
             let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
             if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
-                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos)?;
             }
         }
 

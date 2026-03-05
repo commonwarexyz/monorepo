@@ -114,6 +114,12 @@ pub enum Error {
     PruneBeyondMinRequired(Location, Location),
 }
 
+impl From<crate::merkle::LocationConversionError<crate::mmr::Mmr>> for Error {
+    fn from(e: crate::merkle::LocationConversionError<crate::mmr::Mmr>) -> Self {
+        Self::Mmr(e.into())
+    }
+}
+
 impl From<crate::journal::authenticated::Error> for Error {
     fn from(e: crate::journal::authenticated::Error) -> Self {
         match e {

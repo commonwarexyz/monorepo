@@ -228,7 +228,7 @@ impl<D: Digest> CleanMmr<D> {
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_mmr_size() {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
@@ -292,12 +292,26 @@ impl<D: Digest> CleanMmr<D> {
 
     /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
     /// them required for proof generation.
-    pub fn prune_to_pos(&mut self, pos: Position) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidPosition] if `pos` is before the current pruning boundary or
+    /// beyond the MMR size.
+    pub fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
+        if pos < self.pruned_to_pos || pos > self.size() {
+            return Err(Error::InvalidPosition(pos));
+        }
+
+        if pos == self.pruned_to_pos {
+            return Ok(());
+        }
+
         // Recompute the set of older nodes to retain.
         self.pinned_nodes = self.nodes_to_pin(pos);
         let retained_nodes = self.pos_to_index(pos);
         self.nodes.drain(0..retained_nodes);
         self.pruned_to_pos = pos;
+        Ok(())
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
@@ -305,7 +319,7 @@ impl<D: Digest> CleanMmr<D> {
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             let pos = self.index_to_pos(self.nodes.len());
-            self.prune_to_pos(pos);
+            self.prune_to_pos(pos).expect("pos is always valid");
         }
     }
 
@@ -483,7 +497,7 @@ impl<D: Digest> DirtyMmr<D> {
             if new_size < self.pruned_to_pos {
                 return Err(ElementPruned(new_size));
             }
-            if new_size.is_mmr_size() {
+            if new_size.is_valid_size() {
                 break;
             }
             new_size -= 1;
@@ -873,7 +887,7 @@ mod tests {
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
-            mmr.prune_to_pos(Position::new(14)); // prune up to the tallest peak
+            mmr.prune_to_pos(Position::new(14)).unwrap(); // prune up to the tallest peak
             assert_eq!(mmr.bounds().start, Position::new(14));
 
             // After pruning, we shouldn't be able to generate a proof for any elements before the
@@ -947,7 +961,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
-                    mmr.size().is_mmr_size(),
+                    mmr.size().is_valid_size(),
                     "mmr of size {} should be valid",
                     mmr.size()
                 );
@@ -955,7 +969,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !Position::new(size).is_mmr_size(),
+                        !Position::new(size).is_valid_size(),
                         "mmr of size {size} should be invalid",
                     );
                 }
@@ -1106,7 +1120,7 @@ mod tests {
             let mut mmr = mmr.merkleize(&mut hasher, None);
 
             let leaf_pos = Position::try_from(Location::new(100)).unwrap();
-            mmr.prune_to_pos(leaf_pos);
+            mmr.prune_to_pos(leaf_pos).unwrap();
             let mut mmr = mmr.into_dirty();
             while mmr.size() > leaf_pos {
                 mmr.pop().unwrap();
@@ -1151,9 +1165,9 @@ mod tests {
             }
 
             // Confirm the tree has all the hashes necessary to update any element after pruning.
-            mmr.prune_to_pos(Position::new(150));
+            mmr.prune_to_pos(Position::new(150)).unwrap();
             for leaf_pos in 150u64..=190 {
-                mmr.prune_to_pos(Position::new(leaf_pos));
+                mmr.prune_to_pos(Position::new(leaf_pos)).unwrap();
                 let leaf_loc = Location::new(leaf_pos);
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
@@ -1281,7 +1295,7 @@ mod tests {
                 // Pruned leaf.
                 let mmr = CleanMmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
-                mmr.prune_to_pos(Position::new(50));
+                mmr.prune_to_pos(Position::new(50)).unwrap();
                 let mut dirty = mmr.into_dirty();
                 let result = dirty.update_leaf_digest(Location::new(0), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::ElementPruned(_))));
@@ -1445,7 +1459,7 @@ mod tests {
             assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
 
             // Prune to position 7
-            mmr.prune_to_pos(Position::new(7));
+            mmr.prune_to_pos(Position::new(7)).unwrap();
             let nodes: Vec<_> = (7..*mmr.size())
                 .map(|i| *mmr.get_node_unchecked(Position::new(i)))
                 .collect();

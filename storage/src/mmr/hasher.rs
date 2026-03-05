@@ -1,82 +1,21 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
-use super::Position;
-use crate::mmr::Location;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use super::{Location, Mmr, Position};
+use crate::merkle;
+use commonware_cryptography::Hasher as CHasher;
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher: Send + Sync {
-    type Digest: Digest;
-    type Inner: commonware_cryptography::Hasher<Digest = Self::Digest>;
+///
+/// This is a blanket alias for [`merkle::hasher::Hasher<Mmr>`] so that existing code can continue
+/// to write `H: Hasher<Digest = D>` without specifying the family marker.
+pub trait Hasher: merkle::hasher::Hasher<Mmr> {}
+impl<T: merkle::hasher::Hasher<Mmr>> Hasher for T {}
 
-    /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest;
+/// The standard hasher to use with an MMR. Re-exports the shared [`merkle::hasher::Standard`]
+/// with the MMR-specific [`root`](merkle::hasher::Hasher::root) implementation.
+pub type Standard<H> = merkle::hasher::Standard<H>;
 
-    /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(
-        &mut self,
-        pos: Position,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest;
-
-    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
-    /// decreasing order of height.
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest;
-
-    /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Self::Digest;
-
-    /// Access the inner [CHasher] hasher.
-    fn inner(&mut self) -> &mut Self::Inner;
-
-    /// Fork the hasher to provide equivalent functionality in another thread. This is different
-    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
-    /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher<Digest = Self::Digest>;
-}
-
-/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
-/// external data.
-pub struct Standard<H: CHasher> {
-    hasher: H,
-}
-
-impl<H: CHasher> Standard<H> {
-    /// Creates a new [Standard] hasher.
-    pub fn new() -> Self {
-        Self { hasher: H::new() }
-    }
-
-    pub fn update_with_pos(&mut self, pos: Position) {
-        let pos = *pos;
-        self.hasher.update(&pos.to_be_bytes());
-    }
-
-    pub fn update_with_digest(&mut self, digest: &H::Digest) {
-        self.hasher.update(digest.as_ref());
-    }
-
-    pub fn update_with_element(&mut self, element: &[u8]) {
-        self.hasher.update(element);
-    }
-
-    pub fn finalize(&mut self) -> H::Digest {
-        self.hasher.finalize()
-    }
-}
-
-impl<H: CHasher> Default for Standard<H> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<H: CHasher> Hasher for Standard<H> {
+impl<H: CHasher> merkle::hasher::Hasher<Mmr> for Standard<H> {
     type Digest = H::Digest;
     type Inner = H;
 
@@ -84,21 +23,8 @@ impl<H: CHasher> Hasher for Standard<H> {
         &mut self.hasher
     }
 
-    fn fork(&self) -> impl Hasher<Digest = H::Digest> {
-        Self { hasher: H::new() }
-    }
-
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_element(element);
-        self.finalize()
-    }
-
-    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_digest(left);
-        self.update_with_digest(right);
-        self.finalize()
+    fn fork(&self) -> impl merkle::hasher::Hasher<Mmr, Digest = H::Digest> {
+        Self::new()
     }
 
     fn root<'a>(
@@ -106,16 +32,12 @@ impl<H: CHasher> Hasher for Standard<H> {
         leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.update(&leaves.to_be_bytes());
+        let inner = self.inner();
+        inner.update(&leaves.to_be_bytes());
         for digest in peak_digests {
-            self.update_with_digest(digest);
+            inner.update(digest.as_ref());
         }
-        self.finalize()
-    }
-
-    fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hasher.update(data);
-        self.finalize()
+        inner.finalize()
     }
 }
 

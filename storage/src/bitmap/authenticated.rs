@@ -432,7 +432,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new(chunk as u64)).unwrap();
-        self.mmr.prune_to_pos(mmr_pos);
+        self.mmr.prune_to_pos(mmr_pos)?;
         Ok(())
     }
 
