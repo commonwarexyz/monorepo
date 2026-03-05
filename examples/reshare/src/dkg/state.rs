@@ -17,7 +17,7 @@ use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Output,
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
         primitives::{group::Share, variant::Variant},
@@ -633,7 +633,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Finalize the player's participation in the DKG round.
     pub fn finalize<M: Faults>(
         self,
-        logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
+        logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
