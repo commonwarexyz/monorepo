@@ -5,6 +5,7 @@
 
 use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
 use commonware_utils::channel::oneshot;
+use tracing::warn;
 
 /// Stable waiter identity packed into SQE/CQE `user_data`.
 ///
@@ -253,6 +254,26 @@ impl Waiters {
         }
 
         if is_cancel {
+            match result.abs() {
+                0 => {
+                    // Cancellation successful.
+                }
+                libc::EALREADY => {
+                    // Cancellation is no longer possible at this stage. The target
+                    // operation CQE should follow shortly.
+                }
+                libc::ENOENT => {
+                    // Not found can mean the target already completed (common race) or
+                    // stale/invalid user_data.
+                }
+                libc::EINVAL => {
+                    panic!("async cancel SQE rejected by kernel: EINVAL");
+                }
+                result => {
+                    warn!(result, "unexpected async cancel CQE result");
+                }
+            }
+
             // Cancel CQEs acknowledge cancel requests but do not complete waiters.
             return None;
         }
