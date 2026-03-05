@@ -112,7 +112,9 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+        ops::compute_public::<MinPk>(&self.key)
+            .try_into()
+            .expect("non-zero private key produces non-identity public key")
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -179,6 +181,9 @@ impl Read for PublicKey {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = <MinPk as Variant>::Public::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        if key.is_identity() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Identity"));
+        }
         Ok(Self { raw, key })
     }
 }
@@ -222,10 +227,15 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<<MinPk as Variant>::Public> for PublicKey {
-    fn from(key: <MinPk as Variant>::Public) -> Self {
+impl TryFrom<<MinPk as Variant>::Public> for PublicKey {
+    type Error = CodecError;
+
+    fn try_from(key: <MinPk as Variant>::Public) -> Result<Self, Self::Error> {
+        if key.is_identity() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Identity"));
+        }
         let raw = key.encode_fixed();
-        Self { raw, key }
+        Ok(Self { raw, key })
     }
 }
 
@@ -403,7 +413,7 @@ mod tests {
     use super::*;
     use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::Random;
+    use commonware_math::algebra::{Additive, Random};
     use commonware_utils::test_rng;
 
     #[test]
@@ -472,6 +482,37 @@ mod tests {
         let msg = b"test message";
         let sig = private_key.sign(b"ns", msg);
         assert!(private_key.public_key().verify(b"ns", msg, &sig));
+    }
+
+    #[test]
+    fn test_private_rejects_zero_scalar() {
+        let zero_scalar = group::Scalar::zero();
+        let result = Private::try_from(zero_scalar);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_from_public_rejects_identity() {
+        let identity = group::G1::zero();
+        let result = PublicKey::try_from(identity);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_public_key_read_rejects_identity() {
+        let identity = group::G1::zero();
+        let encoded = identity.encode();
+        let result = PublicKey::decode(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_decode_identity() {
+        let identity = group::G2::zero();
+        let encoded = identity.encode();
+        let decoded = Signature::decode(encoded).unwrap();
+        let inner: &group::G2 = decoded.as_ref();
+        assert_eq!(*inner, identity);
     }
 
     #[test]
