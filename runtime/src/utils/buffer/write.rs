@@ -32,9 +32,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
-///     let mut buf = vec![0u8; size as usize];
-///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
-///     assert_eq!(&buf, b"hello world!");
+///     let buf = reader.read(size as usize).await.expect("read failed");
+///     assert_eq!(buf.coalesce().as_ref(), b"hello world!");
 /// });
 /// ```
 #[derive(Clone)]

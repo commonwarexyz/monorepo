@@ -197,14 +197,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
-                let mut record_buf = vec![0u8; Record::<V>::SIZE];
-                replay_blob
-                    .read_exact(&mut record_buf, Record::<V>::SIZE)
-                    .await?;
+                let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
+                if let Ok(record) = Record::<V>::read(&mut record_buf) {
                     if record.is_valid() {
                         items += 1;
                         intervals.insert(index);
@@ -300,8 +297,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
-        let record = Record::<V>::read(&mut read_buf.as_ref())?;
+        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
+        let record = Record::<V>::read(&mut read_buf)?;
 
         // If record is valid, return it
         if record.is_valid() {

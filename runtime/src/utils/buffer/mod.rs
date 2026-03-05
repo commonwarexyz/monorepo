@@ -30,26 +30,22 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"Hello");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"Hello");
 
             // Read more data that requires a buffer refill
-            let mut buf = [0u8; 14];
-            reader.read_exact(&mut buf, 14).await.unwrap();
-            assert_eq!(&buf, b", world! This ");
+            let read = reader.read(14).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b", world! This ");
 
             // Verify position tracking
             assert_eq!(reader.position(), 19);
 
             // Read the remaining data
-            let mut buf = [0u8; 10];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf[..7], b"is a te");
+            let read = reader.read(7).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"is a te");
 
             // Attempt to read beyond the end should fail
-            let mut buf = [0u8; 5];
-            let result = reader.read_exact(&mut buf, 5).await;
+            let result = reader.read(5).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         });
     }
@@ -69,17 +65,15 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read data that crosses buffer boundaries
-            let mut buf = [0u8; 15];
-            reader.read_exact(&mut buf, 15).await.unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLMNO");
+            let read = reader.read(15).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDEFGHIJKLMNO");
 
             // Verify position tracking
             assert_eq!(reader.position(), 15);
 
             // Read the remaining data
-            let mut buf = [0u8; 11];
-            reader.read_exact(&mut buf, 11).await.unwrap();
-            assert_eq!(&buf, b"PQRSTUVWXYZ");
+            let read = reader.read(11).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"PQRSTUVWXYZ");
 
             // Verify we're at the end
             assert_eq!(reader.position(), 26);
@@ -101,23 +95,20 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
 
             // Read data that crosses buffer boundaries
-            let mut buf = [0u8; 21];
-            reader.read_exact(&mut buf, 21).await.unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLMNOPQRSTU");
+            let read = reader.read(21).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDEFGHIJKLMNOPQRSTU");
 
             // Verify position tracking
             assert_eq!(reader.position(), 21);
 
             // Read the remaining data
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"VWXYZ");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"VWXYZ");
 
             // Rewind and read again
             reader.seek_to(0).unwrap();
-            let mut buf = [0u8; 21];
-            reader.read_exact(&mut buf, 21).await.unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLMNOPQRSTU");
+            let read = reader.read(21).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDEFGHIJKLMNOPQRSTU");
         });
     }
 
@@ -139,27 +130,21 @@ mod tests {
             assert_eq!(reader.blob_remaining(), size);
 
             // Read partial data
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"This ");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"This ");
 
             // Check remaining bytes after partial read
             assert_eq!(reader.blob_remaining(), size - 5);
 
             // Read exactly up to the size limit
-            let mut buf = vec![0u8; (size - 5) as usize];
-            reader
-                .read_exact(&mut buf, (size - 5) as usize)
-                .await
-                .unwrap();
-            assert_eq!(&buf, b"is a test with known size limitations.");
+            let read = reader.read((size - 5) as usize).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"is a test with known size limitations.");
 
             // Verify we're at the end
             assert_eq!(reader.blob_remaining(), 0);
 
             // Reading beyond the end should fail
-            let mut buf = [0u8; 1];
-            let result = reader.read_exact(&mut buf, 1).await;
+            let result = reader.read(1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         });
     }
@@ -179,20 +164,17 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(8));
 
             // Fill the internal buffer and consume most of it (2 bytes remain buffered).
-            let mut first = [0u8; 6];
-            reader.read_exact(&mut first, 6).await.unwrap();
+            let first = reader.read(6).await.unwrap().coalesce();
             assert_eq!(first.as_ref(), b"abcdef");
             assert_eq!(reader.position(), 6);
 
             // Only 4 bytes remain total, so this must fail without consuming anything.
-            let mut second = [0u8; 5];
-            let err = reader.read_exact(&mut second, 5).await.unwrap_err();
+            let err = reader.read(5).await.unwrap_err();
             assert!(matches!(err, Error::BlobInsufficientLength));
             assert_eq!(reader.position(), 6);
 
             // Remaining bytes should still be readable in full.
-            let mut tail = [0u8; 4];
-            reader.read_exact(&mut tail, 4).await.unwrap();
+            let tail = reader.read(4).await.unwrap().coalesce();
             assert_eq!(tail.as_ref(), b"ghij");
             assert_eq!(reader.position(), 10);
         });
@@ -216,18 +198,14 @@ mod tests {
             // Read all data in smaller chunks
             let mut total_read = 0;
             let chunk_size = 8 * 1024; // 8KB chunks
-            let mut buf = vec![0u8; chunk_size];
 
             while total_read < data_size {
                 let to_read = std::cmp::min(chunk_size, data_size - total_read);
-                reader
-                    .read_exact(&mut buf[..to_read], to_read)
-                    .await
-                    .unwrap();
+                let read = reader.read(to_read).await.unwrap().coalesce();
 
                 // Verify data integrity
                 assert!(
-                    buf[..to_read].iter().all(|&b| b == 0x42),
+                    read.as_ref().iter().all(|&b| b == 0x42),
                     "Data at position {total_read} is not correct"
                 );
 
@@ -238,8 +216,7 @@ mod tests {
             assert_eq!(total_read, data_size);
 
             // Reading beyond the end should fail
-            let mut extra_buf = [0u8; 1];
-            let result = reader.read_exact(&mut extra_buf, 1).await;
+            let result = reader.read(1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         });
     }
@@ -261,24 +238,44 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer_size));
 
             // Read exactly one buffer size
-            let mut buf1 = vec![0u8; buffer_size];
-            reader.read_exact(&mut buf1, buffer_size).await.unwrap();
-            assert!(buf1.iter().all(|&b| b == 0x37));
+            let read = reader.read(buffer_size).await.unwrap().coalesce();
+            assert!(read.as_ref().iter().all(|&b| b == 0x37));
 
             // Read exactly one buffer size more
-            let mut buf2 = vec![0u8; buffer_size];
-            reader.read_exact(&mut buf2, buffer_size).await.unwrap();
-            assert!(buf2.iter().all(|&b| b == 0x37));
+            let read = reader.read(buffer_size).await.unwrap().coalesce();
+            assert!(read.as_ref().iter().all(|&b| b == 0x37));
 
             // Read the remaining half buffer
             let half_buffer = buffer_size / 2;
-            let mut buf3 = vec![0u8; half_buffer];
-            reader.read_exact(&mut buf3, half_buffer).await.unwrap();
-            assert!(buf3.iter().all(|&b| b == 0x37));
+            let read = reader.read(half_buffer).await.unwrap().coalesce();
+            assert!(read.as_ref().iter().all(|&b| b == 0x37));
 
             // Verify we're at the end
             assert_eq!(reader.blob_remaining(), 0);
             assert_eq!(reader.position(), size);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_structure_single_vs_chunked() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"ABCDEFGHIJKL";
+            let (blob, size) = context.open("partition", b"structural").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, data).await.unwrap();
+
+            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(5));
+
+            // First read fits in one fetched chunk.
+            let first = reader.read(3).await.unwrap();
+            assert!(first.is_single());
+            assert_eq!(first.coalesce().as_ref(), b"ABC");
+
+            // This read spans refill boundaries and should be represented as multiple chunks.
+            let second = reader.read(7).await.unwrap();
+            assert!(!second.is_single());
+            assert_eq!(second.coalesce().as_ref(), b"DEFGHIJ");
         });
     }
 
@@ -297,9 +294,8 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data to advance the position
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"ABCDE");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDE");
             assert_eq!(reader.position(), 5);
 
             // Seek to a specific position
@@ -307,25 +303,22 @@ mod tests {
             assert_eq!(reader.position(), 10);
 
             // Read data from the new position
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"KLMNO");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"KLMNO");
 
             // Seek to beginning
             reader.seek_to(0).unwrap();
             assert_eq!(reader.position(), 0);
 
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"ABCDE");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDE");
 
             // Seek to end
             reader.seek_to(size).unwrap();
             assert_eq!(reader.position(), size);
 
             // Trying to read should fail
-            let mut buf = [0u8; 1];
-            let result = reader.read_exact(&mut buf, 1).await;
+            let result = reader.read(1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
             // Seek beyond end should fail
@@ -349,25 +342,90 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
+            let _ = reader.read(5).await.unwrap().coalesce();
 
             // Seek far ahead, past the current buffer
             reader.seek_to(500).unwrap();
 
             // Read data - should get data from position 500
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"AAAAA"); // Should still be 'A's
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"AAAAA"); // Should still be 'A's);
             assert_eq!(reader.position(), 505);
 
             // Seek backwards
             reader.seek_to(100).unwrap();
 
             // Read again - should be at position 100
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
+            let _ = reader.read(5).await.unwrap().coalesce();
             assert_eq!(reader.position(), 105);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_seek_within_buffered_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, data).await.unwrap();
+
+            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(10));
+
+            // Reads 0..=5, while the internal fetch cursor advances to 10.
+            let read = reader.read(6).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ABCDEF");
+            assert_eq!(reader.position(), 6);
+            assert_eq!(reader.buffer_remaining(), 4);
+
+            // Seek back within [buffer_start, fetch_position).
+            reader.seek_to(3).unwrap();
+            assert_eq!(reader.position(), 3);
+            assert_eq!(reader.buffer_remaining(), 7);
+
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"DEFGH");
+            assert_eq!(reader.position(), 8);
+            assert_eq!(reader.buffer_remaining(), 2);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_seek_within_unread_buffer_does_not_refill() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context
+                .open("partition", b"seek_unread_no_refill")
+                .await
+                .unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, data).await.unwrap();
+
+            let mut reader = Read::from_pooler(&context, blob, data.len() as u64, NZUsize!(10));
+
+            // First read triggers a single refill of 10 bytes.
+            let first = reader.read(6).await.unwrap();
+            assert_eq!(first.coalesce().as_ref(), b"ABCDEF");
+            assert_eq!(reader.position(), 6);
+            assert_eq!(reader.buffer_remaining(), 4);
+
+            // Seek within the unread buffered window [6, 10).
+            reader.seek_to(7).unwrap();
+            assert_eq!(reader.position(), 7);
+            assert_eq!(reader.buffer_remaining(), 3);
+
+            // Consume only from the already buffered window.
+            let second = reader.read(3).await.unwrap();
+            assert_eq!(second.coalesce().as_ref(), b"HIJ");
+            assert_eq!(reader.position(), 10);
+            assert_eq!(reader.buffer_remaining(), 0);
+
+            // Refill should happen only now (at exhaustion), not at seek/read above.
+            let third = reader.read(1).await.unwrap();
+            assert_eq!(third.coalesce().as_ref(), b"K");
+            assert_eq!(reader.position(), 11);
+            assert_eq!(reader.buffer_remaining(), 9);
         });
     }
 
@@ -397,16 +455,15 @@ mod tests {
             let mut new_reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read the content
-            let mut buf = vec![0u8; size as usize];
-            new_reader
-                .read_exact(&mut buf, size as usize)
-                .await
-                .unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLM", "Resized content should match");
+            let read = new_reader.read(size as usize).await.unwrap().coalesce();
+            assert_eq!(
+                read.as_ref(),
+                b"ABCDEFGHIJKLM",
+                "Resized content should match"
+            );
 
             // Reading beyond resized size should fail
-            let mut extra_buf = [0u8; 1];
-            let result = new_reader.read_exact(&mut extra_buf, 1).await;
+            let result = new_reader.read(1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
             // Test resize to larger size
@@ -418,14 +475,10 @@ mod tests {
 
             // Create a new buffer and read to verify resize
             let mut new_reader = Read::from_pooler(&context, blob, new_size, NZUsize!(10));
-            let mut buf = vec![0u8; new_size as usize];
-            new_reader
-                .read_exact(&mut buf, new_size as usize)
-                .await
-                .unwrap();
-            assert_eq!(&buf[..size as usize], b"ABCDEFGHIJKLM");
+            let read = new_reader.read(new_size as usize).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..size as usize], b"ABCDEFGHIJKLM");
             assert_eq!(
-                &buf[size as usize..],
+                &read.as_ref()[size as usize..],
                 vec![0u8; new_size as usize - size as usize]
             );
         });
@@ -456,8 +509,7 @@ mod tests {
             let mut new_reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Reading from resized blob should fail
-            let mut buf = [0u8; 1];
-            let result = new_reader.read_exact(&mut buf, 1).await;
+            let result = new_reader.read(1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         });
     }
@@ -480,9 +532,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
-            let mut buf = [0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"hello");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
         });
     }
 
@@ -505,9 +556,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 7);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(4));
-            let mut buf = [0u8; 7];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf, b"abcdefg");
+            let read = reader.read(7).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcdefg");
         });
     }
 
@@ -534,9 +584,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 26);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(4));
-            let mut buf = [0u8; 26];
-            reader.read_exact(&mut buf, 26).await.unwrap();
-            assert_eq!(&buf, b"abcdefghijklmnopqrstuvwxyz");
+            let read = reader.read(26).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcdefghijklmnopqrstuvwxyz");
         });
     }
 
@@ -561,9 +610,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
             assert_eq!(size, 11);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
-            let mut buf = vec![0u8; 11];
-            reader.read_exact(&mut buf, 11).await.unwrap();
-            assert_eq!(&buf, b"hello world");
+            let read = reader.read(11).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello world");
         });
     }
 
@@ -588,9 +636,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 10);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
-            let mut buf = vec![0u8; 10];
-            reader.read_exact(&mut buf, 10).await.unwrap();
-            assert_eq!(&buf, b"ab01234hij");
+            let read = reader.read(10).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ab01234hij");
 
             // Extend buffer and do partial overwrite
             writer.write_at(10, b"klmnopqrst").await.unwrap();
@@ -603,9 +650,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
-            let mut buf = vec![0u8; 20];
-            reader.read_exact(&mut buf, 20).await.unwrap();
-            assert_eq!(&buf, b"ab01234hiwxyznopqrst");
+            let read = reader.read(20).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"ab01234hiwxyznopqrst");
         });
     }
 
@@ -630,12 +676,11 @@ mod tests {
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
-            let mut buf = vec![0u8; 20];
-            reader.read_exact(&mut buf, 20).await.unwrap();
+            let read = reader.read(20).await.unwrap().coalesce();
             let mut expected = vec![0u8; 20];
             expected[0..5].copy_from_slice("abcde".as_bytes());
             expected[10..20].copy_from_slice("0123456789".as_bytes());
-            assert_eq!(buf, expected);
+            assert_eq!(read.as_ref(), expected.as_slice());
 
             // Fill the gap between existing data
             writer.write_at(5, b"fghij").await.unwrap();
@@ -647,10 +692,9 @@ mod tests {
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
-            let mut buf = vec![0u8; 20];
-            reader.read_exact(&mut buf, 20).await.unwrap();
+            let read = reader.read(20).await.unwrap().coalesce();
             expected[0..10].copy_from_slice("abcdefghij".as_bytes());
-            assert_eq!(buf, expected);
+            assert_eq!(read.as_ref(), expected.as_slice());
         });
     }
 
@@ -682,9 +726,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(5));
-            let mut buf = vec![0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"hello");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
 
             // Write to resized blob
             writer.write_at(0, b"X").await.unwrap();
@@ -695,9 +738,8 @@ mod tests {
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(5));
-            let mut buf = vec![0u8; 5];
-            reader.read_exact(&mut buf, 5).await.unwrap();
-            assert_eq!(&buf, b"Xello");
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"Xello");
 
             // Test resize to larger size
             writer.resize(10).await.unwrap();
@@ -708,10 +750,9 @@ mod tests {
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 10);
             let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
-            let mut buf = vec![0u8; 10];
-            reader.read_exact(&mut buf, 10).await.unwrap();
-            assert_eq!(&buf[0..5], b"Xello");
-            assert_eq!(&buf[5..10], [0u8; 5]);
+            let read = reader.read(10).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[0..5], b"Xello");
+            assert_eq!(&read.as_ref()[5..10], [0u8; 5]);
 
             // Test resize to zero
             let (blob_zero, size) = context.open("partition", b"resize_zero").await.unwrap();
@@ -786,12 +827,8 @@ mod tests {
             assert_eq!(final_size, 30);
             let mut final_reader =
                 Read::from_pooler(&context, final_blob, final_size, NZUsize!(30));
-            let mut full_content = vec![0u8; 30];
-            final_reader
-                .read_exact(&mut full_content, 30)
-                .await
-                .unwrap();
-            assert_eq!(&full_content, b"buffered and flushed more data");
+            let read = final_reader.read(30).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"buffered and flushed more data");
         });
     }
 
@@ -818,13 +855,12 @@ mod tests {
                 context.open("partition", b"write_straddle").await.unwrap();
             assert_eq!(size_check, 18);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(20));
-            let mut buf = vec![0u8; 18];
-            reader.read_exact(&mut buf, 18).await.unwrap();
+            let read = reader.read(18).await.unwrap().coalesce();
 
             let mut expected = vec![0u8; 18];
             expected[0..10].copy_from_slice(b"0123456789");
             expected[15..18].copy_from_slice(b"abc");
-            assert_eq!(buf, expected);
+            assert_eq!(read.as_ref(), expected.as_slice());
 
             // Test write that exceeds buffer capacity
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
@@ -843,9 +879,8 @@ mod tests {
                 context.open("partition", b"write_straddle2").await.unwrap();
             assert_eq!(size_check2, 17);
             let mut reader2 = Read::from_pooler(&context, blob_check2, size_check2, NZUsize!(20));
-            let mut buf2 = vec![0u8; 17];
-            reader2.read_exact(&mut buf2, 17).await.unwrap();
-            assert_eq!(&buf2, b"01234ABCDEFGHIJKL");
+            let read = reader2.read(17).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"01234ABCDEFGHIJKL");
         });
     }
 
@@ -866,9 +901,8 @@ mod tests {
             let (blob_check, size_check) = context.open("partition", b"write_close").await.unwrap();
             assert_eq!(size_check, 7);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(8));
-            let mut buf = [0u8; 7];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf, b"pending");
+            let read = reader.read(7).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"pending");
         });
     }
 
@@ -898,9 +932,8 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check, 10);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
-            let mut buf = vec![0u8; 10];
-            reader.read_exact(&mut buf, 10).await.unwrap();
-            assert_eq!(&buf, data_large.as_slice());
+            let read = reader.read(10).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data_large.as_slice());
 
             // Now write small data that should be buffered
             writer.write_at(10, b"abc").await.unwrap();
@@ -919,9 +952,8 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check2, 13);
             let mut reader2 = Read::from_pooler(&context, blob_check2, size_check2, NZUsize!(13));
-            let mut buf2 = vec![0u8; 13];
-            reader2.read_exact(&mut buf2, 13).await.unwrap();
-            assert_eq!(&buf2[10..], b"abc".as_slice());
+            let read = reader2.read(13).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[10..], b"abc".as_slice());
         });
     }
 
@@ -957,9 +989,8 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check, 15);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(15));
-            let mut final_buf = vec![0u8; 15];
-            reader.read_exact(&mut final_buf, 15).await.unwrap();
-            assert_eq!(&final_buf, b"01234ABCDEFGHIJ".as_slice());
+            let read = reader.read(15).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"01234ABCDEFGHIJ".as_slice());
         });
     }
 
@@ -985,9 +1016,8 @@ mod tests {
             let (blob_check, size_check) = context.open("partition", b"write_end").await.unwrap();
             assert_eq!(size_check, 13);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(13));
-            let mut buf = vec![0u8; 13];
-            reader.read_exact(&mut buf, 13).await.unwrap();
-            assert_eq!(&buf, b"0123456789abc");
+            let read = reader.read(13).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"0123456789abc");
         });
     }
 
@@ -1027,9 +1057,8 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check, 9);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(9));
-            let mut buf = vec![0u8; 9];
-            reader.read_exact(&mut buf, 9).await.unwrap();
-            assert_eq!(&buf, b"AAABBBCCC");
+            let read = reader.read(9).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"AAABBBCCC");
         });
     }
 
@@ -1071,14 +1100,13 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check, 35);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(35));
-            let mut buf = vec![0u8; 35];
-            reader.read_exact(&mut buf, 35).await.unwrap();
+            let read = reader.read(35).await.unwrap().coalesce();
 
             let mut expected = vec![0u8; 35];
             expected[0..7].copy_from_slice(b"INITIAL");
             expected[20..29].copy_from_slice(b"NONCONTIG");
             expected[29..35].copy_from_slice(b"APPEND");
-            assert_eq!(buf, expected);
+            assert_eq!(read.as_ref(), expected.as_slice());
         });
     }
 
@@ -1125,9 +1153,8 @@ mod tests {
                 .unwrap();
             assert_eq!(size_check, 10);
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
-            let mut buf = vec![0u8; 10];
-            reader.read_exact(&mut buf, 10).await.unwrap();
-            assert_eq!(&buf, b"01234XXXXX");
+            let read = reader.read(10).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"01234XXXXX");
         });
     }
 }

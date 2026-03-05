@@ -888,10 +888,40 @@ impl PooledBuf {
         }
 
         Some(Self {
-            inner: Arc::clone(&self.inner),
+            inner: self.inner.clone(),
             offset: self.offset + start,
             len: end - start,
         })
+    }
+
+    /// Splits the buffer into two at the given index.
+    ///
+    /// Afterwards `self` contains bytes `[at, len)`, and the returned [`PooledBuf`]
+    /// contains bytes `[0, at)`.
+    ///
+    /// This is an `O(1)` zero-copy operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    #[inline]
+    pub fn split_to(&mut self, at: usize) -> Self {
+        assert!(
+            at <= self.len,
+            "split_to out of bounds: {:?} <= {:?}",
+            at,
+            self.len,
+        );
+
+        let prefix = Self {
+            inner: self.inner.clone(),
+            offset: self.offset,
+            len: at,
+        };
+
+        self.offset += at;
+        self.len -= at;
+        prefix
     }
 
     /// Try to recover mutable ownership without copying.
@@ -965,7 +995,7 @@ impl Buf for PooledBuf {
             return Bytes::new();
         }
         let slice = Self {
-            inner: Arc::clone(&self.inner),
+            inner: self.inner.clone(),
             offset: self.offset,
             len,
         };
@@ -2125,6 +2155,41 @@ mod tests {
         assert_eq!(pooled.slice(3..8).as_ref(), bytes.slice(3..8).as_ref());
         assert_eq!(pooled.slice(..=7).as_ref(), bytes.slice(..=7).as_ref());
         assert_eq!(pooled.slice(10..10).as_ref(), bytes.slice(10..10).as_ref());
+    }
+
+    #[test]
+    fn test_bytes_parity_iobuf_split_to() {
+        let page = page_size();
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        pooled_mut.put_slice(b"abcdefgh");
+        let mut pooled = pooled_mut.into_pooled();
+        let mut bytes = Bytes::from_static(b"abcdefgh");
+
+        // split_to(0)
+        assert_eq!(pooled.split_to(0).as_ref(), bytes.split_to(0).as_ref());
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+
+        // split_to(n)
+        assert_eq!(pooled.split_to(3).as_ref(), bytes.split_to(3).as_ref());
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+
+        // split_to(remaining)
+        let remaining = bytes.remaining();
+        assert_eq!(
+            pooled.split_to(remaining).as_ref(),
+            bytes.split_to(remaining).as_ref()
+        );
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+    }
+
+    #[test]
+    #[should_panic(expected = "split_to out of bounds")]
+    fn test_iobuf_split_to_out_of_bounds() {
+        let page = page_size();
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        pooled_mut.put_slice(b"abc");
+        let mut pooled = pooled_mut.into_pooled();
+        let _ = pooled.split_to(4);
     }
 
     /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
