@@ -596,15 +596,10 @@ impl Stream {
         let mut parser = crate::network::proxy::IncrementalParser::new();
         loop {
             self.fill_buffer().await?;
-            let chunk = &self.buffer.as_ref()[..self.buffer_len];
-            match parser.push(chunk)? {
-                crate::network::proxy::ParseChunkResult::Complete {
-                    addr, remaining, ..
-                } => {
-                    self.restore_prefetched(remaining);
-                    return Ok(addr);
-                }
-                crate::network::proxy::ParseChunkResult::Incomplete { .. } => continue,
+            let mut remaining = &self.buffer.as_ref()[..self.buffer_len];
+            if let Some(addr) = parser.push_buf(&mut remaining)? {
+                self.restore_prefetched(remaining);
+                return Ok(addr);
             }
         }
     }

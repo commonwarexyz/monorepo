@@ -28,6 +28,7 @@
 //! from trusted proxies cause the connection to be rejected.
 
 use crate::Error;
+use bytes::Buf;
 /// Re-export for convenience so users don't need to add ipnet as a dependency.
 pub use ipnet::IpNet;
 use proxy_header::{ParseConfig, ProxyHeader};
@@ -77,19 +78,24 @@ impl ProxyConfig {
 pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketAddr, Error> {
     let mut parser = IncrementalParser::new();
     loop {
-        let buf = reader.fill_buf().await.map_err(|_| Error::ReadFailed)?;
-        if buf.is_empty() {
-            return Err(Error::ReadFailed);
-        }
+        let (consumed, parsed) = {
+            let buf = reader.fill_buf().await.map_err(|_| Error::ReadFailed)?;
+            if buf.is_empty() {
+                return Err(Error::ReadFailed);
+            }
 
-        match parser.push(buf)? {
-            ParseChunkResult::Complete { addr, consume, .. } => {
-                reader.consume(consume);
-                return Ok(addr);
-            }
-            ParseChunkResult::Incomplete { consume } => {
-                reader.consume(consume);
-            }
+            let mut remaining = buf;
+            let parsed = parser.push_buf(&mut remaining)?;
+            let consumed = buf
+                .len()
+                .checked_sub(remaining.len())
+                .ok_or(Error::ReadFailed)?;
+            (consumed, parsed)
+        };
+
+        reader.consume(consumed);
+        if let Some(addr) = parsed {
+            return Ok(addr);
         }
     }
 }
@@ -123,21 +129,6 @@ pub fn parse_from_bytes(data: &[u8]) -> Result<ParseResult, Error> {
     }
 }
 
-/// Result of parsing an incremental input chunk.
-#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
-pub enum ParseChunkResult<'a> {
-    /// Header complete. `consume` bytes from the current chunk were part of
-    /// the header, and `remaining` are payload bytes after the header.
-    Complete {
-        addr: SocketAddr,
-        consume: usize,
-        remaining: &'a [u8],
-    },
-    /// Need more bytes. `consume` bytes from the current chunk are now part of
-    /// parser state.
-    Incomplete { consume: usize },
-}
-
 /// Incremental PROXY header parser shared by tokio and io_uring network paths.
 #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 pub struct IncrementalParser {
@@ -153,41 +144,48 @@ impl IncrementalParser {
         }
     }
 
-    /// Push one input chunk and attempt to parse a header.
-    pub fn push<'a>(&mut self, chunk: &'a [u8]) -> Result<ParseChunkResult<'a>, Error> {
-        let previous_len = self.parsed.len();
-        self.parsed.extend_from_slice(chunk);
-
-        match parse_from_bytes(&self.parsed)? {
-            ParseResult::Complete(addr, consumed_total) => {
-                if consumed_total < previous_len {
-                    return Ok(ParseChunkResult::Complete {
-                        addr,
-                        consume: 0,
-                        remaining: chunk,
-                    });
-                }
-
-                let consume = consumed_total
-                    .checked_sub(previous_len)
-                    .ok_or(Error::ReadFailed)?;
-                let remaining = chunk.get(consume..).ok_or(Error::ReadFailed)?;
-                Ok(ParseChunkResult::Complete {
-                    addr,
-                    consume,
-                    remaining,
-                })
+    /// Push bytes from any [`Buf`] and attempt to parse a header.
+    ///
+    /// On success, returns the parsed address and leaves any payload bytes
+    /// (after the header) in `buf` for the caller to process.
+    /// If more bytes are needed, this consumes all bytes currently in `buf`
+    /// into parser state and returns `Ok(None)`.
+    pub fn push_buf<B: Buf>(&mut self, buf: &mut B) -> Result<Option<SocketAddr>, Error> {
+        while buf.has_remaining() {
+            let chunk = buf.chunk();
+            if chunk.is_empty() {
+                return Err(Error::ReadFailed);
             }
-            ParseResult::Incomplete => Ok(ParseChunkResult::Incomplete {
-                consume: chunk.len(),
-            }),
+
+            let previous_len = self.parsed.len();
+            self.parsed.extend_from_slice(chunk);
+
+            match parse_from_bytes(&self.parsed)? {
+                ParseResult::Complete(addr, consumed_total) => {
+                    if consumed_total < previous_len {
+                        return Ok(Some(addr));
+                    }
+
+                    let consumed = consumed_total
+                        .checked_sub(previous_len)
+                        .ok_or(Error::ReadFailed)?;
+                    if consumed > chunk.len() {
+                        return Err(Error::ReadFailed);
+                    }
+                    buf.advance(consumed);
+                    return Ok(Some(addr));
+                }
+                ParseResult::Incomplete => buf.advance(chunk.len()),
+            }
         }
+
+        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{IncrementalParser, ParseChunkResult};
+    use super::IncrementalParser;
 
     #[test]
     fn test_incremental_parser_split_header_preserves_payload() {
@@ -201,31 +199,37 @@ mod tests {
         let chunk1 = &full[..10];
         let chunk2 = &full[10..30];
         let chunk3 = &full[30..];
+        let expected_payload = &full[header_len..];
 
         let mut parser = IncrementalParser::new();
+        let mut chunk1 = chunk1;
+        let mut chunk2 = chunk2;
+        let mut chunk3 = chunk3;
 
-        match parser.push(chunk1).expect("chunk1 parse failed") {
-            ParseChunkResult::Incomplete { consume } => assert_eq!(consume, chunk1.len()),
-            ParseChunkResult::Complete { .. } => panic!("header should be incomplete"),
-        }
+        assert!(
+            parser
+                .push_buf(&mut chunk1)
+                .expect("chunk1 parse failed")
+                .is_none(),
+            "header should be incomplete"
+        );
+        assert!(chunk1.is_empty());
 
-        match parser.push(chunk2).expect("chunk2 parse failed") {
-            ParseChunkResult::Incomplete { consume } => assert_eq!(consume, chunk2.len()),
-            ParseChunkResult::Complete { .. } => panic!("header should be incomplete"),
-        }
+        assert!(
+            parser
+                .push_buf(&mut chunk2)
+                .expect("chunk2 parse failed")
+                .is_none(),
+            "header should be incomplete"
+        );
+        assert!(chunk2.is_empty());
 
-        match parser.push(chunk3).expect("chunk3 parse failed") {
-            ParseChunkResult::Complete {
-                addr,
-                consume,
-                remaining,
-            } => {
-                assert_eq!(addr.ip().to_string(), "192.168.1.100");
-                assert_eq!(addr.port(), 56789);
-                assert_eq!(consume, header_len - (chunk1.len() + chunk2.len()));
-                assert_eq!(remaining, b"hello");
-            }
-            ParseChunkResult::Incomplete { .. } => panic!("header should be complete"),
-        }
+        let addr = parser
+            .push_buf(&mut chunk3)
+            .expect("chunk3 parse failed")
+            .expect("header should be complete");
+        assert_eq!(addr.ip().to_string(), "192.168.1.100");
+        assert_eq!(addr.port(), 56789);
+        assert_eq!(chunk3, expected_payload);
     }
 }
