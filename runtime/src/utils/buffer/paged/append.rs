@@ -136,15 +136,13 @@ impl<B: Blob> Append<B> {
             ),
         };
 
-        let mut buffer = Buffer::new(
+        let buffer = Buffer::from_data(
             blob_state.current_page * cache_ref.page_size(),
+            partial_data.unwrap_or_default(),
             capacity,
+            false,
             cache_ref.pool().clone(),
         );
-        if let Some(partial_page) = partial_data {
-            let over_capacity = buffer.append(partial_page.as_ref());
-            assert!(!over_capacity);
-        }
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
@@ -193,16 +191,13 @@ impl<B: Blob> Append<B> {
                 None,
             ),
         };
-        let mut buffer = Buffer::new(
+        let buffer = Buffer::from_data(
             blob_state.current_page * cache_ref.page_size(),
+            partial_data.unwrap_or_default(),
             capacity,
+            true,
             cache_ref.pool().clone(),
         );
-        if let Some(partial_page) = partial_data {
-            let over_capacity = buffer.append(partial_page.as_ref());
-            assert!(!over_capacity);
-        }
-        buffer.set_immutable(true);
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),

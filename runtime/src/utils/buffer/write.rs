@@ -11,8 +11,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
 ///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
-/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) drain
-///   logical bytes to the blob while keeping tip backing available for reuse.
+/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
+///   bytes to the blob and leave the tip detached until the next buffered write.
 ///
 /// # Example
 ///

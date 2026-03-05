@@ -11,8 +11,8 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Flushing paths ([Self::take] and grow-resize in [Self::resize]) return a cloned `IoBuf` view
-///   of logical bytes and keep backing allocated for reuse.
+/// - Draining paths ([Self::take] and grow-resize in [Self::resize]) hand buffered bytes to the
+///   caller and reset the tip to a detached empty state.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
 /// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
@@ -48,12 +48,27 @@ impl Buffer {
     ///
     /// The backing buffer starts detached and is allocated on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
+        Self::from_data(offset, IoBuf::default(), capacity, false, pool)
+    }
+
+    /// Creates a new buffer seeded with existing logical bytes.
+    ///
+    /// The provided `data` is stored as-is, so callers can preserve immutable bytes loaded from
+    /// disk and defer opening mutable backing until a subsequent write actually needs it.
+    pub(super) fn from_data(
+        offset: u64,
+        data: IoBuf,
+        capacity: usize,
+        immutable: bool,
+        pool: BufferPool,
+    ) -> Self {
+        let len = data.len();
         Self {
-            data: IoBuf::default(),
-            len: 0,
+            data,
+            len,
             offset,
             capacity,
-            immutable: false,
+            immutable,
             pool,
         }
     }
@@ -124,10 +139,9 @@ impl Buffer {
 
     /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
     ///
-    /// If the new size is greater than the current size, a clone of the existing buffered bytes is
-    /// returned (to be flushed to the underlying blob), and logical length is reset to zero while
-    /// preserving backing allocation for reuse. (The returned data is what would be returned by a
-    /// call to [Self::take].)
+    /// If the new size is greater than the current size, the existing buffered bytes are returned
+    /// (to be flushed to the underlying blob), and the tip is reset to empty. (The returned data
+    /// is what would be returned by a call to [Self::take].)
     ///
     /// If the new size is less than the current size (but still greater than current offset), the
     /// buffer is truncated to the new size.
@@ -143,8 +157,9 @@ impl Buffer {
 
         // Handle case where there is some data in the buffer.
         if len >= self.size() {
-            let previous = (self.data.slice(..self.len), self.offset);
-            self.len = 0;
+            let previous = self
+                .take()
+                .expect("take must succeed when resize observes buffered data");
             self.offset = len;
             Some(previous)
         } else if len >= self.offset {
@@ -160,16 +175,23 @@ impl Buffer {
     /// Returns the buffered data and its blob offset, or returns `None` if the buffer is already
     /// empty.
     ///
-    /// This returns a cloned `IoBuf` view of logical bytes, resets logical length to zero, and
+    /// This hands ownership of the buffered bytes to the caller, resets the tip to empty, and
     /// advances offset to the end of the drained range.
     pub(super) fn take(&mut self) -> Option<(IoBuf, u64)> {
         if self.is_empty() {
             return None;
         }
-        let buf = self.data.slice(..self.len);
-        self.len = 0;
+
+        let len = self.len;
         let offset = self.offset;
-        self.offset += buf.len() as u64;
+        let data = std::mem::take(&mut self.data);
+        let buf = if len == data.len() {
+            data
+        } else {
+            data.slice(..len)
+        };
+        self.len = 0;
+        self.offset += len as u64;
         Some((buf, offset))
     }
 
@@ -307,6 +329,7 @@ mod tests {
         assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
         assert_eq!(taken.1, 50);
         assert_eq!(buffer.size(), 53);
+        assert!(!buffer.data.is_pooled());
         assert!(buffer.take().is_none());
 
         // Fill the buffer to capacity.
@@ -338,6 +361,7 @@ mod tests {
         assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
         assert_eq!(resized.1, 50);
         assert_eq!(buffer.size(), 60);
+        assert!(!buffer.data.is_pooled());
         assert!(buffer.take().is_none());
 
         buffer.append(&[4, 5, 6]);
@@ -384,5 +408,20 @@ mod tests {
 
         assert!(buffer.slice(..).is_empty());
         assert!(buffer.slice(0..).is_empty());
+    }
+
+    #[test]
+    fn test_tip_from_data_preserves_immutable_bytes_until_mutated() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::from_data(7, IoBuf::from(&b"abc"[..]), 16, false, pool);
+
+        assert_eq!(buffer.offset, 7);
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(buffer.as_ref(), b"abc");
+        assert!(!buffer.data.is_pooled());
+
+        assert!(!buffer.append(b"def"));
+        assert_eq!(buffer.as_ref(), b"abcdef");
     }
 }
