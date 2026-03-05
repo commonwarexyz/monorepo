@@ -23,6 +23,37 @@ use tracing::{debug, error, trace};
 // [Shared]. The IoBuf contains only the logical (validated) bytes of the page.
 type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
 
+/// Removes a stale in-flight page fetch when the fetcher is dropped.
+struct PageFetchGuard {
+    cache: Arc<RwLock<Cache>>,
+    key: (u64, u64),
+    armed: bool,
+}
+
+impl PageFetchGuard {
+    const fn new(cache: Arc<RwLock<Cache>>, key: (u64, u64)) -> Self {
+        Self {
+            cache,
+            key,
+            armed: true,
+        }
+    }
+
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PageFetchGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut cache = self.cache.write();
+        let _ = cache.page_fetches.remove(&self.key);
+    }
+}
+
 /// A [Cache] caches pages of [Blob] data in memory after verifying the integrity of each.
 ///
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
@@ -223,8 +254,8 @@ impl CacheRef {
 
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
-        // this is the first fetcher.
-        let (fetch_future, is_first_fetcher) = {
+        // this task is the first fetcher.
+        let (fetch_future, fetch_guard) = {
             let mut cache = self.cache.write();
 
             // There's a (small) chance the page was fetched & buffered by another task before we
@@ -238,7 +269,7 @@ impl CacheRef {
             match entry {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
-                    (o.get().clone(), false)
+                    (o.get().clone(), None)
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
@@ -269,16 +300,30 @@ impl CacheRef {
                     let shareable = future.boxed().shared();
                     v.insert(shareable.clone());
 
-                    (shareable, true)
+                    (
+                        shareable,
+                        Some(PageFetchGuard::new(self.cache.clone(), (blob_id, page_num))),
+                    )
                 }
             }
         };
 
-        // Await the future and get the page buffer. If this isn't the task that initiated the
-        // fetch, we can return immediately with the result. Note that we cannot return immediately
-        // on error, since we'd bypass the cleanup required of the first fetcher.
+        // Await the shared fetch. Both first and follower tasks observe the same result.
+        //
+        // If the first fetcher is cancelled at this await, its `PageFetchGuard` drops and
+        // removes the stale `page_fetches` entry. Any existing waiters still hold clones
+        // of this shared future, so they continue awaiting the same in-flight fetch
+        // result.
         let fetch_result = fetch_future.await;
-        if !is_first_fetcher {
+
+        // If `fetch_guard` is `None` it means we joined an in-flight fetch, the first
+        // fetcher owns cleanup.
+        //
+        // We disarm here because we are the fetch owner, and will perform explicit
+        // cleanup below.
+        if let Some(mut guard) = fetch_guard {
+            guard.disarm();
+        } else {
             // Copy the requested portion of the page into the buffer and return immediately.
             let page_buf = fetch_result.map_err(|_| Error::ReadFailed)?;
             let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
@@ -293,7 +338,7 @@ impl CacheRef {
         // This requires a write lock on the page cache to modify `page_fetches` and cache the page.
         let mut cache = self.cache.write();
 
-        // Remove the entry from `page_fetches`.
+        // Explicit first-fetcher cleanup on the non-cancelled path.
         let _ = cache.page_fetches.remove(&(blob_id, page_num));
 
         // Cache the result in the page cache. get_page_from_blob already validated the CRC.
@@ -467,18 +512,59 @@ impl Cache {
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, Runner as _,
-        Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, IoBufsMut,
+        Runner as _, Spawner as _, Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
+    use futures::future::pending;
     use prometheus_client::registry::Registry;
-    use std::num::NonZeroU16;
+    use std::{num::NonZeroU16, sync::Arc};
 
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_SIZE_U64: u64 = PAGE_SIZE.get() as u64;
+
+    /// A blob that signals once a read starts and then never returns.
+    #[derive(Clone)]
+    struct BlockingBlob {
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl Blob for BlockingBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufsMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let sender = self.started.lock().take().unwrap();
+            let _ = sender.send(());
+            pending::<()>().await;
+            unreachable!()
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<crate::IoBufs> + Send,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
 
     #[test_traced]
     fn test_cache_basic() {
@@ -645,6 +731,48 @@ mod tests {
                 MIN_PAGE_SIZE as usize
             );
             assert!(buf.iter().all(|b| *b == 1));
+        });
+    }
+
+    #[test_traced]
+    fn test_page_fetches_entry_removed_when_first_fetcher_cancelled() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Set up a small cache and a blob whose read never completes once started.
+            let blob_id = 0;
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let (started_tx, started_rx) = oneshot::channel();
+            let blob = BlockingBlob {
+                started: Arc::new(Mutex::new(Some(started_tx))),
+            };
+            let mut read_buf = vec![0u8; PAGE_SIZE.get() as usize];
+
+            // Spawn the first fetcher. It will insert into `page_fetches` and then block forever.
+            let cache_ref_for_task = cache_ref.clone();
+            let blob_for_task = blob.clone();
+            let handle = context.spawn(move |_| async move {
+                let _ = cache_ref_for_task
+                    .read(&blob_for_task, blob_id, &mut read_buf, 0)
+                    .await;
+            });
+
+            // Wait until the underlying read has started, ensuring the in-flight marker exists.
+            started_rx.await.expect("blocking read never started");
+            {
+                let page_cache = cache_ref.cache.read();
+                assert!(page_cache.page_fetches.contains_key(&(blob_id, 0)));
+            }
+
+            // Cancel the first fetcher before it reaches explicit cleanup.
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+
+            // The guard drop path should have removed the stale in-flight entry.
+            let page_cache = cache_ref.cache.read();
+            assert!(
+                !page_cache.page_fetches.contains_key(&(blob_id, 0)),
+                "cancelled first fetcher should not leave stale page_fetches entry"
+            );
         });
     }
 }
