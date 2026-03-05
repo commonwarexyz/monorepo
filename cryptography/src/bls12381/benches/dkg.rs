@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{deal, Dealer, DealerLog, Info, Player},
+        dkg::{deal, Dealer, Info, Logs, Player},
         primitives::variant::MinSig,
     },
     ed25519::{PrivateKey, PublicKey},
@@ -19,7 +19,7 @@ type V = MinSig;
 struct Bench {
     info: Info<V, PublicKey>,
     me: PrivateKey,
-    logs: BTreeMap<PublicKey, DealerLog<V, PublicKey>>,
+    logs: Logs<V, PublicKey, N3f1>,
 }
 
 impl Bench {
@@ -68,7 +68,7 @@ impl Bench {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let mut logs = BTreeMap::new();
+        let mut logs = Logs::<V, PublicKey, N3f1>::default();
         for sk in private_keys {
             let pk = sk.public_key();
             let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
@@ -90,18 +90,13 @@ impl Bench {
                     }
                 }
             }
-            logs.insert(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
+            logs.record(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
         }
 
         Self { info, me, logs }
     }
 
-    fn pre_finalize(
-        &self,
-    ) -> (
-        Player<V, PrivateKey>,
-        BTreeMap<PublicKey, DealerLog<V, PublicKey>>,
-    ) {
+    fn pre_finalize(&self) -> (Player<V, PrivateKey>, Logs<V, PublicKey, N3f1>) {
         (
             Player::<MinSig, PrivateKey>::new(self.info.clone(), self.me.clone()).unwrap(),
             self.logs.clone(),
