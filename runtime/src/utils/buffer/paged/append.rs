@@ -2,11 +2,6 @@
 //! the underlying blob which has a page-oriented structure that provides integrity guarantees. The
 //! wrapper also provides read caching managed by a page cache.
 //!
-//! # Warning
-//!
-//! Writing new data to the blob can only be done through `append`. The `write` function is not
-//! supported and will panic.
-//!
 //! # Immutability
 //!
 //! The wrapper can be created in (or converted to) an immutable state, which will prevent any
@@ -32,7 +27,7 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+    Blob, Error, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -207,7 +202,7 @@ impl<B: Blob> Append<B> {
             let over_capacity = buffer.append(partial_page.as_ref());
             assert!(!over_capacity);
         }
-        buffer.immutable = true;
+        buffer.set_immutable(true);
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
@@ -219,9 +214,7 @@ impl<B: Blob> Append<B> {
 
     /// Returns `true` if this blob is in the immutable state.
     pub async fn is_immutable(&self) -> bool {
-        let buffer = self.buffer.read().await;
-
-        buffer.immutable
+        self.buffer.read().await.is_immutable()
     }
 
     /// Convert this blob to the immutable state if it's not already in it.
@@ -231,23 +224,16 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data. When flush_internal returns, write_at has completed and data
         // has been written to the underlying blob.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Ok(());
         }
-        buf_guard.immutable = true;
+        buf_guard.set_immutable(false);
         self.flush_internal(buf_guard, true).await?;
 
-        // Shrink the buffer to release the pooled allocation since we won't be appending.
+        // Compact tip backing after flush to match the post-flush logical view.
         {
             let mut buf_guard = self.buffer.write().await;
-            let len = buf_guard.data.len();
-            if len > 0 {
-                let mut shrunk = IoBufMut::with_capacity(len);
-                shrunk.put_slice(buf_guard.data.as_ref());
-                buf_guard.data = shrunk;
-            } else {
-                buf_guard.data = IoBufMut::default();
-            }
+            buf_guard.set_immutable(true);
         }
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
@@ -259,10 +245,10 @@ impl<B: Blob> Append<B> {
     /// Convert this blob to the mutable state if it's not already in it.
     pub async fn to_mutable(&self) {
         let mut buffer = self.buffer.write().await;
-        if !buffer.immutable {
+        if !buffer.is_immutable() {
             return;
         }
-        buffer.immutable = false;
+        buffer.set_mutable();
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
@@ -340,7 +326,7 @@ impl<B: Blob> Append<B> {
     /// * `Error::ImmutableBlob` - The blob is in the immutable state.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if buffer.immutable {
+        if buffer.is_immutable() {
             return Err(Error::ImmutableBlob);
         }
 
@@ -364,9 +350,9 @@ impl<B: Blob> Append<B> {
 
         // Cache the pages we are writing in the page cache so they remain cached for concurrent
         // reads while we flush the buffer.
-        let remaining_byte_count =
-            self.cache_ref
-                .cache(self.id, buffer.data.as_ref(), buffer.offset);
+        let remaining_byte_count = self
+            .cache_ref
+            .cache(self.id, buffer.as_ref(), buffer.offset);
 
         // Read the old partial page state before doing the heavy work of preparing physical pages.
         // This is safe because partial_page_state is only modified by flush_internal, and we hold
@@ -391,7 +377,7 @@ impl<B: Blob> Append<B> {
 
         // Drain the provided buffer of the full pages that are now cached in the page cache and
         // will be written to the blob.
-        let bytes_to_drain = buffer.data.len() - remaining_byte_count;
+        let bytes_to_drain = buffer.len() - remaining_byte_count;
         buffer.drop_prefix(bytes_to_drain);
         buffer.offset += bytes_to_drain as u64;
         let new_offset = buffer.offset;
@@ -493,6 +479,15 @@ impl<B: Blob> Append<B> {
         buffer.size()
     }
 
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        // Read into a temporary contiguous buffer and copy back to preserve structure.
+        // SAFETY: read_into below initializes all `len` bytes.
+        let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
+        self.read_into(buf.as_mut(), offset).await?;
+        Ok(buf.into())
+    }
+
     /// Reads up to `buf.len()` bytes starting at `logical_offset`, but only as many as are
     /// available.
     ///
@@ -543,7 +538,18 @@ impl<B: Blob> Append<B> {
         }
 
         // Extract any bytes from the buffer that overlap with the requested range.
-        let remaining = buffer.extract(buf.as_mut(), logical_offset);
+        let remaining = if end_offset <= buffer.offset {
+            // No overlap with tip.
+            buf.len()
+        } else {
+            // Overlap is always a suffix of requested range.
+            let overlap_start = buffer.offset.max(logical_offset);
+            let dst_start = (overlap_start - logical_offset) as usize;
+            let src_start = (overlap_start - buffer.offset) as usize;
+            let copied = buf.len() - dst_start;
+            buf[dst_start..].copy_from_slice(&buffer.as_ref()[src_start..src_start + copied]);
+            dst_start
+        };
 
         // Release buffer lock before potential I/O.
         drop(buffer);
@@ -623,13 +629,13 @@ impl<B: Blob> Append<B> {
     ) -> (IoBuf, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let pages_to_write = buffer.data.len() / logical_page_size;
+        let pages_to_write = buffer.len() / logical_page_size;
         let max_pages_to_write = pages_to_write + if include_partial_page { 1 } else { 0 };
         let mut write_buffer = self
             .cache_ref
             .pool()
             .alloc(max_pages_to_write * physical_page_size);
-        let buffer_data = buffer.data.as_ref();
+        let buffer_data = buffer.as_ref();
 
         // For each logical page, copy over the data and then write a crc record for it.
         for page in 0..pages_to_write {
@@ -737,7 +743,7 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data (without fsync) so the reader sees all written data.
         {
             let buf_guard = self.buffer.write().await;
-            if !buf_guard.immutable {
+            if !buf_guard.is_immutable() {
                 self.flush_internal(buf_guard, true).await?;
             }
         }
@@ -781,39 +787,12 @@ impl<B: Blob> Append<B> {
     }
 }
 
-impl<B: Blob> Blob for Append<B> {
-    async fn read_at(&self, logical_offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(logical_offset, len, self.cache_ref.pool().alloc(len))
-            .await
-    }
-
-    async fn read_at_buf(
-        &self,
-        logical_offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-    ) -> Result<IoBufsMut, Error> {
-        let mut bufs = bufs.into();
-        // SAFETY: `len` bytes are filled via read_into below.
-        unsafe { bufs.set_len(len) };
-        if let Some(buf) = bufs.as_single_mut() {
-            self.read_into(buf.as_mut(), logical_offset).await?;
-            Ok(bufs)
-        } else {
-            // Read into a temporary contiguous buffer and copy back to preserve structure.
-            // SAFETY: read_into below initializes all `len` bytes.
-            let mut temp = unsafe { self.cache_ref.pool().alloc_len(len) };
-            self.read_into(temp.as_mut(), logical_offset).await?;
-            bufs.copy_from_slice(temp.as_ref());
-            Ok(bufs)
-        }
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
+impl<B: Blob> Append<B> {
+    pub async fn sync(&self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Ok(());
         }
         self.flush_internal(buf_guard, true).await?;
@@ -822,13 +801,6 @@ impl<B: Blob> Blob for Append<B> {
         // to the blob, but only a read lock since we're not modifying blob state.
         let blob_state = self.blob_state.read().await;
         blob_state.blob.sync().await
-    }
-
-    /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
-    async fn write_at(&self, _offset: u64, _bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the page cache to
-        // support arbitrary writes.
-        unimplemented!("append-only blob type does not support write_at")
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -841,7 +813,7 @@ impl<B: Blob> Blob for Append<B> {
     /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
     /// - Concurrent readers which try to read past the new size during the resize may error.
     /// - The resize is not guaranteed durable until the next sync.
-    async fn resize(&self, size: u64) -> Result<(), Error> {
+    pub async fn resize(&self, size: u64) -> Result<(), Error> {
         let current_size = self.size().await;
 
         // Handle growing by appending zero bytes.
@@ -867,7 +839,7 @@ impl<B: Blob> Blob for Append<B> {
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
+        if buf_guard.is_immutable() {
             return Err(Error::ImmutableBlob);
         }
         let mut blob_guard = self.blob_state.write().await;
@@ -910,12 +882,12 @@ impl<B: Blob> Blob for Append<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            buf_guard.data.clear();
+            buf_guard.clear();
             let over_capacity = buf_guard.append(&page_data.as_ref()[..partial_bytes as usize]);
             assert!(!over_capacity);
         } else {
             // No partial page - all pages are full or blob is empty.
-            buf_guard.data.clear();
+            buf_guard.clear();
         }
 
         Ok(())
@@ -1658,13 +1630,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 120);
-            let all_data: Vec<u8> = append
-                .read_at(0, 120)
-                .await
-                .unwrap()
-                .coalesce()
-                .freeze()
-                .into();
+            let all_data: Vec<u8> = append.read_at(0, 120).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=120).collect();
             assert_eq!(all_data, expected);
         });
@@ -1742,13 +1708,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 30);
-            let all_data: Vec<u8> = append
-                .read_at(0, 30)
-                .await
-                .unwrap()
-                .coalesce()
-                .freeze()
-                .into();
+            let all_data: Vec<u8> = append.read_at(0, 30).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=30).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -1783,13 +1743,7 @@ mod tests {
             );
 
             // Verify the data is the original 10 bytes
-            let fallback_data: Vec<u8> = append
-                .read_at(0, 10)
-                .await
-                .unwrap()
-                .coalesce()
-                .freeze()
-                .into();
+            let fallback_data: Vec<u8> = append.read_at(0, 10).await.unwrap().coalesce().into();
             assert_eq!(
                 fallback_data, data1,
                 "Fallback data should match original 10 bytes"
@@ -1896,13 +1850,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 113);
-            let all_data: Vec<u8> = append
-                .read_at(0, 113)
-                .await
-                .unwrap()
-                .coalesce()
-                .freeze()
-                .into();
+            let all_data: Vec<u8> = append.read_at(0, 113).await.unwrap().coalesce().into();
             let expected: Vec<u8> = (1..=113).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -2081,13 +2029,7 @@ mod tests {
             );
 
             // Verify data is still readable.
-            let data: Vec<u8> = append
-                .read_at(0, 5)
-                .await
-                .unwrap()
-                .coalesce()
-                .freeze()
-                .into();
+            let data: Vec<u8> = append.read_at(0, 5).await.unwrap().coalesce().into();
             assert_eq!(data, vec![1, 2, 3, 4, 5]);
         });
     }
