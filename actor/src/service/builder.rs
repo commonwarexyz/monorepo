@@ -122,7 +122,7 @@ impl<A> ServiceBuilder<A> {
         }
     }
 
-    /// Build a single-lane service with the default non-zero mailbox capacity of 64.
+    /// Build a single-lane service with the default non-zero mailbox capacity of 1024.
     ///
     /// This is a convenience for simple actors that only need one lane.
     pub fn build<E>(self, context: E) -> SingleLaneBuildOutput<E, A>

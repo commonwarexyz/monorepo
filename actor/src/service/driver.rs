@@ -398,6 +398,12 @@ where
                 }
                 LaneTryRecv::Empty => return false,
                 LaneTryRecv::Closed => {
+                    // At least one message was already dispatched in this iteration
+                    // before entering `drain_lane_batch`, so preserve the single
+                    // postprocess hook before shutting down.
+                    self.actor
+                        .postprocess(self.context.as_present_mut(), args)
+                        .await;
                     self.shutdown_gracefully(
                         args,
                         reads,
