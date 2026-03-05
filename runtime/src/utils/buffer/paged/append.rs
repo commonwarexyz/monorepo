@@ -371,10 +371,17 @@ impl<B: Blob> Append<B> {
         }
 
         // Drain the provided buffer of the full pages that are now cached in the page cache and
-        // will be written to the blob.
+        // will be written to the blob. If the tip is fully drained, detach its backing so empty
+        // append buffers don't retain pooled storage.
         let bytes_to_drain = buffer.len() - remaining_byte_count;
-        buffer.drop_prefix(bytes_to_drain);
-        buffer.offset += bytes_to_drain as u64;
+        if remaining_byte_count == 0 {
+            let _ = buffer
+                .take()
+                .expect("take must succeed when flush drains all buffered bytes");
+        } else {
+            buffer.drop_prefix(bytes_to_drain);
+            buffer.offset += bytes_to_drain as u64;
+        }
         let new_offset = buffer.offset;
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
@@ -892,9 +899,10 @@ impl<B: Blob> Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{deterministic, BufferPool, BufferPoolConfig, Runner as _, Storage as _};
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
+    use prometheus_client::registry::Registry;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
 
@@ -1049,6 +1057,48 @@ mod tests {
             // Verify data is still readable after reopen.
             let read_buf = append.read_at(0, 206).await.unwrap().coalesce();
             assert_eq!(read_buf, &expected[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_releases_tip_backing_when_no_partial_tail_remains() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut registry = Registry::default();
+            let pool = BufferPool::new(
+                BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(2)),
+                &mut registry,
+            );
+            let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"release_tip_backing")
+                .await
+                .unwrap();
+            assert_eq!(blob_size, 0);
+
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(&vec![7; PAGE_SIZE.get() as usize]).await.unwrap();
+
+            // One pooled slot backs the page cache and one backs the mutable tip.
+            assert!(
+                matches!(
+                    pool.try_alloc(BUFFER_SIZE),
+                    Err(crate::iobuf::PoolError::Exhausted)
+                ),
+                "full-page tip should occupy the remaining pooled slot before sync"
+            );
+
+            append.sync().await.unwrap();
+
+            // After a full drain, the tip should no longer pin that slot.
+            assert!(
+                pool.try_alloc(BUFFER_SIZE).is_ok(),
+                "sync should release pooled backing when no partial tail remains"
+            );
         });
     }
 
