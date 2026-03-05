@@ -487,13 +487,17 @@ impl IoUringLoop {
                 continue;
             }
 
-            // Idle path. No pending submissions are visible.
+            // No pending submissions are currently visible.
             //
-            // Arm sleep intent and capture a post-arm sequence snapshot from the
-            // same atomic operation. Block only if still idle. Any submission that
-            // arrives after `arm()` observes sleep intent and rings eventfd, so the
-            // loop is woken instead of sleeping through newly published work.
-            if self.waker.arm() == self.processed_seq {
+            // If staging hit capacity, force a submit and wait cycle to open
+            // space, even though the sequence snapshot looks idle here.
+            //
+            // Otherwise, arm sleep intent and capture a post-arm sequence
+            // snapshot from the same atomic operation. Block only if still idle.
+            // Any submission that arrives after `arm()` observes sleep intent
+            // and rings eventfd, so the loop is woken instead of sleeping
+            // through newly published work.
+            if at_capacity || self.waker.arm() == self.processed_seq {
                 self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
                     .expect("unable to submit to ring");
             }
