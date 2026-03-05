@@ -68,13 +68,16 @@
 //! * Construct `nullification(v)`
 //!
 //! Upon constructing or receiving the first `nullification(v)`:
-//! * Set `t_l` and `t_a` to `None`
+//! * Set `t_l` and `t_a` for view `v` to `None`
 //! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
-//! * Set `t_l` and `t_a` to `None`
+//! * Construct `nullification(v)`
+//!
+//! Upon constructing or receiving the first `finalization(c, v)`:
+//! * Set `t_l` and `t_a` for view `v` to `None`
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //! * Enter `v+1`
