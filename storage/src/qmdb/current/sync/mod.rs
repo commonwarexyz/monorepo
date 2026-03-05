@@ -234,7 +234,7 @@ where
     let grafted_mmr_root = db::compute_grafted_mmr_root(&mut hasher, &storage).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(chunk);
+        let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
     let root = db::combine_roots(
@@ -255,7 +255,6 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        dirty_chunks: std::collections::HashSet::new(),
         root,
     };
 

@@ -3,23 +3,21 @@ use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    kv::{self, Batchable},
+    kv,
     mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
             ValueEncoding,
         },
-        build_snapshot_from_log, delete_known_loc,
+        build_snapshot_from_log,
         operation::{Committable, Key, Operation as OperationTrait},
-        update_known_loc, Error,
+        Error,
     },
 };
-use commonware_codec::{Codec, CodecShared};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use futures::future::try_join_all;
-use std::collections::BTreeMap;
 
 pub mod fixed;
 pub mod variable;
@@ -71,100 +69,6 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    /// Performs a batch update, invoking the callback for each resulting operation. The first
-    /// argument of the callback is the activity status of the operation, and the second argument is
-    /// the location of the operation it inactivates (if any).
-    pub(crate) async fn write_batch_with_callback<F>(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
-        mut callback: F,
-    ) -> Result<(), Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
-        let mut updates = BTreeMap::new();
-        let iter = iter.into_iter();
-        let mut locations = Vec::with_capacity(iter.size_hint().0);
-        for (key, value) in iter {
-            let iter = self.snapshot.get(&key);
-            locations.extend(iter.copied());
-            updates.insert(key, value);
-        }
-
-        // Concurrently look up all possible matching locations.
-        locations.sort();
-        locations.dedup();
-        let results = {
-            let reader = self.log.reader().await;
-            let futures = locations.iter().map(|loc| reader.read(**loc));
-            try_join_all(futures).await?
-        };
-
-        // Process the deletes & updates of existing keys, which must appear in the results.
-        for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let key = op.key().expect("updates should have a key");
-            let Some(update) = updates.remove(key) else {
-                continue; // translated key collision
-            };
-
-            let new_loc = self.log.size().await;
-            if let Some(value) = update {
-                update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
-                self.log
-                    .append(&Operation::Update(Update(key.clone(), value)))
-                    .await?;
-                callback(true, Some(old_loc));
-            } else {
-                delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(&Operation::Delete(key.clone())).await?;
-                callback(false, Some(old_loc));
-                self.active_keys -= 1;
-            }
-            self.steps += 1;
-        }
-
-        // Process the creates.
-        for (key, value) in updates {
-            let Some(value) = value else {
-                continue; // attempt to delete a non-existent key
-            };
-            self.snapshot.insert(&key, self.log.size().await);
-            self.log
-                .append(&Operation::Update(Update(key, value)))
-                .await?;
-            callback(true, None);
-            self.active_keys += 1;
-        }
-
-        Ok(())
-    }
-
-    /// Writes a batch of key-value pairs to the database.
-    ///
-    /// For each item in the iterator:
-    /// - `(key, Some(value))` updates or creates the key with the given value
-    /// - `(key, None)` deletes the key
-    pub async fn write_batch(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
-        self.write_batch_with_callback(iter, |_, _| {}).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
         C: Mutable<Item = O>,
         O: OperationTrait + Codec + Committable + Send + Sync,
         I: Index<Value = Location>,
@@ -201,7 +105,6 @@ impl<
             inactivity_floor_loc,
             snapshot,
             last_commit_loc,
-            steps: 0,
             active_keys,
             _update: core::marker::PhantomData,
         })
@@ -229,31 +132,12 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: CodecShared,
-{
-    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
-    where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
-        Iter::IntoIter: Send,
-    {
-        self.write_batch(iter).await
-    }
-}
-
 #[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> crate::qmdb::any::traits::DbAny for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Key,
-    V: ValueEncoding,
+    V: ValueEncoding + 'static,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
@@ -261,15 +145,4 @@ where
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
-
-    async fn commit(
-        &mut self,
-        metadata: Option<V::Value>,
-    ) -> Result<core::ops::Range<Location>, crate::qmdb::Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.steps
-    }
 }

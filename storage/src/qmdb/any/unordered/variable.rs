@@ -156,9 +156,8 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_batchable, assert_gettable, assert_send},
+        kv::tests::{assert_gettable, assert_send},
         qmdb::store::{
-            batch_tests,
             tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
             LogStore,
         },
@@ -251,19 +250,24 @@ pub(crate) mod test {
         db: &mut AnyTest,
         ops: Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
     ) {
-        for op in ops {
-            match op {
-                unordered::Operation::Update(unordered::Update(key, value)) => {
-                    db.write_batch([(key, Some(value))]).await.unwrap();
-                }
-                unordered::Operation::Delete(key) => {
-                    db.write_batch([(key, None)]).await.unwrap();
-                }
-                unordered::Operation::CommitFloor(_, _) => {
-                    panic!("CommitFloor not supported in apply_ops");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    unordered::Operation::Update(unordered::Update(key, value)) => {
+                        batch.write(key, Some(value));
+                    }
+                    unordered::Operation::Delete(key) => {
+                        batch.write(key, None);
+                    }
+                    unordered::Operation::CommitFloor(_, _) => {
+                        panic!("CommitFloor not supported in apply_ops");
+                    }
                 }
             }
-        }
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
     }
 
     /// Return an `Any` database initialized with a fixed config.
@@ -293,42 +297,51 @@ pub(crate) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("open1")).await;
+            let db = open_db(context.with_label("open1")).await;
             let root = db.root();
 
-            db.write_batch((0..ELEMENTS).map(|i| {
-                (
-                    Sha256::hash(&i.to_be_bytes()),
-                    Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
-                )
-            }))
-            .await
-            .unwrap();
+            // Build a batch but don't apply it (simulate failure before commit).
+            {
+                let mut batch = db.new_batch();
+                for i in 0..ELEMENTS {
+                    batch.write(
+                        Sha256::hash(&i.to_be_bytes()),
+                        Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
+                    );
+                }
+                let _ = batch.merkleize(None).await.unwrap().finalize();
+            }
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let mut db = open_db(context.with_label("open2")).await;
             assert_eq!(root, db.root());
 
-            // re-apply the updates and commit them this time.
-
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+            // Re-apply the updates and commit them this time.
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                    batch.write(k, Some(v));
+                }
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
-            // Update every 3rd key
-
-            for i in 0u64..ELEMENTS {
-                if i % 3 != 0 {
-                    continue;
+            // Update every 3rd key but don't apply (simulate failure).
+            {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    if i % 3 != 0 {
+                        continue;
+                    }
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                    batch.write(k, Some(v));
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
+                let _ = batch.merkleize(None).await.unwrap().finalize();
             }
 
             // Simulate a failure and test that we rollback to the previous root.
@@ -337,26 +350,32 @@ pub(crate) mod test {
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
-
-            for i in 0u64..ELEMENTS {
-                if i % 3 != 0 {
-                    continue;
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    if i % 3 != 0 {
+                        continue;
+                    }
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                    batch.write(k, Some(v));
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
-            // Delete every 7th key
-
-            for i in 0u64..ELEMENTS {
-                if i % 7 != 1 {
-                    continue;
+            // Delete every 7th key but don't apply (simulate failure).
+            {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    if i % 7 != 1 {
+                        continue;
+                    }
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    batch.write(k, None);
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                db.write_batch([(k, None)]).await.unwrap();
+                let _ = batch.merkleize(None).await.unwrap().finalize();
             }
 
             // Simulate a failure and test that we rollback to the previous root.
@@ -365,27 +384,25 @@ pub(crate) mod test {
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
-
-            for i in 0u64..ELEMENTS {
-                if i % 7 != 1 {
-                    continue;
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    if i % 7 != 1 {
+                        continue;
+                    }
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    batch.write(k, None);
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                db.write_batch([(k, None)]).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             let root = db.root();
-            assert_eq!(db.bounds().await.end, 1961);
-            assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new(1961))
-            );
-            assert_eq!(db.inactivity_floor_loc(), Location::new(756));
+            let inactivity_floor = db.inactivity_floor_loc();
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.bounds().await.start, Location::new(756));
-            assert_eq!(db.snapshot.items(), 857);
+            db.prune(inactivity_floor).await.unwrap();
+            let bounds = db.bounds().await;
+            let snapshot_items = db.snapshot.items();
 
             db.sync().await.unwrap();
             drop(db);
@@ -393,14 +410,9 @@ pub(crate) mod test {
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().await.end, 1961);
-            assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new(1961))
-            );
-            assert_eq!(db.inactivity_floor_loc(), Location::new(756));
-            assert_eq!(db.bounds().await.start, Location::new(756));
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.bounds().await, bounds);
+            assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
+            assert_eq!(db.snapshot.items(), snapshot_items);
 
             db.destroy().await.unwrap();
         });
@@ -417,10 +429,14 @@ pub(crate) mod test {
             let key2 = Digest::random(&mut context);
             let key3 = Digest::random(&mut context);
 
-            db.write_batch([(key1, Some(vec![10]))]).await.unwrap();
-            db.write_batch([(key2, Some(vec![20]))]).await.unwrap();
-            db.write_batch([(key3, Some(vec![30]))]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(vec![10]));
+                batch.write(key2, Some(vec![20]));
+                batch.write(key3, Some(vec![30]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
@@ -434,15 +450,6 @@ pub(crate) mod test {
             );
 
             db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_any_unordered_variable_batch() {
-        batch_tests::test_batch(|mut ctx| async move {
-            let seed = ctx.next_u64();
-            let cfg = create_test_config(seed, &ctx);
-            AnyTest::init(ctx, cfg).await.unwrap()
         });
     }
 
@@ -506,17 +513,12 @@ pub(crate) mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_write_futures_are_send(db: &mut AnyTest, key: Digest, value: Vec<u8>) {
+    fn assert_batch_futures_are_send(db: &AnyTest, key: Digest, value: Vec<u8>) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.write_batch([(key, Some(value.clone()))]));
-        assert_send(db.write_batch([(key, None)]));
-        assert_batchable(db, key, value);
+        let mut batch = db.new_batch();
+        batch.write(key, Some(value));
+        assert_send(batch.merkleize(None));
         assert_send(db.get_with_loc(&key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_commit_is_send(mut db: AnyTest) {
-        assert_send(db.commit(None));
     }
 }

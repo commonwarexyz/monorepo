@@ -94,13 +94,16 @@ where
             return Ok(());
         }
 
+        let mut batch = self.new_batch();
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    self.set(key, value).await?;
+                    batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    self.commit(metadata).await?;
+                    let finalized = batch.merkleize(metadata).finalize();
+                    self.apply_batch(finalized).await?;
+                    batch = self.new_batch();
                 }
             }
         }

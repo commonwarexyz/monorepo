@@ -16,6 +16,9 @@ pub trait Update<K: Key, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync
     /// The updated key.
     fn key(&self) -> &K;
 
+    /// The updated value.
+    fn value(&self) -> &V::Value;
+
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

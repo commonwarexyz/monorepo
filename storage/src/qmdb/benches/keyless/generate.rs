@@ -60,14 +60,18 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
+    let mut batch = db.new_batch();
     for _ in 0u64..num_operations {
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 300) + 10) as usize];
-        db.append(v).await.unwrap();
+        batch.append(v);
         if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-            db.commit(None).await.unwrap();
+            let finalized = batch.merkleize(None).finalize();
+            db.apply_batch(finalized).await.unwrap();
+            batch = db.new_batch();
         }
     }
-    db.commit(None).await.unwrap();
+    let finalized = batch.merkleize(None).finalize();
+    db.apply_batch(finalized).await.unwrap();
     db.sync().await.unwrap();
 
     db

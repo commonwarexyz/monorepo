@@ -18,11 +18,13 @@
 //! An authenticated database is always merkleized and supports all operations (reads, writes,
 //! authentication, pruning, and persistence) through a single type:
 //! - `init()` returns a database ready for use
-//! - `commit()` durably persists pending operations (called via `&mut self`)
+//! - `new_batch()` creates a batch for collecting mutations
+//! - `batch.merkleize(metadata)` resolves mutations and computes the new root
+//! - `db.apply_batch(finalized)` durably persists the batch (called via `&mut self`)
 //! - `sync()`, `prune()`, `destroy()` manage persistence
 //!
 //! The database implements [store::LogStore], [store::MerkleizedStore], [store::PrunableStore],
-//! [crate::Persistable], [crate::kv::Gettable], and [crate::kv::Batchable].
+//! [crate::Persistable], and [crate::kv::Gettable].
 //!
 //! # Acknowledgments
 //!

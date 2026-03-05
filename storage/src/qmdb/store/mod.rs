@@ -15,10 +15,7 @@ use commonware_cryptography::Digest;
 use core::future::Future;
 use std::num::NonZeroU64;
 
-mod batch;
 pub mod db;
-#[cfg(test)]
-pub use batch::tests as batch_tests;
 
 /// A trait for a store based on an append-only log of operations.
 pub trait LogStore: Send + Sync {
@@ -108,7 +105,10 @@ pub trait MerkleizedStore: LogStore {
 pub(crate) mod tests {
     use super::{LogStore, MerkleizedStore, PrunableStore};
     use crate::mmr::Location;
-    use commonware_utils::NZU64;
+    use commonware_codec::Codec;
+    use commonware_cryptography::{sha256, Hasher};
+    use commonware_utils::{Array, NZU64};
+    use core::fmt::Debug;
 
     pub fn assert_send<T: Send>(_: T) {}
 
@@ -125,5 +125,31 @@ pub(crate) mod tests {
     #[allow(dead_code)]
     pub fn assert_merkleized_store<T: MerkleizedStore>(db: &T, loc: Location) {
         assert_send(db.proof(loc, NZU64!(1)));
+    }
+
+    pub trait TestKey: Array + Copy + Send + Sync {
+        fn from_seed(seed: u64) -> Self;
+    }
+
+    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync {
+        fn from_seed(seed: u64) -> Self;
+    }
+
+    impl TestKey for sha256::Digest {
+        fn from_seed(seed: u64) -> Self {
+            commonware_cryptography::Sha256::hash(&seed.to_be_bytes())
+        }
+    }
+
+    impl<D: TestKey> TestValue for D {
+        fn from_seed(seed: u64) -> Self {
+            D::from_seed(seed)
+        }
+    }
+
+    impl TestValue for Vec<u8> {
+        fn from_seed(seed: u64) -> Self {
+            vec![seed as u8; 32]
+        }
     }
 }

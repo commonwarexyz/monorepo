@@ -9,7 +9,10 @@ use crate::{
             Contiguous, Reader,
         },
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{
+        journaled::{Config as MmrConfig, Mmr},
+        Location, Proof,
+    },
     qmdb::{
         any::VariableValue,
         operation::Committable,
@@ -20,10 +23,10 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
+pub mod batch;
 mod operation;
 pub use operation::Operation;
 
@@ -221,26 +224,41 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         Ok(self.journal.destroy().await?)
     }
 
-    /// Append a value to the db, returning its location which can be used to retrieve it.
-    pub async fn append(&mut self, value: V) -> Result<Location, Error> {
-        self.journal
-            .append(&Operation::Append(value))
-            .await
-            .map_err(Into::into)
+    /// Create a new speculative batch of operations with this database as its parent.
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, H::Digest>> {
+        let journal_size = *self.last_commit_loc + 1;
+        batch::UnmerkleizedBatch {
+            keyless: self,
+            journal_batch: self.journal.new_batch(),
+            appends: Vec::new(),
+            base_operations: Vec::new(),
+            base_size: journal_size,
+        }
     }
 
-    /// Commits any pending operations, ensuring their durability upon return. The caller can
-    /// associate an arbitrary `metadata` value with the commit. Returns the `[start_loc, end_loc)`
-    /// location range of committed operations. The end of the returned range includes the commit
-    /// operation itself, and hence will always be equal to `op_count`.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+    /// Apply a changeset to the database.
+    ///
+    /// Writes all operations to the journal, flushes, and updates state.
+    /// Returns the range of locations written.
+    pub async fn apply_batch(
+        &mut self,
+        batch: batch::Changeset<H::Digest, V>,
+    ) -> Result<core::ops::Range<Location>, Error> {
         let start_loc = self.last_commit_loc + 1;
-        self.last_commit_loc = self.journal.append(&Operation::Commit(metadata)).await?;
-        self.journal.commit().await?;
-        let op_count = self.last_commit_loc + 1;
-        debug!(size = ?op_count, "committed db");
 
-        Ok(start_loc..op_count)
+        // Write all operations to the authenticated journal + apply MMR changeset.
+        self.journal.apply_batch(batch.journal_finalized).await?;
+
+        // Flush journal to disk.
+        self.journal.commit().await?;
+
+        // Update state.
+        self.last_commit_loc = Location::new(batch.total_size - 1);
+
+        let end_loc = Location::new(batch.total_size);
+        debug!(size = ?end_loc, "applied batch");
+        Ok(start_loc..end_loc)
     }
 }
 
@@ -329,7 +347,7 @@ mod test {
     pub fn test_keyless_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db1")).await;
+            let db = open_db(context.with_label("db1")).await;
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, 1); // initial commit should exist
             assert_eq!(bounds.start, Location::new(0));
@@ -340,8 +358,12 @@ mod test {
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
             let root = db.root();
-            db.append(v1).await.unwrap();
-            drop(db); // Simulate failed commit
+            {
+                let mut batch = db.new_batch();
+                batch.append(v1);
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
+            drop(db);
             let mut db = open_db(context.with_label("db2")).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await.end, 1);
@@ -349,7 +371,8 @@ mod test {
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![3u8; 10];
-            db.commit(Some(metadata.clone())).await.unwrap();
+            let finalized = db.new_batch().merkleize(Some(metadata.clone())).finalize();
+            db.apply_batch(finalized).await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -379,29 +402,38 @@ mod test {
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 20];
 
-            let loc1 = db.append(v1.clone()).await.unwrap();
-            assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
-
-            let loc2 = db.append(v2.clone()).await.unwrap();
-            assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
+            let finalized = {
+                let mut batch = db.new_batch();
+                let loc1 = batch.append(v1.clone());
+                let loc2 = batch.append(v2.clone());
+                assert_eq!(loc1, Location::new(1));
+                assert_eq!(loc2, Location::new(2));
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            let loc1 = Location::new(1);
+            let loc2 = Location::new(2);
 
             // Make sure closing/reopening gets us back to the same state.
-            db.commit(None).await.unwrap();
             assert_eq!(db.bounds().await.end, 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new(3)).await.unwrap(), None); // the commit op
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
-            let mut db = open_db(context.with_label("db2")).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.bounds().await.end, 4);
             assert_eq!(db.root(), root);
 
             assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
-            db.append(v2).await.unwrap();
-            db.append(v1).await.unwrap();
+            {
+                let mut batch = db.new_batch();
+                batch.append(v2);
+                batch.append(v1);
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
 
             // Make sure uncommitted items get rolled back.
             drop(db); // Simulate failed commit
@@ -419,12 +451,11 @@ mod test {
         });
     }
 
-    // Helper function to append random elements to a database.
-    async fn append_elements<T: Rng>(db: &mut Db, rng: &mut T, num_elements: usize) {
-        for _ in 0..num_elements {
-            let value = vec![(rng.next_u32() % 255) as u8, (rng.next_u32() % 255) as u8];
-            db.append(value).await.unwrap();
-        }
+    // Helper function to generate random values for batch appends.
+    fn generate_values<T: Rng>(rng: &mut T, num_elements: usize) -> Vec<Vec<u8>> {
+        (0..num_elements)
+            .map(|_| vec![(rng.next_u32() % 255) as u8, (rng.next_u32() % 255) as u8])
+            .collect()
     }
 
     #[test_traced("WARN")]
@@ -432,34 +463,55 @@ mod test {
         let executor = deterministic::Runner::default();
         const ELEMENTS: usize = 1000;
         executor.start(|mut context| async move {
-            let mut db = open_db(context.with_label("db1")).await;
+            let db = open_db(context.with_label("db1")).await;
             let root = db.root();
 
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-
-            // Simulate a failure before committing.
+            // Create uncommitted appends then simulate failure.
+            {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
             drop(db);
             // Should rollback to the previous root.
             let mut db = open_db(context.with_label("db2")).await;
             assert_eq!(root, db.root());
 
-            // Re-apply the updates and commit them this time.
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-            db.commit(None).await.unwrap();
+            // Apply the updates and commit them this time.
+            let finalized = {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
-            // Append more values.
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-
-            // Simulate a failure.
+            // Create uncommitted appends then simulate failure.
+            {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
             drop(db);
             // Should rollback to the previous root.
             let mut db = open_db(context.with_label("db3")).await;
             assert_eq!(root, db.root());
 
-            // Re-apply the updates and commit them this time.
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-            db.commit(None).await.unwrap();
+            // Apply the updates and commit them this time.
+            let finalized = {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
@@ -482,8 +534,14 @@ mod test {
 
             // Append many values then commit.
             const ELEMENTS: usize = 200;
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
 
@@ -502,10 +560,16 @@ mod test {
                 root: <Sha256 as Hasher>::Digest,
                 op_count: Location,
             ) {
-                let mut db = open_db(context.with_label(label1)).await;
+                let db = open_db(context.with_label(label1)).await;
 
-                // Append operations and simulate failure.
-                append_elements(&mut db, &mut context, ELEMENTS).await;
+                // Create uncommitted appends and simulate failure.
+                {
+                    let mut batch = db.new_batch();
+                    for value in generate_values(&mut context, ELEMENTS) {
+                        batch.append(value);
+                    }
+                    // Don't merkleize/finalize/apply -- simulate failed commit
+                }
                 drop(db);
                 let db = open_db(context.with_label(label2)).await;
                 assert_eq!(db.bounds().await.end, op_count);
@@ -526,8 +590,14 @@ mod test {
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             let mut db = open_db(context.with_label("db4")).await;
-            append_elements(&mut db, &mut context, ELEMENTS).await;
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for value in generate_values(&mut context, ELEMENTS) {
+                    batch.append(value);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let db = open_db(context.with_label("db5")).await;
             let bounds = db.bounds().await;
             assert!(bounds.end > op_count);
@@ -549,35 +619,56 @@ mod test {
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
-            let mut db = open_db(context.with_label("db2")).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
-            async fn apply_ops(db: &mut Db) {
-                for i in 0..ELEMENTS {
-                    let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
-                    db.append(v).await.unwrap();
-                }
+            fn build_values() -> Vec<Vec<u8>> {
+                (0..ELEMENTS)
+                    .map(|i| vec![(i % 255) as u8; ((i % 17) + 13) as usize])
+                    .collect()
             }
 
             // Simulate failure after inserting operations without a commit.
-            apply_ops(&mut db).await;
+            {
+                let mut batch = db.new_batch();
+                for v in build_values() {
+                    batch.append(v);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
             drop(db);
-            let mut db = open_db(context.with_label("db3")).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
             // Repeat: simulate failure after inserting operations without a commit.
-            apply_ops(&mut db).await;
+            {
+                let mut batch = db.new_batch();
+                for v in build_values() {
+                    batch.append(v);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
             drop(db);
-            let mut db = open_db(context.with_label("db4")).await;
+            let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
-            apply_ops(&mut db).await;
-            apply_ops(&mut db).await;
-            apply_ops(&mut db).await;
+            {
+                let mut batch = db.new_batch();
+                for v in build_values() {
+                    batch.append(v);
+                }
+                for v in build_values() {
+                    batch.append(v);
+                }
+                for v in build_values() {
+                    batch.append(v);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
             drop(db);
             let mut db = open_db(context.with_label("db5")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
@@ -585,8 +676,14 @@ mod test {
             assert_eq!(db.last_commit_loc(), Location::new(0));
 
             // Apply the ops one last time but fully commit them this time, then clean up.
-            apply_ops(&mut db).await;
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for v in build_values() {
+                    batch.append(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let db = open_db(context.with_label("db6")).await;
             assert!(db.bounds().await.end > 1);
             assert_ne!(db.root(), root);
@@ -605,12 +702,16 @@ mod test {
             // Build a db with some values
             const ELEMENTS: u64 = 100;
             let mut values = Vec::new();
-            for i in 0u64..ELEMENTS {
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                values.push(v.clone());
-                db.append(v).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                    values.push(v.clone());
+                    batch.append(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
@@ -703,20 +804,28 @@ mod test {
             // Build a db with some values
             const ELEMENTS: u64 = 100;
             let mut values = Vec::new();
-            for i in 0u64..ELEMENTS {
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                values.push(v.clone());
-                db.append(v).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0u64..ELEMENTS {
+                    let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                    values.push(v.clone());
+                    batch.append(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             // Add more elements and commit again
-            for i in ELEMENTS..ELEMENTS * 2 {
-                let v = vec![(i % 255) as u8; ((i % 17) + 5) as usize];
-                values.push(v.clone());
-                db.append(v).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in ELEMENTS..ELEMENTS * 2 {
+                    let v = vec![(i % 255) as u8; ((i % 17) + 5) as usize];
+                    values.push(v.clone());
+                    batch.append(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
@@ -830,17 +939,24 @@ mod test {
             let mut db = open_db(context.with_label("db1")).await;
 
             // Add some initial operations and commit
-            for i in 0..10 {
-                let v = vec![i as u8; 10];
-                db.append(v).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0..10 {
+                    let v = vec![i as u8; 10];
+                    batch.append(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let committed_root = db.root();
             let committed_size = db.bounds().await.end;
 
             // Add exactly one more append (uncommitted)
-            let uncommitted_value = vec![99u8; 20];
-            db.append(uncommitted_value.clone()).await.unwrap();
+            {
+                let mut batch = db.new_batch();
+                batch.append(vec![99u8; 20]);
+                // Don't merkleize/finalize/apply -- simulate failed commit
+            }
 
             // Simulate failure without commit
             drop(db);
@@ -861,27 +977,33 @@ mod test {
                 "Last commit location should be correct"
             );
 
-            // Verify the uncommitted append was properly discarded
-            // We should be able to append new data without issues
+            // Verify we can append and commit new data without issues
             let new_value = vec![77u8; 15];
-            let loc = db.append(new_value.clone()).await.unwrap();
-            assert_eq!(
-                loc, committed_size,
-                "New append should get the expected location"
-            );
+            let finalized = {
+                let mut batch = db.new_batch();
+                let loc = batch.append(new_value.clone());
+                assert_eq!(
+                    loc, committed_size,
+                    "New append should get the expected location"
+                );
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             // Verify we can read the new value
-            assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
+            assert_eq!(db.get(committed_size).await.unwrap(), Some(new_value));
 
-            // Test with multiple trailing appends to ensure robustness
-            db.commit(None).await.unwrap();
             let new_committed_root = db.root();
             let new_committed_size = db.bounds().await.end;
 
             // Add multiple uncommitted appends
-            for i in 0..5 {
-                let v = vec![(200 + i) as u8; 10];
-                db.append(v).await.unwrap();
+            {
+                let mut batch = db.new_batch();
+                for i in 0..5 {
+                    let v = vec![(200 + i) as u8; 10];
+                    batch.append(v);
+                }
+                // Don't merkleize/finalize/apply -- simulate failed commit
             }
 
             // Simulate failure without commit
@@ -922,9 +1044,13 @@ mod test {
             // Add some values
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
-            db.append(v1.clone()).await.unwrap();
-            db.append(v2.clone()).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(v1.clone());
+                batch.append(v2.clone());
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             // Test getting valid locations - should succeed
             assert_eq!(db.get(Location::new(1)).await.unwrap().unwrap(), v1);
@@ -960,17 +1086,26 @@ mod test {
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
             let v3 = vec![3u8; 8];
-            db.append(v1.clone()).await.unwrap();
-            db.append(v2.clone()).await.unwrap();
-            db.commit(None).await.unwrap();
-            db.append(v3.clone()).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(v1.clone());
+                batch.append(v2.clone());
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
-            // op_count is 5 (initial_commit, v1, v2, commit, v3), last_commit_loc is 3
+            // op_count is 4 (initial_commit, v1, v2, commit), last_commit_loc is 3
             let last_commit = db.last_commit_loc();
             assert_eq!(last_commit, Location::new(3));
 
-            // Test valid prune (at last commit)
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(v3.clone());
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+
+            // Test valid prune (at previous commit location 3)
             assert!(db.prune(Location::new(3)).await.is_ok());
 
             // Test pruning beyond last commit
@@ -992,12 +1127,467 @@ mod test {
     };
 
     #[allow(dead_code)]
-    fn assert_db_futures_are_send(db: &mut Db, loc: Location, value: Vec<u8>) {
+    fn assert_db_futures_are_send(db: &mut Db, loc: Location) {
         assert_log_store(db);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
         assert_send(db.get(loc));
-        assert_send(db.append(value));
-        assert_send(db.commit(None));
+    }
+
+    /// batch.get() reads pending appends and falls through to base DB.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Pre-populate with 3 values.
+            let base_vals: Vec<Vec<u8>> = (0..3).map(|i| vec![(10 + i) as u8; 12]).collect();
+            let mut base_locs = Vec::new();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for v in &base_vals {
+                    base_locs.push(batch.append(v.clone()));
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+
+            // Second batch: read base DB values through the batch.
+            let mut batch = db.new_batch();
+            for (i, loc) in base_locs.iter().enumerate() {
+                assert_eq!(
+                    batch.get(*loc).await.unwrap(),
+                    Some(base_vals[i].clone()),
+                    "base DB value at loc {loc} mismatch"
+                );
+            }
+
+            // Pending append is visible.
+            let new_val = vec![99u8; 16];
+            let new_loc = batch.append(new_val.clone());
+            assert_eq!(batch.get(new_loc).await.unwrap(), Some(new_val));
+
+            // Location past the end returns None.
+            let beyond = Location::new(*new_loc + 1);
+            assert_eq!(batch.get(beyond).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Child batch reads parent chain values and its own appends.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_stacked_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db(context.with_label("db")).await;
+
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 16];
+
+            // Parent batch appends v1.
+            let mut parent = db.new_batch();
+            let loc1 = parent.append(v1.clone());
+            let parent_m = parent.merkleize(None);
+
+            // Child reads v1 from parent chain.
+            let mut child = parent_m.new_batch();
+            assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
+
+            // Child appends v2.
+            let loc2 = child.append(v2.clone());
+            assert_eq!(child.get(loc2).await.unwrap(), Some(v2));
+
+            // Nonexistent location.
+            let nonexistent = Location::new(9999);
+            assert_eq!(child.get(nonexistent).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Metadata propagates through merkleize and clears with None.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_metadata() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Batch with metadata.
+            let metadata = vec![42u8; 32];
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(vec![1u8; 8]);
+                batch.merkleize(Some(metadata.clone())).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
+            // Second batch clears metadata.
+            let finalized = db.new_batch().merkleize(None).finalize();
+            db.apply_batch(finalized).await.unwrap();
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// MerkleizedBatch::root() matches db.root() after apply_batch().
+    #[test_traced("INFO")]
+    fn test_keyless_batch_speculative_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let merkleized = {
+                let mut batch = db.new_batch();
+                for i in 0u8..10 {
+                    batch.append(vec![i; 16]);
+                }
+                batch.merkleize(None)
+            };
+
+            // Speculative root is available before apply.
+            let speculative = merkleized.root();
+            let finalized = merkleized.finalize();
+            db.apply_batch(finalized).await.unwrap();
+
+            assert_eq!(db.root(), speculative);
+
+            // Second batch: verify again with metadata.
+            let metadata = vec![55u8; 8];
+            let merkleized = {
+                let mut batch = db.new_batch();
+                batch.append(vec![0xAA; 20]);
+                batch.merkleize(Some(metadata))
+            };
+            let speculative = merkleized.root();
+            let finalized = merkleized.finalize();
+            db.apply_batch(finalized).await.unwrap();
+
+            assert_eq!(db.root(), speculative);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// MerkleizedBatch::get() reads from the operation chain and base DB.
+    #[test_traced("INFO")]
+    fn test_keyless_merkleized_batch_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Pre-populate base DB.
+            let base_val = vec![10u8; 12];
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(base_val.clone());
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            // Locations: 0=initial commit, 1=append, 2=commit
+
+            // Create a merkleized batch with new appends.
+            let new_val = vec![20u8; 16];
+            let mut batch = db.new_batch();
+            batch.append(new_val.clone());
+            let merkleized = batch.merkleize(None);
+            // Locations: 3=append, 4=commit
+
+            // Read base DB value through merkleized batch.
+            assert_eq!(
+                merkleized.get(Location::new(1)).await.unwrap(),
+                Some(base_val),
+            );
+
+            // Read this batch's append from the operation chain.
+            assert_eq!(
+                merkleized.get(Location::new(3)).await.unwrap(),
+                Some(new_val),
+            );
+
+            // Commit op returns None (no metadata).
+            assert_eq!(merkleized.get(Location::new(4)).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Chained child batch can be merkleized, finalized, and applied.
+    ///
+    /// The chained pattern builds speculative batches on top of each other
+    /// without applying intermediates. Only the final child is applied, which
+    /// contains all operations from the entire chain.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_chained_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 16];
+            let v3 = vec![3u8; 24];
+
+            // Parent batch.
+            let mut parent = db.new_batch();
+            let loc1 = parent.append(v1.clone());
+            let parent_m = parent.merkleize(None);
+            let parent_root = parent_m.root();
+
+            // Child batch built on top of parent.
+            let mut child = parent_m.new_batch();
+            let loc2 = child.append(v2.clone());
+            let loc3 = child.append(v3.clone());
+            let child_m = child.merkleize(None);
+            let child_root = child_m.root();
+
+            // Roots should differ (child has more data).
+            assert_ne!(parent_root, child_root);
+
+            // Apply only the final child -- it contains everything.
+            let child_finalized = child_m.finalize();
+            db.apply_batch(child_finalized).await.unwrap();
+            assert_eq!(db.root(), child_root);
+            assert_eq!(db.get(loc1).await.unwrap(), Some(v1));
+            assert_eq!(db.get(loc2).await.unwrap(), Some(v2));
+            assert_eq!(db.get(loc3).await.unwrap(), Some(v3));
+
+            // Verify recovery after reopen.
+            drop(db);
+            let db = open_db(context.with_label("db2")).await;
+            assert_eq!(db.root(), child_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Alternatively, chained batches can each be applied independently.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_chained_apply_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 16];
+
+            // Parent batch.
+            let mut parent = db.new_batch();
+            let loc1 = parent.append(v1.clone());
+            let parent_m = parent.merkleize(None);
+            let parent_root = parent_m.root();
+
+            // Finalize and apply parent first.
+            let parent_finalized = parent_m.finalize();
+            db.apply_batch(parent_finalized).await.unwrap();
+            assert_eq!(db.root(), parent_root);
+            assert_eq!(db.get(loc1).await.unwrap(), Some(v1));
+
+            // Now create a second (independent) batch.
+            let mut batch2 = db.new_batch();
+            let loc2 = batch2.append(v2.clone());
+            let batch2_m = batch2.merkleize(None);
+            let batch2_root = batch2_m.root();
+            let batch2_finalized = batch2_m.finalize();
+            db.apply_batch(batch2_finalized).await.unwrap();
+            assert_eq!(db.root(), batch2_root);
+            assert_eq!(db.get(loc2).await.unwrap(), Some(v2));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Many sequential batches accumulate correctly.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_many_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+            let mut hasher = Standard::<Sha256>::new();
+
+            const BATCHES: u64 = 20;
+            const APPENDS_PER_BATCH: u64 = 5;
+
+            let mut all_values: Vec<Vec<u8>> = Vec::new();
+            let mut all_locs: Vec<Location> = Vec::new();
+
+            for batch_idx in 0..BATCHES {
+                let finalized = {
+                    let mut batch = db.new_batch();
+                    for j in 0..APPENDS_PER_BATCH {
+                        let v = vec![(batch_idx * 10 + j) as u8; 8];
+                        let loc = batch.append(v.clone());
+                        all_values.push(v);
+                        all_locs.push(loc);
+                    }
+                    batch.merkleize(None).finalize()
+                };
+                db.apply_batch(finalized).await.unwrap();
+            }
+
+            // Verify all values are readable.
+            for (i, loc) in all_locs.iter().enumerate() {
+                assert_eq!(
+                    db.get(*loc).await.unwrap(),
+                    Some(all_values[i].clone()),
+                    "mismatch at index {i}, loc {loc}"
+                );
+            }
+
+            // Verify proof over the full range.
+            let root = db.root();
+            let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root
+            ));
+
+            // Expected size: 1 initial commit + BATCHES * (APPENDS_PER_BATCH + 1 commit).
+            let expected = 1 + BATCHES * (APPENDS_PER_BATCH + 1);
+            assert_eq!(db.bounds().await.end, expected);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Empty batch (zero appends) produces correct speculative root.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Apply a non-empty batch first so the DB has some state.
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(vec![1u8; 8]);
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            let root_before = db.root();
+            let size_before = db.bounds().await.end;
+
+            // Empty batch with no appends.
+            let merkleized = db.new_batch().merkleize(None);
+            let speculative = merkleized.root();
+            let finalized = merkleized.finalize();
+            db.apply_batch(finalized).await.unwrap();
+
+            // Root changed (a new Commit op was appended).
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.root(), speculative);
+            // Size grew by exactly 1 (the Commit op).
+            assert_eq!(db.bounds().await.end, size_before + 1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// MerkleizedBatch::get() works on a chained child's merkleized batch.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_chained_merkleized_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Pre-populate base DB.
+            let base_val = vec![10u8; 12];
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(base_val.clone());
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            let base_loc = Location::new(1);
+
+            // Parent batch appends v1.
+            let v1 = vec![1u8; 8];
+            let mut parent = db.new_batch();
+            let loc1 = parent.append(v1.clone());
+            let parent_m = parent.merkleize(None);
+
+            // Child batch appends v2.
+            let v2 = vec![2u8; 16];
+            let mut child = parent_m.new_batch();
+            let loc2 = child.append(v2.clone());
+            let child_m = child.merkleize(None);
+
+            // Child's MerkleizedBatch can read all three layers:
+            // base DB value
+            assert_eq!(
+                child_m.get(base_loc).await.unwrap(),
+                Some(base_val),
+                "should read base DB value"
+            );
+            // parent chain value
+            assert_eq!(
+                child_m.get(loc1).await.unwrap(),
+                Some(v1),
+                "should read parent chain value"
+            );
+            // child's own value
+            assert_eq!(
+                child_m.get(loc2).await.unwrap(),
+                Some(v2),
+                "should read child's own value"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Large single batch with many appends, verifying all values and proof.
+    #[test_traced("INFO")]
+    fn test_keyless_batch_large() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+            let mut hasher = Standard::<Sha256>::new();
+
+            const N: u64 = 500;
+            let mut values = Vec::new();
+            let mut locs = Vec::new();
+
+            let finalized = {
+                let mut batch = db.new_batch();
+                for i in 0..N {
+                    let v = vec![(i % 256) as u8; ((i % 29) + 3) as usize];
+                    locs.push(batch.append(v.clone()));
+                    values.push(v);
+                }
+                batch.merkleize(None).finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+
+            // Verify every value.
+            for (i, loc) in locs.iter().enumerate() {
+                assert_eq!(
+                    db.get(*loc).await.unwrap(),
+                    Some(values[i].clone()),
+                    "mismatch at index {i}"
+                );
+            }
+
+            // Verify proof over the full range.
+            let root = db.root();
+            let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root
+            ));
+
+            // Expected: 1 initial commit + N appends + 1 commit.
+            assert_eq!(db.bounds().await.end, 1 + N + 1);
+
+            db.destroy().await.unwrap();
+        });
     }
 }

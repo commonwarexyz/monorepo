@@ -42,6 +42,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
         &self.key
     }
 
+    fn value(&self) -> &V::Value {
+        &self.value
+    }
+
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

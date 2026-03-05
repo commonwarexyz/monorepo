@@ -88,16 +88,19 @@ where
             return Ok(());
         }
 
+        let mut batch = self.new_batch();
         for operation in operations {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    self.write_batch([(key, Some(value))]).await?;
+                    batch.write(key, Some(value));
                 }
                 Operation::Delete(key) => {
-                    self.write_batch([(key, None)]).await?;
+                    batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    self.commit(metadata).await?;
+                    let finalized = batch.merkleize(metadata).await?.finalize();
+                    self.apply_batch(finalized).await?;
+                    batch = self.new_batch();
                 }
             }
         }

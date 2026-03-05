@@ -41,7 +41,6 @@ use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, 
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
-use std::collections::HashSet;
 use tracing::{error, warn};
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
@@ -81,12 +80,6 @@ pub struct Db<
 
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
-
-    /// Bitmap chunks modified since the last merkleization. Only contains chunks that were
-    /// complete at last merkleization (index < old_grafted_leaves). Chunks completed or created
-    /// since then are covered by the `old_grafted_leaves..new_grafted_leaves` range in
-    /// `commit`.
-    pub(super) dirty_chunks: HashSet<usize>,
 
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
@@ -173,6 +166,34 @@ where
     /// See the [Root structure](super) section in the module documentation.
     pub fn ops_root(&self) -> H::Digest {
         self.any.log.root()
+    }
+
+    /// Create a new speculative batch of operations with this database as its parent.
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(
+        &self,
+    ) -> super::batch::UnmerkleizedBatch<
+        '_,
+        E,
+        K,
+        V,
+        C,
+        I,
+        H,
+        U,
+        mmr::journaled::Mmr<E, H::Digest>,
+        mmr::mem::Mmr<H::Digest>,
+        BitMap<N>,
+        N,
+    > {
+        super::batch::UnmerkleizedBatch::new(
+            self.any.new_batch(),
+            self,
+            Vec::new(),
+            Vec::new(),
+            &self.grafted_mmr,
+            &self.status,
+        )
     }
 
     /// Returns a proof for the operation at `loc`.
@@ -329,107 +350,48 @@ where
     }
 }
 
-// Functionality for committing operations.
 impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + 'static,
     C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    /// Raises the activity floor according to policy followed by appending a commit operation with
-    /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
-    /// end_loc)` location range of committed operations.
-    async fn apply_commit_op(
+    /// Apply a changeset to the database.
+    ///
+    /// Returns the range of locations written.
+    pub async fn apply_batch(
         &mut self,
-        metadata: Option<V::Value>,
+        batch: super::batch::Changeset<K, H::Digest, Operation<K, V, U>, N>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = self.any.last_commit_loc + 1;
-        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
+        // 1. Apply inner any batch (writes ops, updates snapshot).
+        let range = self.any.apply_batch(batch.inner).await?;
 
-        // Inactivate the current commit operation.
-        self.status.set_bit(*self.any.last_commit_loc, false);
-        let chunk = BitMap::<N>::to_chunk_index(*self.any.last_commit_loc);
-        if chunk < old_grafted_leaves {
-            self.dirty_chunks.insert(chunk);
+        // 2. Push new bits FIRST. Must happen before clears because for chained
+        //    batches, some clears target locations within the push range
+        //    (ancestor-segment superseded ops that were pushed as active by an
+        //    ancestor and then superseded by a descendant).
+        for &bit in &batch.bitmap_pushes {
+            self.status.push(bit);
         }
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let dirty_chunks = &mut self.dirty_chunks;
-        let inactivity_floor_loc = self
-            .any
-            .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, _new_loc| {
-                let chunk = BitMap::<N>::to_chunk_index(*old_loc);
-                if chunk < old_grafted_leaves {
-                    dirty_chunks.insert(chunk);
-                }
-            })
-            .await?;
-
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
-
-        self.any.apply_commit_op(commit_op).await?;
-
-        Ok(start_loc..self.any.log.size().await)
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// This also merkleizes the grafted MMR and computes the canonical root.
-    /// Returns the `[start_loc, end_loc)` range of committed operations.
-    pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        let range = self.apply_commit_op(metadata).await?;
-
-        // Merkleize: compute grafted leaves for new/dirty bitmap chunks.
-        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
-        let new_grafted_leaves = self.status.complete_chunks();
-        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-            .chain(self.dirty_chunks.iter().copied())
-            .map(|chunk_idx| (chunk_idx, *self.status.get_chunk(chunk_idx)));
-        let grafted_leaves = compute_grafted_leaves::<H, N>(
-            &mut self.any.log.hasher,
-            &self.any.log.mmr,
-            chunks_to_update,
-            self.thread_pool.as_ref(),
-        )
-        .await?;
-
-        // Update the grafted MMR with new/dirty leaves via batch API.
-        let grafting_height = grafting::height::<N>();
-        if !grafted_leaves.is_empty() {
-            let changeset = {
-                let mut batch = self
-                    .grafted_mmr
-                    .new_batch()
-                    .with_pool(self.thread_pool.clone());
-                for &(ops_pos, digest) in &grafted_leaves {
-                    let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
-                    if grafted_pos < batch.size() {
-                        let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
-                        batch
-                            .update_leaf_digest(loc, digest)
-                            .expect("update_leaf_digest failed");
-                    } else {
-                        batch.add_leaf_digest(digest);
-                    }
-                }
-                let mut grafted_hasher =
-                    grafting::GraftedHasher::new(self.any.log.hasher.fork(), grafting_height);
-                batch.merkleize(&mut grafted_hasher).finalize()
-            };
-            self.grafted_mmr.apply(changeset);
+        // 3. Clear superseded locations: previous commit inactivation, diff
+        //    base_old_locs, and ancestor-segment superseded locations (chaining).
+        for loc in &batch.bitmap_clears {
+            self.status.set_bit(**loc, false);
         }
 
-        // Prune bitmap chunks that are fully below the inactivity floor.
+        // 4. Apply precomputed grafted MMR changeset from merkleize().
+        self.grafted_mmr.apply(batch.grafted_changeset);
+
+        // 5. Prune bitmap chunks fully below the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc);
 
-        // Prune the grafted MMR to match.
+        // 6. Prune the grafted MMR to match.
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
             let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
@@ -438,15 +400,8 @@ where
             }
         }
 
-        // Compute and cache the canonical root.
-        let storage = grafting::Storage::new(&self.grafted_mmr, grafting_height, &self.any.log.mmr);
-        let partial_chunk = partial_chunk(&self.status);
-        let ops_root = self.any.log.root();
-        self.root =
-            compute_db_root(&mut self.any.log.hasher, &storage, partial_chunk, &ops_root).await?;
-
-        // Clear dirty chunks for the next commit cycle.
-        self.dirty_chunks.clear();
+        // 7. Use precomputed canonical root from merkleize().
+        self.root = batch.canonical_root;
 
         Ok(range)
     }
@@ -556,7 +511,9 @@ where
 
 /// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
 /// `None` if all bits fall on complete chunk boundaries.
-pub(super) fn partial_chunk<const N: usize>(bitmap: &BitMap<N>) -> Option<(&[u8; N], u64)> {
+pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
+    bitmap: &B,
+) -> Option<([u8; N], u64)> {
     let (last_chunk, next_bit) = bitmap.last_chunk();
     if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
         None
@@ -588,17 +545,18 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
+    G: mmr::read::Readable<H::Digest>,
     S: mmr::storage::Storage<H::Digest>,
     const N: usize,
 >(
     hasher: &mut StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, S>,
-    partial_chunk: Option<(&[u8; N], u64)>,
+    storage: &grafting::Storage<'_, H::Digest, G, S>,
+    partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr_root = compute_grafted_mmr_root(hasher, storage).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(chunk);
+        let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
     Ok(combine_roots(
@@ -612,9 +570,13 @@ pub(super) async fn compute_db_root<
 /// Compute the root of the grafted MMR.
 ///
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
-pub(super) async fn compute_grafted_mmr_root<H: Hasher, S: mmr::storage::Storage<H::Digest>>(
+pub(super) async fn compute_grafted_mmr_root<
+    H: Hasher,
+    G: mmr::read::Readable<H::Digest>,
+    S: mmr::storage::Storage<H::Digest>,
+>(
     hasher: &mut StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, S>,
+    storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
     let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
@@ -639,7 +601,7 @@ pub(super) async fn compute_grafted_mmr_root<H: Hasher, S: mmr::storage::Storage
 /// the grafted leaf equals the ops subtree root directly (zero-chunk identity).
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
-async fn compute_grafted_leaves<H: Hasher, const N: usize>(
+pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
@@ -806,4 +768,84 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     };
 
     Ok((metadata, pruned_chunks, pinned_nodes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::FixedSize;
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+
+    const N: usize = sha256::Digest::SIZE;
+
+    #[test]
+    fn partial_chunk_single_bit() {
+        let mut bm = PrunableBitMap::<N>::new();
+        bm.push(true);
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_some());
+        let (chunk, next_bit) = result.unwrap();
+        assert_eq!(next_bit, 1);
+        assert_eq!(chunk[0], 1); // bit 0 set
+    }
+
+    #[test]
+    fn partial_chunk_aligned() {
+        let mut bm = PrunableBitMap::<N>::new();
+        for _ in 0..PrunableBitMap::<N>::CHUNK_SIZE_BITS {
+            bm.push(true);
+        }
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn partial_chunk_partial() {
+        let mut bm = PrunableBitMap::<N>::new();
+        for _ in 0..(PrunableBitMap::<N>::CHUNK_SIZE_BITS + 5) {
+            bm.push(true);
+        }
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_some());
+        let (_chunk, next_bit) = result.unwrap();
+        assert_eq!(next_bit, 5);
+    }
+
+    #[test]
+    fn combine_roots_deterministic() {
+        let mut h1 = StandardHasher::<Sha256>::new();
+        let mut h2 = StandardHasher::<Sha256>::new();
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let r1 = combine_roots(&mut h1, &ops, &grafted, None);
+        let r2 = combine_roots(&mut h2, &ops, &grafted, None);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn combine_roots_with_partial_differs() {
+        let mut h1 = StandardHasher::<Sha256>::new();
+        let mut h2 = StandardHasher::<Sha256>::new();
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let partial_digest = Sha256::hash(b"partial");
+
+        let without = combine_roots(&mut h1, &ops, &grafted, None);
+        let with = combine_roots(&mut h2, &ops, &grafted, Some((5, &partial_digest)));
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn combine_roots_different_ops_root() {
+        let mut h1 = StandardHasher::<Sha256>::new();
+        let mut h2 = StandardHasher::<Sha256>::new();
+        let ops_a = Sha256::hash(b"ops_a");
+        let ops_b = Sha256::hash(b"ops_b");
+        let grafted = Sha256::hash(b"grafted");
+
+        let r1 = combine_roots(&mut h1, &ops_a, &grafted, None);
+        let r2 = combine_roots(&mut h2, &ops_b, &grafted, None);
+        assert_ne!(r1, r2);
+    }
 }

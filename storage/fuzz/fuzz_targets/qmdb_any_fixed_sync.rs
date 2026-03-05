@@ -158,18 +158,16 @@ fn fuzz(mut input: FuzzInput) {
 
         let mut sync_id = 0;
 
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+
         for op in &input.ops {
             match op {
                 Operation::Update { key, value } => {
-                    db.write_batch([(Key::new(*key), Some(Value::new(*value)))])
-                        .await
-                        .expect("Update should not fail");
+                    pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Key::new(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit => {
@@ -185,8 +183,18 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let _ = db
-                        .commit(Some(FixedBytes::new(commit_id)))
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(Some(FixedBytes::new(commit_id)))
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("Commit should not fail");
                 }
@@ -204,8 +212,18 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let _ = db
-                        .commit(Some(FixedBytes::new(commit_id)))
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(Some(FixedBytes::new(commit_id)))
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
                     let target = sync::Target {
@@ -230,6 +248,7 @@ fn fuzz(mut input: FuzzInput) {
 
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
                     drop(db);
 
                     let cfg = test_config(TEST_NAME, &context);
@@ -246,7 +265,16 @@ fn fuzz(mut input: FuzzInput) {
             }
         }
 
-        let _ = db.commit(None).await.expect("commit should not fail");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for (k, v) in pending_writes.drain(..) {
+                batch.write(k, v);
+            }
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

@@ -154,18 +154,23 @@ fn fuzz(input: FuzzInput) {
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
 
+        let mut pending_appends: Vec<Vec<u8>> = Vec::new();
+
         for op in &input.ops {
             match op {
                 Operation::Append { value_bytes } => {
-                    db.append(value_bytes.clone())
-                        .await
-                        .expect("Append should not fail");
+                    pending_appends.push(value_bytes.clone());
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let _ = db.commit(metadata_bytes.clone())
-                        .await
-                        .expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(metadata_bytes.clone()).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                 }
 
                 Operation::Get { loc_offset } => {
@@ -181,14 +186,28 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                     db.prune(db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
                 Operation::Sync => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                     db.sync().await.expect("Sync should not fail");
                 }
 
@@ -205,7 +224,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                     let _ = db.root();
                 }
 
@@ -217,7 +243,14 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc);
@@ -239,7 +272,16 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let _ = db.commit(None).await.expect("Commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    // Use post-commit op_count so it's consistent with the root.
+                    let op_count = db.bounds().await.end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
@@ -257,6 +299,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::SimulateFailure{} => {
+                    pending_appends.clear();
                     drop(db);
 
                     let cfg = test_config("keyless-fuzz-test", &context);
@@ -271,7 +314,14 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let _ = db.commit(None).await.expect("Commit should not fail");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for v in pending_appends.drain(..) {
+                batch.append(v);
+            }
+            batch.merkleize(None).finalize()
+        };
+        db.apply_batch(finalized).await.expect("Commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

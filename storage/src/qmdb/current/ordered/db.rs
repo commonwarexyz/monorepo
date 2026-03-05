@@ -6,7 +6,7 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    kv::{self, Batchable},
+    kv,
     mmr::Location,
     qmdb::{
         any::{
@@ -21,7 +21,6 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::bitmap::Prunable as BitMap;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -219,46 +218,6 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        C: Mutable<Item = Operation<K, V>>,
-        K: Key,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location>,
-        H: Hasher,
-        const N: usize,
-    > Db<E, C, K, V, I, H, N>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    /// Writes a batch of key-value pairs to the database.
-    ///
-    /// For each item in the iterator:
-    /// - `(key, Some(value))` updates or creates the key with the given value
-    /// - `(key, None)` deletes the key
-    pub async fn write_batch(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
-        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
-        let status = &mut self.status;
-        let dirty_chunks = &mut self.dirty_chunks;
-        self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                    let chunk = BitMap::<N>::to_chunk_index(*loc);
-                    if chunk < old_grafted_leaves {
-                        dirty_chunks.insert(chunk);
-                    }
-                }
-            })
-            .await
-    }
-}
-
 // Store implementation
 impl<
         E: Storage + Clock + Metrics,
@@ -279,25 +238,5 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.get(key).await
-    }
-}
-
-impl<E, C, K, V, I, H, const N: usize> Batchable for Db<E, C, K, V, I, H, N>
-where
-    E: Storage + Clock + Metrics,
-    C: Mutable<Item = Operation<K, V>>,
-    K: Key,
-    V: ValueEncoding,
-    I: OrderedIndex<Value = Location> + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
-    where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
-        Iter::IntoIter: Send,
-    {
-        self.write_batch(iter).await
     }
 }

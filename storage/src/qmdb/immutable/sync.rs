@@ -217,22 +217,27 @@ mod tests {
         ops
     }
 
-    /// Applies the given operations to the database.
+    /// Applies the given operations and commits the database.
     async fn apply_ops(
         db: &mut ImmutableSyncTest,
         ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
+        metadata: Option<sha256::Digest>,
     ) {
-        for op in ops {
-            match op {
-                Operation::Set(key, value) => {
-                    db.set(key, value).await.unwrap();
-                }
-                Operation::Commit(_metadata) => {
-                    // Commit causes a state change, so it is not supported here.
-                    panic!("Commit operation not supported in apply_ops");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Set(key, value) => {
+                        batch.set(key, value);
+                    }
+                    Operation::Commit(_metadata) => {
+                        panic!("Commit operation not supported in apply_ops");
+                    }
                 }
             }
-        }
+            batch.merkleize(metadata).finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
     }
 
     #[rstest]
@@ -249,9 +254,7 @@ mod tests {
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_db_ops = create_test_ops(target_db_ops);
-            apply_ops(&mut target_db, target_db_ops.clone()).await;
-            let metadata = Some(Sha256::fill(1));
-            let _ = target_db.commit(metadata).await.unwrap();
+            apply_ops(&mut target_db, target_db_ops.clone(), Some(Sha256::fill(1))).await;
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
@@ -311,10 +314,10 @@ mod tests {
 
             // Apply new operations to both databases.
             let mut got_db = got_db;
-            apply_ops(&mut got_db, new_ops.clone()).await;
+            apply_ops(&mut got_db, new_ops.clone(), None).await;
             let mut target_db = Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("target_db should have no other references"));
-            apply_ops(&mut target_db, new_ops.clone()).await;
+            apply_ops(&mut target_db, new_ops.clone(), None).await;
 
             // Verify both databases have the new values
             for (key, expected_value) in &new_kvs {
@@ -324,9 +327,7 @@ mod tests {
                 assert_eq!(target_value, Some(*expected_value));
             }
 
-            let _ = got_db.commit(None).await.unwrap();
             got_db.destroy().await.unwrap();
-            let _ = target_db.commit(None).await.unwrap();
             target_db.destroy().await.unwrap();
         });
     }
@@ -338,7 +339,8 @@ mod tests {
         executor.start(|mut context| async move {
             // Create an empty target database
             let mut target_db = create_test_db(context.with_label("target")).await;
-            let _ = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
+            // Commit to establish a valid root
+            apply_ops(&mut target_db, vec![], Some(Sha256::fill(1))).await;
 
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
@@ -385,8 +387,7 @@ mod tests {
             // Create and populate a simple target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            let _ = target_db.commit(Some(Sha256::fill(0))).await.unwrap();
+            apply_ops(&mut target_db, target_ops.clone(), Some(Sha256::fill(0))).await;
 
             // Capture target state
             let target_root = target_db.root();
@@ -458,8 +459,7 @@ mod tests {
             // Create and populate initial target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let initial_ops = create_test_ops(50);
-            apply_ops(&mut target_db, initial_ops.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, initial_ops.clone(), None).await;
 
             // Capture the state after first commit
             let bounds = target_db.bounds().await;
@@ -470,8 +470,7 @@ mod tests {
             // Add more operations to create the extended target
             // (use different seed to avoid key collisions)
             let additional_ops = create_test_ops_seeded(25, 1);
-            apply_ops(&mut target_db, additional_ops.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, additional_ops.clone(), None).await;
             let final_upper_bound = target_db.bounds().await.end;
             let final_root = target_db.root();
 
@@ -596,8 +595,7 @@ mod tests {
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
-            apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops[..29].to_vec(), None).await;
 
             let target_root = target_db.root();
             let bounds = target_db.bounds().await;
@@ -605,8 +603,7 @@ mod tests {
             let op_count = bounds.end;
 
             // Add final op after capturing the range
-            apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops[29..].to_vec(), None).await;
 
             let target_db = Arc::new(target_db);
             let config = Config {
@@ -654,18 +651,15 @@ mod tests {
                     .unwrap();
 
             // Apply the same operations to both databases
-            apply_ops(&mut target_db, original_ops.clone()).await;
-            apply_ops(&mut sync_db, original_ops.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
-            let _ = sync_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, original_ops.clone(), None).await;
+            apply_ops(&mut sync_db, original_ops.clone(), None).await;
 
             drop(sync_db);
 
             // Add one more operation and commit the target database
             // (use different seed to avoid key collisions)
             let last_op = create_test_ops_seeded(1, 1);
-            apply_ops(&mut target_db, last_op.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, last_op.clone(), None).await;
             let root = target_db.root();
             let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
@@ -717,10 +711,8 @@ mod tests {
                     .unwrap();
 
             // Apply the same operations to both databases
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            apply_ops(&mut sync_db, target_ops.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
-            let _ = sync_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops.clone(), None).await;
+            apply_ops(&mut sync_db, target_ops.clone(), None).await;
 
             drop(sync_db);
 
@@ -765,8 +757,7 @@ mod tests {
             // Create and populate target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(100);
-            apply_ops(&mut target_db, target_ops).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             target_db.prune(Location::new(10)).await.unwrap();
 
@@ -825,8 +816,7 @@ mod tests {
             // Create and populate target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(50);
-            apply_ops(&mut target_db, target_ops).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -883,8 +873,7 @@ mod tests {
             // Create and populate target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(100);
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops.clone(), None).await;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -895,11 +884,10 @@ mod tests {
             // Apply more operations to the target database
             // (use different seed to avoid key collisions)
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut target_db, more_ops).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, more_ops, None).await;
 
             target_db.prune(Location::new(10)).await.unwrap();
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, vec![], None).await;
 
             // Capture final target state
             let bounds = target_db.bounds().await;
@@ -964,8 +952,7 @@ mod tests {
             // Create and populate target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(25);
-            apply_ops(&mut target_db, target_ops).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -1023,8 +1010,7 @@ mod tests {
             // Create and populate target database
             let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops).await;
-            let _ = target_db.commit(None).await.unwrap();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             // Capture target state
             let bounds = target_db.bounds().await;

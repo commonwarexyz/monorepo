@@ -104,10 +104,27 @@ fn fuzz(data: FuzzInput) {
             .await
             .expect("Failed to initialize Current database");
 
-        let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+        // committed_state tracks state after apply_batch. pending_expected tracks
+        // uncommitted mutations that haven't been applied yet.
+        let mut committed_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+        let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
-        let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = Location::new(1);
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+        let mut committed_op_count = Location::new(0);
+
+        macro_rules! commit_pending {
+            ($db:expr, $pending_writes:expr, $committed_state:expr, $pending_expected:expr) => {{
+                let finalized = {
+                    let mut batch = $db.new_batch();
+                    for (k, v) in $pending_writes.drain(..) {
+                        batch.write(k, v);
+                    }
+                    batch.merkleize(None).await.unwrap().finalize()
+                };
+                $db.apply_batch(finalized).await.expect("commit should not fail");
+                $committed_state.extend($pending_expected.drain());
+            }};
+        }
 
         for op in &data.operations {
             match op {
@@ -115,22 +132,20 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    db.write_batch([(k, Some(v))]).await.expect("Update should not fail");
-                    expected_state.insert(*key, Some(*value));
+                    pending_writes.push((k, Some(v)));
+                    pending_expected.insert(*key, Some(*value));
                     all_keys.insert(*key);
-                    uncommitted_ops += 1;
-
                 }
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    // Check if key exists before deletion
-                    let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some();
-                    db.write_batch([(k, None)]).await.expect("Delete should not fail");
+                    // Check if key exists in committed state or pending writes.
+                    let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some()
+                        || pending_expected.get(key).is_some_and(|v| v.is_some());
                     if key_existed {
-                        expected_state.insert(*key, None);
+                        pending_writes.push((k, None));
+                        pending_expected.insert(*key, None);
                         all_keys.insert(*key);
-                        uncommitted_ops += 1;
                     }
                 }
 
@@ -138,7 +153,8 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let result = db.get(&k).await.expect("Get should not fail");
 
-                    match expected_state.get(key) {
+                    // Verify against committed state only.
+                    match committed_state.get(key) {
                         Some(Some(expected_value)) => {
                             assert!(result.is_some(), "Expected value for key {key:?}");
                             let actual_value = result.expect("Should have value");
@@ -157,29 +173,27 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.bounds().await.end;
-                    let expected_count = last_committed_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count}, got {actual_count}");
+                    let actual = db.bounds().await.end;
+                    assert_eq!(
+                        actual, committed_op_count,
+                        "Op count mismatch: expected {committed_op_count}, got {actual}"
+                    );
                 }
 
                 CurrentOperation::Commit => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
                 }
 
                 CurrentOperation::Prune => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
                     db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
-                    let _ = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
                     let _root = db.root();
                 }
 
@@ -189,12 +203,10 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    let _ = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
-                    // Adjust start_loc and max_ops to be within the valid range
                     let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % *current_op_count);
                     let oldest_loc = db.inactivity_floor_loc();
@@ -223,9 +235,8 @@ fn fuzz(data: FuzzInput) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let _ = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
 
                     let current_op_count = db.bounds().await.end;
                     let start_loc = Location::new(start_loc % current_op_count.as_u64());
@@ -266,9 +277,8 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let _ = db.commit(None).await.expect("commit should not fail");
-                    last_committed_op_count = db.bounds().await.end;
-                    uncommitted_ops = 0;
+                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
                     match db.key_value_proof(&mut hasher, k.clone()).await {
@@ -284,7 +294,7 @@ fn fuzz(data: FuzzInput) {
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
-                            let expected_value = expected_state.get(key);
+                            let expected_value = committed_state.get(key);
                             if let Some(Some(_)) = expected_value {
                                 panic!("Key {key:?} should exist but proof generation failed");
                             }
@@ -297,13 +307,19 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        let _ = db.commit(None).await.expect("Final commit should not fail");
+        // Final commit to ensure all pending operations are persisted.
+        if !pending_writes.is_empty() {
+            commit_pending!(db, pending_writes, committed_state, pending_expected);
+        }
+
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.expect("Final commit should not fail");
 
         for key in &all_keys {
             let k = Key::new(*key);
             let result = db.get(&k).await.expect("Final get should not fail");
 
-            match expected_state.get(key) {
+            match committed_state.get(key) {
                 Some(Some(expected_value)) => {
                     assert!(result.is_some(), "Lost value for key {key:?} at end");
                     let actual_value = result.expect("Should have value");

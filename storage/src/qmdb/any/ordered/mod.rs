@@ -2,21 +2,18 @@
 use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
-    journal::contiguous::{Contiguous, Mutable, Reader},
-    kv::{self, Batchable},
+    journal::contiguous::{Contiguous, Reader},
+    kv,
     mmr::Location,
     qmdb::{
         any::{db::Db, ValueEncoding},
-        delete_known_loc,
         operation::{Key, Operation as OperationTrait},
-        update_known_loc, Error,
+        Error,
     },
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-#[cfg(any(test, feature = "test-traits"))]
-use core::ops::Range;
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -224,243 +221,6 @@ impl<
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding,
-        C: Mutable<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    /// Performs a batch update, invoking the callback for each resulting operation. The first
-    /// argument of the callback is the activity status of the operation, and the second argument is
-    /// the location of the operation it inactivates (if any).
-    pub(crate) async fn write_batch_with_callback<F>(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
-        mut callback: F,
-    ) -> Result<(), Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // Collect all the possible matching `locations` for any referenced key, while retaining
-        // each item in the batch in a `mutations` map.
-        let mut mutations = BTreeMap::new();
-        let iter = iter.into_iter();
-        let mut locations = Vec::with_capacity(iter.size_hint().0);
-        for (key, value) in iter {
-            let iter = self.snapshot.get(&key);
-            locations.extend(iter.copied());
-            mutations.insert(key, value);
-        }
-
-        // Concurrently look up all possible matching locations.
-        locations.sort();
-        locations.dedup();
-        let results = {
-            let reader = self.log.reader().await;
-            let futures = locations
-                .iter()
-                .map(|loc| Self::get_update_op(&reader, *loc));
-            try_join_all(futures).await?
-        };
-
-        // A set of possible "next_key" values for any keys whose next_key value will need to be
-        // updated.
-        let mut possible_next = BTreeSet::new();
-        // A set of possible previous keys to any new or deleted keys.
-        let mut possible_previous = BTreeMap::new();
-
-        // We divide keys in the batch into three disjoint sets:
-        //   - `deleted`
-        //   - `created`
-        //   - `updated`
-        //
-        // Populate the the deleted and updated sets, and for deleted keys only, immediately update
-        // the log and snapshot.
-        let mut deleted = Vec::new();
-        let mut updated = BTreeMap::new();
-        for (key_data, old_loc) in (results.into_iter()).zip(locations) {
-            let key = key_data.key;
-            possible_previous.insert(key.clone(), (key_data.value, old_loc));
-            possible_next.insert(key_data.next_key);
-
-            let Some(mutation) = mutations.remove(&key) else {
-                // Due to translated key collisions, we may look up keys that aren't in the
-                // mutations set. Note that these could still end up next or previous keys to other
-                // keys in the batch, so they are still added to these sets above.
-                continue;
-            };
-
-            if let Some(new_value) = mutation {
-                // This is an update of an existing key.
-                updated.insert(key.clone(), (new_value, old_loc));
-            } else {
-                // This is a delete of an existing key.
-                deleted.push(key.clone());
-
-                // Update the log and snapshot.
-                delete_known_loc(&mut self.snapshot, &key, old_loc);
-                self.log.append(&Operation::Delete(key)).await?;
-                callback(false, Some(old_loc));
-
-                // Each delete reduces the active key count by one and inactivates that key.
-                self.active_keys -= 1;
-                self.steps += 1;
-            }
-        }
-
-        // Any key remaining in `mutations` must be a new key so move it to the created map.
-        let mut created = BTreeMap::new();
-        for (key, value) in mutations {
-            let Some(value) = value else {
-                continue; // can happen from attempt to delete a non-existent key
-            };
-            created.insert(key.clone(), value);
-
-            // Any newly created key must be a next_key for some remaining key.
-            possible_next.insert(key);
-        }
-
-        // Complete the `possible_previous` and `possible_next` sets by including entries from the
-        // previous _translated_ key for any created or deleted key.
-        let mut locations = Vec::new();
-        for key in deleted.iter().chain(created.keys()) {
-            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
-                continue;
-            };
-            locations.extend(iter.copied());
-        }
-        locations.sort();
-        locations.dedup();
-        let results = {
-            let reader = self.log.reader().await;
-            let futures = locations.iter().map(|loc| reader.read(loc.as_u64()));
-            try_join_all(futures).await?
-        };
-
-        for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let Operation::Update(key_data) = op else {
-                unreachable!("updates should have key data");
-            };
-            possible_next.insert(key_data.next_key);
-            possible_previous.insert(key_data.key, (key_data.value, old_loc));
-        }
-
-        // Remove deleted keys from the possible_* sets.
-        for key in deleted.iter() {
-            possible_previous.remove(key);
-            possible_next.remove(key);
-        }
-
-        // Apply the updates of existing keys.
-        let mut already_updated = BTreeSet::new();
-        for (key, (value, loc)) in updated {
-            let new_loc = self.log.size().await;
-            update_known_loc(&mut self.snapshot, &key, loc, new_loc);
-
-            let next_key = find_next_key(&key, &possible_next);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            });
-            self.log.append(&op).await?;
-            callback(true, Some(loc));
-
-            // Each update of an existing key inactivates its previous location.
-            self.steps += 1;
-            already_updated.insert(key);
-        }
-
-        // Create each new key, and update its previous key if it hasn't already been updated.
-        for (key, value) in created {
-            let new_loc = self.log.size().await;
-            self.snapshot.insert(&key, new_loc);
-            let next_key = find_next_key(&key, &possible_next);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            });
-
-            // Each newly created key increases the active key count.
-            self.log.append(&op).await?;
-            callback(true, None);
-            self.active_keys += 1;
-
-            // Update the next_key value of its previous key (unless there are no existing keys).
-            if possible_previous.is_empty() {
-                continue;
-            }
-            let (prev_key, (prev_value, prev_loc)) = find_prev_key(&key, &possible_previous);
-            if already_updated.contains(prev_key) {
-                continue;
-            }
-            already_updated.insert(prev_key.clone());
-
-            let new_loc = self.log.size().await;
-            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
-            let next_key = find_next_key(prev_key, &possible_next);
-            let op = Operation::Update(Update {
-                key: prev_key.clone(),
-                value: prev_value.clone(),
-                next_key,
-            });
-            self.log.append(&op).await?;
-            callback(true, Some(*prev_loc));
-
-            // Each key whose next-key value is updated inactivates its previous location.
-            self.steps += 1;
-        }
-
-        if possible_next.is_empty() || possible_previous.is_empty() {
-            return Ok(());
-        }
-
-        // Update the previous key of each deleted key if it hasn't already been updated.
-        for key in deleted.iter() {
-            let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &possible_previous);
-            if already_updated.contains(prev_key) {
-                continue;
-            }
-            already_updated.insert(prev_key.clone());
-
-            let new_loc = self.log.size().await;
-            update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
-            let next_key = find_next_key(prev_key, &possible_next);
-            let op = Operation::Update(Update {
-                key: prev_key.clone(),
-                value: prev_value.clone(),
-                next_key,
-            });
-            self.log.append(&op).await?;
-            callback(true, Some(*prev_loc));
-
-            // Each key whose next-key value is updated inactivates its previous location.
-            self.steps += 1;
-        }
-
-        Ok(())
-    }
-
-    /// Writes a batch of key-value pairs to the database.
-    ///
-    /// For each item in the iterator:
-    /// - `(key, Some(value))` updates or creates the key with the given value
-    /// - `(key, None)` deletes the key
-    pub async fn write_batch(
-        &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
-        self.write_batch_with_callback(iter, |_, _| {}).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
@@ -486,7 +246,7 @@ where
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
+pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
     let next = possible_next
         .range((Bound::Excluded(key), Bound::Unbounded))
         .next();
@@ -505,7 +265,10 @@ fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &BTreeSet<K>) -> K {
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
-fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) -> (&'a K, &'a V) {
+pub(crate) fn find_prev_key<'a, K: Ord, V>(
+    key: &K,
+    possible_previous: &'a BTreeMap<K, V>,
+) -> (&'a K, &'a V) {
     let prev = possible_previous
         .range((Bound::Unbounded, Bound::Excluded(key)))
         .next_back();
@@ -518,32 +281,12 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .expect("possible_previous should not be empty")
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>>,
-    I: Index<Value = Location> + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
-    where
-        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
-        Iter::IntoIter: Send,
-    {
-        self.write_batch(iter).await
-    }
-}
-
 #[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> crate::qmdb::any::traits::DbAny for Db<E, C, I, H, Update<K, V>>
 where
     E: Storage + Clock + Metrics,
     K: Key,
-    V: ValueEncoding,
+    V: ValueEncoding + 'static,
     C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
@@ -551,14 +294,6 @@ where
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
-
-    async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.steps
-    }
 }
 
 #[cfg(test)]
@@ -566,7 +301,10 @@ mod test {
     use super::*;
     use crate::{
         kv::Gettable,
-        qmdb::{any::traits::DbAny, store::LogStore},
+        qmdb::{
+            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            store::LogStore,
+        },
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::deterministic::Context;
@@ -589,7 +327,6 @@ mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
-        assert_eq!(db.bounds().await.end, 1);
         assert!(db.get_metadata().await.unwrap().is_none());
         assert!(matches!(
             db.prune(db.inactivity_floor_loc().await).await,
@@ -601,17 +338,25 @@ mod test {
         let d1 = FixedBytes::from([1u8; 4]);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
-        db.write_batch([(d1, Some(d2))]).await.unwrap();
+        // Write without applying (unapplied batch should be lost on reopen).
+        {
+            let mut batch = db.new_batch();
+            batch.write(d1, Some(d2));
+            // Don't merkleize/finalize/apply -- simulates uncommitted write
+        }
         let mut db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().await.end, 1);
 
-        // Test calling commit on an empty db.
+        // Test applying an empty batch on an empty db.
         let metadata = Sha256::fill(3u8);
-        let range = DbAny::commit(&mut db, Some(metadata)).await.unwrap();
+        let finalized = db
+            .new_batch()
+            .merkleize(Some(metadata))
+            .await
+            .unwrap()
+            .finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
         assert_eq!(range.start, Location::new(1));
-        assert_eq!(range.end, Location::new(2));
-        assert_eq!(db.bounds().await.end, 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(
@@ -621,16 +366,16 @@ mod test {
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.bounds().await.end, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            let _ = DbAny::commit(&mut db, None).await.unwrap();
-            assert_eq!(db.bounds().await.end - 1, db.inactivity_floor_loc().await);
+            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let _ = db.apply_batch(finalized).await.unwrap();
         }
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -650,60 +395,90 @@ mod test {
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key1).await.unwrap().is_none());
-        db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), Some(val1));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key2).await.unwrap().is_none());
-        db.write_batch([(key2.clone(), Some(val2))]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key2.clone(), Some(val2));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
-        db.write_batch([(key1.clone(), None)]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), None);
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.write_batch([(key1.clone(), Some(new_val))])
-            .await
-            .unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), Some(new_val));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.write_batch([(key2.clone(), Some(new_val))])
-            .await
-            .unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key2.clone(), Some(new_val));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
-        // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
-        assert_eq!(db.bounds().await.end, 9);
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        // Empty commit batch (no preceding uncommitted writes).
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
 
         // Make sure key1 is already active.
         assert!(db.get(&key1).await.unwrap().is_some());
 
         // Delete all keys.
         assert!(db.get(&key1).await.unwrap().is_some());
-        db.write_batch([(key1.clone(), None)]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), None);
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
-        db.write_batch([(key2.clone(), None)]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key2.clone(), None);
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        // Empty commit batch.
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
-        let prev_op_count = db.bounds().await.end;
-        // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
         assert!(db.get(&key1).await.unwrap().is_none());
-        assert_eq!(db.bounds().await.end, prev_op_count);
 
         // Deletions of non-existent keys should be a no-op.
         let key3 = FixedBytes::from([6u8; 4]);
         assert!(db.get(&key3).await.unwrap().is_none());
-        assert_eq!(db.bounds().await.end, prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
         let op_count = db.bounds().await.end;
         let root = db.root();
         let mut db = reopen_db(context.with_label("reopen1")).await;
@@ -711,13 +486,44 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val2))]).await.unwrap();
-        db.write_batch([(key1.clone(), None)]).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val1))]).await.unwrap();
-        db.write_batch([(key1.clone(), Some(val2))]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), Some(val1));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
 
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key2.clone(), Some(val2));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), None);
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key2.clone(), Some(val1));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), Some(val2));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+
+        // Empty commit batch.
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().await.end;
@@ -729,7 +535,8 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
 
         assert!(db.root() != root);
 
@@ -752,15 +559,21 @@ mod test {
         let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 0u8, 0u8]);
         let val = Sha256::fill(1u8);
 
-        db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val))]).await.unwrap();
-        db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
+        let finalized = {
+            let mut batch = db.new_batch();
+            batch.write(key1.clone(), Some(val));
+            batch.write(key2.clone(), Some(val));
+            batch.write(key3.clone(), Some(val));
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let _ = DbAny::commit(&mut db, None).await.unwrap();
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let _ = db.apply_batch(finalized).await.unwrap();
         db.destroy().await.unwrap();
     }
 }

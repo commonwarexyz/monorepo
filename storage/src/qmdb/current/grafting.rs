@@ -38,16 +38,16 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard MMR hashing with ops-space positions.
 //!
-//! The grafted MMR is incrementally maintained via [GraftedHasher] + the batch API when
-//! grafted leaves change.
+//! The grafted MMR is incrementally maintained via [GraftedHasher] when grafted leaves
+//! change.
 
 use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::Mmr,
+    hasher::Hasher as HasherTrait, iterator::pos_to_height, read::Readable,
     storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
-use core::cmp::Ordering;
+use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
@@ -313,30 +313,32 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
     }
 }
 
-/// A virtual [StorageTrait] that presents a grafted [Mmr] and ops MMR as a single combined
+/// A virtual [StorageTrait] that presents a grafted MMR and ops MMR as a single combined
 /// MMR.
 ///
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
-pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
-    grafted_mmr: &'a Mmr<D>,
+pub(super) struct Storage<'a, D: Digest, G: Readable<D>, S: StorageTrait<D>> {
+    grafted_mmr: &'a G,
     grafting_height: u32,
     ops_mmr: &'a S,
+    _digest: PhantomData<D>,
 }
 
-impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
+impl<'a, D: Digest, G: Readable<D>, S: StorageTrait<D>> Storage<'a, D, G, S> {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(grafted_mmr: &'a Mmr<D>, grafting_height: u32, ops_mmr: &'a S) -> Self {
+    pub(super) const fn new(grafted_mmr: &'a G, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
             grafted_mmr,
             grafting_height,
             ops_mmr,
+            _digest: PhantomData,
         }
     }
 }
 
-impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
+impl<D: Digest, G: Readable<D>, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, G, S> {
     async fn size(&self) -> Position {
         self.ops_mmr.size().await
     }
@@ -549,7 +551,7 @@ mod tests {
         let c1 = Sha256::fill(0xF1);
         let c2 = Sha256::fill(0xF2);
 
-        // Build grafted MMR with 2 leaves via batch API + GraftedHasher.
+        // Build grafted MMR with 2 leaves.
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
         let mut grafted = Mmr::new(&mut grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
@@ -793,7 +795,7 @@ mod tests {
         let grafting_height = 1u32;
         let standard: StandardHasher<Sha256> = StandardHasher::new();
 
-        // Build a grafted MMR with 2 leaves via batch API + GraftedHasher.
+        // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
         let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);

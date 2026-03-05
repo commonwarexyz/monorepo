@@ -136,7 +136,7 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChain<Item>, Item: Send + Sync
 impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync + Encode>
     MerkleizedBatch<'a, H, P, Item>
 {
-    /// Create a child batch on top of this merkleized batch.
+    /// Create a new speculative batch of operations with this batch as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Self, Item> {
         let inner = batch::UnmerkleizedBatch::new(self);
         #[cfg(feature = "std")]
@@ -165,7 +165,7 @@ where
     }
 }
 
-/// The changes from a chain of batches which can be applied to the journal.
+/// An owned changeset that can be applied to the database.
 pub struct Changeset<D: Digest, Item> {
     // The inner MMR changeset.
     changeset: batch::Changeset<D>,

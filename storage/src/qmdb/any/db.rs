@@ -14,19 +14,16 @@ use crate::{
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
-        operation::{Committable, Key, Operation as OperationTrait},
+        operation::{Key, Operation as OperationTrait},
         store::{LogStore, MerkleizedStore, PrunableStore},
-        Error, FloorHelper,
+        Error,
     },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::bitmap::Prunable as BitMap;
-use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
-use tracing::debug;
+use core::num::NonZeroU64;
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
@@ -71,9 +68,6 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
-    /// The number of _steps_ to raise the inactivity floor on the next commit.
-    pub(crate) steps: u64,
-
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
 }
@@ -111,27 +105,6 @@ where
 
     pub fn root(&self) -> H::Digest {
         self.log.root()
-    }
-
-    pub async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn proof(
-        &self,
-        loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
     }
 }
 
@@ -227,7 +200,6 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
-            steps: 0,
             _update: core::marker::PhantomData,
         })
     }
@@ -242,123 +214,25 @@ where
         self.log.destroy().await.map_err(Into::into)
     }
 
-    /// Applies the given commit operation to the log and commits it to disk. Does not raise the
-    /// inactivity floor.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the given operation is not a commit operation.
-    pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
-        assert!(op.is_commit(), "commit operation expected");
-        self.last_commit_loc = self.log.size().await;
-        self.log.append(&op).await?;
-
-        self.log.commit().await.map_err(Into::into)
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
     }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `[start_loc, end_loc)` location range of committed operations.
-    pub async fn commit(&mut self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
-        let start_loc = self.last_commit_loc + 1;
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await?;
-
-        self.inactivity_floor_loc = inactivity_floor_loc;
-
-        Ok(start_loc..self.log.size().await)
-    }
-
-    /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip.
-    // TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): migrate all callers to use
-    // `raise_floor_with_bitmap`.
-    pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.log.size().await;
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        Ok(self.inactivity_floor_loc)
-    }
-
-    /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip, using the
-    /// provided bitmap to find the active operations without I/O. Calls `on_move(old_loc, new_loc)`
-    /// for each moved operation.
-    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
-        &mut self,
-        status: &mut BitMap<N>,
-        on_move: &mut impl FnMut(Location, Location),
-    ) -> Result<Location, Error> {
-        let reader = self.log.reader().await;
-        let tip = Location::new(reader.bounds().end);
-        let steps_to_take = self.steps + 1;
-        self.steps = 0;
-
-        // If the db is empty then raise the floor to tip and return.
-        if self.is_empty() {
-            debug!(tip = ?tip, "db is empty, raising floor to tip");
-            self.inactivity_floor_loc = tip;
-            return Ok(tip);
-        }
-
-        // Scan the bitmap to find (up to) the first `steps_to_take` active locations above the
-        // inactivity floor, setting the corresponding bits to false.
-        let mut locs = Vec::with_capacity(steps_to_take as usize);
-        let mut futures = Vec::with_capacity(steps_to_take as usize);
-        let mut floor = self.inactivity_floor_loc;
-        for _ in 0..steps_to_take {
-            while *floor < tip && !status.get_bit(*floor) {
-                floor += 1;
-            }
-            if *floor >= tip {
-                break;
-            }
-            status.set_bit(*floor, false);
-            locs.push(floor);
-            futures.push(reader.read(*floor));
-            floor += 1;
-        }
-        let ops = try_join_all(futures).await?;
-        drop(reader);
-
-        // Move each to tip, updating the index and bitmap.
-        let mut helper = self.as_floor_helper();
-        for (&loc, op) in locs.iter().zip(ops) {
-            assert!(
-                helper.move_op_if_active(op, loc).await?,
-                "op should be active based on status bitmap"
-            );
-            let new_loc = Location::new(status.len());
-            status.push(true);
-            on_move(loc, new_loc);
-        }
-
-        self.inactivity_floor_loc = floor;
-
-        Ok(self.inactivity_floor_loc)
-    }
-
-    /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) const fn as_floor_helper(
-        &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
-        FloorHelper {
-            snapshot: &mut self.snapshot,
-            log: &mut self.log,
-        }
+    pub async fn proof(
+        &self,
+        loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.historical_proof(self.log.size().await, loc, max_ops)
+            .await
     }
 }
 
@@ -413,8 +287,10 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(historical_size, start_loc, max_ops)
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
             .await
+            .map_err(Into::into)
     }
 }
 

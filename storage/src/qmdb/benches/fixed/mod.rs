@@ -7,11 +7,10 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
-    kv::{Deletable as _, Updatable as _},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            traits::DbAny,
+            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
@@ -248,49 +247,39 @@ async fn gen_random_kv<M>(
     M: DbAny<Key = Digest> + LogStore<Value = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
-    let mut batch = db.start_batch();
 
-    for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(k, v).await.expect("update shouldn't fail");
-    }
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
-    batch = db.start_batch();
-
-    for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
-        if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            batch.delete(rand_key).await.expect("delete shouldn't fail");
-            continue;
+    // Seed the db with `num_elements` entries.
+    {
+        let mut batch = db.new_batch();
+        for i in 0u64..num_elements {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            batch.write(k, Some(v));
         }
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch
-            .update(rand_key, v)
-            .await
-            .expect("update shouldn't fail");
-        if let Some(freq) = commit_frequency {
-            if rng.next_u32() % freq == 0 {
-                let iter = batch.into_iter();
-                db.write_batch(iter)
-                    .await
-                    .expect("write_batch shouldn't fail");
-                DbAny::commit(db, None)
-                    .await
-                    .expect("commit shouldn't fail");
-                batch = db.start_batch();
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
+    }
+
+    // Perform `num_operations` random updates/deletes, committing periodically.
+    {
+        let mut batch = db.new_batch();
+        for _ in 0u64..num_operations {
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+                batch.write(rand_key, None);
+                continue;
+            }
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            batch.write(rand_key, Some(v));
+            if let Some(freq) = commit_frequency {
+                if rng.next_u32() % freq == 0 {
+                    let finalized = batch.merkleize(None).await.unwrap().finalize();
+                    db.apply_batch(finalized).await.unwrap();
+                    batch = db.new_batch();
+                }
             }
         }
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
     }
-
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
-    DbAny::commit(db, None)
-        .await
-        .expect("commit shouldn't fail");
 }

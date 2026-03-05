@@ -103,7 +103,7 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        kv::tests::{assert_batchable, assert_gettable, assert_send},
+        kv::tests::{assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Proof, StandardHasher},
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
@@ -112,7 +112,6 @@ pub mod test {
                 tests::{apply_random_ops, fixed_config},
             },
             store::{
-                batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore as _,
             },
@@ -148,8 +147,12 @@ pub mod test {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            db.write_batch([(k, Some(v1))]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(k, Some(v1));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -175,8 +178,12 @@ pub mod test {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            db.write_batch([(k, Some(v2))]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(k, Some(v2));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -312,7 +319,8 @@ pub mod test {
             let mut db = apply_random_ops::<CurrentTest>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -365,7 +373,8 @@ pub mod test {
             let mut db = apply_random_ops::<CurrentTest>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -447,9 +456,13 @@ pub mod test {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                db.write_batch([(k, Some(v))]).await.unwrap();
+                let finalized = {
+                    let mut batch = db.new_batch();
+                    batch.write(k, Some(v));
+                    batch.merkleize(None).await.unwrap().finalize()
+                };
+                db.apply_batch(finalized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
-                db.commit(None).await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.
@@ -470,24 +483,12 @@ pub mod test {
         });
     }
 
-    #[test_traced("DEBUG")]
-    fn test_batch() {
-        batch_tests::test_batch(|mut ctx| async move {
-            let seed = ctx.next_u64();
-            let prefix = format!("current-unordered-batch-{seed}");
-            open_db(ctx, prefix).await
-        });
-    }
-
     #[allow(dead_code)]
-    fn assert_db_futures_are_send(db: &mut CurrentTest, key: Digest, value: Digest, loc: Location) {
+    fn assert_db_futures_are_send(db: &mut CurrentTest, key: Digest, loc: Location) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
-        assert_send(db.write_batch([(key, Some(value))]));
-        assert_batchable(db, key, value);
-        assert_send(db.commit(None));
     }
 }

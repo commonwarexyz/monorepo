@@ -156,10 +156,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        kv::{
-            tests::{assert_batchable, assert_gettable, assert_send},
-            Batchable as _, Deletable as _, Updatable as _,
-        },
+        kv::tests::{assert_gettable, assert_send},
         mmr::{Location, Position},
         qmdb::{
             any::{
@@ -257,15 +254,14 @@ pub(crate) mod test {
 
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Vec<u8>>>) {
+        let mut batch = db.new_batch();
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.write_batch([(data.key, Some(data.value))])
-                        .await
-                        .unwrap();
+                    batch.write(data.key, Some(data.value));
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)]).await.unwrap();
+                    batch.write(key, None);
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -274,6 +270,8 @@ pub(crate) mod test {
                 }
             }
         }
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
@@ -329,19 +327,25 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
             let val = Sha256::fill(1u8);
 
-            db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
-            let _ = db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1.clone(), Some(val));
+                batch.write(key3.clone(), Some(val));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert!(db.get(&key2).await.unwrap().is_none());
             assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
             // Batch-insert the middle key.
-            let mut batch = db.start_batch();
-            batch.update(key2.clone(), val).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
-            let _ = db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key2.clone(), Some(val));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
@@ -354,7 +358,6 @@ pub(crate) mod test {
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key1);
 
-            db.commit(None).await.unwrap();
             db.destroy().await.unwrap();
         });
     }
@@ -374,14 +377,21 @@ pub(crate) mod test {
 
             // Delete the previous key of a newly created key.
             let mut db = open_variable_db(context.with_label("first")).await;
-            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1.clone(), Some(val1));
+                batch.write(key3.clone(), Some(val3));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
-            let mut batch = db.start_batch();
-            batch.delete(key1.clone()).await.unwrap();
-            batch.create(key2.clone(), val2).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1.clone(), None);
+                batch.write(key2.clone(), Some(val2));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             assert!(db.get(&key1).await.unwrap().is_none());
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -390,19 +400,25 @@ pub(crate) mod test {
             assert_eq!(span2.1.next_key, key3);
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key2);
-            db.commit(None).await.unwrap();
             db.destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
             let mut db = open_variable_db(context.with_label("second")).await;
-            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1.clone(), Some(val1));
+                batch.write(key3.clone(), Some(val3));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
-            let mut batch = db.start_batch();
-            batch.create(key2.clone(), val2).await.unwrap();
-            batch.delete(key3.clone()).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key2.clone(), Some(val2));
+                batch.write(key3.clone(), None);
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -411,7 +427,6 @@ pub(crate) mod test {
             assert_eq!(span1.1.next_key, key2);
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
-            db.commit(None).await.unwrap();
             db.destroy().await.unwrap();
         });
     }
@@ -426,20 +441,12 @@ pub(crate) mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut AnyTest, key: Digest, value: Vec<u8>) {
+    fn assert_mutable_db_futures_are_send(db: &mut AnyTest, key: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.write_batch([(key, Some(value.clone()))]));
-        assert_send(db.write_batch([(key, None)]));
-        assert_batchable(db, key, value);
         assert_send(db.get_all(&key));
         assert_send(db.get_with_loc(&key));
         assert_send(db.get_span(&key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_commit_is_send(mut db: AnyTest) {
-        assert_send(db.commit(None));
     }
 
     // FromSyncTestable implementation for from_sync_result tests

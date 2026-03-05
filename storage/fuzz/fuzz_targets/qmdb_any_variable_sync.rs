@@ -171,23 +171,31 @@ fn fuzz(input: FuzzInput) {
             <Sha256 as commonware_cryptography::Hasher>::Digest,
         > = BTreeMap::new();
 
+        let mut pending_writes: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
+
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.write_batch([(Key::new(*key), Some(value_bytes.to_vec()))])
-                        .await
-                        .expect("Update should not fail");
+                    pending_writes.push((Key::new(*key), Some(value_bytes.to_vec())));
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Key::new(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let _ = db
-                        .commit(metadata_bytes.clone())
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(metadata_bytes.clone())
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
@@ -209,7 +217,16 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Proof { start_loc, max_ops } => {
                     // proof requires commit
-                    let _ = db.commit(None).await.expect("commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = db.bounds().await.end;
                     let oldest_retained_loc = db.inactivity_floor_loc();
@@ -227,7 +244,16 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     // historical proof verification requires a root captured at a commit point.
-                    let _ = db.commit(None).await.expect("commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
@@ -252,7 +278,16 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let _ = db.commit(None).await.expect("commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     db.sync().await.expect("Sync should not fail");
                 }
@@ -267,13 +302,23 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     // root requires commit
-                    let _ = db.commit(None).await.expect("commit should not fail");
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let _ = db.root();
                 }
 
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
                     drop(db);
 
                     let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
@@ -290,7 +335,16 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let _ = db.commit(None).await.expect("commit should not fail");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for (k, v) in pending_writes.drain(..) {
+                batch.write(k, v);
+            }
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

@@ -197,31 +197,57 @@ fn fuzz(input: FuzzInput) {
                     CurrentOperation::Update { key, value } => {
                         let k = Key::new(*key);
                         let v = Value::new(*value);
-                        if db.write_batch([(k, Some(v))]).await.is_err() {
+                        let result = {
+                            let finalized = {
+                                let mut batch = db.new_batch();
+                                batch.write(k, Some(v));
+                                batch.merkleize(None).await.unwrap().finalize()
+                            };
+                            db.apply_batch(finalized).await
+                        };
+                        if result.is_err() {
                             break;
                         }
                         pending.insert(*key, Some(*value));
                     }
                     CurrentOperation::Delete { key } => {
                         let k = Key::new(*key);
-                        if db.write_batch([(k, None)]).await.is_err() {
+                        let result = {
+                            let finalized = {
+                                let mut batch = db.new_batch();
+                                batch.write(k, None);
+                                batch.merkleize(None).await.unwrap().finalize()
+                            };
+                            db.apply_batch(finalized).await
+                        };
+                        if result.is_err() {
                             break;
                         }
                         pending.insert(*key, None);
                     }
                     CurrentOperation::Commit => {
-                        let Ok(_) = db.commit(None).await else {
+                        let result = {
+                            let finalized =
+                                db.new_batch().merkleize(None).await.unwrap().finalize();
+                            db.apply_batch(finalized).await
+                        };
+                        if result.is_err() {
                             forget_pending(&pending, &mut committed);
                             break;
-                        };
+                        }
                         apply_pending(&mut pending, &mut committed);
                     }
                     CurrentOperation::Prune => {
                         // Prune requires a committed db, so commit first.
-                        let Ok(_) = db.commit(None).await else {
+                        let result = {
+                            let finalized =
+                                db.new_batch().merkleize(None).await.unwrap().finalize();
+                            db.apply_batch(finalized).await
+                        };
+                        if result.is_err() {
                             forget_pending(&pending, &mut committed);
                             break;
-                        };
+                        }
                         apply_pending(&mut pending, &mut committed);
                         let floor = db.inactivity_floor_loc();
                         if db.prune(floor).await.is_err() {
@@ -300,14 +326,14 @@ fn fuzz(input: FuzzInput) {
             // Verify the recovered DB is usable.
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            db.write_batch([(test_key, Some(test_value))])
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(test_key, Some(test_value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized)
                 .await
-                .expect("write_batch after recovery should succeed");
-
-            let _ = db
-                .commit(None)
-                .await
-                .expect("commit after recovery should succeed");
+                .expect("apply_batch after recovery should succeed");
 
             db.destroy()
                 .await

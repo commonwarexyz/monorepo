@@ -2,7 +2,6 @@
 
 use super::{fixed, variable};
 use crate::{
-    mmr::Location,
     qmdb::{
         any::{
             ordered::variable::Operation as VariableOperation, traits::DbAny, FixedValue,
@@ -11,7 +10,6 @@ use crate::{
         current::BitmapPrunedBits,
         operation::Key,
         store::LogStore as _,
-        Error,
     },
     translator::Translator,
 };
@@ -19,7 +17,6 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use core::ops::Range;
 
 // =============================================================================
 // Fixed variant test trait implementations
@@ -28,21 +25,13 @@ use core::ops::Range;
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: FixedValue,
+        V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
         const N: usize,
     > DbAny for fixed::Db<E, K, V, H, T, N>
 {
     type Digest = H::Digest;
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.any.steps
-    }
 }
 
 // =============================================================================
@@ -52,7 +41,7 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         K: Key,
-        V: VariableValue,
+        V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -61,14 +50,6 @@ where
     VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.any.steps
-    }
 }
 
 // =============================================================================
@@ -128,7 +109,7 @@ where
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: FixedValue,
+        V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
         const P: usize,
@@ -136,14 +117,6 @@ impl<
     > DbAny for fixed::partitioned::Db<E, K, V, H, T, P, N>
 {
     type Digest = H::Digest;
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.any.steps
-    }
 }
 
 impl<
@@ -176,7 +149,7 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         K: Key,
-        V: VariableValue,
+        V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
         const P: usize,
@@ -186,14 +159,6 @@ where
     VariableOperation<K, V>: Codec,
 {
     type Digest = H::Digest;
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        Self::commit(self, metadata).await
-    }
-
-    fn steps(&self) -> u64 {
-        self.any.steps
-    }
 }
 
 impl<
