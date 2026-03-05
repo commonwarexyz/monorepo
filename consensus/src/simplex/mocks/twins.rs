@@ -272,6 +272,37 @@ fn arrangement_count(base: usize, rounds: usize) -> Option<usize> {
     Some(total)
 }
 
+fn combination_count(n: usize, k: usize) -> Option<u128> {
+    if k > n {
+        return Some(0);
+    }
+    let k = k.min(n - k);
+    let mut total = 1u128;
+    for i in 0..k {
+        total = total.checked_mul((n - k + i + 1) as u128)?;
+        total /= (i + 1) as u128;
+    }
+    Some(total)
+}
+
+fn combination_from_rank(n: usize, k: usize, mut rank: u128) -> Vec<usize> {
+    let mut set = Vec::with_capacity(k);
+    let mut start = 0usize;
+    for remaining in (1..=k).rev() {
+        for candidate in start..=(n - remaining) {
+            let suffix = combination_count(n - candidate - 1, remaining - 1)
+                .expect("suffix count should fit in u128");
+            if rank < suffix {
+                set.push(candidate);
+                start = candidate + 1;
+                break;
+            }
+            rank -= suffix;
+        }
+    }
+    set
+}
+
 fn generate_scenarios(
     seed: u64,
     n: usize,
@@ -317,7 +348,10 @@ fn generate_scenarios(
     // from the per-round option product while enforcing uniqueness.
     let mut scenarios = Vec::with_capacity(max_scenarios);
     let mut seen = HashSet::new();
-    while scenarios.len() < max_scenarios {
+    let max_attempts = max_scenarios.saturating_mul(64).max(1024);
+    let mut attempts = 0usize;
+    while scenarios.len() < max_scenarios && attempts < max_attempts {
+        attempts += 1;
         let digits: Vec<usize> = (0..rounds).map(|_| rng.gen_range(0..base)).collect();
         if seen.insert(digits.clone()) {
             scenarios.push(Scenario {
@@ -325,6 +359,11 @@ fn generate_scenarios(
             });
         }
     }
+    assert_eq!(
+        scenarios.len(),
+        max_scenarios,
+        "failed to sample enough unique scenarios in fallback path"
+    );
     scenarios
 }
 
@@ -347,19 +386,20 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
         }
     }
 
-    let mut all = Vec::new();
-    choose(0, n, faults, &mut Vec::new(), &mut all);
-    if all.len() <= max_sets {
+    let total = combination_count(n, faults).expect("combination count should fit in u128");
+    if total <= max_sets as u128 {
+        let mut all = Vec::with_capacity(total as usize);
+        choose(0, n, faults, &mut Vec::new(), &mut all);
         return all;
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut picked = HashSet::new();
-    let mut sampled = Vec::new();
+    let mut sampled = Vec::with_capacity(max_sets);
     while sampled.len() < max_sets {
-        let idx = rng.gen_range(0..all.len());
+        let idx = rng.gen_range(0..total);
         if picked.insert(idx) {
-            sampled.push(all[idx].clone());
+            sampled.push(combination_from_rank(n, faults, idx));
         }
     }
     sampled
@@ -454,6 +494,12 @@ mod tests {
     }
 
     #[test]
+    fn generated_scenarios_fallback_sampling_is_bounded() {
+        let scenarios = generate_scenarios(5, 4, 40, 3, 8);
+        assert_eq!(scenarios.len(), 8);
+    }
+
+    #[test]
     fn round_scenarios_expand_with_additional_partition_counts() {
         let two_way = round_scenarios(5, 2);
         let up_to_three_way = round_scenarios(5, 3);
@@ -497,5 +543,18 @@ mod tests {
             scenario.route(View::new(1), &2, &participants),
             SplitTarget::None
         );
+    }
+
+    #[test]
+    fn compromised_set_sampling_handles_large_combination_spaces() {
+        let sets = compromised_sets(9, 30, 10, 3);
+        assert_eq!(sets.len(), 3);
+
+        let unique: HashSet<_> = sets.iter().cloned().collect();
+        assert_eq!(unique.len(), sets.len());
+        for set in sets {
+            assert_eq!(set.len(), 10);
+            assert!(set.windows(2).all(|window| window[0] < window[1]));
+        }
     }
 }

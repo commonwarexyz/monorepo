@@ -5833,11 +5833,8 @@ mod tests {
                         }
                     }
                 };
-                let make_resolver_forwarder = || {
-                    move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
-                        Some(recipients.clone())
-                    }
-                };
+                let make_resolver_forwarder =
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 let make_vote_router = || {
                     let participants = participants.clone();
@@ -5857,7 +5854,7 @@ mod tests {
                         scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let make_resolver_router = || move |(_, _): &(_, _)| SplitTarget::Both;
+                let make_resolver_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
                 let (vote_sender_primary, vote_sender_secondary) =
                     vote_sender.split_with(make_vote_forwarder());
@@ -5873,8 +5870,6 @@ mod tests {
                         make_certificate_router(),
                     );
 
-                // Resolver traffic is delivered to both twins so this side-channel
-                // does not get dropped entirely during partitioned schedules.
                 let (resolver_sender_primary, resolver_sender_secondary) =
                     resolver_sender.split_with(make_resolver_forwarder());
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
@@ -5954,6 +5949,8 @@ mod tests {
                 }
             }
 
+            let honest_start = reporters.len();
+
             // Create honest engines.
             for (idx, validator) in participants.iter().enumerate() {
                 if twin_index_set.contains(&idx) {
@@ -6019,7 +6016,6 @@ mod tests {
             }
 
             // Wait for progress (liveness check) on honest replicas only.
-            let honest_start = twin_indices.len() * 2; // Each twin produces 2 reporters.
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(honest_start) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
@@ -6069,21 +6065,12 @@ mod tests {
                 }
             }
 
-            // Blocked peers can include collateral effects under highly adversarial
-            // schedules. Keep this as an observability signal instead of a hard
-            // invariant; the stronger attribution check is reporter.faults above.
             let blocked = oracle.blocked().await.unwrap();
-            if !blocked.is_empty() {
-                let attributed = blocked
-                    .iter()
-                    .filter(|(_, faulter)| twin_identities.contains(faulter))
-                    .count();
-                if attributed == 0 {
-                    warn!(
-                        blocked = blocked.len(),
-                        "blocked peers contained no twin faulter attribution in this case"
-                    );
-                }
+            for (_, faulter) in blocked {
+                assert!(
+                    twin_identities.contains(&faulter),
+                    "blocked peer attributed to non-twin participant"
+                );
             }
         });
     }
@@ -6278,7 +6265,7 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_twins_large_shuffle() {
+    fn test_twins_large_campaign() {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 4,
