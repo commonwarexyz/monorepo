@@ -4,7 +4,7 @@ use crate::{
     Roundable,
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digestible};
+use commonware_cryptography::{certificate::Scheme as CertificateScheme, Committable, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
@@ -349,15 +349,15 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<<V::Consensus as ConsensusEngine>::Notarization> {
         let cache = self.caches.get(&round.epoch())?;
-        let notarization = cache
+        let notarizations = cache
             .notarizations
-            .get(Identifier::Key(&digest))
+            .get_all(round.view().get())
             .await
             .expect("failed to get notarization")?;
-        if notarization.round() == round {
-            return Some(notarization);
-        }
-        None
+        notarizations.into_iter().find(|notarization| {
+            notarization.round() == round
+                && V::commitment_to_inner(notarization.commitment()) == digest
+        })
     }
 
     /// Get a finalization from the prunable archive by block digest.
@@ -445,5 +445,68 @@ where
         if let Some(prunable) = self.caches.get_mut(&round.epoch()) {
             prunable.prune(min_view).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Manager};
+    use crate::{
+        marshal::tests::{StandardSimplexHarness, TestHarness, NAMESPACE},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{sha256::Sha256, Hasher as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+
+    #[test]
+    fn test_get_notarization_same_digest_different_rounds() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            type H = StandardSimplexHarness;
+            type V = <H as TestHarness>::Variant;
+            let fixture = H::fixture(&mut context, NAMESPACE, H::num_validators());
+
+            let manager_cfg = Config {
+                partition_prefix: "test-cache".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+            };
+            let mut manager =
+                Manager::<deterministic::Context, V>::init(context, manager_cfg, ()).await;
+            let schemes = fixture.schemes;
+
+            let digest = Sha256::hash(b"same-digest");
+            let parent = Sha256::hash(b"parent");
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+
+            let proposal1 = H::make_proposal(round1, View::zero(), parent, digest);
+            let proposal2 = H::make_proposal(round2, View::new(1), parent, digest);
+            let notarization1 = H::make_notarization(proposal1, &schemes);
+            let notarization2 = H::make_notarization(proposal2, &schemes);
+
+            manager
+                .put_notarization(round1, digest, notarization1)
+                .await;
+            manager
+                .put_notarization(round2, digest, notarization2)
+                .await;
+
+            let recovered1 = manager
+                .get_notarization(round1, digest)
+                .await
+                .expect("round 1 notarization should exist");
+            let recovered2 = manager
+                .get_notarization(round2, digest)
+                .await
+                .expect("round 2 notarization should exist");
+
+            assert_eq!(recovered1.round(), round1);
+            assert_eq!(recovered2.round(), round2);
+        });
     }
 }
