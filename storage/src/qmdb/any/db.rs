@@ -24,7 +24,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::bitmap::Prunable as BitMap;
-use core::{future::Future, num::NonZeroU64, ops::Range};
+use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
 
@@ -407,17 +407,14 @@ where
         self.root()
     }
 
-    fn historical_proof(
+    async fn historical_proof(
         &self,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error>> + Send
-    {
-        let fut = self
-            .log
-            .historical_proof(historical_size, start_loc, max_ops);
-        async move { fut.await.map_err(Into::into) }
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.historical_proof(historical_size, start_loc, max_ops)
+            .await
     }
 }
 
