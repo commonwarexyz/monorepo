@@ -277,43 +277,7 @@ impl crate::Listener for Listener {
         // Parse PROXY header if configured and connection is from trusted proxy
         let client_addr = if let Some(ref proxy_cfg) = self.proxy {
             if proxy_cfg.is_trusted(tcp_addr.ip()) {
-                // Keep reading until we have enough data to parse the PROXY
-                // header. We must accumulate bytes across reads because
-                // `fill_buffer` replaces the stream buffer each call.
-                let mut parsed = Vec::new();
-                loop {
-                    let previous_len = parsed.len();
-                    io_stream.fill_buffer().await?;
-                    parsed.extend_from_slice(&io_stream.buffer.as_ref()[..io_stream.buffer_len]);
-                    match crate::network::proxy::parse_from_bytes(&parsed)? {
-                        crate::network::proxy::ParseResult::Complete(addr, consumed) => {
-                            if consumed >= previous_len {
-                                // Header ended in the current read: advance the stream's
-                                // buffer cursor past the header and leave payload buffered.
-                                io_stream.buffer_pos = consumed - previous_len;
-                                debug_assert!(io_stream.buffer_pos <= io_stream.buffer_len);
-                            } else {
-                                // Defensive path: parser reported a boundary in earlier data.
-                                // Rehydrate the remaining payload into the stream buffer.
-                                let remaining = &parsed[consumed..];
-                                if remaining.len() > io_stream.buffer.capacity() {
-                                    return Err(Error::ReadFailed);
-                                }
-                                // SAFETY: `remaining.len() <= buffer.capacity()` checked above.
-                                unsafe { io_stream.buffer.set_len(remaining.len()) };
-                                io_stream.buffer.as_mut()[..remaining.len()]
-                                    .copy_from_slice(remaining);
-                                io_stream.buffer_pos = 0;
-                                io_stream.buffer_len = remaining.len();
-                            }
-                            break addr;
-                        }
-                        crate::network::proxy::ParseResult::Incomplete => {
-                            // Need more data, continue reading
-                            continue;
-                        }
-                    }
-                }
+                io_stream.parse_proxy_header().await?
             } else {
                 tcp_addr
             }
@@ -613,6 +577,36 @@ impl Stream {
         // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
         unsafe { self.buffer.set_len(self.buffer_len) };
         Ok(self.buffer_len)
+    }
+
+    /// Replace the internal buffer with already-received payload bytes.
+    fn restore_prefetched(&mut self, bytes: &[u8]) {
+        if bytes.len() > self.buffer.capacity() {
+            self.buffer = self.pool.alloc(bytes.len());
+        }
+        // SAFETY: We ensure `bytes.len() <= self.buffer.capacity()` above.
+        unsafe { self.buffer.set_len(bytes.len()) };
+        self.buffer.as_mut()[..bytes.len()].copy_from_slice(bytes);
+        self.buffer_pos = 0;
+        self.buffer_len = bytes.len();
+    }
+
+    /// Parse a PROXY header from this stream and preserve bytes after the header.
+    async fn parse_proxy_header(&mut self) -> Result<SocketAddr, Error> {
+        let mut parser = crate::network::proxy::IncrementalParser::new();
+        loop {
+            self.fill_buffer().await?;
+            let chunk = &self.buffer.as_ref()[..self.buffer_len];
+            match parser.push(chunk)? {
+                crate::network::proxy::ParseChunkResult::Complete {
+                    addr, remaining, ..
+                } => {
+                    self.restore_prefetched(remaining);
+                    return Ok(addr);
+                }
+                crate::network::proxy::ParseChunkResult::Incomplete { .. } => continue,
+            }
+        }
     }
 }
 
