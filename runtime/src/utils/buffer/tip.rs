@@ -119,6 +119,7 @@ impl Buffer {
         self.immutable = false;
     }
 
+    /// Copy into detached exact-size storage so immutable tips do not retain oversized backing.
     fn compact(data: &[u8]) -> IoBuf {
         if data.is_empty() {
             IoBuf::default()
