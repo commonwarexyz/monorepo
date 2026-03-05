@@ -36,7 +36,7 @@
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = now+2Δ` and advance (certification) `t_a = now+3Δ`
+//! * Set timer for leader proposal `t_l = now+2Δ`, retry `t_r = None` and advance (certification) `t_a = now+3Δ`
 //! * If leader `l` has not been active in last `r` views, set `t_l` and `t_a` to 0
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
@@ -55,24 +55,25 @@
 //!   * Set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
-//! * Set `t_a` to `None`
 //! * Mark `c` as notarized
 //! * Construct `notarization(c,v)` (even if we have not verified `c`)
 //!
 //! Upon constructing or receiving the first `notarization(c,v)`:
 //! * Broadcast `notarization(c,v)`
 //! * Attempt to certify `c` (see [Certification](#certification))
-//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
+//!     * On success: set `t_a` to `None`, broadcast `finalize(c,v)` if have not broadcast `nullify(v)` and enter `v+1`
 //!     * On failure: set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
-//! * Set `t_r` to `None`
+//! * Set `t_l` and `t_a` to `None`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
+//! * Set `t_l` and `t_a` to `None`
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
+//! * Enter `v+1`
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T` // TODO: define `T`
@@ -339,7 +340,7 @@
 //!
 //! ## Persistence
 //!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
