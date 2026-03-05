@@ -277,13 +277,35 @@ impl crate::Listener for Listener {
         // Parse PROXY header if configured and connection is from trusted proxy
         let client_addr = if let Some(ref proxy_cfg) = self.proxy {
             if proxy_cfg.is_trusted(tcp_addr.ip()) {
-                // Keep reading until we have enough data to parse the PROXY header
+                // Keep reading until we have enough data to parse the PROXY
+                // header. We must accumulate bytes across reads because
+                // `fill_buffer` replaces the stream buffer each call.
+                let mut parsed = Vec::new();
                 loop {
+                    let previous_len = parsed.len();
                     io_stream.fill_buffer().await?;
-                    let buf = &io_stream.buffer.as_ref()[..io_stream.buffer_len];
-                    match crate::network::proxy::parse_from_bytes(buf)? {
+                    parsed.extend_from_slice(&io_stream.buffer.as_ref()[..io_stream.buffer_len]);
+                    match crate::network::proxy::parse_from_bytes(&parsed)? {
                         crate::network::proxy::ParseResult::Complete(addr, consumed) => {
-                            io_stream.buffer_pos = consumed;
+                            if consumed >= previous_len {
+                                // Header ended in the current read: advance the stream's
+                                // buffer cursor past the header and leave payload buffered.
+                                io_stream.buffer_pos = consumed - previous_len;
+                                debug_assert!(io_stream.buffer_pos <= io_stream.buffer_len);
+                            } else {
+                                // Defensive path: parser reported a boundary in earlier data.
+                                // Rehydrate the remaining payload into the stream buffer.
+                                let remaining = &parsed[consumed..];
+                                if remaining.len() > io_stream.buffer.capacity() {
+                                    return Err(Error::ReadFailed);
+                                }
+                                // SAFETY: `remaining.len() <= buffer.capacity()` checked above.
+                                unsafe { io_stream.buffer.set_len(remaining.len()) };
+                                io_stream.buffer.as_mut()[..remaining.len()]
+                                    .copy_from_slice(remaining);
+                                io_stream.buffer_pos = 0;
+                                io_stream.buffer_len = remaining.len();
+                            }
                             break addr;
                         }
                         crate::network::proxy::ParseResult::Incomplete => {
