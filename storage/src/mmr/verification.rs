@@ -28,12 +28,17 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from a valid [Proof] over the given range of elements. The
     /// resulting store can be used to generate proofs over any sub-range of the original range.
     /// Returns an error if the proof is invalid or could not be verified against the given root.
+    ///
+    /// `peaks` supplies peak (position, digest) pairs for the MMR. These are needed because
+    /// fold-based proofs compress prefix peaks into a single accumulator, making individual peak
+    /// digests irrecoverable from the proof alone.
     pub fn new<H, E>(
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
         start_loc: Location,
         root: &D,
+        peaks: &[(Position, D)],
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
@@ -42,16 +47,13 @@ impl<D: Digest> ProofStore<D> {
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
-        Self::new_from_digests(proof.leaves, digests)
-    }
-
-    /// Create a new [ProofStore] from the result of calling
-    /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
-    /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(leaves: Location, digests: Vec<(Position, D)>) -> Result<Self, Error> {
+        let mut map: HashMap<Position, D> = digests.into_iter().collect();
+        for &(pos, digest) in peaks {
+            map.insert(pos, digest);
+        }
         Ok(Self {
-            size: Position::try_from(leaves)?,
-            digests: digests.into_iter().collect(),
+            size: Position::try_from(proof.leaves)?,
+            digests: map,
         })
     }
 
@@ -228,6 +230,7 @@ mod tests {
                     &elements[range.to_usize_range()],
                     range_start,
                     root,
+                    &[],
                 )
                 .unwrap();
 

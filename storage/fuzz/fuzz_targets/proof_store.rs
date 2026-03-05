@@ -51,6 +51,7 @@ async fn fuzz(input: FuzzInput) {
         &input.elements,
         input.start_loc,
         &input.root,
+        &[],
     ) else {
         return;
     };

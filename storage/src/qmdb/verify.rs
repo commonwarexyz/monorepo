@@ -41,12 +41,17 @@ where
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
+///
+/// `peaks` supplies peak (position, digest) pairs for the MMR. These are needed because
+/// fold-based proofs compress prefix peaks into a single accumulator, making individual peak
+/// digests irrecoverable from the proof alone.
 pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
     start_loc: Location,
     operations: &[Op],
     root: &D,
+    peaks: &[(Position, D)],
 ) -> Result<ProofStore<D>, Error>
 where
     Op: Encode,
@@ -57,17 +62,7 @@ where
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
     // Create ProofStore by verifying the proof and extracting all digests
-    ProofStore::new(hasher, proof, &elements, start_loc, root)
-}
-
-/// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
-///
-/// If you have not yet verified the proof, use [create_proof_store] instead.
-pub fn create_proof_store_from_digests<D: Digest>(
-    proof: &Proof<D>,
-    digests: Vec<(Position, D)>,
-) -> Result<ProofStore<D>, Error> {
-    ProofStore::new_from_digests(proof.leaves, digests)
+    ProofStore::new(hasher, proof, &elements, start_loc, root, peaks)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -292,6 +287,7 @@ mod tests {
                 range.start,                         // start_loc
                 &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
                 root,
+                &[],
             );
             assert!(result.is_ok());
             let proof_store = result.unwrap();
@@ -339,63 +335,10 @@ mod tests {
                 &proof,
                 Location::new(0),
                 &operations,
-                &wrong_root
+                &wrong_root,
+                &[],
             )
             .is_err());
-        });
-    }
-
-    #[test_traced]
-    fn test_create_proof_store_from_digests() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher = test_hasher();
-            let mut mmr = DirtyMmr::new();
-
-            // Add some operations to the MMR
-            let operations = vec![1, 2, 3];
-            let mut positions = Vec::new();
-            for op in &operations {
-                let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
-                positions.push(pos);
-            }
-            let mmr = mmr.merkleize(&mut hasher, None);
-            let root = mmr.root();
-            let proof = mmr
-                .range_proof(&mut hasher, Location::new(0)..Location::new(3))
-                .unwrap();
-
-            // First verify and extract digests
-            let digests = verify_proof_and_extract_digests(
-                &mut hasher,
-                &proof,
-                Location::new(0),
-                &operations,
-                root,
-            )
-            .unwrap();
-
-            // Create proof store from digests
-            let proof_store = create_proof_store_from_digests(&proof, digests).unwrap();
-
-            // Verify we can use the proof store
-            let sub_proof = verification::range_proof(
-                &mut hasher,
-                &proof_store,
-                Location::new(0)..Location::new(2),
-            )
-            .await
-            .unwrap();
-
-            // Verify the sub-proof
-            assert!(verify_proof(
-                &mut hasher,
-                &sub_proof,
-                Location::new(0),
-                &operations[0..2],
-                root,
-            ));
         });
     }
 
@@ -422,7 +365,7 @@ mod tests {
 
             // Create proof store
             let proof_store =
-                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, root)
+                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, root, &[])
                     .unwrap();
 
             // Generate multi-proof for specific locations
@@ -566,7 +509,7 @@ mod tests {
                 .range_proof(&mut hasher, Location::new(0)..Location::new(3))
                 .unwrap();
             let proof_store =
-                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, root)
+                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, root, &[])
                     .unwrap();
 
             // Generate multi-proof for single element

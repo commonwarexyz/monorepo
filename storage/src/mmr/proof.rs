@@ -42,13 +42,16 @@ pub enum ReconstructionError {
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in the MMR from its root digest.
 ///
-/// The `digests` vector contains:
+/// The `digests` vector uses a fold-based layout:
 ///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
+/// 1. If there are peaks entirely before the proven range (fold prefix), the first digest is
+///    a single accumulator produced by folding those peaks: `fold(fold(..., peak0), peak1)`.
+///    If there are no such peaks, this entry is absent.
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
+/// 2. The digests of peaks entirely after the proven range, in peak iteration order.
+///
+/// 3. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
+///    in depth-first (forward consumption) order for each range peak.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
     /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
@@ -585,23 +588,6 @@ where
 ///
 /// # Errors
 ///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if the range is empty.
-/// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
-/// (>= `size`).
-#[cfg(test)]
-fn nodes_required_for_range_proof(
-    leaves: Location,
-    range: Range<Location>,
-) -> Result<Vec<Position>, Error> {
-    let bp = proof_blueprint(leaves, range)?;
-    let mut positions = Vec::with_capacity(bp.fold_prefix.len() + bp.fetch_nodes.len());
-    positions.extend(bp.fold_prefix);
-    positions.extend(bp.fetch_nodes);
-    Ok(positions)
-}
-
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
 /// inclusion of the elements at the specified `locations`.
 ///
@@ -1484,15 +1470,14 @@ mod tests {
         // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
         let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
 
-        let result = nodes_required_for_range_proof(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
+        let result = proof_blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
         assert!(
             result.is_ok(),
             "Should be able to prove with MAX_LOCATION leaves"
         );
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
-        let result_overflow =
-            nodes_required_for_range_proof(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
+        let result_overflow = proof_blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1572,25 +1557,25 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let positions = nodes_required_for_range_proof(leaves, loc..loc + 1)
-            .expect("should compute positions for location 0");
+        let bp = proof_blueprint(leaves, loc..loc + 1)
+            .expect("should compute blueprint for location 0");
+        let total = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         assert_eq!(
-            positions.len(),
-            EXPECTED_WORST_CASE,
+            total, EXPECTED_WORST_CASE,
             "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
         );
 
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let positions = nodes_required_for_range_proof(leaves, last_leaf_loc..last_leaf_loc + 1)
-            .expect("should compute positions for last leaf");
+        let bp = proof_blueprint(leaves, last_leaf_loc..last_leaf_loc + 1)
+            .expect("should compute blueprint for last leaf");
+        let total = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         let expected_last_leaf = NUM_PEAKS - 1;
         assert_eq!(
-            positions.len(),
-            expected_last_leaf,
+            total, expected_last_leaf,
             "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
         );
     }

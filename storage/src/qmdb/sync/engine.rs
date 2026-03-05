@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    mmr::{Location, StandardHasher},
+    mmr::{iterator::nodes_to_pin, Location, Position, StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -436,7 +436,25 @@ where
             // is the batch at the sync boundary.
             if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
                 match pinned_nodes {
-                    Some(nodes) => self.pinned_nodes = Some(nodes),
+                    Some(nodes) => {
+                        let expected = match Position::try_from(start_loc) {
+                            Ok(pos) => nodes_to_pin(pos).count(),
+                            Err(_) => {
+                                return Err(SyncError::Engine(EngineError::PinnedNodes(
+                                    format!("invalid boundary location: {start_loc}"),
+                                )));
+                            }
+                        };
+                        if nodes.len() != expected {
+                            return Err(SyncError::Engine(EngineError::PinnedNodes(
+                                format!(
+                                    "expected {expected} pinned nodes, got {}",
+                                    nodes.len()
+                                ),
+                            )));
+                        }
+                        self.pinned_nodes = Some(nodes);
+                    }
                     None if *start_loc > 0 => {
                         return Err(SyncError::Engine(EngineError::PinnedNodes(
                             "resolver did not provide pinned nodes for non-zero boundary"
