@@ -523,6 +523,7 @@ impl IoUringLoop {
         pending_cancels: &mut VecDeque<WaiterId>,
     ) -> Option<bool> {
         let mut drained = 0u64;
+        let mut disconnected = false;
         let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
@@ -545,7 +546,10 @@ impl IoUringLoop {
             // done for now.
             let op = match self.receiver.try_recv() {
                 Ok(work) => work,
-                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
                 Err(TryRecvError::Empty) => break,
             };
 
@@ -608,6 +612,9 @@ impl IoUringLoop {
 
         // Track which submitted sequence has been consumed.
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
+        if disconnected {
+            return None;
+        }
 
         let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
@@ -971,6 +978,39 @@ mod tests {
             .expect("channel should remain connected");
         assert!(at_capacity);
         assert!(!pending_cancels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fill_submission_queue_updates_processed_seq_on_disconnect() {
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+        let mut pending_cancels = VecDeque::new();
+
+        // Keep this test focused on operation staging, not wake rearm behavior.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, _rx) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: opcode::Nop::new().build(),
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: None,
+            })
+            .await
+            .expect("failed to enqueue op");
+        drop(submitter);
+
+        assert!(
+            iouring
+                .fill_submission_queue(&mut ring, &mut pending_cancels)
+                .is_none()
+        );
+        assert_eq!(iouring.processed_seq, 1);
     }
 
     #[tokio::test]

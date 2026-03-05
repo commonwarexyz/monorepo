@@ -254,19 +254,19 @@ impl Waiters {
         }
 
         if is_cancel {
-            match result.abs() {
+            match result {
                 0 => {
                     // Cancellation successful.
                 }
-                libc::EALREADY => {
+                result if result == -libc::EALREADY => {
                     // Cancellation is no longer possible at this stage. The target
                     // operation CQE should follow shortly.
                 }
-                libc::ENOENT => {
+                result if result == -libc::ENOENT => {
                     // Not found can mean the target already completed (common race) or
                     // stale/invalid user_data.
                 }
-                libc::EINVAL => {
+                result if result == -libc::EINVAL => {
                     panic!("async cancel SQE rejected by kernel: EINVAL");
                 }
                 result => {
@@ -422,6 +422,7 @@ mod tests {
         assert_eq!(cancel, waiter_id.cancel_user_data());
 
         // Cancel CQE does not complete the waiter. The op CQE delivers the result.
+        assert!(waiters.on_completion(cancel, i32::MIN).is_none());
         assert!(waiters.on_completion(cancel, -libc::ECANCELED).is_none());
         let completed = waiters
             .on_completion(waiter_id.user_data(), 123)
