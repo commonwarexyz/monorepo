@@ -112,6 +112,27 @@ where
     pub fn root(&self) -> H::Digest {
         self.log.root()
     }
+
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn proof(
+        &self,
+        loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+        self.historical_proof(self.log.size().await, loc, max_ops)
+            .await
+    }
 }
 
 // Functionality requiring Mutable journal.
@@ -219,27 +240,6 @@ where
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
-    }
-
-    pub async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn proof(
-        &self,
-        loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
     }
 
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
