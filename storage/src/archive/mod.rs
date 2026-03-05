@@ -72,6 +72,10 @@ pub trait Archive: Send {
     }
 
     /// Retrieve an item from [Archive].
+    ///
+    /// Note that if the [Archive] is a [MultiArchive], there may be multiple values associated with the
+    /// same [Identifier::Index]. If there are multiple values, the first stored will be returned. Use
+    /// [MultiArchive::get_all] to retrieve all values at an index.
     fn get<'a>(
         &'a self,
         identifier: Identifier<'a, Self::Key>,
@@ -111,6 +115,47 @@ pub trait Archive: Send {
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Extension of [Archive] that supports multiple items at the same index.
+///
+/// Unlike [Archive::put], which is a no-op when the index already exists,
+/// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
+/// at an existing index. As with [Archive::put], keys are assumed to be globally
+/// unique, but duplicate keys are not rejected.
+pub trait MultiArchive: Archive {
+    /// Retrieve all values stored at the given index.
+    ///
+    /// Returns `None` if the index does not exist or has been pruned.
+    fn get_all(
+        &self,
+        index: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
+
+    /// Store an item, allowing multiple items at the same index.
+    ///
+    /// Multiple items may share the same `index`. If the same key is stored at
+    /// multiple indices, any associated value may be returned when queried with
+    /// [Identifier::Key].
+    fn put_multi(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::sync] in a single operation.
+    fn put_multi_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            self.put_multi(index, key, value).await?;
+            self.sync().await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,7 +180,7 @@ mod tests {
     async fn create_prunable(
         context: Context,
         compression: Option<u8>,
-    ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
+    ) -> impl MultiArchive<Key = FixedBytes<64>, Value = i32> {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test-key".into(),
@@ -722,6 +767,314 @@ mod tests {
         test_many_keys_determinism(create_immutable, None, 50_000);
     }
 
+    async fn test_put_multi_and_get_impl(
+        context: Context,
+        mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        // Put three items at the same index with different keys
+        let index = 5u64;
+        let key_a = test_key("aaa");
+        let key_b = test_key("bbb");
+        let key_c = test_key("ccc");
+
+        archive
+            .put_multi(index, key_a.clone(), 10)
+            .await
+            .expect("put_multi a");
+        archive
+            .put_multi(index, key_b.clone(), 20)
+            .await
+            .expect("put_multi b");
+        archive
+            .put_multi(index, key_c.clone(), 30)
+            .await
+            .expect("put_multi c");
+
+        // Retrieve each by key
+        assert_eq!(
+            archive.get(Identifier::Key(&key_a)).await.unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            archive.get(Identifier::Key(&key_b)).await.unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            archive.get(Identifier::Key(&key_c)).await.unwrap(),
+            Some(30)
+        );
+
+        // Missing key returns None
+        let missing = test_key("zzz");
+        assert_eq!(archive.get(Identifier::Key(&missing)).await.unwrap(), None);
+
+        // items_tracked reflects unique indices, not total items
+        let buffer = context.encode();
+        assert!(buffer.contains("items_tracked 1"));
+    }
+
+    #[test_traced]
+    fn test_put_multi_and_get_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context.clone(), None).await;
+            test_put_multi_and_get_impl(context, archive).await;
+        });
+    }
+
+    async fn test_put_multi_duplicate_key_impl(
+        context: Context,
+        mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        let key = test_key("dup");
+        archive.put_multi(5, key.clone(), 10).await.unwrap();
+        archive.put_multi(7, key.clone(), 20).await.unwrap();
+
+        // Duplicate key is allowed across indices.
+        assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
+        assert_eq!(archive.get(Identifier::Index(7)).await.unwrap(), Some(20));
+        assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![10]));
+        assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![20]));
+
+        // Like Archive::put, duplicate keys may return any associated value.
+        assert!(matches!(
+            archive.get(Identifier::Key(&key)).await.unwrap(),
+            Some(10 | 20)
+        ));
+
+        let buffer = context.encode();
+        assert!(buffer.contains("items_tracked 2"));
+    }
+
+    #[test_traced]
+    fn test_put_multi_duplicate_key_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context.clone(), None).await;
+            test_put_multi_duplicate_key_impl(context, archive).await;
+        });
+    }
+
+    async fn test_get_all_impl(mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>) {
+        // Three items at the same index
+        archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
+        archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
+        archive.put_multi(5, test_key("ccc"), 30).await.unwrap();
+
+        // One item at a different index
+        archive.put_multi(7, test_key("ddd"), 40).await.unwrap();
+
+        // get_all returns all values at the index in insertion order
+        let all = archive.get_all(5).await.unwrap();
+        assert_eq!(all, Some(vec![10, 20, 30]));
+
+        // Single-item index returns one element
+        let all = archive.get_all(7).await.unwrap();
+        assert_eq!(all, Some(vec![40]));
+
+        // Missing index returns None
+        let all = archive.get_all(99).await.unwrap();
+        assert_eq!(all, None);
+
+        // Archive::get(Index) still returns only the first
+        assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
+    }
+
+    #[test_traced]
+    fn test_get_all_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_get_all_impl(archive).await;
+        });
+    }
+
+    async fn test_put_multi_preserves_archive_put_semantics_impl(
+        mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        // put_multi two items at the same index
+        archive
+            .put_multi(1, test_key("aaa"), 10)
+            .await
+            .expect("put_multi");
+        archive
+            .put_multi(1, test_key("bbb"), 20)
+            .await
+            .expect("put_multi");
+
+        // Archive::put is a no-op when index already exists
+        archive
+            .put(1, test_key("ccc"), 30)
+            .await
+            .expect("Archive::put should no-op");
+
+        // Only two items exist (Archive::put did not add a third)
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("aaa")))
+                .await
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("bbb")))
+                .await
+                .unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("ccc")))
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Archive::get(Index) returns the first item inserted
+        let first = archive
+            .get(Identifier::Index(1))
+            .await
+            .unwrap()
+            .expect("should find first");
+        assert_eq!(first, 10);
+    }
+
+    #[test_traced]
+    fn test_put_multi_preserves_archive_put_semantics_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_put_multi_preserves_archive_put_semantics_impl(archive).await;
+        });
+    }
+
+    async fn test_put_multi_restart_impl<A, F, Fut>(
+        context: Context,
+        creator: F,
+        compression: Option<u8>,
+    ) where
+        A: MultiArchive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        // Write multi-items, sync, and drop
+        {
+            let mut archive = creator(context.with_label("init1"), compression).await;
+            archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
+            archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
+            archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
+            archive.sync().await.unwrap();
+        }
+
+        // Reinitialize and verify
+        let archive = creator(context.with_label("init2"), compression).await;
+
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("aaa")))
+                .await
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("bbb")))
+                .await
+                .unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("ccc")))
+                .await
+                .unwrap(),
+            Some(30)
+        );
+
+        // items_tracked reflects two unique indices after restart
+        let buffer = context.encode();
+        assert!(buffer.contains("items_tracked 2"));
+    }
+
+    #[test_traced]
+    fn test_put_multi_restart_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_put_multi_restart_impl(context, create_prunable, None).await;
+        });
+    }
+
+    async fn test_put_multi_mixed_indices_impl(
+        context: Context,
+        mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
+    ) {
+        // Mix Archive::put (single-item) and MultiArchive::put_multi
+        archive.put(1, test_key("single"), 100).await.unwrap();
+        archive
+            .put_multi(2, test_key("multi-a"), 200)
+            .await
+            .unwrap();
+        archive
+            .put_multi(2, test_key("multi-b"), 201)
+            .await
+            .unwrap();
+        archive
+            .put_multi(3, test_key("multi-c"), 300)
+            .await
+            .unwrap();
+
+        // All retrievable by key
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("single")))
+                .await
+                .unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("multi-a")))
+                .await
+                .unwrap(),
+            Some(200)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("multi-b")))
+                .await
+                .unwrap(),
+            Some(201)
+        );
+        assert_eq!(
+            archive
+                .get(Identifier::Key(&test_key("multi-c")))
+                .await
+                .unwrap(),
+            Some(300)
+        );
+
+        // Archive::get(Index) returns first item at that index
+        assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(200));
+
+        // Gap tracking works across mixed usage
+        let (end, next) = archive.next_gap(1);
+        assert_eq!(end, Some(3));
+        assert!(next.is_none());
+
+        let buffer = context.encode();
+        assert!(buffer.contains("items_tracked 3"));
+    }
+
+    #[test_traced]
+    fn test_put_multi_mixed_indices_prunable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context.clone(), None).await;
+            test_put_multi_mixed_indices_impl(context, archive).await;
+        });
+    }
+
     fn assert_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -748,12 +1101,36 @@ mod tests {
     }
 
     #[allow(dead_code)]
+    fn assert_multi_archive_futures_are_send<T: super::MultiArchive>(
+        archive: &mut T,
+        key: T::Key,
+        value: T::Value,
+    ) where
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        assert_archive_futures_are_send(archive, key.clone(), value.clone());
+        assert_send(archive.get_all(1));
+        assert_send(archive.put_multi(1, key.clone(), value.clone()));
+        assert_send(archive.put_multi_sync(2, key, value));
+    }
+
+    #[allow(dead_code)]
     fn assert_prunable_archive_futures_are_send(
         archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
         assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_multi_archive_futures_are_send(
+        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_multi_archive_futures_are_send(archive, key, value);
     }
 
     #[allow(dead_code)]
