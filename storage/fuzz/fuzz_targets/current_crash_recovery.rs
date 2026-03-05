@@ -198,12 +198,13 @@ fn fuzz(input: FuzzInput) {
                         let k = Key::new(*key);
                         let v = Value::new(*value);
                         let result = {
-                            let finalized = {
-                                let mut batch = db.new_batch();
-                                batch.write(k, Some(v));
-                                batch.merkleize(None).await.unwrap().finalize()
+                            let mut batch = db.new_batch();
+                            batch.write(k, Some(v));
+                            let merkleized = match batch.merkleize(None).await {
+                                Ok(m) => m,
+                                Err(_) => break,
                             };
-                            db.apply_batch(finalized).await
+                            db.apply_batch(merkleized.finalize()).await
                         };
                         if result.is_err() {
                             break;
@@ -213,12 +214,13 @@ fn fuzz(input: FuzzInput) {
                     CurrentOperation::Delete { key } => {
                         let k = Key::new(*key);
                         let result = {
-                            let finalized = {
-                                let mut batch = db.new_batch();
-                                batch.write(k, None);
-                                batch.merkleize(None).await.unwrap().finalize()
+                            let mut batch = db.new_batch();
+                            batch.write(k, None);
+                            let merkleized = match batch.merkleize(None).await {
+                                Ok(m) => m,
+                                Err(_) => break,
                             };
-                            db.apply_batch(finalized).await
+                            db.apply_batch(merkleized.finalize()).await
                         };
                         if result.is_err() {
                             break;
@@ -227,9 +229,14 @@ fn fuzz(input: FuzzInput) {
                     }
                     CurrentOperation::Commit => {
                         let result = {
-                            let finalized =
-                                db.new_batch().merkleize(None).await.unwrap().finalize();
-                            db.apply_batch(finalized).await
+                            let merkleized = match db.new_batch().merkleize(None).await {
+                                Ok(m) => m,
+                                Err(_) => {
+                                    forget_pending(&pending, &mut committed);
+                                    break;
+                                }
+                            };
+                            db.apply_batch(merkleized.finalize()).await
                         };
                         if result.is_err() {
                             forget_pending(&pending, &mut committed);
@@ -240,9 +247,14 @@ fn fuzz(input: FuzzInput) {
                     CurrentOperation::Prune => {
                         // Prune requires a committed db, so commit first.
                         let result = {
-                            let finalized =
-                                db.new_batch().merkleize(None).await.unwrap().finalize();
-                            db.apply_batch(finalized).await
+                            let merkleized = match db.new_batch().merkleize(None).await {
+                                Ok(m) => m,
+                                Err(_) => {
+                                    forget_pending(&pending, &mut committed);
+                                    break;
+                                }
+                            };
+                            db.apply_batch(merkleized.finalize()).await
                         };
                         if result.is_err() {
                             forget_pending(&pending, &mut committed);
