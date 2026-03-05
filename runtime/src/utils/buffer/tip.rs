@@ -53,8 +53,10 @@ impl Buffer {
 
     /// Creates a new buffer seeded with existing logical bytes.
     ///
-    /// The provided `data` is stored as-is, so callers can preserve immutable bytes loaded from
-    /// disk and defer opening mutable backing until a subsequent write actually needs it.
+    /// Mutable buffers preserve the provided `data` as-is so callers can keep zero-copy bytes
+    /// loaded from disk until a subsequent write actually needs mutable backing. Immutable buffers
+    /// compact the seed bytes to exact-size detached storage so oversized page-backed views are
+    /// not retained.
     pub(super) fn from(
         offset: u64,
         data: IoBuf,
@@ -63,6 +65,11 @@ impl Buffer {
         pool: BufferPool,
     ) -> Self {
         let len = data.len();
+        let data = if immutable {
+            Self::compact(data.as_ref())
+        } else {
+            data
+        };
         Self {
             data,
             len,
@@ -102,18 +109,22 @@ impl Buffer {
         if !compact {
             return;
         }
-        if self.len == 0 {
-            self.data = IoBuf::default();
-            return;
-        }
         // Use detached exact-size storage so sealing a partial page releases any pooled
         // page-aligned backing instead of pinning a storage-pool slot per immutable tip.
-        self.data = IoBuf::copy_from_slice(self.as_ref());
+        self.data = Self::compact(self.as_ref());
     }
 
     /// Set the buffer mutable.
     pub(super) const fn set_mutable(&mut self) {
         self.immutable = false;
+    }
+
+    fn compact(data: &[u8]) -> IoBuf {
+        if data.is_empty() {
+            IoBuf::default()
+        } else {
+            IoBuf::copy_from_slice(data)
+        }
     }
 
     /// Returns immutable logical bytes for `range`.
@@ -423,6 +434,25 @@ mod tests {
 
         assert!(!buffer.append(b"def"));
         assert_eq!(buffer.as_ref(), b"abcdef");
+    }
+
+    #[test]
+    fn test_tip_from_immutable_compacts_seed_data() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut oversized = pool.alloc(16);
+        oversized.put_slice(b"abc");
+        oversized.put_bytes(0, 13);
+        let oversized = oversized.freeze().slice(..3);
+        assert!(oversized.is_pooled());
+
+        let buffer = Buffer::from(7, oversized, 16, true, pool);
+
+        assert!(buffer.is_immutable());
+        assert_eq!(buffer.offset, 7);
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(buffer.as_ref(), b"abc");
+        assert!(!buffer.data.is_pooled());
     }
 
     #[test]
