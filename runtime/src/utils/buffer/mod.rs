@@ -11,9 +11,96 @@ pub use write::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Blob as _, Error, Runner, Storage};
+    use crate::{
+        deterministic, Blob as _, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
+        Spawner, Storage,
+    };
     use commonware_macros::test_traced;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
+    use futures::{pin_mut, FutureExt};
+    use std::{sync::Arc, time::Duration};
+
+    struct BlockingReadGate {
+        read_started: Option<oneshot::Sender<()>>,
+        release_read: Option<oneshot::Receiver<()>>,
+    }
+
+    /// Test-only blob wrapper that blocks exactly one read call until explicitly released.
+    ///
+    /// Used to assert lock ordering / contention behavior in writer read-path tests.
+    #[derive(Clone)]
+    struct BlockingReadBlob {
+        data: Arc<Vec<u8>>,
+        gate: Arc<Mutex<BlockingReadGate>>,
+    }
+
+    impl BlockingReadBlob {
+        fn new(data: Vec<u8>) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (read_started_tx, read_started_rx) = oneshot::channel();
+            let (release_read_tx, release_read_rx) = oneshot::channel();
+            (
+                Self {
+                    data: Arc::new(data),
+                    gate: Arc::new(Mutex::new(BlockingReadGate {
+                        read_started: Some(read_started_tx),
+                        release_read: Some(release_read_rx),
+                    })),
+                },
+                read_started_rx,
+                release_read_tx,
+            )
+        }
+
+        async fn block_once_on_read(&self) {
+            let rx = {
+                let mut gate = self.gate.lock();
+                let _ = gate.read_started.take().unwrap().send(());
+                gate.release_read.take().unwrap()
+            };
+            let _ = rx.await;
+        }
+    }
+
+    impl crate::Blob for BlockingReadBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.block_once_on_read().await;
+
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            if end > self.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = buf.into();
+            out.put_slice(&self.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
 
     #[test_traced]
     fn test_read_basic() {
@@ -829,6 +916,87 @@ mod tests {
                 Read::from_pooler(&context, final_blob, final_size, NZUsize!(30));
             let read = final_reader.read(30).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"buffered and flushed more data");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_read_at_blocks_concurrent_write_until_persisted_read_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, read_started_rx, release_read_tx) =
+                BlockingReadBlob::new(b"abcdefghij".to_vec());
+            let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
+            let reader = writer.clone();
+
+            // This read is entirely in persisted blob bytes (no buffered tip overlap).
+            let read_task = context
+                .clone()
+                .spawn(move |_| async move { reader.read_at(0, 4).await.expect("read failed") });
+
+            // Wait until read_at reached underlying blob I/O while holding the tip lock.
+            read_started_rx.await.expect("read start signal missing");
+
+            let write_task = context.clone().spawn(move |_| async move {
+                writer.write_at(0, b"WXYZ").await.expect("write failed");
+            });
+            pin_mut!(write_task);
+
+            // Let scheduler poll the write task, it should be blocked on the tip write lock.
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(
+                write_task.as_mut().now_or_never().is_none(),
+                "write_at completed while read_at still held lock over blob I/O"
+            );
+
+            // Unblock persisted read and ensure both operations complete.
+            release_read_tx
+                .send(())
+                .expect("failed to release blocked read");
+            let read_result = read_task.await.expect("read task failed").coalesce();
+            assert_eq!(read_result.as_ref(), b"abcd");
+            write_task.await.expect("write task failed");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_read_at_overlap_blocks_concurrent_write_until_persisted_read_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, read_started_rx, release_read_tx) =
+                BlockingReadBlob::new(b"abcdefghij".to_vec());
+            let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
+
+            // This creates a tip buffer with "XYZ" at offset 10.
+            writer.write_at(10, b"XYZ").await.unwrap();
+
+            // This reads overlaps blob and tip buffer.
+            let reader = writer.clone();
+            let read_task = context
+                .clone()
+                .spawn(move |_| async move { reader.read_at(8, 5).await.expect("read failed") });
+
+            // Wait until overlap read reaches persisted blob I/O while holding the tip lock.
+            read_started_rx.await.expect("read start signal missing");
+
+            let write_task = context.clone().spawn(move |_| async move {
+                writer.write_at(10, b"UVW").await.expect("write failed");
+            });
+            pin_mut!(write_task);
+
+            // Write should remain blocked on the tip write lock until read releases it.
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(
+                write_task.as_mut().now_or_never().is_none(),
+                "write_at completed while overlap read_at still held lock over blob I/O"
+            );
+
+            // Unblock persisted read and ensure both operations complete.
+            release_read_tx
+                .send(())
+                .expect("failed to release blocked read");
+            let read_result = read_task.await.expect("read task failed").coalesce();
+            assert_eq!(read_result.as_ref(), b"ijXYZ");
+            write_task.await.expect("write task failed");
         });
     }
 
