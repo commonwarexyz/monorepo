@@ -170,7 +170,7 @@ stability_scope!(ALPHA {
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             async {
                 panic!(
-                    "Actor::on_read_only must be implemented when read-write ingress is dispatched"
+                    "Actor::on_read_only must be implemented when read-only ingress is dispatched"
                 )
             }
         }
