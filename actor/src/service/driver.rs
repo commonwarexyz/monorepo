@@ -182,6 +182,7 @@ where
         })
     }
 
+    /// Run the actor service loop, dispatching ingress messages to
     /// read-only or read-write handlers, and exits on shutdown, lane
     /// closure, or fatal handler error.
     async fn enter(mut self, mut args: A::Args) {
