@@ -144,25 +144,17 @@ where
 
     let n = ciphertexts.len();
 
-    // Sample random challenge scalars
-    let t0 = std::time::Instant::now();
     let challenges: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut *rng)).collect();
-    let t_challenges = t0.elapsed();
 
     // V::Signature MSM: Σ c_i * r_i
-    let t0 = std::time::Instant::now();
     let c_points: Vec<V::Signature> = ciphertexts.iter().map(|ct| ct.c).collect();
     let c_agg = V::Signature::msm(&c_points, &challenges, &commonware_parallel::Sequential);
-    let t_sig_msm = t0.elapsed();
 
     // V::Public MSM: Σ u_i * r_i
-    let t0 = std::time::Instant::now();
     let u_points: Vec<V::Public> = ciphertexts.iter().map(|ct| ct.u).collect();
     let u_agg = V::Public::msm(&u_points, &challenges, &commonware_parallel::Sequential);
-    let t_pub_msm = t0.elapsed();
 
     // Scalar sum: s = Σ r_i * m_i
-    let t0 = std::time::Instant::now();
     let mut msg_scalar = Scalar::zero();
     for (r, &m) in challenges.iter().zip(messages.iter()) {
         let m_scalar = Scalar::from_u64(m);
@@ -173,20 +165,11 @@ where
     let mut msg_term = *h_id_gamma;
     msg_term *= &(-msg_scalar);
     let sig_term = c_agg + &msg_term;
-    let t_scalar = t0.elapsed();
 
     // Check: e(pk^gamma, sig_term) * e(-u_agg, sig_id) == 1
-    let t0 = std::time::Instant::now();
     let lhs = V::pairing(pk_gamma, &sig_term);
     let rhs = V::pairing(&u_agg.neg(), signature);
-    let result = lhs.mul(&rhs).is_one();
-    let t_pairing = t0.elapsed();
-
-    println!(
-        "  verify_decryption(n={n}): challenges={t_challenges:.2?}, sig_msm={t_sig_msm:.2?}, pub_msm={t_pub_msm:.2?}, scalar={t_scalar:.2?}, pairing={t_pairing:.2?}",
-    );
-
-    result
+    lhs.mul(&rhs).is_one()
 }
 
 #[cfg(test)]
