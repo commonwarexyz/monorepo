@@ -1,0 +1,30 @@
+diff --git a/resolver/src/p2p/fetcher.rs b/resolver/src/p2p/fetcher.rs
+index 8c30053d..6f27ea8a 100644
+--- a/resolver/src/p2p/fetcher.rs
++++ b/resolver/src/p2p/fetcher.rs
+@@ -1,6 +1,6 @@
+ use crate::p2p::wire;
+ use commonware_cryptography::PublicKey;
+-use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
++use commonware_p2p::{CheckedSender, utils::codec::WrappedSender, Recipients, Sender};
+ use commonware_runtime::{
+     telemetry::metrics::{
+         histogram::Buckets,
+@@ -563,14 +563,14 @@ where
+     }
+ 
+     /// Returns true if the fetch is in progress.
+-    #[cfg(test)]
++    #[cfg(any(test, feature = "fuzzing"))]
+     pub fn contains(&self, key: &Key) -> bool {
+         self.key_to_id.contains_key(key) || self.pending.contains(key)
+     }
+ }
+ 
+-#[cfg(test)]
+-mod tests {
++#[cfg(any(test, feature = "fuzzing"))]
++    pub mod tests {
+     use super::*;
+     use crate::p2p::mocks::Key as MockKey;
+     use commonware_cryptography::{
