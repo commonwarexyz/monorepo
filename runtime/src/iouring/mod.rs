@@ -524,7 +524,7 @@ impl IoUringLoop {
     ) -> Option<bool> {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
-        let mut advanced = self.timeout_wheel.next_deadline().is_some();
+        let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
@@ -566,9 +566,9 @@ impl IoUringLoop {
                 // Avoid per-loop clock reads when no deadlines are active.
                 // When the first deadline arrives after an idle period, align
                 // wheel time once before converting deadlines to ticks.
-                if !advanced {
+                if !wheel_aligned {
                     assert!(self.timeout_wheel.advance(Instant::now()).is_none());
-                    advanced = true;
+                    wheel_aligned = true;
                 }
 
                 match self.timeout_wheel.target_tick(deadline) {
