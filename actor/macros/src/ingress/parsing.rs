@@ -152,6 +152,12 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
 
     let name: Ident = input.parse()?;
     let fields = parse_fields(input)?;
+    if let Some(field) = fields.iter().find(|f| f.name == "response") {
+        return Err(syn::Error::new(
+            field.name.span(),
+            "`response` is reserved for the implicit response channel in ask/subscribe items",
+        ));
+    }
     input.parse::<Token![;]>()?;
 
     Ok(Item {
