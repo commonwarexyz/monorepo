@@ -2,7 +2,7 @@ use crate::algebra::{
     msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
@@ -13,6 +13,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
 use std::borrow::Cow;
 
 // SECTION: Performance knobs.
@@ -134,7 +135,9 @@ impl<K> Poly<K> {
         K: Space<R>,
     {
         // Contains 1, r, r^2, ...
-        let weights = powers(r, self.len_usize()).collect::<Vec<_>>();
+        let weights = powers(R::one(), r)
+            .take(self.len_usize())
+            .collect::<Vec<_>>();
         K::msm(&self.coeffs, &weights, strategy)
     }
 
@@ -160,10 +163,10 @@ impl<K> Poly<K> {
             };
 
             let len = self.len_usize();
-            let mut out: Vec<_> = powers(b0.as_ref(), len).map(|b0_j| b0_j * &a0).collect();
+            let mut out: Vec<_> = powers(a0, b0.as_ref()).take(len).collect();
             for (ai, bi) in iter {
-                powers(bi.as_ref(), len)
-                    .map(|bi_j| bi_j * &ai)
+                powers(ai, bi.as_ref())
+                    .take(len)
                     .zip(out.iter_mut())
                     .for_each(|(c_j, o_j)| *o_j += &c_j);
             }
@@ -543,7 +546,7 @@ impl<I: Clone + Ord, F: crate::algebra::FieldNTT> Interpolator<I, F> {
 
         let points: Vec<(I, u32)> = points.into_iter().filter(|(_, k)| *k < total_u32).collect();
         let max_k = points.iter().map(|(_, k)| *k).max().unwrap_or(0) as usize;
-        let powers: Vec<_> = powers(&w, max_k + 1).collect();
+        let powers: Vec<_> = powers(F::one(), &w).take(max_k + 1).collect();
 
         let eval_points = points
             .into_iter()
