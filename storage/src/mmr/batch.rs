@@ -1010,7 +1010,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut base = build_reference(&mut hasher, 100);
-            base.prune_to_pos(Position::new(50));
+            base.prune(Location::new(27)).unwrap();
 
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 100u64..110 {

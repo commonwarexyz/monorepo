@@ -67,9 +67,9 @@ pub struct Config<D: Digest> {
     /// The retained nodes of the MMR.
     pub nodes: Vec<D>,
 
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// The leaf location up to which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pub pruned_to_pos: Position,
+    pub pruned_to: Location,
 
     /// The pinned nodes of the MMR, in the order expected by `nodes_to_pin`.
     pub pinned_nodes: Vec<D>,
@@ -130,12 +130,14 @@ impl<D: Digest> Mmr<D> {
     /// # Errors
     ///
     /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
-    /// count for `config.pruned_to_pos`.
+    /// count for `config.pruned_to`.
     ///
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
     pub fn init(config: Config<D>, hasher: &mut impl Hasher<Digest = D>) -> Result<Self, Error> {
+        let pruned_to_pos = Position::try_from(config.pruned_to)?;
+
         // Validate that the total size is valid
-        let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
+        let Some(size) = pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
         if !size.is_mmr_size() {
@@ -145,7 +147,7 @@ impl<D: Digest> Mmr<D> {
         // Validate and populate pinned nodes
         let mut pinned_nodes = BTreeMap::new();
         let mut expected_pinned_nodes = 0;
-        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
+        for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
             expected_pinned_nodes += 1;
             if i >= config.pinned_nodes.len() {
                 return Err(Error::InvalidPinnedNodes);
@@ -159,7 +161,6 @@ impl<D: Digest> Mmr<D> {
         }
 
         let nodes = VecDeque::from(config.nodes);
-        let pruned_to_pos = config.pruned_to_pos;
         let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
         Ok(Self {
             nodes,
@@ -238,10 +239,10 @@ impl<D: Digest> Mmr<D> {
         Location::try_from(self.size()).expect("invalid mmr size")
     }
 
-    /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
-    /// retained nodes respectively.
-    pub fn bounds(&self) -> Range<Position> {
-        self.pruned_to_pos..self.size()
+    /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
+    /// count.
+    pub fn bounds(&self) -> Range<Location> {
+        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.leaves()
     }
 
     /// Return a new iterator over the peaks of the MMR.
@@ -312,14 +313,23 @@ impl<D: Digest> Mmr<D> {
             .collect()
     }
 
-    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
-    /// them required for proof generation.
-    pub fn prune_to_pos(&mut self, pos: Position) {
-        // Recompute the set of older nodes to retain.
-        self.pinned_nodes = self.nodes_to_pin(pos);
-        let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
+    /// Prune all nodes up to but not including the given leaf location, and pin the O(log2(n))
+    /// number of them required for proof generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
+    pub fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        if loc > self.leaves() {
+            return Err(Error::LeafOutOfBounds(loc));
+        }
+        let pos = Position::try_from(loc)?;
+        if pos <= self.pruned_to_pos {
+            return Ok(());
+        }
+        self.prune_to_pos(pos);
+        Ok(())
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
@@ -329,6 +339,15 @@ impl<D: Digest> Mmr<D> {
             let pos = self.index_to_pos(self.nodes.len());
             self.prune_to_pos(pos);
         }
+    }
+
+    /// Position-based pruning. Assumes `pos` is the position of a leaf since the pruning boundary
+    /// must be leaf aligned.
+    fn prune_to_pos(&mut self, pos: Position) {
+        self.pinned_nodes = self.nodes_to_pin(pos);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
+        self.pruned_to_pos = pos;
     }
 
     /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
@@ -554,7 +573,7 @@ mod tests {
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() as u64 <= mmr.size());
             }
-            assert_eq!(mmr.bounds().start, Position::new(0));
+            assert_eq!(mmr.bounds().start, Location::new(0));
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
@@ -621,8 +640,8 @@ mod tests {
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
-            mmr.prune_to_pos(Position::new(14)); // prune up to the tallest peak
-            assert_eq!(mmr.bounds().start, Position::new(14));
+            mmr.prune(Location::new(8)).unwrap(); // prune up to the tallest peak
+            assert_eq!(mmr.bounds().start, Location::new(8));
 
             // After pruning, we shouldn't be able to generate a proof for any elements before the
             // pruning boundary. (To be precise, due to the maintenance of pinned nodes, we may in
@@ -656,12 +675,13 @@ mod tests {
             );
 
             // Test that we can initialize a new MMR from another's elements.
-            let oldest_pos = mmr.bounds().start;
+            let oldest_loc = mmr.bounds().start;
+            let oldest_pos = Position::try_from(oldest_loc).unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
             let mmr_copy = Mmr::init(
                 Config {
                     nodes: mmr.nodes.iter().copied().collect(),
-                    pruned_to_pos: oldest_pos,
+                    pruned_to: oldest_loc,
                     pinned_nodes: digests,
                 },
                 &mut hasher,
@@ -777,7 +797,7 @@ mod tests {
             let mut mmr = Mmr::init(
                 Config {
                     nodes: vec![],
-                    pruned_to_pos: Position::new(0),
+                    pruned_to: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &mut hasher,
@@ -865,10 +885,10 @@ mod tests {
             }
 
             // Confirm the tree has all the hashes necessary to update any element after pruning.
-            mmr.prune_to_pos(Position::new(150));
-            for leaf_pos in 150u64..=190 {
-                mmr.prune_to_pos(Position::new(leaf_pos));
-                let leaf_loc = Location::new(leaf_pos);
+            mmr.prune(Location::new(100)).unwrap();
+            for leaf in 100u64..=190 {
+                mmr.prune(Location::new(leaf)).unwrap();
+                let leaf_loc = Location::new(leaf);
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
         });
@@ -925,7 +945,7 @@ mod tests {
             let mmr = Mmr::init(
                 Config {
                     nodes: Vec::new(),
-                    pruned_to_pos: Position::new(0),
+                    pruned_to: Location::new(0),
                     pinned_nodes: Vec::new(),
                 },
                 &mut hasher,
@@ -1005,7 +1025,7 @@ mod tests {
                 // Pruned leaf.
                 let mmr = Mmr::new(&mut hasher);
                 let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
-                mmr.prune_to_pos(Position::new(50));
+                mmr.prune(Location::new(27)).unwrap();
                 let mut batch = mmr.new_batch();
                 let result = batch.update_leaf_digest(Location::new(0), Sha256::fill(0));
                 assert!(matches!(result, Err(Error::ElementPruned(_))));
@@ -1061,17 +1081,17 @@ mod tests {
             // Test with empty config - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Test with too few pinned nodes - should fail
-            // Use a valid MMR size (127 is valid: 2^7 - 1 makes a complete tree)
+            // 64 leaves = 127 nodes (complete tree)
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
-                pruned_to_pos: Position::new(127),
-                pinned_nodes: vec![], // Should have nodes for position 127
+                pruned_to: Location::new(64),
+                pinned_nodes: vec![],
             };
             assert!(matches!(
                 Mmr::init(config, &mut hasher),
@@ -1081,7 +1101,7 @@ mod tests {
             // Test with too many pinned nodes - should fail
             let config = Config {
                 nodes: vec![],
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![Sha256::hash(b"dummy")],
             };
             assert!(matches!(
@@ -1103,7 +1123,7 @@ mod tests {
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
             let config = Config {
                 nodes: vec![],
-                pruned_to_pos: Position::new(50),
+                pruned_to: Location::new(27),
                 pinned_nodes,
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
@@ -1118,7 +1138,7 @@ mod tests {
             // Test with valid size 0 - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
@@ -1127,7 +1147,7 @@ mod tests {
             // Size 2 is invalid (can't have just one parent node + one leaf)
             let config = Config {
                 nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
             assert!(matches!(
@@ -1142,7 +1162,7 @@ mod tests {
                     Sha256::hash(b"leaf2"),
                     Sha256::hash(b"parent"),
                 ],
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
@@ -1165,12 +1185,12 @@ mod tests {
 
             let config = Config {
                 nodes,
-                pruned_to_pos: Position::new(0),
+                pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
 
-            // Test with non-zero pruned_to_pos - should succeed
+            // Test with non-zero pruned_to - should succeed
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
             let mut mmr = Mmr::new(&mut hasher);
             let changeset = {
@@ -1183,8 +1203,8 @@ mod tests {
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
 
-            // Prune to position 7
-            mmr.prune_to_pos(Position::new(7));
+            // Prune to leaf 4 (position 7)
+            mmr.prune(Location::new(4)).unwrap();
             let nodes: Vec<_> = (7..*mmr.size())
                 .map(|i| *mmr.get_node_unchecked(Position::new(i)))
                 .collect();
@@ -1192,16 +1212,16 @@ mod tests {
 
             let config = Config {
                 nodes: nodes.clone(),
-                pruned_to_pos: Position::new(7),
+                pruned_to: Location::new(4),
                 pinned_nodes: pinned_nodes.clone(),
             };
             assert!(Mmr::init(config, &mut hasher).is_ok());
 
-            // Same nodes but wrong pruned_to_pos - should fail
-            // pruned_to_pos=8 + 12 nodes = size 20 (invalid)
+            // Same nodes but wrong pruned_to - should fail
+            // Location(5) -> Position(8), 8 + 12 nodes = size 20 (invalid)
             let config = Config {
                 nodes: nodes.clone(),
-                pruned_to_pos: Position::new(8),
+                pruned_to: Location::new(5),
                 pinned_nodes: pinned_nodes.clone(),
             };
             assert!(matches!(
@@ -1209,11 +1229,11 @@ mod tests {
                 Err(Error::InvalidSize(_))
             ));
 
-            // Same nodes but different wrong pruned_to_pos - should fail
-            // pruned_to_pos=9 + 12 nodes = size 21 (invalid)
+            // Same nodes but different wrong pruned_to - should fail
+            // Location(1) -> Position(1), 1 + 12 nodes = size 13 (invalid)
             let config = Config {
                 nodes,
-                pruned_to_pos: Position::new(9),
+                pruned_to: Location::new(1),
                 pinned_nodes,
             };
             assert!(matches!(

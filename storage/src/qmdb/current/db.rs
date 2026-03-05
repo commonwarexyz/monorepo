@@ -399,9 +399,9 @@ where
         // 6. Prune the grafted MMR to match.
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > self.grafted_mmr.bounds().start {
-                self.grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            let prune_loc = Location::new(pruned_chunks);
+            if prune_loc > self.grafted_mmr.bounds().start {
+                self.grafted_mmr.prune(prune_loc)?;
             }
         }
 
