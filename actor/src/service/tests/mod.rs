@@ -117,8 +117,8 @@ ingress! {
     ExternalPriorityOrderMailbox,
 
     pub tell FromLane;
-    tell FromPriority;
-    tell FromExternal;
+    tell Priority;
+    tell External;
 }
 
 impl<E: Spawner> Actor<E> for ExternalPriorityOrderActor {
@@ -149,11 +149,11 @@ impl<E: Spawner> Actor<E> for ExternalPriorityOrderActor {
                 self.log.lock().push("lane");
                 Ok(())
             }
-            ExternalPriorityOrderMailboxReadWriteMessage::FromPriority => {
+            ExternalPriorityOrderMailboxReadWriteMessage::Priority => {
                 self.log.lock().push("priority");
                 Ok(())
             }
-            ExternalPriorityOrderMailboxReadWriteMessage::FromExternal => {
+            ExternalPriorityOrderMailboxReadWriteMessage::External => {
                 self.log.lock().push("external");
                 Ok(())
             }
@@ -170,7 +170,7 @@ impl<E: Spawner> Actor<E> for ExternalPriorityOrderActor {
         if self.priority_ready {
             self.priority_ready = false;
             futures::future::Either::Left(futures::future::ready(Some(
-                ExternalPriorityOrderMailboxReadWriteMessage::FromPriority,
+                ExternalPriorityOrderMailboxReadWriteMessage::Priority,
             )))
         } else {
             futures::future::Either::Right(futures::future::pending())
@@ -184,7 +184,7 @@ impl<E: Spawner> Actor<E> for ExternalPriorityOrderActor {
     ) -> Option<ExternalPriorityOrderMailboxReadWriteMessage> {
         if self.external_ready {
             self.external_ready = false;
-            Some(ExternalPriorityOrderMailboxReadWriteMessage::FromExternal)
+            Some(ExternalPriorityOrderMailboxReadWriteMessage::External)
         } else {
             std::future::pending::<Option<ExternalPriorityOrderMailboxReadWriteMessage>>().await
         }
