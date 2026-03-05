@@ -48,14 +48,14 @@ impl Buffer {
     ///
     /// The backing buffer starts detached and is allocated on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
-        Self::from_data(offset, IoBuf::default(), capacity, false, pool)
+        Self::from(offset, IoBuf::default(), capacity, false, pool)
     }
 
     /// Creates a new buffer seeded with existing logical bytes.
     ///
     /// The provided `data` is stored as-is, so callers can preserve immutable bytes loaded from
     /// disk and defer opening mutable backing until a subsequent write actually needs it.
-    pub(super) fn from_data(
+    pub(super) fn from(
         offset: u64,
         data: IoBuf,
         capacity: usize,
@@ -411,10 +411,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_from_data_preserves_immutable_bytes_until_mutated() {
+    fn test_tip_from_preserves_immutable_bytes_until_mutated() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
-        let mut buffer = Buffer::from_data(7, IoBuf::from(&b"abc"[..]), 16, false, pool);
+        let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, false, pool);
 
         assert_eq!(buffer.offset, 7);
         assert_eq!(buffer.len(), 3);

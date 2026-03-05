@@ -136,7 +136,7 @@ impl<B: Blob> Append<B> {
             ),
         };
 
-        let buffer = Buffer::from_data(
+        let buffer = Buffer::from(
             blob_state.current_page * cache_ref.page_size(),
             partial_data.unwrap_or_default(),
             capacity,
@@ -191,7 +191,7 @@ impl<B: Blob> Append<B> {
                 None,
             ),
         };
-        let buffer = Buffer::from_data(
+        let buffer = Buffer::from(
             blob_state.current_page * cache_ref.page_size(),
             partial_data.unwrap_or_default(),
             capacity,
