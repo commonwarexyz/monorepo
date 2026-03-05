@@ -55,6 +55,100 @@ mod ingress;
 ///
 /// Only `pub` items generate mailbox convenience methods.
 ///
+/// # Example expansion
+///
+/// Given:
+///
+/// ```rust,ignore
+/// ingress! {
+///     MyMailbox,
+///     pub tell Ping;
+///     pub ask GetValue -> u64;
+/// }
+/// ```
+///
+/// `cargo expand` produces (internal attributes elided for brevity):
+///
+/// ```rust,ignore
+/// // --- Ingress enums (used by Actor::on_read_only / on_read_write) ---
+///
+/// pub enum MyMailboxReadOnlyMessage {
+///     GetValue { response: ::commonware_actor::oneshot::Sender<u64> },
+/// }
+///
+/// pub enum MyMailboxReadWriteMessage {
+///     Ping,
+/// }
+///
+/// pub enum MyMailboxMessage {
+///     ReadOnly(MyMailboxReadOnlyMessage),
+///     ReadWrite(MyMailboxReadWriteMessage),
+/// }
+///
+/// // --- Typed mailbox newtype (wraps the base Mailbox) ---
+///
+/// pub struct MyMailbox(::commonware_actor::mailbox::Mailbox<MyMailboxMessage>);
+///
+/// impl Clone for MyMailbox { /* clones inner sender */ }
+/// impl Debug for MyMailbox { /* writes "MyMailbox" */ }
+/// impl From<Mailbox<MyMailboxMessage>> for MyMailbox { /* newtype conversion */ }
+///
+/// impl MyMailbox {
+///     pub async fn ping(&self) -> Result<(), MailboxError> {
+///         self.0.tell(Ping).await
+///     }
+///     pub fn ping_lossy(&self) -> bool {
+///         self.0.tell_lossy(Ping)
+///     }
+///     pub fn try_ping(&self) -> Result<(), MailboxError> {
+///         self.0.try_tell(Ping)
+///     }
+///     pub async fn get_value(&self) -> Result<u64, MailboxError> {
+///         self.0.ask(GetValue).await
+///     }
+///     pub async fn get_value_timeout<T: Future<Output = ()>>(
+///         &self,
+///         timeout: T,
+///     ) -> Result<u64, MailboxError> {
+///         self.0.ask_timeout(GetValue, timeout).await
+///     }
+/// }
+///
+/// // --- Envelope routing (used by the service loop) ---
+///
+/// impl IntoIngressEnvelope for MyMailboxMessage {
+///     type ReadOnlyIngress = MyMailboxReadOnlyMessage;
+///     type ReadWriteIngress = MyMailboxReadWriteMessage;
+///
+///     fn into_ingress_envelope(self) -> IngressEnvelope<...> {
+///         match self {
+///             Self::ReadOnly(m)  => IngressEnvelope::ReadOnly(m),
+///             Self::ReadWrite(m) => IngressEnvelope::ReadWrite(m),
+///         }
+///     }
+/// }
+///
+/// // --- Internal wrapper structs (bridge mailbox helpers to enums) ---
+///
+/// pub(crate) struct Ping;
+/// impl Tell<MyMailboxMessage> for Ping {
+///     fn into_ingress(self) -> MyMailboxMessage {
+///         MyMailboxMessage::ReadWrite(MyMailboxReadWriteMessage::Ping)
+///     }
+/// }
+///
+/// pub(crate) struct GetValue;
+/// impl Ask<MyMailboxMessage> for GetValue {
+///     type Response = u64;
+///     fn into_ingress(
+///         self,
+///         response: oneshot::Sender<Self::Response>,
+///     ) -> MyMailboxMessage {
+///         MyMailboxMessage::ReadOnly(MyMailboxReadOnlyMessage::GetValue { response })
+///     }
+/// }
+/// ```
+///
 /// # Item semantics
 ///
 /// - `tell`: fire-and-forget.
