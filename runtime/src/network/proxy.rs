@@ -35,6 +35,13 @@ use proxy_header::{ParseConfig, ProxyHeader};
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncBufReadExt;
 
+/// PROXY v2 absolute maximum header size (spec section 2.2):
+/// fixed preamble (16) + payload length field (u16::MAX).
+///
+/// PROXY v1 is much smaller and capped at 107 bytes including CRLF
+/// (spec section 2.1); `proxy-header` enforces that separately.
+const MAX_PROXY_HEADER_BYTES: usize = 12 + 4 + u16::MAX as usize;
+
 /// Configuration for PROXY protocol support.
 ///
 /// When attached to a network configuration, connections from trusted proxy IPs
@@ -99,41 +106,14 @@ pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketA
     }
 }
 
-/// Result of attempting to parse a PROXY header from bytes.
-pub enum ParseResult {
-    /// Successfully parsed. Contains client address and bytes consumed.
-    Complete(SocketAddr, usize),
-    /// Need more data to complete parsing.
-    Incomplete,
-}
-
-/// Parse PROXY header from raw bytes.
-///
-/// Returns `ParseResult::Incomplete` if more data is needed, or
-/// `ParseResult::Complete` with the client address and bytes consumed.
-/// Returns an error if the data is definitively invalid.
-pub fn parse_from_bytes(data: &[u8]) -> Result<ParseResult, Error> {
-    match ProxyHeader::parse(data, ParseConfig::default()) {
-        Ok((header, consumed)) => {
-            let addr = header
-                .proxied_address()
-                .map(|p| p.source)
-                .ok_or(Error::ReadFailed)?;
-            Ok(ParseResult::Complete(addr, consumed))
-        }
-        Err(proxy_header::Error::BufferTooShort) => Ok(ParseResult::Incomplete),
-        Err(_) => Err(Error::ReadFailed),
-    }
-}
-
 /// Incremental PROXY header parser shared by tokio and io_uring network paths.
-pub struct IncrementalParser {
+pub(crate) struct IncrementalParser {
     parsed: Vec<u8>,
 }
 
 impl IncrementalParser {
     /// Create a parser with a small initial buffer for realistic header sizes.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             parsed: Vec::with_capacity(256),
         }
@@ -145,32 +125,40 @@ impl IncrementalParser {
     /// (after the header) in `buf` for the caller to process.
     /// If more bytes are needed, this consumes all bytes currently in `buf`
     /// into parser state and returns `Ok(None)`.
-    pub fn push_buf<B: Buf>(&mut self, buf: &mut B) -> Result<Option<SocketAddr>, Error> {
+    pub(crate) fn push_buf<B: Buf>(&mut self, buf: &mut B) -> Result<Option<SocketAddr>, Error> {
         while buf.has_remaining() {
-            let chunk = buf.chunk();
-            if chunk.is_empty() {
+            if self.parsed.len() == MAX_PROXY_HEADER_BYTES {
                 return Err(Error::ReadFailed);
             }
 
+            let chunk_len = buf.chunk().len();
+            if chunk_len == 0 {
+                return Err(Error::ReadFailed);
+            }
+            let take = std::cmp::min(chunk_len, MAX_PROXY_HEADER_BYTES - self.parsed.len());
             let previous_len = self.parsed.len();
-            self.parsed.extend_from_slice(chunk);
+            self.parsed.extend_from_slice(&buf.chunk()[..take]);
 
-            match parse_from_bytes(&self.parsed)? {
-                ParseResult::Complete(addr, consumed_total) => {
-                    if consumed_total < previous_len {
-                        return Ok(Some(addr));
-                    }
-
-                    let consumed = consumed_total
-                        .checked_sub(previous_len)
+            match ProxyHeader::parse(&self.parsed, ParseConfig::default()) {
+                Ok((header, consumed_total)) => {
+                    let addr = header
+                        .proxied_address()
+                        .map(|p| p.source)
                         .ok_or(Error::ReadFailed)?;
-                    if consumed > chunk.len() {
+                    let consumed = consumed_total.saturating_sub(previous_len);
+                    if consumed > take {
                         return Err(Error::ReadFailed);
                     }
                     buf.advance(consumed);
                     return Ok(Some(addr));
                 }
-                ParseResult::Incomplete => buf.advance(chunk.len()),
+                Err(proxy_header::Error::BufferTooShort) => {
+                    buf.advance(take);
+                    if take < chunk_len {
+                        return Err(Error::ReadFailed);
+                    }
+                }
+                Err(_) => return Err(Error::ReadFailed),
             }
         }
 
@@ -180,7 +168,73 @@ impl IncrementalParser {
 
 #[cfg(test)]
 mod tests {
-    use super::IncrementalParser;
+    use super::{IncrementalParser, MAX_PROXY_HEADER_BYTES};
+    use crate::Error;
+
+    fn build_v2_max_tcp4_header() -> Vec<u8> {
+        let mut header = Vec::with_capacity(MAX_PROXY_HEADER_BYTES);
+        header.extend_from_slice(b"\r\n\r\n\0\r\nQUIT\n");
+        header.push(0x21); // version 2, PROXY command
+        header.push(0x11); // AF_INET + STREAM
+        header.extend_from_slice(&u16::MAX.to_be_bytes()); // payload length
+
+        // IPv4 address block (12 bytes)
+        header.extend_from_slice(&[192, 168, 1, 100]);
+        header.extend_from_slice(&[10, 0, 0, 1]);
+        header.extend_from_slice(&56789u16.to_be_bytes());
+        header.extend_from_slice(&443u16.to_be_bytes());
+
+        // Fill remaining payload as opaque TLV bytes.
+        let trailing = (u16::MAX as usize) - 12;
+        header.extend(std::iter::repeat_n(0u8, trailing));
+        assert_eq!(header.len(), MAX_PROXY_HEADER_BYTES);
+        header
+    }
+
+    #[test]
+    fn test_incremental_parser_v1_length_limit_106_then_107() {
+        // Keep a syntactically plausible v1 prefix but omit all delimiters after src addr.
+        // At 106 bytes this remains "incomplete"; adding one byte (107) crosses v1 max line
+        // length and must be rejected.
+        let mut first = b"PROXY TCP4 ".to_vec();
+        first.extend(std::iter::repeat_n(b'1', 95));
+        assert_eq!(first.len(), 106);
+
+        let mut parser = IncrementalParser::new();
+        let mut first = first.as_slice();
+        assert!(
+            parser
+                .push_buf(&mut first)
+                .expect("106-byte malformed v1 prefix should be treated as incomplete")
+                .is_none()
+        );
+        assert!(first.is_empty());
+
+        let mut one_more = b"1".as_slice();
+        let result = parser.push_buf(&mut one_more);
+        assert!(matches!(result, Err(Error::ReadFailed)));
+    }
+
+    #[test]
+    fn test_incremental_parser_v1_max_tcp6_header_preserves_payload() {
+        let src = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+        let dst = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+        let header = format!("PROXY TCP6 {src} {dst} 65535 65535\r\n");
+        assert_eq!(header.len(), 104);
+
+        let mut full = header.into_bytes();
+        full.extend_from_slice(b"payload");
+
+        let mut parser = IncrementalParser::new();
+        let mut buf = full.as_slice();
+        let addr = parser
+            .push_buf(&mut buf)
+            .expect("max v1 tcp6 header should parse")
+            .expect("header should be complete");
+        assert_eq!(addr.ip().to_string(), src);
+        assert_eq!(addr.port(), 65535);
+        assert_eq!(buf, b"payload");
+    }
 
     #[test]
     fn test_incremental_parser_split_header_preserves_payload() {
@@ -226,5 +280,32 @@ mod tests {
         assert_eq!(addr.ip().to_string(), "192.168.1.100");
         assert_eq!(addr.port(), 56789);
         assert_eq!(chunk3, expected_payload);
+    }
+
+    #[test]
+    fn test_incremental_parser_v2_absolute_max_header_preserves_payload() {
+        let header = build_v2_max_tcp4_header();
+        let split = header.len() - 1;
+
+        let mut parser = IncrementalParser::new();
+        let mut first = &header[..split];
+        assert!(
+            parser
+                .push_buf(&mut first)
+                .expect("incomplete max v2 header chunk should not fail")
+                .is_none()
+        );
+        assert!(first.is_empty());
+
+        let mut second = Vec::from(&header[split..]);
+        second.extend_from_slice(b"tail");
+        let mut second = second.as_slice();
+        let addr = parser
+            .push_buf(&mut second)
+            .expect("complete max v2 header should parse")
+            .expect("header should be complete");
+        assert_eq!(addr.ip().to_string(), "192.168.1.100");
+        assert_eq!(addr.port(), 56789);
+        assert_eq!(second, b"tail");
     }
 }
