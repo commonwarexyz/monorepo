@@ -10,8 +10,11 @@ use commonware_storage::{
 };
 use std::num::NonZeroU64;
 
-/// Maximum number of digests in a proof.
-pub const MAX_DIGESTS: usize = 10_000;
+/// Maximum number of operations in a single batch.
+pub const MAX_OPERATIONS: usize = 10_000;
+
+/// Maximum number of pinned nodes (O(log n) peaks, at most 62 for a 2^62 element MMR).
+pub const MAX_PINNED_NODES: usize = 62;
 
 /// Request for operations from the server.
 #[derive(Debug)]
@@ -20,6 +23,7 @@ pub struct GetOperationsRequest {
     pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
+    pub include_pinned_nodes: bool,
 }
 
 /// Response with operations and proof.
@@ -31,6 +35,7 @@ where
     pub request_id: RequestId,
     pub proof: Proof<D>,
     pub operations: Vec<Op>,
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// Request for sync target from server.
@@ -163,6 +168,7 @@ impl Write for GetOperationsRequest {
         self.op_count.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
+        self.include_pinned_nodes.write(buf);
     }
 }
 
@@ -172,6 +178,7 @@ impl EncodeSize for GetOperationsRequest {
             + self.op_count.encode_size()
             + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
+            + self.include_pinned_nodes.encode_size()
     }
 }
 
@@ -188,11 +195,13 @@ impl Read for GetOperationsRequest {
                 "max_ops cannot be zero",
             ));
         };
+        let include_pinned_nodes = bool::read(buf)?;
         Ok(Self {
             request_id,
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         })
     }
 }
@@ -218,6 +227,15 @@ where
         self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
+        match &self.pinned_nodes {
+            Some(nodes) => {
+                true.write(buf);
+                nodes.write(buf);
+            }
+            None => {
+                false.write(buf);
+            }
+        }
     }
 }
 
@@ -227,7 +245,14 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        let pinned_size = self
+            .pinned_nodes
+            .as_ref()
+            .map_or(1, |nodes| 1 + nodes.encode_size());
+        self.request_id.encode_size()
+            + self.proof.encode_size()
+            + self.operations.encode_size()
+            + pinned_size
     }
 }
 
@@ -239,15 +264,23 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
+        let proof = Proof::<D>::read_cfg(buf, &MAX_OPERATIONS)?;
         let operations = {
-            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
+            let range_cfg = RangeCfg::from(0..=MAX_OPERATIONS);
             Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+        };
+        let has_pinned = bool::read(buf)?;
+        let pinned_nodes = if has_pinned {
+            let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
+            Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
+        } else {
+            None
         };
         Ok(Self {
             request_id,
             proof,
             operations,
+            pinned_nodes,
         })
     }
 }

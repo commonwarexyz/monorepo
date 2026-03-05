@@ -137,6 +137,13 @@ where
         }
     }
 
+    async fn pinned_nodes_at(
+        &self,
+        boundary: Location,
+    ) -> Result<Vec<Key>, commonware_storage::qmdb::Error> {
+        self.pinned_nodes_at(boundary).await
+    }
+
     fn name() -> &'static str {
         "any"
     }

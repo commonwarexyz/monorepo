@@ -81,7 +81,7 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-        _include_pinned_nodes: bool,
+        include_pinned_nodes: bool,
     ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
@@ -89,6 +89,7 @@ where
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx
@@ -102,8 +103,8 @@ where
         let response = rx
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
-        let (proof, operations) = match response {
-            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
+        let (proof, operations, pinned_nodes) = match response {
+            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations, r.pinned_nodes),
             wire::Message::Error(err) => {
                 return Err(crate::Error::Server {
                     code: err.error_code,
@@ -117,7 +118,7 @@ where
             proof,
             operations,
             success_tx: tx,
-            pinned_nodes: None,
+            pinned_nodes,
         })
     }
 }

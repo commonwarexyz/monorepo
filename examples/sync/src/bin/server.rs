@@ -225,16 +225,29 @@ where
     );
 
     // Get the historical proof and operations
-    let result = database
+    let (proof, operations) = database
         .historical_proof(request.op_count, request.start_loc, max_ops)
-        .await;
+        .await
+        .map_err(|err| {
+            warn!(?err, "failed to generate historical proof");
+            Error::Database(err)
+        })?;
+
+    // Fetch pinned nodes if requested.
+    let pinned_nodes = if request.include_pinned_nodes {
+        let nodes = database
+            .pinned_nodes_at(request.start_loc)
+            .await
+            .map_err(|err| {
+                warn!(?err, "failed to get pinned nodes");
+                Error::Database(err)
+            })?;
+        Some(nodes)
+    } else {
+        None
+    };
 
     drop(db_opt);
-
-    let (proof, operations) = result.map_err(|err| {
-        warn!(?err, "failed to generate historical proof");
-        Error::Database(err)
-    })?;
 
     debug!(
         request_id = request.request_id,
@@ -247,6 +260,7 @@ where
         request_id: request.request_id,
         proof,
         operations,
+        pinned_nodes,
     })
 }
 

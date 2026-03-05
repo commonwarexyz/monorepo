@@ -78,6 +78,12 @@ pub trait Syncable: Sized {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
 
+    /// Get pinned nodes at the given boundary location.
+    fn pinned_nodes_at(
+        &self,
+        boundary: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send;
+
     /// Get the database type name for logging.
     fn name() -> &'static str;
 }

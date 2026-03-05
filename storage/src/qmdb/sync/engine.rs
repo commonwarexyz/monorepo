@@ -208,8 +208,8 @@ where
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end;
 
-        // Special case: If we don't have pinned nodes, we need to extract them from a proof
-        // for the lower sync bound.
+        // Special case: If we don't have pinned nodes, request them from the resolver alongside
+        // the first batch at the lower sync bound.
         if self.pinned_nodes.is_none() {
             let start_loc = self.target.range.start;
             let resolver = self.resolver.clone();
@@ -435,8 +435,15 @@ where
             // Use pinned nodes from the resolver if we don't have them yet and this
             // is the batch at the sync boundary.
             if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Some(nodes) = pinned_nodes {
-                    self.pinned_nodes = Some(nodes);
+                match pinned_nodes {
+                    Some(nodes) => self.pinned_nodes = Some(nodes),
+                    None if *start_loc > 0 => {
+                        return Err(SyncError::Engine(EngineError::PinnedNodes(
+                            "resolver did not provide pinned nodes for non-zero boundary"
+                                .to_string(),
+                        )));
+                    }
+                    None => {}
                 }
             }
 
