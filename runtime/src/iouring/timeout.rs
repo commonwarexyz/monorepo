@@ -153,20 +153,25 @@ impl TimeoutWheel {
 
     /// Compute a target timeout tick for `deadline`.
     ///
-    /// The computed target is based on the wheel's `current_tick` and clamped to
-    /// `[current_tick + 1, current_tick + max_timeout_ticks]`.
+    /// Returns:
+    /// - `None` if `deadline` is already expired in the current wheel tick domain.
+    /// - `Some(tick)` for schedulable deadlines, clamped to at most
+    ///   `current_tick + max_timeout_ticks`.
     ///
     /// This does not read wall-clock time, callers are expected to keep
     /// `current_tick` fresh by calling [`Self::advance`] each loop iteration.
-    pub fn target_tick(&self, deadline: Instant) -> Tick {
+    pub fn target_tick(&self, deadline: Instant) -> Option<Tick> {
         let deadline_nanos =
             Self::duration_to_nanos_saturating(deadline.saturating_duration_since(self.start));
         let deadline_tick = deadline_nanos.div_ceil(self.tick_nanos);
-        let min_tick = self.current_tick.saturating_add(1);
+        if deadline_tick <= self.current_tick {
+            return None;
+        }
+
         let max_tick = self
             .current_tick
             .saturating_add(self.max_timeout_nanos.div_ceil(self.tick_nanos));
-        deadline_tick.clamp(min_tick, max_tick)
+        Some(deadline_tick.min(max_tick))
     }
 
     /// Schedule `id` at `target_tick`.
@@ -540,19 +545,20 @@ mod tests {
             assert_eq!(tick, expected);
         }
 
-        // Past deadline clamps to one tick.
+        // Past deadline(s) are already expired.
         let past_deadline = start.checked_sub(Duration::from_millis(1)).unwrap_or(start);
-        assert_eq!(wheel.target_tick(past_deadline), 1);
+        assert_eq!(wheel.target_tick(past_deadline), None);
+        assert_eq!(wheel.target_tick(start), None);
 
         // Very far deadline clamps to max_timeout (100ms => 20 ticks at 5ms).
         let far_deadline = start + Duration::from_secs(10);
-        assert_eq!(wheel.target_tick(far_deadline), 20);
+        assert_eq!(wheel.target_tick(far_deadline), Some(20));
 
         // Target tick should be computed relative to current_tick after advances.
         assert!(advance(&mut wheel, 7).is_empty());
         let now = start + Duration::from_millis(35);
         let deadline = now + Duration::from_millis(12); // ceil(12/5)=3 ticks.
-        assert_eq!(wheel.target_tick(deadline), 10);
+        assert_eq!(wheel.target_tick(deadline), Some(10));
     }
 
     #[test]
@@ -587,7 +593,9 @@ mod tests {
 
         let now = wheel.start + Duration::from_millis(50); // tick 10
         let deadline = now + Duration::from_millis(10); // +2 ticks => tick 12
-        let target_tick = wheel.target_tick(deadline);
+        let target_tick = wheel
+            .target_tick(deadline)
+            .expect("deadline should be schedulable");
         assert_eq!(target_tick, 12);
         wheel.schedule(WaiterId::new(1, 0), target_tick);
         assert!(advance(&mut wheel, 11).is_empty());

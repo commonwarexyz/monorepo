@@ -59,7 +59,8 @@
 //!
 //! Operations can optionally carry an absolute deadline via [Op::deadline]. When present:
 //! - The loop tracks deadline ticks in a userspace timing wheel
-//! - Expired operations submit an async-cancel SQE
+//! - Already-expired operations complete immediately with `ETIMEDOUT` before SQE submission
+//! - In-flight operations that expire submit an async-cancel SQE
 //! - A timed-out waiter is removed only after both original-op and cancel CQEs arrive
 //! - If the original op CQE result is `ECANCELED`, the caller sees `ETIMEDOUT`
 //! - If the original op CQE result arrives before cancel completion, that original
@@ -570,7 +571,15 @@ impl IoUringLoop {
                     advanced = true;
                 }
 
-                Some(self.timeout_wheel.target_tick(deadline))
+                match self.timeout_wheel.target_tick(deadline) {
+                    Some(target_tick) => Some(target_tick),
+                    None => {
+                        // Deadline already expired before this operation reached staging.
+                        // Return result immediately to caller.
+                        let _ = sender.send((-libc::ETIMEDOUT, buffer));
+                        continue;
+                    }
+                }
             } else {
                 None
             };
@@ -965,6 +974,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fill_submission_queue_expired_deadline_completes_immediately() {
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+        let mut pending_cancels = VecDeque::new();
+
+        // Keep this test focused on operation staging, not wake rearm behavior.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        let past_deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+
+        submitter
+            .send(Op {
+                work: opcode::Nop::new().build(),
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: Some(past_deadline),
+            })
+            .await
+            .expect("failed to enqueue op");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring, &mut pending_cancels)
+            .expect("channel should remain connected");
+
+        assert!(!at_capacity);
+        assert!(pending_cancels.is_empty());
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+
+        let (result, buffer) = rx.await.expect("missing timeout completion");
+        assert_eq!(result, -libc::ETIMEDOUT);
+        assert!(buffer.is_none());
+    }
+
+    #[tokio::test]
     async fn test_timeout_slot_reuse_does_not_cancel_new_waiter_early() {
         let cfg = Config {
             // Keep ring size realistic; size=1 can deadlock progress in some setups.
@@ -978,8 +1029,8 @@ mod tests {
         let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
         let handle = std::thread::spawn(move || iouring.run());
 
-        // First operation completes quickly but still carries a deadline, leaving a stale
-        // timeout entry that should be ignored later after slot reuse.
+        // First operation completes quickly but still carries a generous deadline,
+        // leaving a stale timeout entry that should be ignored later after slot reuse.
         let (tx1, rx1) = oneshot::channel();
         submitter
             .send(Op {
@@ -988,7 +1039,7 @@ mod tests {
                 buffer: None,
                 fd: None,
                 iovecs: None,
-                deadline: Some(Instant::now() + Duration::from_millis(15)),
+                deadline: Some(Instant::now() + Duration::from_millis(200)),
             })
             .await
             .expect("failed to submit first operation");
