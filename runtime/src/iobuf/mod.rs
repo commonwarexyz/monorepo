@@ -123,7 +123,7 @@ impl IoBuf {
             return Self::default();
         }
 
-        if at == self.len() {
+        if at == self.remaining() {
             return std::mem::take(self);
         }
 
