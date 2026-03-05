@@ -96,6 +96,8 @@ impl<B: Blob> Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
+        // Keep the zero-length fast path after the bounds check so offset > size still preserves
+        // the BlobInsufficientLength contract.
         if len == 0 {
             return Ok(IoBufs::default());
         }
