@@ -304,6 +304,9 @@ impl<D: Digest> CleanMmr<D> {
             return Err(Error::LeafOutOfBounds(loc));
         }
         let pos = Position::try_from(loc)?;
+        if pos <= self.pruned_to_pos {
+            return Ok(());
+        }
         self.prune_to_pos(pos);
         Ok(())
     }
@@ -1554,6 +1557,29 @@ mod tests {
             // location < leaves should succeed
             let result = mmr.proof(Location::new(9));
             assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        });
+    }
+
+    #[test]
+    fn test_mem_mmr_prune_backward_returns_ok() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
+
+            // Prune to location 50
+            mmr.prune(Location::new(50)).unwrap();
+            assert_eq!(mmr.bounds().start, Location::new(50));
+
+            // Pruning backward (to a location before current boundary) should return Ok
+            assert!(mmr.prune(Location::new(25)).is_ok());
+            assert!(mmr.prune(Location::new(0)).is_ok());
+            assert!(mmr.prune(Location::new(50)).is_ok());
+
+            // Bounds should be unchanged
+            assert_eq!(mmr.bounds().start, Location::new(50));
         });
     }
 }
