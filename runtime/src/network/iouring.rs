@@ -364,14 +364,19 @@ impl Sink {
                 continue;
             }
 
-            // Non-positive result indicates an error or EOF.
-            let op_bytes_sent: usize = return_value.try_into().map_err(|_| Error::SendFailed)?;
-            if op_bytes_sent == 0 {
-                return Err(Error::SendFailed);
+            // Retryable error paths are handled above. From here:
+            // - ETIMEDOUT maps to caller-visible timeout
+            // - any other negative or zero result is treated as send failure
+            if return_value <= 0 {
+                if return_value == -libc::ETIMEDOUT {
+                    return Err(Error::Timeout);
+                } else {
+                    return Err(Error::SendFailed);
+                };
             }
 
             // Mark bytes as sent.
-            bytes_sent += op_bytes_sent;
+            bytes_sent += return_value as usize;
         }
 
         Ok(())
@@ -449,13 +454,18 @@ impl Sink {
                 continue;
             }
 
-            // A negative or zero return value indicates an error.
-            let op_bytes_sent: usize = return_value.try_into().map_err(|_| Error::SendFailed)?;
-            if op_bytes_sent == 0 {
-                return Err(Error::SendFailed);
+            // Retryable error paths are handled above. From here:
+            // - ETIMEDOUT maps to caller-visible timeout
+            // - any other negative or zero result is treated as send failure
+            if return_value <= 0 {
+                if return_value == -libc::ETIMEDOUT {
+                    return Err(Error::Timeout);
+                } else {
+                    return Err(Error::SendFailed);
+                };
             }
 
-            bufs.advance(op_bytes_sent);
+            bufs.advance(return_value as usize);
         }
 
         Ok(())
@@ -562,11 +572,13 @@ impl Stream {
                 Some(OpBuffer::Read(b)) => b,
                 _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
-
             if should_retry(return_value) {
                 continue;
             }
 
+            // Retryable error paths are handled above. From here:
+            // - ETIMEDOUT maps to caller-visible timeout
+            // - any other negative or zero result is treated as recv failure
             if return_value <= 0 {
                 let err = if return_value == -libc::ETIMEDOUT {
                     Error::Timeout
