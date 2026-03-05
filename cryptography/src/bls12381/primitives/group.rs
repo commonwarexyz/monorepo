@@ -564,7 +564,7 @@ impl Scalar {
         Self(fr)
     }
 
-    /// Creates a new scalar from the given limbs in little-endian represention.
+    /// Creates a new scalar from the given limbs in little-endian representation.
     ///
     /// The limbs represent an integer `l[0] + l[1]*2^64 + l[2]*2^128 + l[3]*2^192`, which is then
     /// converted into [`blst_fr`]'s internal Montgomery form.
