@@ -65,7 +65,11 @@
 //!     * On failure: set `t_l` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
+//! * Construct `nullification(v)`
+//!
+//! Upon constructing or receiving the first `nullification(v)`:
 //! * Set `t_l` and `t_a` to `None`
+//! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
