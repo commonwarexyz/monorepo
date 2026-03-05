@@ -168,7 +168,11 @@ stability_scope!(ALPHA {
             _snapshot: Self::Snapshot,
             _message: <Self::Ingress as IntoIngressEnvelope>::ReadOnlyIngress,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            futures::future::pending()
+            async {
+                panic!(
+                    "Actor::on_read_only must be implemented when read-write ingress is dispatched"
+                )
+            }
         }
 
         /// Handle one ingress message that may mutate actor state.
@@ -186,7 +190,11 @@ stability_scope!(ALPHA {
             _args: &mut Self::Args,
             _message: <Self::Ingress as IntoIngressEnvelope>::ReadWriteIngress,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            futures::future::pending()
+            async {
+                panic!(
+                    "Actor::on_read_write must be implemented when read-write ingress is dispatched"
+                )
+            }
         }
 
         /// Poll high-priority external per-iteration sources and map them to
