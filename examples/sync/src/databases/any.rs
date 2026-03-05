@@ -130,7 +130,18 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        let mut hasher = commonware_storage::mmr::StandardHasher::<Hasher>::new();
+        async move {
+            self.historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                .await
+        }
+    }
+
+    async fn pinned_nodes_at(
+        &self,
+        boundary: Location,
+    ) -> Result<Vec<Key>, commonware_storage::qmdb::Error> {
+        self.pinned_nodes_at(boundary).await
     }
 
     fn name() -> &'static str {

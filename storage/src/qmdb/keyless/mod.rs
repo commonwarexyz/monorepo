@@ -191,10 +191,11 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     ///  2. the operations corresponding to the leaves in this range.
     pub async fn proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        self.historical_proof(self.size().await, start_loc, max_ops)
+        self.historical_proof(hasher, self.size().await, start_loc, max_ops)
             .await
     }
 
@@ -209,13 +210,14 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     ///   number of operations.
     pub async fn historical_proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops)
+            .historical_proof(hasher, op_count, start_loc, max_ops)
             .await?)
     }
 
@@ -330,6 +332,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
     for Keyless<E, V, H, Merkleized<H>, Durable>
 {
     type Digest = H::Digest;
+    type Hasher = H;
     type Operation = Operation<V>;
 
     fn root(&self) -> Self::Digest {
@@ -338,14 +341,19 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
 
     async fn historical_proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
         Ok(self
             .journal
-            .historical_proof(historical_size, start_loc, max_ops)
+            .historical_proof(hasher, historical_size, start_loc, max_ops)
             .await?)
+    }
+
+    async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<Self::Digest>, Error> {
+        Ok(self.journal.pinned_nodes_at(boundary).await?)
     }
 }
 
@@ -728,7 +736,7 @@ mod test {
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
-                db.historical_proof(db.bounds().await.end + 1, Location::new(5), NZU64!(10))
+                db.historical_proof(&mut hasher, db.bounds().await.end + 1, Location::new(5), NZU64!(10))
                     .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
@@ -747,7 +755,7 @@ mod test {
             ];
 
             for (start_loc, max_ops) in test_cases {
-                let (proof, ops) = db.proof(Location::new(start_loc), NZU64!(max_ops)).await.unwrap();
+                let (proof, ops) = db.proof(&mut hasher, Location::new(start_loc), NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof
                 assert!(
@@ -887,7 +895,7 @@ mod test {
                     continue;
                 }
 
-                let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops) = db.proof(&mut hasher, start_loc, NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof still works
                 assert!(
@@ -913,7 +921,7 @@ mod test {
             assert!(new_oldest <= AGGRESSIVE_PRUNE);
 
             // Can still generate proofs for the remaining data
-            let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
+            let (proof, ops) = db.proof(&mut hasher, new_oldest, NZU64!(20)).await.unwrap();
             assert!(
                 verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
                 "Proof should still verify after aggressive pruning"
@@ -928,7 +936,7 @@ mod test {
 
             // Should still be able to prove the remaining operations
             if final_oldest < bounds.end {
-                let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
+                let (final_proof, final_ops) = db.proof(&mut hasher, final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"
@@ -1123,7 +1131,7 @@ mod test {
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {
         assert_log_store(db);
-        assert_merkleized_store(db, loc);
+        assert_merkleized_store(db, &mut crate::mmr::StandardHasher::<Sha256>::new(), loc);
         assert_send(db.sync());
         assert_send(db.get(loc));
     }

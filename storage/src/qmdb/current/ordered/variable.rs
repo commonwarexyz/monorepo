@@ -786,7 +786,7 @@ mod test {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
+        assert_merkleized_store(db, &mut crate::mmr::StandardHasher::<Sha256>::new(), loc);
         assert_send(db.sync());
     }
 

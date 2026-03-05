@@ -228,7 +228,7 @@ fn fuzz(input: FuzzInput) {
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc);
                     let root = merkleized_db.root();
-                    if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
+                    if let Ok((proof, ops)) = merkleized_db.proof(&mut hasher, start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
@@ -254,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let root = merkleized_db.root();
                     if let Ok((proof, ops)) = merkleized_db
-                        .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
+                        .historical_proof(&mut hasher, op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),

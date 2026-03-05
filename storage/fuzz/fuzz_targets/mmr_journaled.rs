@@ -227,7 +227,7 @@ fn fuzz(input: FuzzInput) {
                         if bounds.contains(&position) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                            if let Ok(proof) = mmr.proof(location).await {
+                            if let Ok(proof) = mmr.proof(&mut hasher, location).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
@@ -262,7 +262,7 @@ fn fuzz(input: FuzzInput) {
                             && end_loc < mmr.leaves()
                             && mmr.bounds().contains(&start_pos)
                         {
-                            if let Ok(proof) = mmr.range_proof(range.clone()).await {
+                            if let Ok(proof) = mmr.range_proof(&mut hasher, range.clone()).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_range_inclusion(
                                     &mut hasher,
@@ -296,7 +296,7 @@ fn fuzz(input: FuzzInput) {
                     match mmr {
                         MmrState::Clean(mmr) => {
                             let result = mmr
-                                .historical_range_proof(requested_leaves, range.clone())
+                                .historical_range_proof(&mut hasher, requested_leaves, range.clone())
                                 .await;
                             match result {
                                 Ok(historical_proof) => {
@@ -324,13 +324,13 @@ fn fuzz(input: FuzzInput) {
                         }
                         MmrState::Dirty(mmr) => {
                             let result = mmr
-                                .historical_range_proof(requested_leaves, range.clone())
+                                .historical_range_proof(&mut hasher, requested_leaves, range.clone())
                                 .await;
                             match result {
                                 Err(Error::Unmerkleized) => {
                                     let clean = mmr.merkleize(&mut hasher);
                                     match clean
-                                        .historical_range_proof(requested_leaves, range.clone())
+                                        .historical_range_proof(&mut hasher, requested_leaves, range.clone())
                                         .await
                                     {
                                         Ok(historical_proof) => {

@@ -64,7 +64,7 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
     fn into_log_components(self) -> (Self::Mmr, Self::Journal);
 
     /// Get the pinned nodes at a given position
-    fn pinned_nodes_at(
+    fn test_pinned_nodes_at(
         &self,
         pos: Position,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
@@ -1138,7 +1138,7 @@ where
         let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
 
         let pinned_nodes = db
-            .pinned_nodes_at(Position::try_from(db.inactivity_floor_loc().await).unwrap())
+            .test_pinned_nodes_at(Position::try_from(db.inactivity_floor_loc().await).unwrap())
             .await;
         let (_, journal) = db.into_log_components();
 
@@ -1274,7 +1274,7 @@ where
 
         // Get pinned nodes and target hash before deconstructing source_db
         let pinned_nodes = source_db
-            .pinned_nodes_at(Position::try_from(lower_bound).unwrap())
+            .test_pinned_nodes_at(Position::try_from(lower_bound).unwrap())
             .await;
         let target_hash = MerkleizedStore::root(&source_db);
         let target_op_count = source_db.bounds().await.end;

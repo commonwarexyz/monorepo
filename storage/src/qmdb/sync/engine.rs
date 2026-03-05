@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    mmr::{Location, StandardHasher},
+    mmr::{iterator::nodes_to_pin, Location, Position, StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -208,8 +208,8 @@ where
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end;
 
-        // Special case: If we don't have pinned nodes, we need to extract them from a proof
-        // for the lower sync bound.
+        // Special case: If we don't have pinned nodes, request them from the resolver alongside
+        // the first batch at the lower sync bound.
         if self.pinned_nodes.is_none() {
             let start_loc = self.target.range.start;
             let resolver = self.resolver.clone();
@@ -217,7 +217,7 @@ where
                 start_loc,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .get_operations(target_size, start_loc, NZU64!(1), true)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -260,7 +260,7 @@ where
                 gap_range.start,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size)
+                        .get_operations(target_size, gap_range.start, batch_size, false)
                         .await;
                     IndexedFetchResult {
                         start_loc: gap_range.start,
@@ -407,6 +407,7 @@ where
             proof,
             operations,
             success_tx,
+            pinned_nodes,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -431,12 +432,36 @@ where
         let _ = success_tx.send(proof_valid);
 
         if proof_valid {
-            // Extract pinned nodes if we don't have them and this is the first batch
+            // Use pinned nodes from the resolver if we don't have them yet and this
+            // is the batch at the sync boundary.
             if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
-                    crate::qmdb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
-                    self.pinned_nodes = Some(nodes);
+                match pinned_nodes {
+                    Some(nodes) => {
+                        let expected = match Position::try_from(start_loc) {
+                            Ok(pos) => nodes_to_pin(pos).count(),
+                            Err(_) => {
+                                return Err(SyncError::Engine(EngineError::PinnedNodes(
+                                    format!("invalid boundary location: {start_loc}"),
+                                )));
+                            }
+                        };
+                        if nodes.len() != expected {
+                            return Err(SyncError::Engine(EngineError::PinnedNodes(
+                                format!(
+                                    "expected {expected} pinned nodes, got {}",
+                                    nodes.len()
+                                ),
+                            )));
+                        }
+                        self.pinned_nodes = Some(nodes);
+                    }
+                    None if *start_loc > 0 => {
+                        return Err(SyncError::Engine(EngineError::PinnedNodes(
+                            "resolver did not provide pinned nodes for non-zero boundary"
+                                .to_string(),
+                        )));
+                    }
+                    None => {}
                 }
             }
 
@@ -559,6 +584,7 @@ mod tests {
                     },
                     operations: vec![],
                     success_tx: oneshot::channel().0,
+                    pinned_nodes: None,
                 }),
             }
         });

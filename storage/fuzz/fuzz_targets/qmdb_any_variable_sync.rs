@@ -221,7 +221,9 @@ fn fuzz(input: FuzzInput) {
                     let op_count = clean_db.bounds().await.end;
                     let oldest_retained_loc = clean_db.inactivity_floor_loc();
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
-                        if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
+                        if let Ok((proof, log)) =
+                            clean_db.proof(&mut hasher, *start_loc, *max_ops).await
+                        {
                             let root = clean_db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
@@ -252,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Ok((proof, log)) = clean_db
-                        .historical_proof(op_count, *start_loc, *max_ops)
+                        .historical_proof(&mut hasher, op_count, *start_loc, *max_ops)
                         .await
                     {
                         let root = historical_roots

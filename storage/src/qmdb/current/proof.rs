@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
+    mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof, StandardHasher},
     qmdb::{current::grafting, Error},
 };
 use commonware_codec::Codec;
@@ -40,7 +40,8 @@ impl<D: Digest> RangeProof<D> {
         range: Range<Location>,
         ops_root: D,
     ) -> Result<Self, Error> {
-        let proof = verification::range_proof(storage, range).await?;
+        let proof =
+            verification::range_proof(&mut StandardHasher::<H>::new(), storage, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {

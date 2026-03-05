@@ -25,7 +25,7 @@ use commonware_storage::{
         any::unordered::{fixed::Operation as FixedOperation, Update},
         current::{self, FixedConfig as Config},
         operation::Committable,
-        store::LogStore,
+        store::{LogStore, MerkleizedStore},
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -141,7 +141,15 @@ where
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         // Return ops-level proofs (not grafted proofs) for the sync engine.
-        self.ops_historical_proof(op_count, start_loc, max_ops)
+        let mut hasher = commonware_storage::mmr::StandardHasher::<Hasher>::new();
+        async move {
+            self.ops_historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                .await
+        }
+    }
+
+    async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<Key>, qmdb::Error> {
+        MerkleizedStore::pinned_nodes_at(self, boundary).await
     }
 
     fn name() -> &'static str {

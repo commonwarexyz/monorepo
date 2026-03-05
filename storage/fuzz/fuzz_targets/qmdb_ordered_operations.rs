@@ -168,7 +168,7 @@ fn fuzz(data: FuzzInput) {
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count);
                         let (proof, log) = clean_db
-                            .proof(adjusted_start, *max_ops)
+                            .proof(&mut hasher, adjusted_start, *max_ops)
                             .await
                             .expect("proof should not fail");
 
@@ -205,7 +205,7 @@ fn fuzz(data: FuzzInput) {
                         let adjusted_start = Location::new(*start_loc % *actual_op_count);
 
                         if let Ok(res) = clean_db
-                            .proof(adjusted_start, *max_ops)
+                            .proof(&mut hasher, adjusted_start, *max_ops)
                             .await {
                                 let _ = verify_proof(
                                     &mut hasher,

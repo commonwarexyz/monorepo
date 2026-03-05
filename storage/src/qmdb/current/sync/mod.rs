@@ -498,15 +498,23 @@ macro_rules! impl_current_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, Self::Error> {
-                self.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await
-                    .map(|(proof, operations)| crate::qmdb::sync::FetchResult {
-                        proof,
-                        operations,
-                        success_tx: commonware_utils::channel::oneshot::channel().0,
-                    })
+                let mut hasher = crate::mmr::StandardHasher::<H>::new();
+                let (proof, operations) = self.any
+                    .historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                    .await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.any.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(crate::qmdb::sync::FetchResult {
+                    proof,
+                    operations,
+                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
 
@@ -534,16 +542,24 @@ macro_rules! impl_current_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
-                db.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await
-                    .map(|(proof, operations)| crate::qmdb::sync::FetchResult {
-                        proof,
-                        operations,
-                        success_tx: commonware_utils::channel::oneshot::channel().0,
-                    })
+                let mut hasher = crate::mmr::StandardHasher::<H>::new();
+                let (proof, operations) = db.any
+                    .historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                    .await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.any.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(crate::qmdb::sync::FetchResult {
+                    proof,
+                    operations,
+                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
 
@@ -571,17 +587,25 @@ macro_rules! impl_current_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                db.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await
-                    .map(|(proof, operations)| crate::qmdb::sync::FetchResult {
-                        proof,
-                        operations,
-                        success_tx: commonware_utils::channel::oneshot::channel().0,
-                    })
+                let mut hasher = crate::mmr::StandardHasher::<H>::new();
+                let (proof, operations) = db.any
+                    .historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                    .await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.any.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(crate::qmdb::sync::FetchResult {
+                    proof,
+                    operations,
+                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
     };
