@@ -351,7 +351,7 @@ where
         let cache = self.caches.get(&round.epoch())?;
         let notarization = cache
             .notarizations
-            .get_multi(&digest)
+            .get(Identifier::Key(&digest))
             .await
             .expect("failed to get notarization")?;
         if notarization.round() == round {
@@ -389,7 +389,7 @@ where
             // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
-                .get_multi(&digest)
+                .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get verified block")
             {
@@ -399,7 +399,7 @@ where
             // Check notarized blocks
             if let Some(block) = cache
                 .notarized_blocks
-                .get_multi(&digest)
+                .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
             {
