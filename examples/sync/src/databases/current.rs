@@ -141,7 +141,11 @@ where
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         // Return ops-level proofs (not grafted proofs) for the sync engine.
-        self.ops_historical_proof(op_count, start_loc, max_ops)
+        let mut hasher = commonware_storage::mmr::StandardHasher::<Hasher>::new();
+        async move {
+            self.ops_historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                .await
+        }
     }
 
     fn name() -> &'static str {

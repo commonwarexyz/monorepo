@@ -283,12 +283,13 @@ where
     /// suitable for state sync.
     pub async fn ops_historical_proof(
         &self,
+        hasher: &mut mmr::StandardHasher<H>,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
         self.any
-            .historical_proof(historical_size, start_loc, max_ops)
+            .historical_proof(hasher, historical_size, start_loc, max_ops)
             .await
     }
 
@@ -676,6 +677,7 @@ where
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
+    type Hasher = H;
     type Operation = Operation<K, V, U>;
 
     fn root(&self) -> H::Digest {
@@ -684,13 +686,18 @@ where
 
     async fn historical_proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
         self.any
-            .historical_proof(historical_size, start_loc, max_ops)
+            .historical_proof(hasher, historical_size, start_loc, max_ops)
             .await
+    }
+
+    async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<Self::Digest>, Error> {
+        self.any.pinned_nodes_at(boundary).await
     }
 }
 

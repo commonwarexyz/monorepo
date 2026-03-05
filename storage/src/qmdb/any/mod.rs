@@ -494,7 +494,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest, Hasher = Sha256>,
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as MerkleizedStore>::Operation: Codec,
     {
@@ -563,7 +563,7 @@ pub(crate) mod test {
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
-            let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
+            let (proof, ops) = db.proof(&mut hasher, loc, NZU64!(10)).await.unwrap();
             assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
         }
 
@@ -612,7 +612,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest, Hasher = Sha256>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -633,18 +633,18 @@ pub(crate) mod test {
         let original_op_count = db.size().await;
 
         // Historical proof should match "regular" proof when historical size == current database size
+        let mut hasher = StandardHasher::<Sha256>::new();
         let max_ops = NZU64!(10);
         let start_loc = Location::new(5);
         let (historical_proof, historical_ops) = db
-            .historical_proof(original_op_count, start_loc, max_ops)
+            .historical_proof(&mut hasher, original_op_count, start_loc, max_ops)
             .await
             .unwrap();
-        let (regular_proof, regular_ops) = db.proof(start_loc, max_ops).await.unwrap();
+        let (regular_proof, regular_ops) = db.proof(&mut hasher, start_loc, max_ops).await.unwrap();
 
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let mut hasher = StandardHasher::<Sha256>::new();
         assert!(verify_proof(
             &mut hasher,
             &historical_proof,
@@ -665,7 +665,7 @@ pub(crate) mod test {
 
         // Historical proof should remain the same even though database has grown
         let (historical_proof2, historical_ops2) = db
-            .historical_proof(original_op_count, start_loc, max_ops)
+            .historical_proof(&mut hasher, original_op_count, start_loc, max_ops)
             .await
             .unwrap();
         assert_eq!(historical_proof2.leaves, original_op_count);
@@ -688,7 +688,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest, Hasher = Sha256>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -705,15 +705,19 @@ pub(crate) mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
 
+        let mut hasher = StandardHasher::<Sha256>::new();
         let historical_op_count = Location::new(5);
         let (proof, ops) = db
-            .historical_proof(historical_op_count, Location::new(1), NZU64!(10))
+            .historical_proof(
+                &mut hasher,
+                historical_op_count,
+                Location::new(1),
+                NZU64!(10),
+            )
             .await
             .unwrap();
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), 4);
-
-        let mut hasher = StandardHasher::<Sha256>::new();
 
         // Changing the proof digests should cause verification to fail
         {
@@ -821,7 +825,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest, Hasher = Sha256>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
@@ -837,9 +841,11 @@ pub(crate) mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
 
+        let mut hasher = crate::mmr::StandardHasher::<Sha256>::new();
+
         // Test singleton database (historical size = 2 means 1 op after initial commit)
         let (single_proof, single_ops) = db
-            .historical_proof(Location::new(2), Location::new(1), NZU64!(1))
+            .historical_proof(&mut hasher, Location::new(2), Location::new(1), NZU64!(1))
             .await
             .unwrap();
         assert_eq!(single_proof.leaves, Location::new(2));
@@ -847,14 +853,14 @@ pub(crate) mod test {
 
         // Test requesting more operations than available in historical position
         let (_limited_proof, limited_ops) = db
-            .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+            .historical_proof(&mut hasher, Location::new(11), Location::new(6), NZU64!(20))
             .await
             .unwrap();
         assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
 
         // Test proof at minimum historical position
         let (min_proof, min_ops) = db
-            .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+            .historical_proof(&mut hasher, Location::new(4), Location::new(1), NZU64!(3))
             .await
             .unwrap();
         assert_eq!(min_proof.leaves, Location::new(4));

@@ -209,14 +209,19 @@ impl<
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops)
+            .historical_proof(hasher, op_count, start_loc, max_ops)
             .await?)
+    }
+
+    pub async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<H::Digest>, Error> {
+        Ok(self.journal.pinned_nodes_at(boundary).await?)
     }
 
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
@@ -253,11 +258,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     ///  2. the operations corresponding to the leaves in this range.
     pub async fn proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let op_count = self.bounds().await.end;
-        self.historical_proof(op_count, start_index, max_ops).await
+        self.historical_proof(hasher, op_count, start_index, max_ops)
+            .await
     }
 
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -501,6 +508,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
     type Digest = H::Digest;
+    type Hasher = H;
     type Operation = Operation<K, V>;
 
     fn root(&self) -> Self::Digest {
@@ -509,12 +517,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     async fn historical_proof(
         &self,
+        hasher: &mut crate::mmr::StandardHasher<H>,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.historical_proof(historical_size, start_loc, max_ops)
+        self.historical_proof(hasher, historical_size, start_loc, max_ops)
             .await
+    }
+
+    async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<Self::Digest>, Error> {
+        Ok(self.journal.pinned_nodes_at(boundary).await?)
     }
 }
 
@@ -703,7 +716,10 @@ pub(super) mod test {
             // end.
             let max_ops = NZU64!(5);
             for i in 0..*db.bounds().await.end {
-                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
+                let (proof, log) = db
+                    .proof(&mut hasher, Location::new(i), max_ops)
+                    .await
+                    .unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
@@ -899,8 +915,10 @@ pub(super) mod test {
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
+            let mut hasher = StandardHasher::<Sha256>::new();
             let proof_result = db
                 .proof(
+                    &mut hasher,
                     Location::new(pruned_pos),
                     NZU64!(pruned_pos + 100),
                 )
@@ -982,7 +1000,7 @@ pub(super) mod test {
     fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_merkleized_store(db, loc);
+        assert_merkleized_store(db, &mut crate::mmr::StandardHasher::<Sha256>::new(), loc);
         assert_send(db.sync());
     }
 

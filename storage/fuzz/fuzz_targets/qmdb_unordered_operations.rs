@@ -147,7 +147,7 @@ fn fuzz(data: FuzzInput) {
                     let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                     let (proof, log) = clean_db
-                        .proof(adjusted_start, NZU64!(adjusted_max_ops))
+                        .proof(&mut hasher, adjusted_start, NZU64!(adjusted_max_ops))
                         .await
                         .expect("proof should not fail");
 

@@ -81,6 +81,7 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
+        _include_pinned_nodes: bool,
     ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
@@ -116,6 +117,7 @@ where
             proof,
             operations,
             success_tx: tx,
+            pinned_nodes: None,
         })
     }
 }

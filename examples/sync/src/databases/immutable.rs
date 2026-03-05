@@ -137,7 +137,11 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        let mut hasher = commonware_storage::mmr::StandardHasher::<Hasher>::new();
+        async move {
+            self.historical_proof(&mut hasher, op_count, start_loc, max_ops)
+                .await
+        }
     }
 
     fn name() -> &'static str {

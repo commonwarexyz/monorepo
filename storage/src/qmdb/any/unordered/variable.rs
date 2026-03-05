@@ -477,7 +477,7 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+            async fn test_pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
                 join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
@@ -517,7 +517,7 @@ pub(crate) mod test {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
+        assert_merkleized_store(db, &mut crate::mmr::StandardHasher::<Sha256>::new(), loc);
         assert_send(db.sync());
     }
 

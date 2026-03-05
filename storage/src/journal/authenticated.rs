@@ -11,6 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
+        iterator::nodes_to_pin,
         journaled::{CleanMmr, DirtyMmr, Mmr, State},
         mem::{Clean, Dirty},
         Error as MmrError, Location, Position, Proof, StandardHasher,
@@ -211,10 +212,11 @@ where
     ///   pruned.
     pub async fn proof(
         &self,
+        hasher: &mut StandardHasher<H>,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        self.historical_proof(self.size().await, start_loc, max_ops)
+        self.historical_proof(hasher, self.size().await, start_loc, max_ops)
             .await
     }
 
@@ -232,6 +234,7 @@ where
     ///   pruned.
     pub async fn historical_proof(
         &self,
+        hasher: &mut StandardHasher<H>,
         historical_leaves: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
@@ -251,7 +254,7 @@ where
 
         let proof = self
             .mmr
-            .historical_range_proof(historical_leaves, start_loc..end_loc)
+            .historical_range_proof(hasher, historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -269,6 +272,25 @@ where
     /// Return the root of the MMR.
     pub fn root(&self) -> H::Digest {
         self.mmr.root()
+    }
+
+    /// Return the digests of the pinned nodes at the given boundary location.
+    ///
+    /// Returns the digests in the same order as `nodes_to_pin` for the position corresponding to
+    /// `boundary`.
+    pub async fn pinned_nodes_at(&self, boundary: Location) -> Result<Vec<H::Digest>, Error> {
+        let pos = Position::try_from(boundary)?;
+        let mut result = Vec::new();
+        for p in nodes_to_pin(pos) {
+            let digest = self
+                .mmr
+                .get_node(p)
+                .await?
+                .ok_or(MmrError::ElementPruned(p))?;
+            result.push(digest);
+        }
+
+        Ok(result)
     }
 
     /// Convert this journal into its dirty counterpart for batched updates.
@@ -1429,7 +1451,11 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_multi", 50).await;
 
-            let (proof, ops) = journal.proof(Location::new(0), NZU64!(50)).await.unwrap();
+            let mut hasher = StandardHasher::new();
+            let (proof, ops) = journal
+                .proof(&mut hasher, Location::new(0), NZU64!(50))
+                .await
+                .unwrap();
 
             assert_eq!(ops.len(), 50);
             for (i, op) in ops.iter().enumerate() {
@@ -1437,7 +1463,6 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
             let root = journal.root();
             assert!(verify_proof(
                 &proof,
@@ -1456,9 +1481,10 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_limit", 50).await;
 
+            let mut hasher = StandardHasher::new();
             let size = journal.size().await;
             let (proof, ops) = journal
-                .historical_proof(size, Location::new(0), NZU64!(20))
+                .historical_proof(&mut hasher, size, Location::new(0), NZU64!(20))
                 .await
                 .unwrap();
 
@@ -1469,7 +1495,6 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
             let root = journal.root();
             assert!(verify_proof(
                 &proof,
@@ -1488,10 +1513,11 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_end", 50).await;
 
+            let mut hasher = StandardHasher::new();
             let size = journal.size().await;
             // Request proof starting near the end
             let (proof, ops) = journal
-                .historical_proof(size, Location::new(40), NZU64!(20))
+                .historical_proof(&mut hasher, size, Location::new(40), NZU64!(20))
                 .await
                 .unwrap();
 
@@ -1502,7 +1528,6 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
             let root = journal.root();
             assert!(verify_proof(
                 &proof,
@@ -1522,8 +1547,9 @@ mod tests {
             let journal = create_journal_with_ops(context, "proof_oob", 5).await;
 
             // Request proof with size > actual journal size
+            let mut hasher = StandardHasher::new();
             let result = journal
-                .historical_proof(Location::new(10), Location::new(0), NZU64!(1))
+                .historical_proof(&mut hasher, Location::new(10), Location::new(0), NZU64!(1))
                 .await;
 
             assert!(matches!(
@@ -1540,9 +1566,12 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_start_oob", 5).await;
 
+            let mut hasher = StandardHasher::new();
             let size = journal.size().await;
             // Request proof starting at size (should fail)
-            let result = journal.historical_proof(size, size, NZU64!(1)).await;
+            let result = journal
+                .historical_proof(&mut hasher, size, size, NZU64!(1))
+                .await;
 
             assert!(matches!(
                 result,
@@ -1574,7 +1603,7 @@ mod tests {
 
             // Generate proof for the historical state
             let (proof, ops) = journal
-                .historical_proof(historical_size, Location::new(0), NZU64!(50))
+                .historical_proof(&mut hasher, historical_size, Location::new(0), NZU64!(50))
                 .await
                 .unwrap();
 
@@ -1612,10 +1641,13 @@ mod tests {
             let pruned_boundary = journal.prune(Location::new(25)).await.unwrap();
 
             // Try to get proof starting at a location before the pruned boundary
+            let mut hasher = StandardHasher::new();
             let size = journal.size().await;
             let start_loc = Location::new(0);
             if start_loc < pruned_boundary {
-                let result = journal.historical_proof(size, start_loc, NZU64!(1)).await;
+                let result = journal
+                    .historical_proof(&mut hasher, size, start_loc, NZU64!(1))
+                    .await;
 
                 // Should fail when trying to read pruned operations
                 assert!(result.is_err());

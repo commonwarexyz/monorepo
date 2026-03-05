@@ -195,8 +195,9 @@ fn fuzz(input: FuzzInput) {
                         last_commit_loc = Some(durable_db.bounds().await.end - 1);
                         uncommitted_ops.clear();
                         let merkleized_db = durable_db.into_merkleized();
-                        if let Ok((proof, ops)) =
-                            merkleized_db.proof(safe_start, safe_max_ops).await
+                        if let Ok((proof, ops)) = merkleized_db
+                            .proof(&mut hasher, safe_start, safe_max_ops)
+                            .await
                         {
                             let root = merkleized_db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
@@ -222,7 +223,7 @@ fn fuzz(input: FuzzInput) {
                         let merkleized_db = db.into_merkleized();
                         if safe_start >= merkleized_db.bounds().await.start {
                             let _ = merkleized_db
-                                .historical_proof(safe_size, safe_start, safe_max_ops)
+                                .historical_proof(&mut hasher, safe_size, safe_start, safe_max_ops)
                                 .await;
                         }
                         db = merkleized_db.into_mutable();

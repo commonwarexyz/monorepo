@@ -56,8 +56,12 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Return a range proof for the nodes corresponding to the given location range.
-    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
-        range_proof(self, range).await
+    pub async fn range_proof<H: Hasher<Digest = D>>(
+        &self,
+        hasher: &mut H,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        range_proof(hasher, self, range).await
     }
 
     /// Return a multi proof for the elements corresponding to the given locations.
@@ -84,12 +88,13 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<D: Digest, S: Storage<D>>(
+pub async fn range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<D>>(
+    hasher: &mut H,
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     let leaves = Location::try_from(mmr.size().await)?;
-    historical_range_proof(mmr, leaves, range).await
+    historical_range_proof(hasher, mmr, leaves, range).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
@@ -101,24 +106,38 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
+pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<D>>(
+    hasher: &mut H,
     mmr: &S,
     leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    // Get the positions of all nodes needed to generate the proof.
-    let positions = proof::nodes_required_for_range_proof(leaves, range)?;
+    // Get the proof blueprint.
+    let bp = proof::proof_blueprint(leaves, range)?;
 
-    // Fetch the digest of each.
+    // Fold prefix peaks into a single accumulator.
     let mut digests: Vec<D> = Vec::new();
-    let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
-    let hash_results = try_join_all(node_futures).await?;
+    if !bp.fold_prefix.is_empty() {
+        let mut acc = hasher.digest(&leaves.to_be_bytes());
+        let node_futures = bp.fold_prefix.iter().map(|&pos| mmr.get_node(pos));
+        let results = try_join_all(node_futures).await?;
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
+                Some(d) => acc = hasher.fold(&acc, &d),
+                None => return Err(Error::ElementPruned(bp.fold_prefix[i])),
+            }
+        }
+        digests.push(acc);
+    }
 
-    for (i, hash_result) in hash_results.into_iter().enumerate() {
-        match hash_result {
-            Some(hash) => digests.push(hash),
-            None => return Err(Error::ElementPruned(positions[i])),
-        };
+    // Fetch remaining nodes (after-peaks and siblings).
+    let node_futures = bp.fetch_nodes.iter().map(|&pos| mmr.get_node(pos));
+    let results = try_join_all(node_futures).await?;
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Some(d) => digests.push(d),
+            None => return Err(Error::ElementPruned(bp.fetch_nodes[i])),
+        }
     }
 
     Ok(Proof { leaves, digests })
@@ -202,7 +221,7 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
@@ -219,7 +238,10 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .await
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],

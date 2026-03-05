@@ -217,7 +217,7 @@ where
                 start_loc,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .get_operations(target_size, start_loc, NZU64!(1), true)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -260,7 +260,7 @@ where
                 gap_range.start,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size)
+                        .get_operations(target_size, gap_range.start, batch_size, false)
                         .await;
                     IndexedFetchResult {
                         start_loc: gap_range.start,
@@ -407,6 +407,7 @@ where
             proof,
             operations,
             success_tx,
+            pinned_nodes,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -431,11 +432,10 @@ where
         let _ = success_tx.send(proof_valid);
 
         if proof_valid {
-            // Extract pinned nodes if we don't have them and this is the first batch
+            // Use pinned nodes from the resolver if we don't have them yet and this
+            // is the batch at the sync boundary.
             if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
-                    crate::qmdb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
+                if let Some(nodes) = pinned_nodes {
                     self.pinned_nodes = Some(nodes);
                 }
             }
@@ -559,6 +559,7 @@ mod tests {
                     },
                     operations: vec![],
                     success_tx: oneshot::channel().0,
+                    pinned_nodes: None,
                 }),
             }
         });

@@ -7,11 +7,11 @@
 //! These operations can be cleaned from storage by calling [PrunableStore::prune].
 
 use crate::{
-    mmr::{Location, Proof},
+    mmr::{Location, Proof, StandardHasher},
     qmdb::Error,
 };
 use commonware_codec::CodecShared;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::future::Future;
 use std::num::NonZeroU64;
 
@@ -78,6 +78,9 @@ pub trait MerkleizedStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
 
+    /// The cryptographic hasher type.
+    type Hasher: CHasher<Digest = Self::Digest>;
+
     /// The operation type stored in the log.
     type Operation;
 
@@ -98,12 +101,13 @@ pub trait MerkleizedStore: LogStore {
     #[allow(clippy::type_complexity)]
     fn proof(
         &self,
+        hasher: &mut StandardHasher<Self::Hasher>,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
     {
         async move {
-            self.historical_proof(self.bounds().await.end, start_loc, max_ops)
+            self.historical_proof(hasher, self.bounds().await.end, start_loc, max_ops)
                 .await
         }
     }
@@ -124,10 +128,20 @@ pub trait MerkleizedStore: LogStore {
     #[allow(clippy::type_complexity)]
     fn historical_proof(
         &self,
+        hasher: &mut StandardHasher<Self::Hasher>,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
+
+    /// Return the digests of the pinned nodes at the given boundary location.
+    ///
+    /// Returns the digests in the same order as `nodes_to_pin` for the position corresponding to
+    /// `boundary`.
+    fn pinned_nodes_at(
+        &self,
+        boundary: Location,
+    ) -> impl Future<Output = Result<Vec<Self::Digest>, Error>> + Send;
 }
 
 #[cfg(test)]
@@ -149,7 +163,11 @@ pub(crate) mod tests {
     }
 
     #[allow(dead_code)]
-    pub fn assert_merkleized_store<T: MerkleizedStore>(db: &T, loc: Location) {
-        assert_send(db.proof(loc, NZU64!(1)));
+    pub fn assert_merkleized_store<T: MerkleizedStore>(
+        db: &T,
+        hasher: &mut crate::mmr::StandardHasher<T::Hasher>,
+        loc: Location,
+    ) {
+        assert_send(db.proof(hasher, loc, NZU64!(1)));
     }
 }

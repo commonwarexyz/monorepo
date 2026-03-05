@@ -274,20 +274,23 @@ pub(crate) mod test {
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
             let original_op_count = db.bounds().await.end;
+            let mut hasher = StandardHasher::<Sha256>::new();
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new(6), max_ops)
+                .historical_proof(&mut hasher, original_op_count, Location::new(6), max_ops)
                 .await
                 .unwrap();
-            let (regular_proof, regular_ops) = db.proof(Location::new(6), max_ops).await.unwrap();
+            let (regular_proof, regular_ops) = db
+                .proof(&mut hasher, Location::new(6), max_ops)
+                .await
+                .unwrap();
 
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
-            let mut hasher = StandardHasher::<Sha256>::new();
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
@@ -305,7 +308,7 @@ pub(crate) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new(6), NZU64!(10))
+                .historical_proof(&mut hasher, original_op_count, Location::new(6), NZU64!(10))
                 .await
                 .unwrap();
             assert_eq!(historical_proof.leaves, original_op_count);
@@ -324,8 +327,13 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.bounds().await.end + 1, Location::new(6), NZU64!(10))
-                    .await,
+                db.historical_proof(
+                    &mut hasher,
+                    db.bounds().await.end + 1,
+                    Location::new(6),
+                    NZU64!(10)
+                )
+                .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
@@ -350,7 +358,10 @@ pub(crate) mod test {
             let full_size = db.bounds().await.end;
 
             // Verify a single-op proof at the full commit size.
-            let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
+            let (proof, proof_ops) = db
+                .proof(&mut hasher, Location::new(1), NZU64!(1))
+                .await
+                .unwrap();
             assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
                 &mut hasher,
@@ -362,7 +373,7 @@ pub(crate) mod test {
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
-                .historical_proof(full_size, Location::new(1), NZU64!(1))
+                .historical_proof(&mut hasher, full_size, Location::new(1), NZU64!(1))
                 .await
                 .unwrap();
             assert_eq!(hp.digests, proof.digests);
@@ -370,7 +381,7 @@ pub(crate) mod test {
 
             // Test requesting more operations than available in historical position.
             let (_proof, limited_ops) = db
-                .historical_proof(Location::new(11), Location::new(6), NZU64!(20))
+                .historical_proof(&mut hasher, Location::new(11), Location::new(6), NZU64!(20))
                 .await
                 .unwrap();
             assert_eq!(limited_ops.len(), 5); // limited by historical size
@@ -378,7 +389,7 @@ pub(crate) mod test {
 
             // Test proof at minimum historical position.
             let (min_proof, min_ops) = db
-                .historical_proof(Location::new(4), Location::new(1), NZU64!(3))
+                .historical_proof(&mut hasher, Location::new(4), Location::new(1), NZU64!(3))
                 .await
                 .unwrap();
             assert_eq!(min_proof.leaves, Location::new(4));
@@ -412,7 +423,10 @@ pub(crate) mod test {
                 let clean_db = clean_db.into_merkleized();
                 let end_loc = clean_db.bounds().await.end;
                 let root = clean_db.root();
-                let (proof, proof_ops) = clean_db.proof(start_loc, max_ops).await.unwrap();
+                let (proof, proof_ops) = clean_db
+                    .proof(&mut hasher, start_loc, max_ops)
+                    .await
+                    .unwrap();
                 checkpoints.push((end_loc, root, proof, proof_ops));
 
                 db = clean_db.into_mutable();
@@ -422,7 +436,7 @@ pub(crate) mod test {
             let final_db = db.commit(None).await.unwrap().0.into_merkleized();
             for (historical_size, root, reference_proof, reference_ops) in checkpoints {
                 let (historical_proof, historical_ops) = final_db
-                    .historical_proof(historical_size, start_loc, max_ops)
+                    .historical_proof(&mut hasher, historical_size, start_loc, max_ops)
                     .await
                     .unwrap();
                 assert_eq!(historical_proof.leaves, reference_proof.leaves);
@@ -439,7 +453,10 @@ pub(crate) mod test {
 
             // Verify the current full-size proof against the current root as a final sanity check.
             let full_root = final_db.root();
-            let (full_proof, full_ops) = final_db.proof(start_loc, max_ops).await.unwrap();
+            let (full_proof, full_ops) = final_db
+                .proof(&mut hasher, start_loc, max_ops)
+                .await
+                .unwrap();
             assert!(verify_proof(
                 &mut hasher,
                 &full_proof,
@@ -462,7 +479,7 @@ pub(crate) mod test {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
+        assert_merkleized_store(db, &mut crate::mmr::StandardHasher::<Sha256>::new(), loc);
         assert_send(db.sync());
     }
 
@@ -499,7 +516,7 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+            async fn test_pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
                 join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
