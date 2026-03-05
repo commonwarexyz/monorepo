@@ -159,8 +159,7 @@
 //! ## Protocol Informal Specification
 //!
 //! # Specification
-//! 
-//! 
+//!
 //! ## 1. Introduction
 //! 
 //! This is a specification of modification of the [Simplex Consensus](https://eprint.iacr.org/2023/463). It targets:
@@ -435,7 +434,6 @@
 //!    1. Let `cert = get_best_certificate(r, v - 1)`.
 //!    1. If `cert != None`, broadcast `cert`.
 //!    1. Set `t_r = now + T`.
-//! 
 //!
 //! ## Protocol Properties
 //!
