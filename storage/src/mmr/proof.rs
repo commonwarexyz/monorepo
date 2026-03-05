@@ -968,14 +968,15 @@ mod tests {
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
         let root = *mmr.root();
-        for i in 1..*mmr.size() {
-            mmr.prune_to_pos(Position::new(i));
+        for prune_leaf in 1..*mmr.leaves() {
+            let prune_loc = Location::new(prune_leaf);
+            mmr.prune(prune_loc).unwrap();
             let pruned_root = mmr.root();
             assert_eq!(root, *pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new(loc as u64);
                 let proof = mmr.proof(loc);
-                if Position::try_from(loc).unwrap() < Position::new(i) {
+                if loc < prune_loc {
                     continue;
                 }
                 assert!(proof.is_ok());
@@ -1001,15 +1002,15 @@ mod tests {
         }
         let mut mmr = mmr.merkleize(&mut hasher, None);
 
-        // prune up to the first peak
-        const PRUNE_POS: Position = Position::new(62);
-        mmr.prune_to_pos(PRUNE_POS);
-        assert_eq!(mmr.bounds().start, PRUNE_POS);
+        // prune up to leaf 32 (first peak of the 49-element MMR)
+        const PRUNE_LOC: Location = Location::new(32);
+        mmr.prune(PRUNE_LOC).unwrap();
+        assert_eq!(mmr.bounds().start, PRUNE_LOC);
 
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root();
         for i in 0..elements.len() - 1 {
-            if Position::try_from(Location::new(i as u64)).unwrap() < PRUNE_POS {
+            if Location::new(i as u64) < PRUNE_LOC {
                 continue;
             }
             for j in (i + 2)..elements.len() {
@@ -1035,8 +1036,8 @@ mod tests {
             mmr.add(&mut hasher, elements.last().unwrap());
         }
         let mut mmr = mmr.merkleize(&mut hasher, None);
-        mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
-        assert_eq!(mmr.bounds().start, 130);
+        mmr.prune(Location::new(66)).unwrap();
+        assert_eq!(mmr.bounds().start, Location::new(66));
 
         let updated_root = mmr.root();
         let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);

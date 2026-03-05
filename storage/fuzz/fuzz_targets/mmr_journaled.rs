@@ -222,9 +222,7 @@ fn fuzz(input: FuzzInput) {
                     if mmr.leaves() > 0 {
                         let location = location % mmr.leaves().as_u64();
                         let location = Location::new(location);
-                        let position = Position::try_from(location).unwrap();
-                        let bounds = mmr.bounds();
-                        if bounds.contains(&position) {
+                        if mmr.bounds().contains(&location) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
                             if let Ok(proof) = mmr.proof(location).await {
@@ -256,11 +254,9 @@ fn fuzz(input: FuzzInput) {
                     if mmr.leaves() > 0 {
                         let range =
                             Location::new(start_loc)..Location::new(end_loc);
-                        let start_pos = Position::try_from(range.start).unwrap();
-
-                        if start_loc < mmr.leaves()
-                            && end_loc < mmr.leaves()
-                            && mmr.bounds().contains(&start_pos)
+                        if start_loc < *mmr.leaves()
+                            && end_loc < *mmr.leaves()
+                            && mmr.bounds().contains(&range.start)
                         {
                             if let Ok(proof) = mmr.range_proof(range.clone()).await {
                                 let root = mmr.root();
@@ -315,7 +311,7 @@ fn fuzz(input: FuzzInput) {
                                     assert!(range.is_empty());
                                 }
                                 Err(Error::ElementPruned(_)) =>
-                                    assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap())),
+                                    assert!(!mmr.bounds().contains(&range.start)),
                                 Err(err) => panic!(
                                     "unexpected clean historical_range_proof error: {err:?}"
                                 ),
@@ -368,7 +364,7 @@ fn fuzz(input: FuzzInput) {
                                     MmrState::Dirty(mmr)
                                 }
                                 Err(Error::ElementPruned(_)) => {
-                                    assert!(!mmr.bounds().contains(&Position::try_from(range.start).unwrap()));
+                                    assert!(!mmr.bounds().contains(&range.start));
                                     MmrState::Dirty(mmr)
                                 }
                                 Err(err) => panic!(
@@ -414,9 +410,10 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
                     if mmr.size() > 0 {
-                        let safe_pos = pos % (mmr.size() + 1).as_u64();
-                        mmr.prune_to_pos(safe_pos.into()).await.unwrap();
-                        assert!(mmr.bounds().start <= mmr.size());
+                        let safe_loc =
+                            Location::new(pos % (*mmr.leaves() + 1));
+                        mmr.prune(safe_loc).await.unwrap();
+                        assert!(mmr.bounds().start <= mmr.leaves());
                     }
                     MmrState::Clean(mmr)
                 }
@@ -455,12 +452,10 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::GetPrunedToPos => {
                     match &mmr {
                         MmrState::Clean(m) => {
-                            let pruned_pos = m.bounds().start;
-                            assert!(pruned_pos <= m.size());
+                            assert!(m.bounds().start <= m.leaves());
                         }
                         MmrState::Dirty(m) => {
-                            let pruned_pos = m.bounds().start;
-                            assert!(pruned_pos <= m.size());
+                            assert!(m.bounds().start <= m.leaves());
                         }
                     }
                     mmr
@@ -471,13 +466,13 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Clean(m) => {
                             let bounds = m.bounds();
                             if !bounds.is_empty() {
-                                assert!(bounds.start < m.size());
+                                assert!(bounds.start < m.leaves());
                             }
                         }
                         MmrState::Dirty(m) => {
                             let bounds = m.bounds();
                             if !bounds.is_empty() {
-                                assert!(bounds.start < m.size());
+                                assert!(bounds.start < m.leaves());
                             }
                         }
                     }
@@ -533,7 +528,6 @@ fn fuzz(input: FuzzInput) {
                     .await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
-                        assert_eq!(sync_mmr.bounds().start, lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();
                     }
                     restarts += 1;

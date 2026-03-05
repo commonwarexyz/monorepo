@@ -424,8 +424,7 @@ pub(crate) mod test {
             // retained op to tip.
             let max_ops = NZU64!(4);
             let end_loc = db.size().await;
-            let start_pos = db.log.mmr.bounds().start;
-            let start_loc = Location::try_from(start_pos).unwrap();
+            let start_loc = db.log.mmr.bounds().start;
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
             let db = db.into_mutable();

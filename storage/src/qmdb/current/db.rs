@@ -463,13 +463,13 @@ where
         status.prune_to_bit(*any.inactivity_floor_loc);
 
         // Prune the grafted MMR to match: nodes for pruned bitmap chunks are no longer needed
-        // in memory. `prune_to_pos` pins the O(log n) peak digests covering the pruned region,
-        // which remain accessible via `get_node` for root computation and metadata persistence.
+        // in memory. `prune` pins the O(log n) peak digests covering the pruned region, which
+        // remain accessible via `get_node` for root computation and metadata persistence.
         let pruned_chunks = status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
-                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            let prune_loc = Location::new(pruned_chunks);
+            if prune_loc > grafted_mmr.bounds().start {
+                grafted_mmr.prune(prune_loc)?;
             }
         }
 

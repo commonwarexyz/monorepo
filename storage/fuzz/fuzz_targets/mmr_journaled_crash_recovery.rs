@@ -196,24 +196,24 @@ async fn run_operations(
             }
 
             MmrOperation::PruneToPos { pos } => {
-                let size = mmr.size().as_u64();
-                let current_pruned = mmr.bounds().start.as_u64();
-                let safe_pos = (*pos).min(size);
+                let leaves = *mmr.leaves();
+                let current_pruned = *mmr.bounds().start;
+                let safe_loc = (*pos).min(leaves);
 
-                if safe_pos <= current_pruned {
+                if safe_loc <= current_pruned {
                     // No-op: already pruned past this point
                     Ok(mmr)
                 } else {
                     let mut clean_mmr = mmr.merkleize(hasher);
-                    match clean_mmr.prune_to_pos(Position::new(safe_pos)).await {
+                    match clean_mmr.prune(Location::new(safe_loc)).await {
                         Err(_) => {
                             // Partial prune possible
-                            max_pruned = max_pruned.max(safe_pos);
+                            max_pruned = max_pruned.max(safe_loc);
                             Err(())
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = clean_mmr.bounds().start.as_u64();
+                            let pruned = *clean_mmr.bounds().start;
                             min_pruned = pruned;
                             max_pruned = pruned;
                             Ok(clean_mmr.into_dirty())

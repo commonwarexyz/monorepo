@@ -13,7 +13,7 @@ use crate::{
     mmr::{
         journaled::{CleanMmr, DirtyMmr, Mmr, State},
         mem::{Clean, Dirty},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        Error as MmrError, Location, Proof, StandardHasher,
     },
     Persistable,
 };
@@ -182,9 +182,7 @@ where
         debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
 
         // Prune MMR to match the journal's actual boundary
-        self.mmr
-            .prune_to_pos(Position::try_from(Location::from(bounds.start))?)
-            .await?;
+        self.mmr.prune(Location::from(bounds.start)).await?;
 
         Ok(Location::new(bounds.start))
     }
