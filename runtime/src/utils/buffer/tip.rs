@@ -46,7 +46,7 @@ pub(super) struct Buffer {
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
     ///
-    /// The backing buffer starts detached and is allocated on first write.
+    /// The buffer starts detached, mutable, and allocates backing on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
         Self::from(offset, IoBuf::default(), capacity, false, pool)
     }
