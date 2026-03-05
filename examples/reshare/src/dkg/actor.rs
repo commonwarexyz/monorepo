@@ -12,7 +12,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, W
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck},
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
@@ -514,7 +514,10 @@ where
                         }
 
                         // Finalize the round before acknowledging
-                        let logs = storage.logs(epoch);
+                        let mut logs = Logs::<_, _, N3f1>::default();
+                        for (dealer, log) in storage.logs(epoch) {
+                            logs.record(dealer, log);
+                        }
                         let (success, next_round, next_output, next_share) =
                             if let Some(ps) = player_state.take() {
                                 match ps.finalize::<N3f1>(logs, &Sequential) {
