@@ -106,9 +106,9 @@ impl Buffer {
             self.data = IoBuf::default();
             return;
         }
-        let mut shrunk = self.pool.alloc(self.len);
-        shrunk.put_slice(self.as_ref());
-        self.data = shrunk.freeze();
+        // Use detached exact-size storage so sealing a partial page releases any pooled
+        // page-aligned backing instead of pinning a storage-pool slot per immutable tip.
+        self.data = IoBuf::copy_from_slice(self.as_ref());
     }
 
     /// Set the buffer mutable.
@@ -423,5 +423,21 @@ mod tests {
 
         assert!(!buffer.append(b"def"));
         assert_eq!(buffer.as_ref(), b"abcdef");
+    }
+
+    #[test]
+    fn test_set_immutable_compact_releases_pooled_backing() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(0, 16, pool);
+
+        assert!(!buffer.append(b"abc"));
+        assert!(buffer.data.is_pooled());
+
+        buffer.set_immutable(true);
+
+        assert!(buffer.is_immutable());
+        assert_eq!(buffer.as_ref(), b"abc");
+        assert!(!buffer.data.is_pooled());
     }
 }
