@@ -285,6 +285,19 @@
 //!     return None;
 //! }
 //!
+//! fn parent_certificate(r, v) -> Option<certificate> {
+//!     if r.round[v].proposal = proposal(c, v) {
+//!         let v_parent = c.parent;
+//!         if r.round[v_parent].finalization = finalization(c_parent, v_parent) {
+//!             return Some(finalization(c_parent, v_parent));
+//!         }
+//!         if r.round[v_parent].notarization = notarization(c_parent, v_parent) {
+//!             return Some(notarization(c_parent, v_parent));
+//!         }
+//!     }
+//!     return None;
+//! }
+//!
 //! fn parent_payload(r, v, v_parent) -> Option<c_parent> {
 //!     if v <= v_parent {
 //!         return None;
@@ -410,6 +423,7 @@
 //!    1. Set `r.round[v].nullification = nullification(v)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
+//!    1. If `r = leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
 //!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
 //!    1. Call `enter_view(r, v + 1)`.
 //!
