@@ -122,7 +122,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(127);
 const PAGE_CACHE_SIZE: usize = 8;
 
-type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
+type Db = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
 fn test_config(
     test_name: &str,
@@ -149,25 +149,28 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
         let cfg = test_config("keyless-fuzz-test", &context);
-        let mut db = CleanDb::init(context.clone(), cfg)
+        let mut db = Db::init(context.clone(), cfg)
             .await
-            .expect("Failed to init keyless db")
-            .into_mutable();
+            .expect("Failed to init keyless db");
         let mut restarts = 0usize;
+
+        let mut pending_appends: Vec<Vec<u8>> = Vec::new();
 
         for op in &input.ops {
             match op {
                 Operation::Append { value_bytes } => {
-                    db.append(value_bytes.clone())
-                        .await
-                        .expect("Append should not fail");
+                    pending_appends.push(value_bytes.clone());
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (durable_db, _) = db.commit(metadata_bytes.clone())
-                        .await
-                        .expect("Commit should not fail");
-                    db = durable_db.into_mutable();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(metadata_bytes.clone()).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                 }
 
                 Operation::Get { loc_offset } => {
@@ -183,18 +186,29 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
-                    merkleized_db.prune(merkleized_db.last_commit_loc())
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.prune(db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Sync => {
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
-                    clean_db.sync().await.expect("Sync should not fail");
-                    db = clean_db.into_mutable();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::OpCount => {
@@ -210,9 +224,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let merkleized_db = db.into_merkleized();
-                    let _ = merkleized_db.root();
-                    db = merkleized_db.into_mutable();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    let _ = db.root();
                 }
 
                 Operation::Proof {
@@ -223,18 +243,24 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc);
-                    let root = merkleized_db.root();
-                    if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
+                    let root = db.root();
+                    if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -246,14 +272,23 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for v in pending_appends.drain(..) {
+                            batch.append(v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.expect("Commit should not fail");
+                    // Use post-commit op_count so it's consistent with the root.
+                    let op_count = db.bounds().await.end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
                     let start_loc = Location::new(start_loc);
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = merkleized_db.root();
-                    if let Ok((proof, ops)) = merkleized_db
+                    let root = db.root();
+                    if let Ok((proof, ops)) = db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
@@ -261,28 +296,33 @@ fn fuzz(input: FuzzInput) {
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
-                        db = merkleized_db.into_mutable();
                 }
 
                 Operation::SimulateFailure{} => {
+                    pending_appends.clear();
                     drop(db);
 
                     let cfg = test_config("keyless-fuzz-test", &context);
-                    db = CleanDb::init(
+                    db = Db::init(
                         context.with_label("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
-                    .expect("Failed to init keyless db")
-                    .into_mutable();
+                    .expect("Failed to init keyless db");
                     restarts += 1;
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-        let clean_db = durable_db.into_merkleized();
-        clean_db.destroy().await.expect("Destroy should not fail");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for v in pending_appends.drain(..) {
+                batch.append(v);
+            }
+            batch.merkleize(None).finalize()
+        };
+        db.apply_batch(finalized).await.expect("Commit should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

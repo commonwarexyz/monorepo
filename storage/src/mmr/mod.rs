@@ -67,12 +67,14 @@
 //! )
 //! ```
 
+pub mod batch;
 pub mod hasher;
 pub mod iterator;
 pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
+pub mod read;
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -85,10 +87,12 @@ cfg_if::cfg_if! {
     }
 }
 
+pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
+pub use read::Readable;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.
@@ -131,8 +135,6 @@ pub enum Error {
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]
     RangeOutOfBounds(Location),
-    #[error("mmr requires merkleization for requested size")]
-    Unmerkleized,
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location),
     #[error("bit offset {0} out of bounds (size: {1})")]
@@ -141,6 +143,11 @@ pub enum Error {
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
+    #[error("stale changeset: expected MMR size {expected}, actual {actual}")]
+    StaleChangeset {
+        expected: Position,
+        actual: Position,
+    },
 }
 
 impl From<LocationError> for Error {

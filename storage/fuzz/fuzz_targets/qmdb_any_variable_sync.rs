@@ -163,8 +163,7 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
-            .expect("Failed to init source db")
-            .into_mutable();
+            .expect("Failed to init source db");
         let mut restarts = 0usize;
 
         let mut historical_roots: BTreeMap<
@@ -172,37 +171,40 @@ fn fuzz(input: FuzzInput) {
             <Sha256 as commonware_cryptography::Hasher>::Digest,
         > = BTreeMap::new();
 
+        let mut pending_writes: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
+
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.write_batch([(Key::new(*key), Some(value_bytes.to_vec()))])
-                        .await
-                        .expect("Update should not fail");
+                    pending_writes.push((Key::new(*key), Some(value_bytes.to_vec())));
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Key::new(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (durable_db, _) = db
-                        .commit(metadata_bytes.clone())
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(metadata_bytes.clone())
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
-                    db = clean_db.into_mutable();
+                    historical_roots.insert(db.bounds().await.end, db.root());
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
-                    merkleized_db
-                        .prune(merkleized_db.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Get { key } => {
@@ -214,19 +216,26 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    // proof requires commit + merkleization
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
-                    let op_count = clean_db.bounds().await.end;
-                    let oldest_retained_loc = clean_db.inactivity_floor_loc();
+                    // proof requires commit
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let op_count = db.bounds().await.end;
+                    let oldest_retained_loc = db.inactivity_floor_loc();
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
-                        if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
-                            let root = clean_db.root();
+                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
+                            let root = db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -235,9 +244,17 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     // historical proof verification requires a root captured at a commit point.
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
                         *historical_roots
@@ -247,28 +264,32 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if *start_loc >= op_count || op_count > max_ops.get() {
-                        db = clean_db.into_mutable();
                         continue;
                     }
 
-                    if let Ok((proof, log)) = clean_db
-                        .historical_proof(op_count, *start_loc, *max_ops)
-                        .await
+                    if let Ok((proof, log)) =
+                        db.historical_proof(op_count, *start_loc, *max_ops).await
                     {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 Operation::Sync => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
-                    clean_db.sync().await.expect("Sync should not fail");
-                    db = clean_db.into_mutable();
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -280,35 +301,50 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    // root requires commit + merkleization
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
-                    let _ = clean_db.root();
-                    db = clean_db.into_mutable();
+                    // root requires commit
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch.merkleize(None).await.unwrap().finalize()
+                    };
+                    db.apply_batch(finalized)
+                        .await
+                        .expect("commit should not fail");
+                    historical_roots.insert(db.bounds().await.end, db.root());
+                    let _ = db.root();
                 }
 
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
                     drop(db);
 
                     let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
-                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
+                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
-                    .expect("Failed to init source db")
-                    .into_mutable();
+                    .expect("Failed to init source db");
                     restarts += 1;
                 }
             }
         }
 
-        let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
+        let finalized = {
+            let mut batch = db.new_batch();
+            for (k, v) in pending_writes.drain(..) {
+                batch.write(k, v);
+            }
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }
