@@ -63,6 +63,16 @@ enum ParentPayloadError {
     },
 }
 
+impl ParentPayloadError {
+    /// Returns whether the ancestry error permanently invalidates the proposal.
+    const fn invalid_proposal(self) -> bool {
+        match self {
+            Self::ParentNotBeforeProposal { .. } | Self::ParentBeforeFinalized { .. } => true,
+            Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
+        }
+    }
+}
+
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
@@ -539,6 +549,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     ?err,
                     "proposal exists but ancestry is not certified"
                 );
+                if err.invalid_proposal() {
+                    self.trigger_timeout(view, TimeoutReason::InvalidProposal);
+                }
                 return None;
             }
         };
@@ -1582,6 +1595,99 @@ mod tests {
                     last_finalized: View::new(3),
                 })
             );
+        });
+    }
+
+    #[test]
+    fn try_verify_fast_paths_parent_before_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context.clone(),
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let finalized_view = View::new(3);
+            let finalized_proposal = Proposal::new(
+                Rnd::new(epoch, finalized_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
+            let finalization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, finalized_proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                    .expect("finalization");
+            state.add_finalization(finalization);
+
+            let view = state.current_view();
+            assert_eq!(view, View::new(4));
+            let proposal = Proposal::new(
+                Rnd::new(epoch, view),
+                View::new(2),
+                Sha256Digest::from([6u8; 32]),
+            );
+            assert!(state.set_proposal(view, proposal));
+
+            let initial_deadline = state.next_timeout_deadline();
+            assert!(initial_deadline > context.current());
+
+            assert!(state.try_verify().is_none());
+            assert!(state.next_timeout_deadline() <= context.current());
+        });
+    }
+
+    #[test]
+    fn try_verify_waits_for_missing_parent_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context.clone(),
+                Config {
+                    scheme: verifier,
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                },
+            );
+            state.set_genesis(test_genesis());
+            assert!(state.enter_view(View::new(2)));
+            state.set_leader(View::new(2), None);
+
+            let proposal = Proposal::new(
+                Rnd::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256Digest::from([7u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), proposal));
+
+            let initial_deadline = state.next_timeout_deadline();
+            assert!(initial_deadline > context.current());
+
+            assert!(state.try_verify().is_none());
+            assert_eq!(state.next_timeout_deadline(), initial_deadline);
         });
     }
 
