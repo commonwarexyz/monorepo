@@ -543,14 +543,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let parent_payload = match self.parent_payload(&proposal) {
             Ok(parent_payload) => parent_payload,
             Err(err) => {
-                debug!(
-                    %view,
-                    ?proposal,
-                    ?err,
-                    "proposal exists but ancestry is not certified"
-                );
                 if err.invalid_proposal() {
                     self.trigger_timeout(view, TimeoutReason::InvalidProposal);
+                } else {
+                    debug!(
+                        %view,
+                        ?proposal,
+                        ?err,
+                        "proposal exists but ancestry is not yet certified"
+                    );
                 }
                 return None;
             }
