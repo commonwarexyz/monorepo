@@ -44,7 +44,8 @@ This script parses benchmark names from benchmark command output and validates
 them. Supported input formats:
 1. Bencher output from `cargo bench ... -- --output-format bencher`:
    `test module::function/k=v ... bench: ...`
-2. List output from `cargo bench ... -- --list`:
+2. List output from `cargo bench ... -- --list` or
+   `cargo test --benches ... -- --list`:
    `module::function/k=v: benchmark`
 
 Usage
@@ -52,6 +53,7 @@ Usage
   ./lint_benchmark_names.py benchmark-output.txt
   ./lint_benchmark_names.py output1.txt output2.txt
   cargo bench -- --output-format bencher | ./lint_benchmark_names.py -
+  cargo test --benches -p commonware-math -- --list | ./lint_benchmark_names.py -
 """
 
 import re
