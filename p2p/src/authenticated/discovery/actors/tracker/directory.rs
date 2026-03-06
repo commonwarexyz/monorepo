@@ -137,9 +137,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        self.metrics
-            .connected
-            .remove(&metrics::Peer::new(peer));
+        self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
@@ -698,10 +696,7 @@ mod tests {
             directory.release(Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
-                None
-            );
+            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
         });
     }
 

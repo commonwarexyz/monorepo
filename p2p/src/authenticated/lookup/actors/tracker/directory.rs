@@ -123,9 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        self.metrics
-            .connected
-            .remove(&metrics::Peer::new(peer));
+        self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
     }
@@ -656,10 +654,7 @@ mod tests {
             directory.release(super::Metadata::Listener(pk_1.clone()));
 
             let metrics = context.encode();
-            assert_eq!(
-                metric_value(&metrics, "connected", &pk_1.to_string()),
-                None
-            );
+            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
         });
     }
 
