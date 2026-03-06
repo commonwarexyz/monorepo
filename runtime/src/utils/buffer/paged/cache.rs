@@ -39,33 +39,6 @@ struct PageFetchEntry {
     waiters: usize,
 }
 
-/// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
-/// entries must always contain a full logical page.
-async fn fetch_cacheable_page(
-    blob: &impl Blob,
-    page_num: u64,
-    page_size: u64,
-) -> Result<IoBuf, Arc<Error>> {
-    let page = get_page_from_blob(blob, page_num, page_size)
-        .await
-        .map_err(Arc::new)?;
-
-    // We should never be fetching partial pages through the page cache. This can happen if a
-    // non-last page is corrupted and falls back to a partial CRC.
-    let len = page.len();
-    if len != page_size as usize {
-        error!(
-            page_num,
-            expected = page_size,
-            actual = len,
-            "attempted to fetch partial page from blob"
-        );
-        return Err(Arc::new(Error::InvalidChecksum));
-    }
-
-    Ok(page)
-}
-
 /// Removes a stale in-flight page fetch when the last unresolved waiter is dropped.
 struct PageFetchGuard {
     cache: Arc<RwLock<Cache>>,
@@ -545,6 +518,33 @@ impl Cache {
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
     }
+}
+
+/// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
+/// entries must always contain a full logical page.
+async fn fetch_cacheable_page(
+    blob: &impl Blob,
+    page_num: u64,
+    page_size: u64,
+) -> Result<IoBuf, Arc<Error>> {
+    let page = get_page_from_blob(blob, page_num, page_size)
+        .await
+        .map_err(Arc::new)?;
+
+    // We should never be fetching partial pages through the page cache. This can happen if a
+    // non-last page is corrupted and falls back to a partial CRC.
+    let len = page.len();
+    if len != page_size as usize {
+        error!(
+            page_num,
+            expected = page_size,
+            actual = len,
+            "attempted to fetch partial page from blob"
+        );
+        return Err(Arc::new(Error::InvalidChecksum));
+    }
+
+    Ok(page)
 }
 
 #[cfg(test)]
