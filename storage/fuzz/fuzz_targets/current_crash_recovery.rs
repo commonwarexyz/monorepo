@@ -192,75 +192,49 @@ fn fuzz(input: FuzzInput) {
                     }
                 };
 
+            // Accumulate writes until Commit, matching the intended
+            // pending/committed separation.
+            let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+
+            macro_rules! commit_pending {
+                () => {{
+                    let result = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        let merkleized = match batch.merkleize(None).await {
+                            Ok(m) => m,
+                            Err(_) => {
+                                forget_pending(&pending, &mut committed);
+                                break;
+                            }
+                        };
+                        db.apply_batch(merkleized.finalize()).await
+                    };
+                    if result.is_err() {
+                        forget_pending(&pending, &mut committed);
+                        break;
+                    }
+                    apply_pending(&mut pending, &mut committed);
+                }};
+            }
+
             for op in &operations {
                 match op {
                     CurrentOperation::Update { key, value } => {
-                        let k = Key::new(*key);
-                        let v = Value::new(*value);
-                        let result = {
-                            let mut batch = db.new_batch();
-                            batch.write(k, Some(v));
-                            let merkleized = match batch.merkleize(None).await {
-                                Ok(m) => m,
-                                Err(_) => break,
-                            };
-                            db.apply_batch(merkleized.finalize()).await
-                        };
-                        if result.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
                     }
                     CurrentOperation::Delete { key } => {
-                        let k = Key::new(*key);
-                        let result = {
-                            let mut batch = db.new_batch();
-                            batch.write(k, None);
-                            let merkleized = match batch.merkleize(None).await {
-                                Ok(m) => m,
-                                Err(_) => break,
-                            };
-                            db.apply_batch(merkleized.finalize()).await
-                        };
-                        if result.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
                     }
                     CurrentOperation::Commit => {
-                        let result = {
-                            let merkleized = match db.new_batch().merkleize(None).await {
-                                Ok(m) => m,
-                                Err(_) => {
-                                    forget_pending(&pending, &mut committed);
-                                    break;
-                                }
-                            };
-                            db.apply_batch(merkleized.finalize()).await
-                        };
-                        if result.is_err() {
-                            forget_pending(&pending, &mut committed);
-                            break;
-                        }
-                        apply_pending(&mut pending, &mut committed);
+                        commit_pending!();
                     }
                     CurrentOperation::Prune => {
-                        // Prune requires a committed db, so commit first.
-                        let result = {
-                            let merkleized = match db.new_batch().merkleize(None).await {
-                                Ok(m) => m,
-                                Err(_) => {
-                                    forget_pending(&pending, &mut committed);
-                                    break;
-                                }
-                            };
-                            db.apply_batch(merkleized.finalize()).await
-                        };
-                        if result.is_err() {
-                            forget_pending(&pending, &mut committed);
-                            break;
-                        }
-                        apply_pending(&mut pending, &mut committed);
+                        commit_pending!();
                         let floor = db.inactivity_floor_loc();
                         if db.prune(floor).await.is_err() {
                             break;
