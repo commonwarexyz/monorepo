@@ -11,7 +11,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     certificate::{Attestation, Scheme},
-    Digest,
+    Committable, Digest,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
@@ -75,6 +75,14 @@ impl<D: Digest> EncodeSize for Proposal<D> {
 impl<D: Digest> Epochable for Proposal<D> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
+    }
+}
+
+impl<D: Digest> Committable for Proposal<D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.payload
     }
 }
 
@@ -917,6 +925,14 @@ impl<S: Scheme, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> Committable for Notarization<S, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.proposal.commitment()
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarization<S, D>
 where
@@ -1397,6 +1413,14 @@ impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
 impl<S: Scheme, D: Digest> Viewable for Finalization<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+impl<S: Scheme, D: Digest> Committable for Finalization<S, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.proposal.commitment()
     }
 }
 

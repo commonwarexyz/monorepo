@@ -17,7 +17,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View};
+    use types::{Epoch, Height, Round, View};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -39,6 +39,16 @@ commonware_macros::stability_scope!(BETA {
         /// Returns the view associated with this object.
         fn view(&self) -> View;
     }
+
+    /// Roundable composes epoch and view access into a round identifier.
+    pub trait Roundable: Epochable + Viewable {
+        /// Returns the round associated with this object.
+        fn round(&self) -> Round {
+            Round::new(self.epoch(), self.view())
+        }
+    }
+
+    impl<T: Epochable + Viewable> Roundable for T {}
 
     /// Block is the interface for a block in the blockchain.
     ///
@@ -62,7 +72,6 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::types::Round;
     use commonware_cryptography::Digest;
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;

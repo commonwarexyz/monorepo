@@ -1,13 +1,13 @@
 use crate::{
-    marshal::core::Variant,
-    simplex::types::{Finalization, Notarization},
+    marshal::core::{ConsensusEngine, Variant},
     types::{Epoch, Round, View},
+    Roundable,
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{certificate::Scheme as CertificateScheme, Committable, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier},
+    archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
     metadata::{self, Metadata},
     translator::TwoCap,
 };
@@ -35,11 +35,10 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 #[allow(clippy::type_complexity)]
-struct Cache<R, V, S>
+struct Cache<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
     _scope: R,
@@ -53,22 +52,21 @@ where
         TwoCap,
         R,
         <V::Block as Digestible>::Digest,
-        Notarization<S, V::Commitment>,
+        <V::Consensus as ConsensusEngine>::Notarization,
     >,
     /// Finalizations stored by view
     finalizations: prunable::Archive<
         TwoCap,
         R,
         <V::Block as Digestible>::Digest,
-        Finalization<S, V::Commitment>,
+        <V::Consensus as ConsensusEngine>::Finalization,
     >,
 }
 
-impl<R, V, S> Cache<R, V, S>
+impl<R, V> Cache<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
@@ -85,11 +83,10 @@ where
 }
 
 /// Manages prunable caches and their metadata.
-pub(crate) struct Manager<R, V, S>
+pub(crate) struct Manager<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Context
     context: R,
@@ -105,14 +102,13 @@ where
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, V, S>>,
+    caches: BTreeMap<Epoch, Cache<R, V>>,
 }
 
-impl<R, V, S> Manager<R, V, S>
+impl<R, V> Manager<R, V>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    S: Scheme,
 {
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(
@@ -163,7 +159,7 @@ where
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, V, S>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, V>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -212,14 +208,14 @@ where
                 &self.cfg,
                 epoch,
                 "notarizations",
-                S::certificate_codec_config_unbounded(),
+                <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
                 &scope,
                 &self.cfg,
                 epoch,
                 "finalizations",
-                S::certificate_codec_config_unbounded(),
+                <<V::Consensus as ConsensusEngine>::Scheme as CertificateScheme>::certificate_codec_config_unbounded(),
             ),
         );
         let existing = self.caches.insert(
@@ -275,7 +271,7 @@ where
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_multi_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "verified");
     }
@@ -292,7 +288,7 @@ where
         };
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_multi_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -302,14 +298,14 @@ where
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        notarization: Notarization<S, V::Commitment>,
+        notarization: <V::Consensus as ConsensusEngine>::Notarization,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), digest, notarization)
+            .put_multi_sync(round.view().get(), digest, notarization)
             .await;
         Self::handle_result(result, round, "notarization");
     }
@@ -319,7 +315,7 @@ where
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        finalization: Finalization<S, V::Commitment>,
+        finalization: <V::Consensus as ConsensusEngine>::Finalization,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -346,17 +342,22 @@ where
         }
     }
 
-    /// Get a notarization from the prunable archive by round.
+    /// Get a notarization from the prunable archive by round and digest.
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<S, V::Commitment>> {
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<<V::Consensus as ConsensusEngine>::Notarization> {
         let cache = self.caches.get(&round.epoch())?;
-        cache
+        let notarizations = cache
             .notarizations
-            .get(Identifier::Index(round.view().get()))
+            .get_all(round.view().get())
             .await
-            .expect("failed to get notarization")
+            .expect("failed to get notarization")?;
+        notarizations.into_iter().find(|notarization| {
+            notarization.round() == round
+                && V::commitment_to_inner(notarization.commitment()) == digest
+        })
     }
 
     /// Get a finalization from the prunable archive by block digest.
@@ -367,7 +368,7 @@ where
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Finalization<S, V::Commitment>> {
+    ) -> Option<<V::Consensus as ConsensusEngine>::Finalization> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&digest)).await {
                 Ok(Some(finalization)) => return Some(finalization),
@@ -444,5 +445,68 @@ where
         if let Some(prunable) = self.caches.get_mut(&round.epoch()) {
             prunable.prune(min_view).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Manager};
+    use crate::{
+        marshal::tests::{StandardSimplexHarness, TestHarness, NAMESPACE},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{sha256::Sha256, Hasher as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+
+    #[test]
+    fn test_get_notarization_same_digest_different_rounds() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            type H = StandardSimplexHarness;
+            type V = <H as TestHarness>::Variant;
+            let fixture = H::fixture(&mut context, NAMESPACE, H::num_validators());
+
+            let manager_cfg = Config {
+                partition_prefix: "test-cache".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+            };
+            let mut manager =
+                Manager::<deterministic::Context, V>::init(context, manager_cfg, ()).await;
+            let schemes = fixture.schemes;
+
+            let digest = Sha256::hash(b"same-digest");
+            let parent = Sha256::hash(b"parent");
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+
+            let proposal1 = H::make_proposal(round1, View::zero(), parent, digest);
+            let proposal2 = H::make_proposal(round2, View::new(1), parent, digest);
+            let notarization1 = H::make_notarization(proposal1, &schemes);
+            let notarization2 = H::make_notarization(proposal2, &schemes);
+
+            manager
+                .put_notarization(round1, digest, notarization1)
+                .await;
+            manager
+                .put_notarization(round2, digest, notarization2)
+                .await;
+
+            let recovered1 = manager
+                .get_notarization(round1, digest)
+                .await
+                .expect("round 1 notarization should exist");
+            let recovered2 = manager
+                .get_notarization(round2, digest)
+                .await
+                .expect("round 2 notarization should exist");
+
+            assert_eq!(recovered1.round(), round1);
+            assert_eq!(recovered2.round(), round2);
+        });
     }
 }

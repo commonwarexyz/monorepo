@@ -1907,4 +1907,102 @@ mod tests {
             clean_shutdown(seed);
         }
     }
+
+    /// Verify that a peer sending an undecodable request is not blocked.
+    #[test_traced("TRACE")]
+    fn test_decode_failure_does_not_block_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // 3 peers: peer 1 is the resolver under test, peer 2 has data,
+            // peer 3 sends a truncated request via a raw sender (no resolver).
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(7);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("valid data"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Peer 1: resolver under test
+            let scheme1 = schemes.remove(0);
+            let pk1 = scheme1.public_key();
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(pk1.clone()),
+                scheme1,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: has data, normal resolver
+            let scheme2 = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme2.public_key()),
+                scheme2,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            // Peer 3: raw sender only (no resolver), sends truncated request
+            let scheme3 = schemes.remove(0);
+            let pk3 = scheme3.public_key();
+            let (mut raw_sender, _) = connections.remove(0);
+
+            // Craft a wire::Message with trailing bytes after a valid
+            // request. This simulates a newer wire format where a Request
+            // variant has more fields than the receiver expects (e.g., a
+            // Notarized request with a newly-added commitment field that
+            // old nodes don't know about). The codec's `decode_cfg` checks
+            // for unconsumed bytes after decoding and returns ExtraData.
+            //
+            // Wire layout:
+            //   [id: u64] [payload_tag: u8 = 0 (Request)] [key: u8] [extra: u8]
+            //
+            // The extra trailing byte triggers ExtraData from decode_cfg,
+            // which is the same error path hit when a new node sends a
+            // Request with additional fields to an old node.
+            use bytes::BufMut;
+            use commonware_p2p::{Recipients, Sender as _};
+            let mut buf = Vec::new();
+            buf.put_u64(12345); // message id
+            buf.put_u8(0); // Payload::Request tag
+            buf.put_u8(7); // valid Key(7)
+            buf.put_u8(0xFF); // extra byte: triggers ExtraData
+            let truncated = commonware_runtime::IoBuf::from(buf);
+            raw_sender
+                .send(Recipients::One(pk1.clone()), truncated, false)
+                .await
+                .unwrap();
+
+            // Allow time for the message to arrive and be processed
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Verify peer 3 was NOT blocked by peer 1
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                !blocked.contains(&(pk1.clone(), pk3.clone())),
+                "peer 3 should not be blocked after sending undecodable request, blocked: {blocked:?}"
+            );
+
+            // Verify the resolver still works: fetch from peer 2
+            mailbox1.fetch(key.clone()).await;
+            let event = cons_out1.recv().await.unwrap();
+            match event {
+                Event::Success(k, v) => {
+                    assert_eq!(k, key);
+                    assert_eq!(v, Bytes::from("valid data"));
+                }
+                Event::Failed(_) => panic!("fetch should succeed after decode failure"),
+            }
+        });
+    }
 }

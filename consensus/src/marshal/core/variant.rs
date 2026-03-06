@@ -12,6 +12,7 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
+use super::ConsensusEngine;
 use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible};
@@ -20,6 +21,9 @@ use std::{future::Future, sync::Arc};
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
+    /// Consensus engine coupled to this marshal variant.
+    type Consensus: ConsensusEngine<Commitment = Self::Commitment>;
+
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.

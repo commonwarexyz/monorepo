@@ -82,11 +82,11 @@ use crate::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
             },
-            Standard,
+            StandardSimplex,
         },
         Update,
     },
-    simplex::types::Context,
+    simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     VerifyingApplication,
@@ -137,14 +137,14 @@ use tracing::{debug, warn};
 pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: Application<E>,
     B: CertifiableBlock,
     ES: Epocher,
 {
     context: E,
     application: A,
-    marshal: Mailbox<S, Standard<B>>,
+    marshal: Mailbox<StandardSimplex<B, S>>,
     epocher: ES,
     last_built: LastBuilt<B>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
@@ -155,7 +155,7 @@ where
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -166,7 +166,12 @@ where
     ES: Epocher,
 {
     /// Creates a new [`Deferred`] wrapper.
-    pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
+    pub fn new(
+        context: E,
+        application: A,
+        marshal: Mailbox<StandardSimplex<B, S>>,
+        epocher: ES,
+    ) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
         let build_histogram = Histogram::new(Buckets::LOCAL);
@@ -242,7 +247,7 @@ where
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -508,7 +513,7 @@ where
 impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: VerifyingApplication<
         E,
         Block = B,
@@ -599,7 +604,7 @@ where
 impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
@@ -639,7 +644,7 @@ where
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + SimplexScheme<B::Digest>,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
@@ -661,12 +666,12 @@ where
 mod tests {
     use super::Deferred;
     use crate::{
-        marshal::mocks::{
-            harness::{
-                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
-                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+        marshal::{
+            mocks::verifying::MockVerifyingApp,
+            tests::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardSimplexHarness,
+                TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
-            verifying::MockVerifyingApp,
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
@@ -694,7 +699,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
@@ -818,7 +823,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
@@ -906,7 +911,7 @@ mod tests {
 
             let me = participants[0].clone();
 
-            let setup = StandardHarness::setup_validator(
+            let setup = StandardSimplexHarness::setup_validator(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
