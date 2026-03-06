@@ -39,7 +39,7 @@ use tracing::debug;
 pub(crate) trait FloorScan {
     /// Return the next location at or after `floor` that might be active,
     /// below `tip`. Returns `None` if no candidate exists in `[floor, tip)`.
-    fn next_candidate(&mut self, floor: &Location, tip: u64) -> Option<Location>;
+    fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location>;
 }
 
 /// Sequential scan: every location is a candidate.
@@ -47,9 +47,9 @@ pub(crate) trait FloorScan {
 pub(crate) struct SequentialScan;
 
 impl FloorScan for SequentialScan {
-    fn next_candidate(&mut self, floor: &Location, tip: u64) -> Option<Location> {
-        if **floor < tip {
-            Some(*floor)
+    fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location> {
+        if *floor < tip {
+            Some(floor)
         } else {
             None
         }
@@ -377,7 +377,7 @@ where
         scan: &mut S,
     ) -> Result<bool, Error> {
         loop {
-            let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
+            let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
                 return Ok(false);
             };
             *floor = Location::new(*candidate + 1);
