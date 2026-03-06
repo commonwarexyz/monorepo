@@ -37,7 +37,7 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = now+2Δ`, retry `t_r = None` and advance (certification) `t_a = now+3Δ`
-//! * If leader `l` has not been active in last `r` views, set `t_l` and `t_a` to 0
+//! * If leader `l` has not been active in last `lookback` views, set `t_l` and `t_a` to 0
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -47,8 +47,7 @@
 //! * Set `t_l` to `None`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
 //!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
-//!     * If can't verify `c` in view `v` because missing notarization/nullification for a
-//!       previous view `v_m`, request `v_m`
+//!     * If the parent is not available (missing certificates), do nothing
 //!     * If verification of `c` fails: set `t_l` to `0`
 //!
 //! Upon receiving first `nullify(v)` from `l`:
@@ -62,14 +61,14 @@
 //! * Broadcast `notarization(c,v)`
 //! * Attempt to certify `c` (see [Certification](#certification))
 //!     * On success: set `t_a` to `None`, broadcast `finalize(c,v)` if have not broadcast `nullify(v)` and enter `v+1`
-//!     * On failure: set `t_l` to `0`
+//!     * On failure: set `t_l` and `t_a` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Construct `nullification(v)`
 //!
 //! Upon constructing or receiving the first `nullification(v)`:
-//! * Set `t_l` and `t_a` for view `v` to `None`
-//! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)`
+//! * Set `t_l` and `t_a` to `None`
+//! * If `nullify(v)` and `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
 //!
@@ -77,13 +76,13 @@
 //! * Construct `finalization(c, v)`
 //!
 //! Upon constructing or receiving the first `finalization(c, v)`:
-//! * Set `t_l` and `t_a` for view `v` to `None`
+//! * Set `t_l` and `t_a` to `None`
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //! * Enter `v+1`
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * If `nullify(v)` has not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T` // TODO: define `T`
+//! * If `nullify(v)` and `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T`
 //!
 //! Upon `t_r` firing:
 //! * Broadcast `nullify(v)` and either `finalization(c, v-1)`, `notarization(c, v-1)` or `nullification(v-1)`
@@ -207,17 +206,24 @@
 //! Replica `r` tracks, per view `v`:
 //!
 //! - `view` is the replica view, initially `1`.
-//! - `notarized` is the proposal this replica has notarized in the current view, initially `⊥`.
-//! - `nullified` is whether `nullify(v)` has already been broadcast, initially `false`.
-//! - `proofs` is a map `View -> Set<Certificate>` where `Certificate` is only one of:
-//!   - `finalization(c, v)`
-//!   - `notarization(c, v)`
-//!   - `nullification(v)`
+//! - `last_finalized` is the view of the last finalized container, initially `0` (genesis).
+//! - `round` is a map `View -> RoundState` tracking per-view state, where `RoundState` is:
+//!   - `notarization`: `Option<notarization(c, v)>`, initially `None`.
+//!   - `nullification`: `Option<nullification(v)>`, initially `None`.
+//!   - `finalization`: `Option<finalization(c, v)>`, initially `None`.
+//!   - `broadcast_notarize`: `bool`, whether `notarize(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_notarization`: `bool`, whether `notarization(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_nullify`: `bool`, whether `nullify(v)` has been broadcast, initially `false`.
+//!   - `broadcast_nullification`: `bool`, whether `nullification(v)` has been broadcast, initially `false`.
+//!   - `broadcast_finalize`: `bool`, whether `finalize(c, v)` has been broadcast, initially `false`.
+//!   - `broadcast_finalization`: `bool`, whether `finalization(c, v)` has been broadcast, initially `false`.
+//!   - `certified`: `Option<bool>`, where `None` means certification is pending,
+//!     `Some(true)` means certified, and `Some(false)` means rejected.
+//!   - `t_l`: leader proposal timeout.
+//!   - `t_a`: advance/certification timeout.
+//!   - `t_r`: retry timeout.
 //! - `messages` is a map `View -> (Replica -> Set<Message>)` storing received vote messages
 //!   (`notarize`, `nullify`, `finalize`) grouped by view then sender.
-//! - Timer `t_l` (leader proposal timeout).
-//! - Timer `t_a` (advance/certification timeout).
-//! - Timer `t_r` (retry timeout).
 //!
 //! Timer semantics:
 //!
@@ -253,48 +259,49 @@
 //! fn select_parent(r, v) -> Result<(c_parent, v_parent), v_m> {
 //!     let i = v - 1;
 //!     while i > 0 {
-//!         if finalization(c_parent, i) ∈ r.proofs[i] {
+//!         if r.round[i].finalization = finalization(c_parent, i) {
 //!             return Ok((c_parent, i));
 //!         }
-//!         // TODO: Align with implementation in `actors/voter/state.rs` (`is_certified`):
-//!         // select the first certified ancestor, instead of modeling this as
-//!         // `notarization(c_parent, i) ∈ r.proofs[i] and certify(c_parent)`.
-//!         if notarization(c_parent, i) ∈ r.proofs[i] and certify(c_parent) {
+//!         if r.round[i].notarization = notarization(c_parent, i) and r.round[i].certified == Some(true) {
 //!             return Ok((c_parent, i));
 //!         }
-//!         if nullification(i) ∈ r.proofs[i] {
+//!         if r.round[i].nullification != None {
 //!             i -= 1;
 //!             continue;
 //!         }
-//!         return Err(i); // Missing proof for view i.
+//!         return Err(i);
 //!     }
 //!     return Ok((genesis, 0));
 //! }
 //!
-//! // Validates a claimed parent `(c_parent, v_parent)` for a proposal in view `v`.
-//! // Returns `Ok(true)` if valid, `Ok(false)` if invalid, and `Err(v_m)` if missing proof for view `v_m`.
-//! fn valid_parent(r, v, (c_parent, v_parent)) -> Result<bool, v_m> {
-//!     if v_parent == 0 {
-//!         return Ok(c_parent == genesis);
+//! fn is_certified(r, v) -> Option<c> {
+//!     if v == 0 {
+//!         return Some(genesis);
 //!     }
+//!     if r.round[v].finalization = finalization(c, v) {
+//!         return Some(c);
+//!     }
+//!     if r.round[v].notarization = notarization(c, v) and r.round[v].certified == Some(true) {
+//!         return Some(c);
+//!     }
+//!     return None;
+//! }
 //!
-//!     if finalization(c_parent, v_parent) ∉ r.proofs[v_parent] {
-//!         if notarization(c_parent, v_parent) ∉ r.proofs[v_parent] {
-//!             return Err(v_parent); // Missing parent proof.
-//!         }
-//!         if !certify(c_parent) {
-//!             return Ok(false);
-//!         }
+//! fn parent_payload(r, v, v_parent) -> Option<c_parent> {
+//!     if v <= v_parent {
+//!         return None;
 //!     }
-//!
-//!     let i = v - 1;
-//!     while i > v_parent {
-//!         if nullification(i) ∉ r.proofs[i] {
-//!             return Err(i); // Missing bridge proof.
-//!         }
-//!         i -= 1;
+//!     if v_parent < r.last_finalized {
+//!         return None;
 //!     }
-//!     return Ok(true);
+//!     let i = v_parent+1;
+//!     while i < v {
+//!         if r.round[i].nullification == None {
+//!             return None;
+//!         }
+//!         i += 1;
+//!     }
+//!     return is_certified(r, v_parent);
 //! }
 //!
 //! // Records message `m` from replica `r'`. Returns true only on the first observation.
@@ -319,14 +326,12 @@
 //!     }
 //!     r.view = next;
 //!     r.leader = leader(next);
-//!     r.notarized = ⊥;
-//!     r.nullified = false;
-//!     r.t_l = now + 2Δ;
-//!     r.t_r = None;
-//!     r.t_a = now + 3Δ;
+//!     r.round[next].t_l = now + 2Δ;
+//!     r.round[next].t_r = None;
+//!     r.round[next].t_a = now + 3Δ;
 //!     if r.leader has not been active in the last lookback views {
-//!         r.t_l = 0;
-//!         r.t_a = 0;
+//!         r.round[next].t_l = 0;
+//!         r.round[next].t_a = 0;
 //!     }
 //! }
 //!
@@ -334,13 +339,13 @@
 //! // Mirrors `get_best_certificate` behavior in voter state.
 //! // Priority: finalization > nullification > notarization.
 //! fn get_best_certificate(r, v) -> Option<certificate> {
-//!     if finalization(c, v) ∈ r.proofs[v] {
+//!     if r.round[v].finalization = finalization(c, v) {
 //!         return finalization(c, v);
 //!     }
-//!     if nullification(v) ∈ r.proofs[v] {
-//!         return nullification(v);
+//!     if r.round[v].nullification != None {
+//!         return r.round[v].nullification;
 //!     }
-//!     if notarization(c, v) ∈ r.proofs[v] {
+//!     if r.round[v].notarization = notarization(c, v) {
 //!         return notarization(c, v);
 //!     }
 //!     return None;
@@ -353,28 +358,26 @@
 //!
 //! 1. On entering view `v`:
 //!    1. Determine leader `l = leader(v)`.
-//!    1. If `l` has not been active in the last `lookback` views, set `t_l = 0` and `t_a = 0`.
+//!    1. If `l` has not been active in the last `lookback` views, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = select_parent(r, v)`.
-//!       1. If `parent = Err(v_m)`, send `request(v_m)`, set `t_l = 0`, and return.
+//!       1. If `parent = Err(v_m)`, send `request(v_m)`, set `r.round[v].t_l = 0`, and return.
 //!       1. Let `c = propose(v, parent)`.
-//!       1. If `c = None`, set `t_l = 0`, and return.
-//!       1. Set `r.notarized = c`.
+//!       1. If `c = None`, set `r.round[v].t_l = 0`, and return.
+//!       1. Set `r.round[v].broadcast_notarize = true`.
 //!       1. Broadcast `notarize(c, v)`.
 //!
 //! ### 7.2. First Leader Notarize
 //!
 //! 1. On receiving `notarize(c, v)` from replica `r' = leader(v)`:
 //!    1. If `!record_message(r, r', notarize(c, v))`, return.
-//!    1. If `r.notarized != ⊥` or `r.nullified`, return.
-//!    1. Set `t_l = None`.
-//!    1. Let `(c_parent, v_parent)` be `c`'s declared parent.
-//!    1. Let `parent_ok = valid_parent(r, v, (c_parent, v_parent))`.
-//!    1. If `parent_ok = Err(v_m)`, send `request(v_m)` and return.
-//!    1. If `parent_ok = Ok(false)`, return.
+//!    1. If `r.round[v].broadcast_notarize` or `r.round[v].broadcast_nullify`, return.
+//!    1. Set `r.round[v].t_l = None`.
+//!    1. Let `v_parent` be `c`'s declared parent view.
+//!    1. If `parent_payload(r, v, v_parent) = None`, return.
 //!    1. Verify `c`.
-//!    1. If verification succeeds, set `r.notarized = c` and broadcast `notarize(c, v)`.
-//!    1. If verification fails, set `t_l = 0`.
+//!    1. If verification succeeds, set `r.round[v].broadcast_notarize = true` and broadcast `notarize(c, v)`.
+//!    1. If verification fails, set `r.round[v].t_l = 0`.
 //!
 //! ### 7.3. Notarization Path
 //! 1. On receiving `notarize(c, v)` from replica `r'`:
@@ -384,29 +387,31 @@
 //!    1. Mark `c` as notarized.
 //!    1. Assemble `notarization(c, v)` (even if `c` itself is not yet verified locally).
 //! 1. On constructing or receiving the first `notarization(c, v)`:
-//!    1. Add `notarization(c, v)` to `r.proofs[v]`.
-//!    1. Broadcast `notarization(c, v)`.
+//!    1. Set `r.round[v].notarization = notarization(c, v)`.
+//!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
 //!    1. Attempt `certify(c)`:
 //!       1. On success:
-//!          1. Set `t_a = None`.
-//!          1. If `!r.nullified`, broadcast `finalize(c, v)`.
+//!          1. Set `r.round[v].t_a = None`.
+//!          1. Set `r.round[v].certified = Some(true)`.
+//!          1. If `!r.round[v].broadcast_nullify`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!          1. Call `enter_view(r, v + 1)`.
 //!       1. On failure:
-//!          1. Set `t_l = 0`.
+//!          1. Set `r.round[v].certified = Some(false)`.
+//!          1. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!
 //! ### 7.4. Nullification Path
 //!
 //! 1. On receiving `nullify(v)` from replica `r'`:
 //!    1. If `!record_message(r, r', nullify(v))`, return.
 //!    2. If `r' == leader(v)`:
-//!       3. Set `t_l = 0`.
+//!       3. Set `r.round[v].t_l = 0`.
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
-//!    1. Add `nullification(v)` to `r.proofs[v]`.
-//!    1. Set `t_l = None` and `t_a = None`.
-//!    1. If `!r.nullified`, set `r.nullified = true` and broadcast `nullify(v)`.
-//!    1. Broadcast `nullification(v)`.
+//!    1. Set `r.round[v].nullification = nullification(v)`.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
+//!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
 //!    1. Call `enter_view(r, v + 1)`.
 //!
 //! ### 7.5. Finalization Path
@@ -416,24 +421,25 @@
 //! 1. On observing `≥ Q` `finalize(c, v)` votes:
 //!    1. Assemble `finalization(c, v)`.
 //! 1. On constructing or receiving the first `finalization(c, v)`:
-//!    1. Add `finalization(c, v)` to `r.proofs[v]`.
-//!    1. Set `t_l = None` and `t_a = None`.
+//!    1. Set `r.round[v].finalization = finalization(c, v)`.
+//!    1. Set `r.last_finalized = v`.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. Mark `c` finalized and recursively finalize ancestors.
-//!    1. Broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
+//!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
 //!    1. Call `enter_view(r, v + 1)`.
 //!
 //! ### 7.6. Timeout Behavior
 //!
-//! 1. On `t_l` or `t_a` firing:
-//!    1. If `!r.nullified`:
-//!       1. Set `r.nullified = true`.
+//! 1. On `r.round[v].t_l` or `r.round[v].t_a` firing:
+//!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`:
+//!       1. Set `r.round[v].broadcast_nullify = true`.
 //!       1. Broadcast `nullify(v)`.
-//!       1. Set `t_r = now + T`.
-//! 1. On `t_r` firing:
+//!       1. Set `r.round[v].t_r = now + T`.
+//! 1. On `r.round[v].t_r` firing:
 //!    1. Broadcast `nullify(v)`.
 //!    1. Let `cert = get_best_certificate(r, v - 1)`.
 //!    1. If `cert != None`, broadcast `cert`.
-//!    1. Set `t_r = now + T`.
+//!    1. Set `r.round[v].t_r = now + T`.
 //!
 //! ## Protocol Properties
 //!
