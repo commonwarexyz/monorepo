@@ -108,6 +108,10 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
+
+    /// The changeset was created from a different database state than the current one.
+    #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
+    StaleChangeset { expected: u64, actual: u64 },
 }
 
 impl From<crate::journal::authenticated::Error> for Error {

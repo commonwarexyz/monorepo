@@ -197,6 +197,9 @@ where
 
     /// Total active keys after this batch.
     total_active_keys: usize,
+
+    /// The database size when this batch was created, used to detect stale changesets.
+    db_size: u64,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -215,6 +218,9 @@ pub struct Changeset<K, D: Digest, Item: Send> {
 
     /// Location of the CommitFloor operation appended by this batch.
     new_last_commit_loc: Location,
+
+    /// The database size when the batch was created. Used to detect stale changesets.
+    db_size: u64,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -241,7 +247,7 @@ where
     base_diff: Arc<BTreeMap<K, DiffEntry<V::Value>>>,
     base_operations: Vec<Arc<Vec<Operation<K, V, U>>>>,
     base_size: u64,
-    db_journal_size: u64,
+    db_size: u64,
     base_inactivity_floor_loc: Location,
     base_active_keys: usize,
 }
@@ -264,11 +270,11 @@ where
     /// The operation space is divided into three contiguous regions:
     ///
     /// ```text
-    ///  [0 ............. db_journal_size) [db_journal_size ...... base) [base ...... base+len)
-    ///   ^-- base DB journal (on disk)    ^-- parent chain (in mem)     ^-- current_ops (in mem)
+    ///  [0 ........... db_size)  [db_size ..... base_size)  [base_size .. base_size+len)
+    ///   DB journal (on disk)    parent chain (in mem)       current_ops (in mem)
     /// ```
     ///
-    /// For top-level batches, the parent chain is empty, so db_journal_size == base.
+    /// For top-level batches, the parent chain is empty, so db_size == base.
     async fn read_op(
         &self,
         loc: Location,
@@ -279,9 +285,9 @@ where
         if loc_val >= self.base_size {
             // This batch's own operations (user mutations, or earlier floor-raise ops).
             Ok(current_ops[(loc_val - self.base_size) as usize].clone())
-        } else if loc_val >= self.db_journal_size {
+        } else if loc_val >= self.db_size {
             // Parent batch chain's operations (in-memory). Walk segments to find the right one.
-            let mut offset = (loc_val - self.db_journal_size) as usize;
+            let mut offset = (loc_val - self.db_size) as usize;
             for segment in &self.base_operations {
                 if offset < segment.len() {
                     return Ok(segment[offset].clone());
@@ -467,6 +473,7 @@ where
             new_inactivity_floor_loc: floor,
             new_last_commit_loc: commit_loc,
             total_active_keys: total_active_keys as usize,
+            db_size: self.db_size,
         })
     }
 }
@@ -505,7 +512,7 @@ where
                 base_diff: self.base_diff,
                 base_operations: self.base_operations,
                 base_size: self.base_size,
-                db_journal_size: self.base_size - chain_len,
+                db_size: self.base_size - chain_len,
                 base_inactivity_floor_loc: self.base_inactivity_floor_loc,
                 base_active_keys: self.base_active_keys,
             },
@@ -983,9 +990,9 @@ where
         U,
         authenticated::MerkleizedBatch<'a, H, P, Operation<K, V, U>>,
     > {
-        let db_journal_size = *self.db.last_commit_loc + 1;
+        let db_size = *self.db.last_commit_loc + 1;
         let chain_ops_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
-        let total_size = db_journal_size + chain_ops_len;
+        let total_size = db_size + chain_ops_len;
 
         UnmerkleizedBatch {
             db: self.db,
@@ -1062,6 +1069,7 @@ where
             active_keys_delta,
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
+            db_size: self.db_size,
         }
     }
 }
@@ -1108,18 +1116,24 @@ where
 {
     /// Apply a changeset to the database.
     ///
-    /// This is the single mutation point for the DB. It:
-    /// 1. Writes all operations (user + floor raise + CommitFloor) to the journal
-    /// 2. Flushes the journal to disk
-    /// 3. Updates the in-memory snapshot index
-    /// 4. Updates DB metadata (active_keys, floor, last_commit)
+    /// A changeset is only valid if the database has not been modified since the
+    /// batch that produced it was created. Multiple batches can be forked from the
+    /// same parent for speculative execution, but only one may be applied. Applying
+    /// a stale changeset returns [`Error::StaleChangeset`].
     ///
     /// Returns the range of locations written.
     pub async fn apply_batch(
         &mut self,
         batch: Changeset<K, H::Digest, Operation<K, V, U>>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = Location::new(*self.last_commit_loc + 1);
+        let journal_size = *self.last_commit_loc + 1;
+        if batch.db_size != journal_size {
+            return Err(Error::StaleChangeset {
+                expected: batch.db_size,
+                actual: journal_size,
+            });
+        }
+        let start_loc = Location::new(journal_size);
 
         // 1. Write all operations to the authenticated journal + apply MMR changeset.
         self.log.apply_batch(batch.journal_finalized).await?;

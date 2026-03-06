@@ -37,6 +37,9 @@ where
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
     pub(super) base_size: u64,
+
+    /// The database size when this batch was created, used to detect stale changesets.
+    pub(super) db_size: u64,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -59,6 +62,9 @@ where
 
     /// Total operation count after this batch.
     total_size: u64,
+
+    /// The database size when this batch was created, used to detect stale changesets.
+    db_size: u64,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -68,6 +74,9 @@ pub struct Changeset<D: Digest, V: VariableValue> {
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
+
+    /// The database size when the batch was created. Used to detect stale changesets.
+    pub(super) db_size: u64,
 }
 
 impl<'a, E, V, H, P> UnmerkleizedBatch<'a, E, V, H, P>
@@ -142,6 +151,7 @@ where
             journal_batch,
             base_operations,
             total_size,
+            db_size: self.db_size,
         }
     }
 }
@@ -188,6 +198,7 @@ where
             appends: Vec::new(),
             base_operations: self.base_operations.clone(),
             base_size: self.total_size,
+            db_size: self.db_size,
         }
     }
 
@@ -196,6 +207,7 @@ where
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
             total_size: self.total_size,
+            db_size: self.db_size,
         }
     }
 }

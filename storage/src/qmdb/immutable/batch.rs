@@ -57,6 +57,9 @@ where
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
     pub(super) base_size: u64,
+
+    /// The database size when this batch was created, used to detect stale changesets.
+    pub(super) db_size: u64,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -84,6 +87,9 @@ where
 
     /// Total operation count after this batch.
     total_size: u64,
+
+    /// The database size when this batch was created, used to detect stale changesets.
+    db_size: u64,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -96,6 +102,9 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
+
+    /// The database size when the batch was created. Used to detect stale changesets.
+    pub(super) db_size: u64,
 }
 
 impl<'a, E, K, V, H, T, P> UnmerkleizedBatch<'a, E, K, V, H, T, P>
@@ -167,6 +176,7 @@ where
             diff: Arc::new(diff),
             base_operations,
             total_size,
+            db_size: self.db_size,
         }
     }
 }
@@ -213,6 +223,7 @@ where
             base_diff: Arc::clone(&self.diff),
             base_operations: self.base_operations.clone(),
             base_size: self.total_size,
+            db_size: self.db_size,
         }
     }
 
@@ -233,6 +244,7 @@ where
             journal_finalized: self.journal_batch.finalize(),
             snapshot_diffs,
             total_size: self.total_size,
+            db_size: self.db_size,
         }
     }
 }

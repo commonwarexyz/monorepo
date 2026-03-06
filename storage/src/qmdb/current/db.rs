@@ -363,6 +363,11 @@ where
 {
     /// Apply a changeset to the database.
     ///
+    /// A changeset is only valid if the database has not been modified since the
+    /// batch that produced it was created. Multiple batches can be forked from the
+    /// same parent for speculative execution, but only one may be applied. Applying
+    /// a stale changeset returns [`Error::StaleChangeset`].
+    ///
     /// Returns the range of locations written.
     pub async fn apply_batch(
         &mut self,

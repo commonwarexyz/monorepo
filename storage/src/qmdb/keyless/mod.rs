@@ -244,17 +244,29 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
             appends: Vec::new(),
             base_operations: Vec::new(),
             base_size: journal_size,
+            db_size: journal_size,
         }
     }
 
     /// Apply a changeset to the database.
     ///
-    /// Writes all operations to the journal, flushes, and updates state.
+    /// A changeset is only valid if the database has not been modified since the
+    /// batch that produced it was created. Multiple batches can be forked from the
+    /// same parent for speculative execution, but only one may be applied. Applying
+    /// a stale changeset returns [`Error::StaleChangeset`].
+    ///
     /// Returns the range of locations written.
     pub async fn apply_batch(
         &mut self,
         batch: batch::Changeset<H::Digest, V>,
     ) -> Result<core::ops::Range<Location>, Error> {
+        let journal_size = *self.last_commit_loc + 1;
+        if batch.db_size != journal_size {
+            return Err(Error::StaleChangeset {
+                expected: batch.db_size,
+                actual: journal_size,
+            });
+        }
         let start_loc = self.last_commit_loc + 1;
 
         // Write all operations to the authenticated journal + apply MMR changeset.
@@ -1596,6 +1608,139 @@ mod test {
 
             // Expected: 1 initial commit + N appends + 1 commit.
             assert_eq!(db.bounds().await.end, 1 + N + 1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Create two batches from the same DB state.
+            let changeset_a = {
+                let mut batch = db.new_batch();
+                batch.append(vec![10]);
+                batch.merkleize(None).finalize()
+            };
+            let changeset_b = {
+                let mut batch = db.new_batch();
+                batch.append(vec![20]);
+                batch.merkleize(None).finalize()
+            };
+
+            // Apply the first -- should succeed.
+            db.apply_batch(changeset_a).await.unwrap();
+
+            // Apply the second -- should fail because the DB was modified.
+            let result = db.apply_batch(changeset_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_chained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Parent batch.
+            let mut parent = db.new_batch();
+            parent.append(vec![1]);
+            let parent_m = parent.merkleize(None);
+
+            // Fork two children from the same parent.
+            let child_a = {
+                let mut batch = parent_m.new_batch();
+                batch.append(vec![2]);
+                batch.merkleize(None).finalize()
+            };
+            let child_b = {
+                let mut batch = parent_m.new_batch();
+                batch.append(vec![3]);
+                batch.merkleize(None).finalize()
+            };
+
+            // Apply child A.
+            db.apply_batch(child_a).await.unwrap();
+
+            // Child B is stale.
+            let result = db.apply_batch(child_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_parent_applied_before_child() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Parent batch.
+            let mut parent = db.new_batch();
+            parent.append(vec![1]);
+            let parent_m = parent.merkleize(None);
+
+            // Child batch.
+            let mut child = parent_m.new_batch();
+            child.append(vec![2]);
+            let child_changeset = child.merkleize(None).finalize();
+
+            // Apply parent first.
+            let parent_changeset = parent_m.finalize();
+            db.apply_batch(parent_changeset).await.unwrap();
+
+            // Child is stale because it expected to be applied on top of the
+            // pre-parent DB state.
+            let result = db.apply_batch(child_changeset).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_child_applied_before_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Parent batch.
+            let mut parent = db.new_batch();
+            parent.append(vec![1]);
+            let parent_m = parent.merkleize(None);
+
+            // Child batch. Finalize both before applying either so the
+            // borrow on `db` through `parent_m` is released.
+            let mut child = parent_m.new_batch();
+            child.append(vec![2]);
+            let child_changeset = child.merkleize(None).finalize();
+            let parent_changeset = parent_m.finalize();
+
+            // Apply child first (it carries all parent ops too).
+            db.apply_batch(child_changeset).await.unwrap();
+
+            // Parent is stale.
+            let result = db.apply_batch(parent_changeset).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
 
             db.destroy().await.unwrap();
         });

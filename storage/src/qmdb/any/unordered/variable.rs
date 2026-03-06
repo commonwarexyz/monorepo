@@ -453,6 +453,157 @@ pub(crate) mod test {
         });
     }
 
+    #[test_traced]
+    fn test_stale_changeset_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+
+            // Create two batches from the same DB state.
+            let changeset_a = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(vec![10]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let changeset_b = {
+                let mut batch = db.new_batch();
+                batch.write(key2, Some(vec![20]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            // Apply the first -- should succeed.
+            db.apply_batch(changeset_a).await.unwrap();
+
+            // Apply the second -- should fail because the DB was modified.
+            let result = db.apply_batch(changeset_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_chained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+            let key3 = Sha256::hash(&[3]);
+
+            // Commit initial state.
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(vec![10]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+
+            // Create a parent batch, then fork two children.
+            let parent = {
+                let mut batch = db.new_batch();
+                batch.write(key2, Some(vec![20]));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            let child_a = {
+                let mut batch = parent.new_batch();
+                batch.write(key3, Some(vec![30]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let child_b = {
+                let mut batch = parent.new_batch();
+                batch.write(key3, Some(vec![40]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            // Apply child_a, then child_b should be stale.
+            db.apply_batch(child_a).await.unwrap();
+            let result = db.apply_batch(child_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error for sibling, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_parent_applied_before_child() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+
+            // Create parent, then child.
+            let parent = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(vec![10]));
+                batch.merkleize(None).await.unwrap()
+            };
+            let child = {
+                let mut batch = parent.new_batch();
+                batch.write(key2, Some(vec![20]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let parent = parent.finalize();
+
+            // Apply parent first -- child should now be stale.
+            db.apply_batch(parent).await.unwrap();
+            let result = db.apply_batch(child).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset for child after parent applied, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_changeset_child_applied_before_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+
+            // Create parent, then child.
+            let parent = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(vec![10]));
+                batch.merkleize(None).await.unwrap()
+            };
+            let child = {
+                let mut batch = parent.new_batch();
+                batch.write(key2, Some(vec![20]));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let parent = parent.finalize();
+
+            // Apply child first -- parent should now be stale.
+            db.apply_batch(child).await.unwrap();
+            let result = db.apply_batch(parent).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset for parent after child applied, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
