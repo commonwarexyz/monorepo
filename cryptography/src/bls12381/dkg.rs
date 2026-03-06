@@ -315,7 +315,7 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Random},
+    algebra::{Additive, CryptoGroup, Random, Ring as _},
     poly::{Interpolator, Poly},
 };
 use commonware_parallel::{Sequential, Strategy};
@@ -648,7 +648,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                     let Ok(player_scalar) = self.player_scalar(player) else {
                         return false;
                     };
-                    let coeff = Scalar::random(&mut *rng);
+                    let coeff = if reveal_count == 1 {
+                        Scalar::one()
+                    } else {
+                        Scalar::random(&mut *rng)
+                    };
                     reveal_eval_points.push((coeff.clone(), player_scalar));
                     priv_msg
                         .share
