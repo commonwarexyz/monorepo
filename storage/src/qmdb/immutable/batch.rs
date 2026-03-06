@@ -117,6 +117,9 @@ where
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
 {
     /// Set a key to a value.
+    ///
+    /// The key must not already exist in the database or in any ancestor batch
+    /// in the chain. Setting a key that already exists causes undefined behavior.
     pub fn set(&mut self, key: K, value: V) {
         self.mutations.insert(key, value);
     }
