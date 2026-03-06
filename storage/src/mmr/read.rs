@@ -67,11 +67,6 @@ pub trait BatchChainInfo<D: Digest> {
     /// from. This is constant through the entire chain.
     fn base_size(&self) -> Position;
 
-    /// Number of nodes from the original MMR that are still retained after
-    /// all pops in the chain. Nodes at or above this position were appended
-    /// by batches. Equal to `base_size()` when nothing was popped.
-    fn retained_size(&self) -> Position;
-
     /// Collect all overwrites that target nodes in the original MMR
     /// (i.e. positions < `base_size()`), walking from the deepest
     /// ancestor to the current batch. Later batches overwrite earlier ones.

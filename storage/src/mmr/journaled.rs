@@ -842,10 +842,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo<D> for Mmr<E, D> {
         self.size()
     }
 
-    fn retained_size(&self) -> Position {
-        self.size()
-    }
-
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 

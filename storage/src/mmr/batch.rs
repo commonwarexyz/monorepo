@@ -2,11 +2,9 @@
 //!
 //! # Overview
 //!
-//! A [`Batch`] borrows a parent MMR (anything implementing [`Readable`])
-//! immutably and records mutations -- appends, leaf updates, pops, and
-//! pruning advances -- without touching the parent. Multiple batches can
-//! coexist on the same parent, and batches can be stacked (Base <- A <- B)
-//! to arbitrary depth.
+//! A [`Batch`] borrows a parent MMR ([`Readable`]) immutably and records mutations -- append
+//! and leaf updates -- without mutating the parent. Multiple batches can coexist on the same
+//! parent, and batches can be stacked (Base <- A <- B <- ...) to arbitrary depth.
 //!
 //! # Lifecycle
 //!
@@ -31,7 +29,7 @@
 //!
 //! # Type aliases
 //!
-//! - [`UnmerkleizedBatch`] -- mutable phase: add, update, pop, advance pruning.
+//! - [`UnmerkleizedBatch`] -- mutable phase: add, update leaves.
 //! - [`MerkleizedBatch`]   -- immutable phase: root is computed, proofs available.
 //! - [`Changeset`]         -- owned delta that can be applied to the base MMR.
 //!
@@ -64,7 +62,6 @@ use crate::mmr::{
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
-use core::cmp;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_parallel::ThreadPool;
@@ -76,18 +73,11 @@ cfg_if::cfg_if! {
 pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
     /// The parent MMR.
     parent: &'a P,
-    /// How many of the parent's nodes are retained. Starts at `parent.size()`
-    /// and shrinks with each `pop()`.
-    parent_retained: Position,
-    /// Nodes appended by this batch, at positions [retained, retained + appended.len()).
+    /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
     appended: Vec<D>,
-    /// Overwritten nodes at positions < retained. Shadows parent data;
-    /// later writes win.
+    /// Overwritten nodes at positions < parent.size(). Shadows parent data; later writes win.
     overwrites: BTreeMap<Position, D>,
-    /// Logical pruning boundary. Recorded here, materialized when the
-    /// changeset is applied to the parent.
-    pruned_to_pos: Position,
-    /// Type-state: Dirty (mutable phase) or `Clean<D>` (immutable, has root).
+    /// Type-state: Dirty (mutable, no root) or `Clean<D>` (immutable, has root).
     state: S,
     /// Thread pool for parallel merkleization.
     #[cfg(feature = "std")]
@@ -103,23 +93,18 @@ pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 /// Owned set of changes against a base MMR.
 /// Apply via [`super::mem::Mmr::apply`].
 pub struct Changeset<D: Digest> {
-    /// Number of nodes retained from the original MMR. Nodes at or above
-    /// this position are replaced by `appended`.
-    pub(crate) parent_retained: Position,
-    /// Nodes appended at positions [parent_retained, parent_retained + appended.len()).
+    /// Nodes appended after the base MMR's existing nodes.
     pub(crate) appended: Vec<D>,
-    /// Overwritten nodes at positions < parent_retained.
+    /// Overwritten nodes within the base MMR's range.
     pub(crate) overwrites: BTreeMap<Position, D>,
     /// Root digest after applying the changeset.
     pub(crate) root: D,
-    /// Pruning boundary to apply.
-    pub(crate) pruned_to_pos: Position,
 }
 
 impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
-        Position::new(*self.parent_retained + self.appended.len() as u64)
+        Position::new(*self.parent.size() + self.appended.len() as u64)
     }
 
     /// Resolve a node: overwrites -> appended -> parent.
@@ -130,8 +115,8 @@ impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
         if let Some(d) = self.overwrites.get(&pos) {
             return Some(*d);
         }
-        if pos >= self.parent_retained {
-            let index = (*pos - *self.parent_retained) as usize;
+        if pos >= self.parent.size() {
+            let index = (*pos - *self.parent.size()) as usize;
             return self.appended.get(index).copied();
         }
         self.parent.get_node(pos)
@@ -139,8 +124,8 @@ impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
 
     /// Store a digest to the given storage location.
     fn store_node(&mut self, pos: Position, digest: D) {
-        if pos >= self.parent_retained {
-            let index = (*pos - *self.parent_retained) as usize;
+        if pos >= self.parent.size() {
+            let index = (*pos - *self.parent.size()) as usize;
             self.appended[index] = digest;
         } else {
             self.overwrites.insert(pos, digest);
@@ -158,8 +143,6 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     /// O(1) time and space.
     pub fn new(parent: &'a P) -> Self {
         Self {
-            parent_retained: parent.size(),
-            pruned_to_pos: parent.pruned_to_pos(),
             parent,
             appended: Vec::new(),
             overwrites: BTreeMap::new(),
@@ -218,8 +201,7 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
             return Err(Error::LeafOutOfBounds(loc));
         }
         let pos = Position::try_from(loc)?;
-        let prune_boundary = cmp::max(self.parent.pruned_to_pos(), self.pruned_to_pos);
-        if pos < prune_boundary {
+        if pos < self.parent.pruned_to_pos() {
             return Err(Error::ElementPruned(pos));
         }
         let digest = hasher.leaf_digest(pos, element);
@@ -232,8 +214,7 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
         let pos = Position::try_from(loc).map_err(|_| Error::LocationOverflow(loc))?;
-        let prune_boundary = cmp::max(self.parent.pruned_to_pos(), self.pruned_to_pos);
-        if pos < prune_boundary {
+        if pos < self.parent.pruned_to_pos() {
             return Err(Error::ElementPruned(pos));
         }
         if pos >= self.size() {
@@ -251,7 +232,7 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_batched(&mut self, updates: &[(Location, D)]) -> Result<(), Error> {
         let leaves = Location::try_from(self.size()).expect("invalid mmr size");
-        let prune_boundary = cmp::max(self.parent.pruned_to_pos(), self.pruned_to_pos);
+        let prune_boundary = self.parent.pruned_to_pos();
         let mut positions = Vec::with_capacity(updates.len());
         for (loc, _) in updates {
             if *loc >= leaves {
@@ -267,53 +248,6 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
             self.store_node(*pos, *digest);
             self.mark_dirty(*pos);
         }
-        Ok(())
-    }
-
-    /// Pop the most recent leaf. Can pop into parent range.
-    pub fn pop(&mut self) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Error::Empty);
-        }
-
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(Error::ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-
-        // Truncate: remove nodes from appended and/or shrink parent_retained.
-        if new_size >= self.parent_retained {
-            let keep_appended = (*new_size - *self.parent_retained) as usize;
-            self.appended.truncate(keep_appended);
-        } else {
-            self.appended.clear();
-            self.parent_retained = new_size;
-            // Remove overwrites at positions >= new parent_retained.
-            self.overwrites.split_off(&new_size);
-        }
-
-        // Remove dirty nodes that are now out of bounds.
-        self.state.remove_above(self.size());
-
-        Ok(self.size())
-    }
-
-    /// Record intent to prune to `pos`. Logical only -- parent is immutable.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPosition`] if `pos` exceeds the batch's size.
-    pub fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
-        if pos > self.size() {
-            return Err(Error::InvalidPosition(pos));
-        }
-        self.pruned_to_pos = cmp::max(self.pruned_to_pos, pos);
         Ok(())
     }
 
@@ -347,10 +281,8 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
 
         Batch {
             parent: self.parent,
-            parent_retained: self.parent_retained,
             appended: self.appended,
             overwrites: self.overwrites,
-            pruned_to_pos: self.pruned_to_pos,
             state: Clean { root },
             #[cfg(feature = "std")]
             pool: self.pool,
@@ -479,7 +411,7 @@ impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
     }
 
     fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
+        self.parent.pruned_to_pos()
     }
 }
 
@@ -488,10 +420,6 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
 {
     fn base_size(&self) -> Position {
         self.parent.base_size()
-    }
-
-    fn retained_size(&self) -> Position {
-        cmp::min(self.parent_retained, self.parent.retained_size())
     }
 
     fn collect_overwrites(&self, into: &mut BTreeMap<Position, D>) {
@@ -530,10 +458,8 @@ impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
     pub fn into_dirty(self) -> UnmerkleizedBatch<'a, D, P> {
         Batch {
             parent: self.parent,
-            parent_retained: self.parent_retained,
             appended: self.appended,
             overwrites: self.overwrites,
-            pruned_to_pos: self.pruned_to_pos,
             state: Dirty::default(),
             #[cfg(feature = "std")]
             pool: self.pool,
@@ -545,27 +471,24 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> MerkleizedBatch<'a, D, P
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMR.
     pub fn finalize(self) -> Changeset<D> {
-        let retained = cmp::min(self.parent_retained, self.parent.retained_size());
+        let base_size = self.parent.base_size();
         let effective = self.size();
-        let pruned = self.pruned_to_pos;
 
-        // Resolve nodes at [retained, effective).
-        let mut appended = Vec::with_capacity((*effective - *retained) as usize);
-        for i in *retained..*effective {
+        // Resolve nodes at [base_size, effective).
+        let mut appended = Vec::with_capacity((*effective - *base_size) as usize);
+        for i in *base_size..*effective {
             appended.push(self.get_node(Position::new(i)).expect("node in range"));
         }
 
-        // Collect overwrites from entire chain, filtered to [pruned, retained).
+        // Collect overwrites from entire chain, filtered to positions < base_size.
         let mut overwrites = BTreeMap::new();
         self.collect_overwrites(&mut overwrites);
-        overwrites.retain(|&pos, _| pos >= pruned && pos < retained);
+        overwrites.retain(|&pos, _| pos < base_size);
 
         Changeset {
-            parent_retained: retained,
             appended,
             overwrites,
             root: self.state.root,
-            pruned_to_pos: pruned,
         }
     }
 }
@@ -1013,116 +936,6 @@ mod tests {
         });
     }
 
-    /// Add then pop in batch. Verify root matches smaller reference MMR.
-    #[test]
-    fn test_pop_appended() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = build_reference(&mut hasher, 50);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            for i in 50u64..55 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch.add(&mut hasher, &element);
-            }
-            // Pop last leaf.
-            batch.pop().unwrap();
-
-            let merkleized = batch.merkleize(&mut hasher);
-
-            let reference = build_reference(&mut hasher, 54);
-            assert_eq!(merkleized.root(), *reference.root());
-        });
-    }
-
-    /// Pop leaves from base range via batch. Verify root matches building a fresh MMR with fewer
-    /// leaves.
-    #[test]
-    fn test_pop_into_parent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = build_reference(&mut hasher, 50);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            // Pop 5 leaves from the base.
-            for _ in 0..5 {
-                batch.pop().unwrap();
-            }
-            let merkleized = batch.merkleize(&mut hasher);
-
-            let reference = build_reference(&mut hasher, 45);
-            assert_eq!(merkleized.root(), *reference.root());
-
-            // Apply and verify.
-            let mut base_copy = base.clone();
-            let changeset = merkleized.finalize();
-            base_copy.apply(changeset);
-            assert_eq!(base_copy.root(), reference.root());
-        });
-    }
-
-    /// Pop into parent range, then add new leaves. Verify root and proofs.
-    #[test]
-    fn test_pop_then_add() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = build_reference(&mut hasher, 50);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            // Pop 5.
-            for _ in 0..5 {
-                batch.pop().unwrap();
-            }
-            // Add 10 new.
-            for i in 100u64..110 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch.add(&mut hasher, &element);
-            }
-            let merkleized = batch.merkleize(&mut hasher);
-
-            // Build reference: 45 original elements then 10 with different seed.
-            let mut reference = build_reference(&mut hasher, 45);
-            let changeset = {
-                let mut batch = UnmerkleizedBatch::new(&reference);
-                for i in 100u64..110 {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
-                    batch.add(&mut hasher, &element);
-                }
-                batch.merkleize(&mut hasher).finalize()
-            };
-            reference.apply(changeset);
-
-            assert_eq!(merkleized.root(), *reference.root());
-        });
-    }
-
-    /// Pop past pruned boundary returns Error::ElementPruned.
-    #[test]
-    fn test_pop_error_on_prune_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut base = build_reference(&mut hasher, 20);
-            base.prune_to_pos(Position::new(15));
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            // Pop until we hit the prune boundary.
-            loop {
-                match batch.pop() {
-                    Ok(_) => continue,
-                    Err(Error::ElementPruned(_)) => break,
-                    Err(e) => panic!("unexpected error: {e}"),
-                }
-            }
-        });
-    }
-
     /// MerkleizedBatch -> into_dirty -> more mutations -> merkleize -> verify.
     #[test]
     fn test_into_dirty_roundtrip() {
@@ -1183,33 +996,6 @@ mod tests {
             base.apply(cs2);
 
             let reference = build_reference(&mut hasher, 70);
-            assert_eq!(base.root(), reference.root());
-        });
-    }
-
-    /// Batch advances pruning, changeset carries it, apply prunes base.
-    #[test]
-    fn test_prune() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut base = build_reference(&mut hasher, 100);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            for i in 100u64..110 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch.add(&mut hasher, &element);
-            }
-            batch.prune_to_pos(Position::new(50)).unwrap();
-            let merkleized = batch.merkleize(&mut hasher);
-            let changeset = merkleized.finalize();
-            base.apply(changeset);
-
-            assert_eq!(base.bounds().start, Position::new(50));
-
-            // Root should match reference built from scratch with same content.
-            let reference = build_reference(&mut hasher, 110);
             assert_eq!(base.root(), reference.root());
         });
     }
@@ -1290,54 +1076,7 @@ mod tests {
         });
     }
 
-    /// Base <- A (pops into base) <- B (adds). B's changeset has parent_retained < base.size().
-    #[test]
-    fn test_flattened_changeset_with_pop() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut base = build_reference(&mut hasher, 50);
-
-            // Layer A: pop 5 leaves.
-            let mut batch_a = UnmerkleizedBatch::new(&base);
-            for _ in 0..5 {
-                batch_a.pop().unwrap();
-            }
-            let merkleized_a = batch_a.merkleize(&mut hasher);
-
-            // Layer B on A: add 10 new leaves.
-            let mut batch_b = UnmerkleizedBatch::new(&merkleized_a);
-            for i in 200u64..210 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch_b.add(&mut hasher, &element);
-            }
-            let merkleized_b = batch_b.merkleize(&mut hasher);
-            let b_root = merkleized_b.root();
-
-            let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
-            base.apply(changeset);
-
-            assert_eq!(*base.root(), b_root);
-
-            // Build reference: 45 base elements + 10 new.
-            let mut reference = build_reference(&mut hasher, 45);
-            let changeset = {
-                let mut batch = UnmerkleizedBatch::new(&reference);
-                for i in 200u64..210 {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
-                    batch.add(&mut hasher, &element);
-                }
-                batch.merkleize(&mut hasher).finalize()
-            };
-            reference.apply(changeset);
-            assert_eq!(base.root(), reference.root());
-        });
-    }
-
-    /// Base <- A (overwrite leaf 5) <- B (pop 3) <- C (add 10).
+    /// Base <- A (overwrite leaf 5) <- B (overwrite leaf 10) <- C (add 10).
     /// Flatten C's changeset, apply to base, verify root matches building the equivalent directly.
     #[test]
     fn test_three_deep_stacking() {
@@ -1346,19 +1085,21 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut base = build_reference(&mut hasher, 100);
 
+            let digest_a = Sha256::fill(0xDD);
+            let digest_b = Sha256::fill(0xEE);
+
             // Layer A: overwrite leaf 5.
-            let updated_digest = Sha256::fill(0xDD);
             let mut batch_a = UnmerkleizedBatch::new(&base);
             batch_a
-                .update_leaf_digest(Location::new(5), updated_digest)
+                .update_leaf_digest(Location::new(5), digest_a)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
-            // Layer B on A: pop 3 leaves.
+            // Layer B on A: overwrite leaf 10.
             let mut batch_b = merkleized_a.new_batch();
-            for _ in 0..3 {
-                batch_b.pop().unwrap();
-            }
+            batch_b
+                .update_leaf_digest(Location::new(10), digest_b)
+                .unwrap();
             let merkleized_b = batch_b.merkleize(&mut hasher);
 
             // Layer C on B: add 10 leaves.
@@ -1379,13 +1120,16 @@ mod tests {
 
             assert_eq!(*base.root(), c_root);
 
-            // Build the equivalent directly: 97 base elements with leaf 5 overwritten,
-            // then 10 new elements.
-            let mut reference = build_reference(&mut hasher, 97);
+            // Build the equivalent directly: 100 base elements with leaves 5 and 10
+            // overwritten, then 10 new elements.
+            let mut reference = build_reference(&mut hasher, 100);
             let changeset = {
                 let mut batch = UnmerkleizedBatch::new(&reference);
                 batch
-                    .update_leaf_digest(Location::new(5), updated_digest)
+                    .update_leaf_digest(Location::new(5), digest_a)
+                    .unwrap();
+                batch
+                    .update_leaf_digest(Location::new(10), digest_b)
                     .unwrap();
                 for i in 300u64..310 {
                     hasher.inner().update(&i.to_be_bytes());
@@ -1485,43 +1229,6 @@ mod tests {
         });
     }
 
-    /// prune beyond size returns an error.
-    #[test]
-    fn test_prune_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = build_reference(&mut hasher, 50);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            let result = batch.prune_to_pos(Position::new(999));
-            assert!(
-                matches!(result, Err(Error::InvalidPosition(_))),
-                "expected InvalidPosition, got {result:?}"
-            );
-        });
-    }
-
-    /// After prune(50), update_leaf_digest at position 40 should fail.
-    #[test]
-    fn test_update_leaf_respects_logical_prune_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = build_reference(&mut hasher, 100);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            batch.prune_to_pos(Position::new(50)).unwrap();
-
-            // Update at location 10 (position < 50) should fail.
-            let result = batch.update_leaf_digest(Location::new(10), Sha256::fill(0xFF));
-            assert!(
-                matches!(result, Err(Error::ElementPruned(_))),
-                "expected ElementPruned, got {result:?}"
-            );
-        });
-    }
-
     /// update_leaf (element-based) hashes the element before storing. Verify root matches
     /// building the same update via Mmr::update_leaf.
     #[test]
@@ -1572,23 +1279,6 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {result:?}"
-            );
-        });
-    }
-
-    /// Pop from an empty batch returns Error::Empty.
-    #[test]
-    fn test_pop_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let base = Mmr::new(&mut hasher);
-
-            let mut batch = UnmerkleizedBatch::new(&base);
-            let result = batch.pop();
-            assert!(
-                matches!(result, Err(Error::Empty)),
-                "expected Empty, got {result:?}"
             );
         });
     }

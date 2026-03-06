@@ -9,7 +9,6 @@ use libfuzzer_sys::fuzz_target;
 #[derive(Arbitrary, Debug, Clone)]
 enum MmrOperation {
     Add { data: Vec<u8> },
-    Pop,
     UpdateLeaf { location: u8, new_data: Vec<u8> },
     GetNode { pos: u64 },
     GetSize,
@@ -48,28 +47,6 @@ impl ReferenceMmr {
         // Track nodes added (leaf + any parent nodes)
         let nodes_after = self.calculate_mmr_size(self.leaf_positions.len());
         self.total_nodes_added = nodes_after;
-    }
-
-    fn pop(&mut self) -> Result<(), ()> {
-        if self.leaf_positions.is_empty() {
-            return Err(());
-        }
-
-        // Check if the last leaf would be pruned - if so, we can't pop it
-        let last_leaf_pos = *self.leaf_positions.last().unwrap();
-        if last_leaf_pos < self.pruned_to_pos {
-            return Err(()); // Element is pruned, can't pop
-        }
-
-        self.leaf_positions.pop();
-        self.leaf_data.pop();
-
-        if self.leaf_positions.is_empty() {
-            self.total_nodes_added = 0;
-        } else {
-            self.total_nodes_added = self.calculate_mmr_size(self.leaf_positions.len());
-        }
-        Ok(())
     }
 
     fn update_leaf(&mut self, idx: usize, new_data: Vec<u8>) {
@@ -176,37 +153,6 @@ fn fuzz(input: FuzzInput) {
                         mmr.get_node(mmr_pos).is_some(),
                         "Operation {op_idx}: Should be able to get added node"
                     );
-                }
-
-                MmrOperation::Pop => {
-                    let leaves_before = mmr.leaves();
-                    let size_before = mmr.size();
-                    let mmr_result = {
-                        let mut batch = mmr.new_batch();
-                        let r = batch.pop();
-                        if r.is_ok() {
-                            mmr.apply(batch.merkleize(&mut hasher).finalize());
-                        }
-                        r
-                    };
-                    let ref_result = reference.pop();
-
-                    assert_eq!(
-                        mmr_result.is_ok(), ref_result.is_ok(),
-                        "Operation {op_idx}: Pop result mismatch - MMR: {mmr_result:?}, Ref: {ref_result:?}",
-                    );
-
-                    if mmr_result.is_ok() {
-                        assert!(
-                            mmr.size() < size_before,
-                            "Operation {op_idx}: Size should decrease after successful pop"
-                        );
-                        assert_eq!(
-                            mmr.leaves(),
-                            leaves_before - 1,
-                            "Operation {op_idx}: Leaves should decrease after successful pop"
-                        );
-                    }
                 }
 
                 MmrOperation::UpdateLeaf { location, new_data } => {
