@@ -63,16 +63,16 @@ impl Drop for PageFetchGuard {
             return;
         }
 
-        let mut cache = self.cache.write();
-        let Some(current) = cache.page_fetches.get(&self.key) else {
-            return;
-        };
         // A resolved fetch removes `page_fetches[key]` before waiters resume and disarm their
         // guards. If that fetch failed, the page remains uncached, so a new reader can install a
         // new fetch for the same key before an old waiter is cancelled. Ignore drops from stale
         // waiters so they cannot decrement or remove a newer generation. A surviving waiter keeps
         // the current generation installed, which lets the shared future finish and cache the page
         // on success.
+        let mut cache = self.cache.write();
+        let Some(current) = cache.page_fetches.get(&self.key) else {
+            return;
+        };
         if !Arc::ptr_eq(current, &self.fetch) {
             return;
         }
