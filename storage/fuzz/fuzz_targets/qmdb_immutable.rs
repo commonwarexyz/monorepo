@@ -107,6 +107,23 @@ fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeC
     }
 }
 
+/// Assign locations to pending keys based on sorted order (matching BTreeMap
+/// iteration in `merkleize()`).
+fn assign_pending_locations(
+    pending: &[(Digest, Vec<u8>)],
+    base: Location,
+    keys_set: &mut Vec<(Digest, Location)>,
+    set_locations: &mut Vec<(Digest, Location)>,
+) {
+    let mut sorted_keys: Vec<Digest> = pending.iter().map(|(k, _)| *k).collect();
+    sorted_keys.sort();
+    for (i, key) in sorted_keys.iter().enumerate() {
+        let loc = Location::new(base.as_u64() + i as u64);
+        keys_set.push((*key, loc));
+        set_locations.push((*key, loc));
+    }
+}
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
 
@@ -133,10 +150,9 @@ fn fuzz(input: FuzzInput) {
                     let key = generate_key(&mut rng, key_seed);
                     let value = generate_value(&mut rng, value_size);
 
-                    if !keys_set.iter().any(|(k, _)| k == &key) {
-                        let loc = db.bounds().await.end + pending_sets.len() as u64;
-                        keys_set.push((key, loc));
-                        set_locations.push((key, loc));
+                    if !keys_set.iter().any(|(k, _): &(Digest, _)| k == &key)
+                        && !pending_sets.iter().any(|(k, _): &(Digest, _)| k == &key)
+                    {
                         pending_sets.push((key, value));
                     }
                 }
@@ -156,6 +172,12 @@ fn fuzz(input: FuzzInput) {
                         None
                     };
 
+                    assign_pending_locations(
+                        &pending_sets,
+                        db.bounds().await.end,
+                        &mut keys_set,
+                        &mut set_locations,
+                    );
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
@@ -171,6 +193,12 @@ fn fuzz(input: FuzzInput) {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc);
+                        assign_pending_locations(
+                            &pending_sets,
+                            db.bounds().await.end,
+                            &mut keys_set,
+                            &mut set_locations,
+                        );
                         let finalized = {
                             let mut batch = db.new_batch();
                             for (k, v) in pending_sets.drain(..) {
@@ -182,8 +210,8 @@ fn fuzz(input: FuzzInput) {
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         db.prune(safe_loc).await.expect("prune should not fail");
                         let oldest = db.bounds().await.start;
-                        set_locations.retain(|(_, l)| *l >= oldest);
-                        keys_set.retain(|(_, l)| *l >= oldest);
+                        set_locations.retain(|(_, l): &(_, Location)| *l >= oldest);
+                        keys_set.retain(|(_, l): &(_, Location)| *l >= oldest);
                     }
                 }
 
@@ -197,6 +225,12 @@ fn fuzz(input: FuzzInput) {
                         let safe_start = Location::new(safe_start);
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
+                        assign_pending_locations(
+                            &pending_sets,
+                            db.bounds().await.end,
+                            &mut keys_set,
+                            &mut set_locations,
+                        );
                         let finalized = {
                             let mut batch = db.new_batch();
                             for (k, v) in pending_sets.drain(..) {
@@ -251,6 +285,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::Root => {
+                    assign_pending_locations(
+                        &pending_sets,
+                        db.bounds().await.end,
+                        &mut keys_set,
+                        &mut set_locations,
+                    );
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
@@ -265,6 +305,12 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
+        assign_pending_locations(
+            &pending_sets,
+            db.bounds().await.end,
+            &mut keys_set,
+            &mut set_locations,
+        );
         let finalized = {
             let mut batch = db.new_batch();
             for (k, v) in pending_sets.drain(..) {
