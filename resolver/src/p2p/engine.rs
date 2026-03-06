@@ -4,7 +4,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::Consumer;
+use crate::{Consumer, RequestType};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -225,11 +225,20 @@ impl<
             } => {
                 match msg {
                     Message::Fetch(requests) => {
-                        for FetchRequest { key, targets } in requests {
+                        for FetchRequest {
+                            key,
+                            targets,
+                            request_type,
+                        } in requests
+                        {
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
                             let is_new = !self.fetch_timers.contains_key(&key);
+                            let urgent = matches!(request_type, RequestType::Urgent);
+                            if urgent {
+                                self.fetcher.mark_urgent(key.clone());
+                            }
 
                             // Update targets
                             match targets {
@@ -249,6 +258,9 @@ impl<
                                 self.fetch_timers
                                     .insert(key.clone(), self.metrics.fetch_duration.timer());
                                 self.fetcher.add_ready(key);
+                            } else if urgent {
+                                self.fetcher.escalate(&key, &mut sender).await;
+                                trace!(?key, "escalated urgent fetch");
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
                             }
@@ -418,7 +430,7 @@ impl<
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
+        let Some((key, exhausted)) = self.fetcher.pop_by_id(id, &peer, true) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
@@ -429,8 +441,7 @@ impl<
             self.metrics.fetch.inc(Status::Success);
             self.fetch_timers.remove(&key).unwrap(); // must exist in the map, records metric on drop
 
-            // Clear all targets for this key
-            self.fetcher.clear_targets(&key);
+            let _ = self.fetcher.cancel(&key);
             return;
         }
 
@@ -439,7 +450,9 @@ impl<
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.add_retry(key);
+        if exhausted {
+            self.fetcher.add_retry(key);
+        }
     }
 
     /// Handle a network response from a peer that did not have the data.
@@ -447,13 +460,16 @@ impl<
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
+        let Some((key, exhausted)) = self.fetcher.pop_by_id(id, &peer, false) else {
             // It's possible that the key does not exist if the request was canceled
             return;
         };
 
-        // The peer did not have the data, so we need to try again
-        self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.add_retry(key);
+        // The peer did not have the data. Retry only once every in-flight peer
+        // for this request ID has been exhausted.
+        if exhausted {
+            self.metrics.fetch.inc(Status::Failure);
+            self.fetcher.add_retry(key);
+        }
     }
 }

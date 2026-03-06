@@ -228,6 +228,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
+    use commonware_resolver::RequestType;
     use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -255,11 +256,11 @@ mod tests {
         type Key = U64;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, key: U64) {
+        async fn fetch_with_type(&mut self, key: U64, _request_type: RequestType) {
             self.outstanding.lock().insert(key);
         }
 
-        async fn fetch_all(&mut self, keys: Vec<U64>) {
+        async fn fetch_all_with_type(&mut self, keys: Vec<U64>, _request_type: RequestType) {
             for key in keys {
                 self.outstanding.lock().insert(key);
             }

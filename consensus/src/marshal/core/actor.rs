@@ -24,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
-use commonware_resolver::Resolver;
+use commonware_resolver::{RequestType, Resolver};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
     Metrics, Spawner, Storage,
@@ -851,12 +851,16 @@ where
                 // be available.
                 return;
             }
-            // Attempt to fetch the block (with notarization) from the resolver.
-            // If this is a valid view, this request should be fine to keep open
-            // until resolution or pruning (even if the oneshot is canceled).
+            // Attempt to fetch the block (with notarization) urgently. A proposer
+            // can withhold the block from the next leader even when certificate
+            // dissemination succeeds, and waiting for a single-peer timeout here
+            // can consume the entire proposal window.
             debug!(?round, ?digest, "requested block missing");
             resolver
-                .fetch(Request::<V::Commitment>::Notarized { round })
+                .fetch_with_type(
+                    Request::<V::Commitment>::Notarized { round },
+                    RequestType::Urgent,
+                )
                 .await;
         }
 

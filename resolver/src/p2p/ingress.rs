@@ -1,4 +1,4 @@
-use crate::Resolver;
+use crate::{RequestType, Resolver};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
@@ -17,6 +17,8 @@ pub struct FetchRequest<K, P> {
     /// - `None`: No targeting (or clear existing targeting), try any available peer
     /// - `Some(peers)`: Only try the specified peers
     pub targets: Option<NonEmptyVec<P>>,
+    /// How aggressively the request should fan out.
+    pub request_type: RequestType,
 }
 
 /// Messages that can be sent to the peer actor.
@@ -52,29 +54,37 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     type Key = K;
     type PublicKey = P;
 
-    /// Send a fetch request to the peer actor.
+    /// Send a fetch request to the peer actor with a specific request type.
     ///
     /// If a fetch is already in progress for this key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch(&mut self, key: Self::Key) {
+    async fn fetch_with_type(&mut self, key: Self::Key, request_type: RequestType) {
         self.sender
-            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
+            .send_lossy(Message::Fetch(vec![FetchRequest {
+                key,
+                targets: None,
+                request_type,
+            }]))
             .await;
     }
 
-    /// Send a fetch request to the peer actor for a batch of keys.
+    /// Send a fetch request to the peer actor for a batch of keys with a specific request type.
     ///
     /// If a fetch is already in progress for any key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
+    async fn fetch_all_with_type(&mut self, keys: Vec<Self::Key>, request_type: RequestType) {
         self.sender
             .send_lossy(Message::Fetch(
                 keys.into_iter()
-                    .map(|key| FetchRequest { key, targets: None })
+                    .map(|key| FetchRequest {
+                        key,
+                        targets: None,
+                        request_type,
+                    })
                     .collect(),
             ))
             .await;
@@ -88,6 +98,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             .send_lossy(Message::Fetch(vec![FetchRequest {
                 key,
                 targets: Some(targets),
+                request_type: RequestType::Regular,
             }]))
             .await;
     }
@@ -106,6 +117,7 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
                     .map(|(key, targets)| FetchRequest {
                         key,
                         targets: Some(targets),
+                        request_type: RequestType::Regular,
                     })
                     .collect(),
             ))
