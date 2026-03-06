@@ -55,13 +55,14 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate *args='':
     #!/usr/bin/env bash
     set -euo pipefail
-    output="$(mktemp)"
+    list_output="$(mktemp)"
     cleanup() {
-        rm -f "$output"
+        rm -f "$list_output"
     }
     trap cleanup EXIT
-    cargo test --benches -p {{ crate }} {{ args }} -- --verbose | tee "$output"
-    python3 .github/scripts/lint_benchmark_names.py "$output"
+    cargo test --benches -p {{ crate }} {{ args }} -- --verbose
+    cargo test --benches -p {{ crate }} {{ args }} -- --list | tee "$list_output"
+    python3 .github/scripts/lint_benchmark_names.py "$list_output"
 
 # Run tests
 test *args='':
