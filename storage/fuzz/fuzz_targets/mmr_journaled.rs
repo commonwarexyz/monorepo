@@ -167,22 +167,27 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (last_pos, changeset) = {
+                    let (positions, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let mut last = None;
-                        for item in &items {
-                            last = Some(batch.add(&mut hasher, item));
-                        }
-                        (last.unwrap(), batch.merkleize(&mut hasher).finalize())
+                        let positions: Vec<_> = items
+                            .iter()
+                            .map(|item| batch.add(&mut hasher, item))
+                            .collect();
+                        (positions, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset);
                     assert!(mmr.size() > size_before);
 
-                    for item in &items {
+                    for (item, pos) in items.iter().zip(&positions) {
                         leaves.push(item.to_vec());
-                        historical_sizes.push(mmr.leaves());
+                        // Convert leaf position to location, then +1 for count.
+                        let loc = Location::try_from(*pos).unwrap();
+                        historical_sizes.push(loc + 1);
                     }
-                    assert_eq!(Position::try_from(mmr.leaves() - 1).unwrap(), last_pos);
+                    assert_eq!(
+                        Position::try_from(mmr.leaves() - 1).unwrap(),
+                        *positions.last().unwrap()
+                    );
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
