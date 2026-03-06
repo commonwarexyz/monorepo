@@ -564,17 +564,23 @@ impl Scalar {
         Self(fr)
     }
 
-    /// Creates a new scalar from the provided integer.
-    pub(crate) fn from_u64(i: u64) -> Self {
-        // Create a new scalar
+    /// Creates a new scalar from the given limbs in little-endian representation.
+    ///
+    /// The limbs represent an integer `l[0] + l[1]*2^64 + l[2]*2^128 + l[3]*2^192`, which is then
+    /// converted into [`blst_fr`]'s internal Montgomery form.
+    pub fn from_limbs(limbs: [u64; 4]) -> Self {
         let mut ret = blst_fr::default();
-        let buffer = [i, 0, 0, 0];
 
         // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
+        unsafe { blst_fr_from_uint64(&mut ret, limbs.as_ptr()) };
         Self(ret)
+    }
+
+    /// Creates a new scalar from the provided integer.
+    pub fn from_u64(i: u64) -> Self {
+        Self::from_limbs([i, 0, 0, 0])
     }
 
     /// Encodes the scalar into a byte array.
@@ -686,6 +692,12 @@ impl Drop for Scalar {
 impl ZeroizeOnDrop for Scalar {}
 
 impl Object for Scalar {}
+
+impl From<u64> for Scalar {
+    fn from(value: u64) -> Self {
+        Self::from_u64(value)
+    }
+}
 
 impl<'a> AddAssign<&'a Self> for Scalar {
     fn add_assign(&mut self, rhs: &'a Self) {
