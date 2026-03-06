@@ -60,7 +60,7 @@ test-benches crate *args='':
         rm -f "$output"
     }
     trap cleanup EXIT
-    cargo bench -p {{ crate }} {{ args }} --benches -- --list | tee "$output"
+    cargo test --benches -p {{ crate }} {{ args }} -- --verbose | tee "$output"
     python3 .github/scripts/lint_benchmark_names.py "$output"
 
 # Run tests
