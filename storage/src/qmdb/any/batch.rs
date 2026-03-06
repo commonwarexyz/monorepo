@@ -668,7 +668,7 @@ where
         let mut next_candidates: BTreeSet<K> = BTreeSet::new();
         let mut prev_candidates: BTreeMap<K, (V::Value, Location)> = BTreeMap::new();
 
-        let mut deleted: Vec<(K, Location)> = Vec::new();
+        let mut deleted: BTreeMap<K, Location> = BTreeMap::new();
         let mut updated: BTreeMap<K, (V::Value, Location)> = BTreeMap::new();
 
         for (key_data, &old_loc) in update_results.into_iter().zip(&locations) {
@@ -692,7 +692,7 @@ where
             if let Some(new_value) = mutation {
                 updated.insert(key, (new_value, old_loc));
             } else {
-                deleted.push((key, old_loc));
+                deleted.insert(key, old_loc);
             }
         }
 
@@ -716,7 +716,7 @@ where
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
-        for key in deleted.iter().map(|(k, _)| k).chain(created.keys()) {
+        for key in deleted.keys().chain(created.keys()) {
             let Some((iter, _)) = m.db.snapshot.prev_translated_key(key) else {
                 continue;
             };
@@ -745,10 +745,7 @@ where
         // to the base-DB-only prev_translated_key lookup above.
         for (key, entry) in &*m.base_diff {
             // Skip keys already handled by this batch's mutations.
-            if updated.contains_key(key)
-                || created.contains_key(key)
-                || deleted.iter().any(|(k, _)| k == key)
-            {
+            if updated.contains_key(key) || created.contains_key(key) || deleted.contains_key(key) {
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
@@ -768,7 +765,7 @@ where
         // but the base diff incorporation may have re-added them via next_key
         // references. Also remove parent-deleted keys that the base DB lookup may
         // have added.
-        for (key, _) in &deleted {
+        for key in deleted.keys() {
             prev_candidates.remove(key);
             next_candidates.remove(key);
         }
@@ -849,7 +846,7 @@ where
 
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
-            for key in created_keys.iter().chain(deleted.iter().map(|(k, _)| k)) {
+            for key in created_keys.iter().chain(deleted.keys()) {
                 let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &prev_candidates);
                 if diff.contains_key(prev_key) {
                     continue;
