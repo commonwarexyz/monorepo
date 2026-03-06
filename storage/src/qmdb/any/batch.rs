@@ -35,6 +35,26 @@ use std::{
 };
 use tracing::debug;
 
+/// Strategy for finding the next active location during floor raising.
+pub(crate) trait FloorScan {
+    /// Return the next location at or after `floor` that might be active,
+    /// below `tip`. Returns `None` if no candidate exists in `[floor, tip)`.
+    fn next_candidate(&mut self, floor: &Location, tip: u64) -> Option<Location>;
+}
+
+/// Sequential scan: every location is a candidate.
+pub(crate) struct SequentialScan;
+
+impl FloorScan for SequentialScan {
+    fn next_candidate(&mut self, floor: &Location, tip: u64) -> Option<Location> {
+        if **floor < tip {
+            Some(*floor)
+        } else {
+            None
+        }
+    }
+}
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<V> {
@@ -332,34 +352,36 @@ where
         creates
     }
 
-    /// Scan forward from `floor` to find the next active operation, re-append
-    /// it at the tip. Returns `true` if an active op was found and moved,
-    /// `false` if the floor reached `fixed_tip`.
-    async fn advance_floor_once(
+    /// Scan forward from `floor` to find the next active operation, re-append it at the tip.
+    /// The `scan` parameter controls which locations are considered as potentially active,
+    /// allowing implementations to skip locations known to be inactive without reading them.
+    /// Returns `true` if an active op was found and moved, `false` if the floor reached
+    /// `fixed_tip`.
+    async fn advance_floor_once<S: FloorScan>(
         &self,
         floor: &mut Location,
         fixed_tip: u64,
         ops: &mut Vec<Operation<K, V, U>>,
         diff: &mut BTreeMap<K, DiffEntry<V::Value>>,
+        scan: &mut S,
     ) -> Result<bool, Error> {
         loop {
-            if **floor >= fixed_tip {
+            let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
                 return Ok(false);
-            }
-            let op_loc = *floor;
-            *floor = Location::new(**floor + 1);
+            };
+            *floor = Location::new(*candidate + 1);
 
-            let op = self.read_op(op_loc, ops).await?;
+            let op = self.read_op(candidate, ops).await?;
             let Some(key) = op.key().cloned() else {
                 continue; // skip CommitFloor and other non-keyed ops
             };
 
-            if self.is_active_at(&key, op_loc, diff) {
+            if self.is_active_at(&key, candidate, diff) {
                 let new_loc = Location::new(self.base_size + ops.len() as u64);
                 let base_old_loc = diff
                     .get(&key)
                     .or_else(|| self.base_diff.get(&key))
-                    .map_or(Some(op_loc), DiffEntry::base_old_loc);
+                    .map_or(Some(candidate), DiffEntry::base_old_loc);
                 let value = extract_update_value(&op);
                 ops.push(op);
                 diff.insert(
@@ -377,13 +399,14 @@ where
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
-    async fn finish(
+    async fn finish<S: FloorScan>(
         mut self,
         mut ops: Vec<Operation<K, V, U>>,
         mut diff: BTreeMap<K, DiffEntry<V::Value>>,
         active_keys_delta: isize,
         user_steps: u64,
         metadata: Option<V::Value>,
+        mut scan: S,
     ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, U, P>, Error> {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
@@ -398,7 +421,7 @@ where
             let fixed_tip = self.base_size + ops.len() as u64;
             for _ in 0..total_steps {
                 if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff)
+                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan)
                     .await?
                 {
                     break;
@@ -535,6 +558,17 @@ where
         self,
         metadata: Option<V::Value>,
     ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P>, Error> {
+        self.merkleize_with_floor_scan(metadata, SequentialScan)
+            .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
+    /// to accelerate floor raising.
+    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+        self,
+        metadata: Option<V::Value>,
+        scan: S,
+    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P>, Error> {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
@@ -622,7 +656,7 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
             .await
     }
 }
@@ -646,6 +680,17 @@ where
     pub async fn merkleize(
         self,
         metadata: Option<V::Value>,
+    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P>, Error> {
+        self.merkleize_with_floor_scan(metadata, SequentialScan)
+            .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
+    /// to accelerate floor raising.
+    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+        self,
+        metadata: Option<V::Value>,
+        scan: S,
     ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P>, Error> {
         let (mut mutations, m) = self.into_parts();
 
@@ -877,7 +922,7 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
             .await
     }
 }
