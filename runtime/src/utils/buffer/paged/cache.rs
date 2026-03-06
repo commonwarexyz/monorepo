@@ -586,13 +586,19 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    enum ControlledBlobResult {
+        Success(Arc<Vec<u8>>),
+        Error,
+    }
+
     /// A blob that blocks its first physical page read until released and counts total reads.
     #[derive(Clone)]
     struct ControlledBlob {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-        page: Arc<Vec<u8>>,
         reads: Arc<AtomicUsize>,
+        result: ControlledBlobResult,
     }
 
     impl Blob for ControlledBlob {
@@ -614,54 +620,10 @@ mod tests {
                 release.await.expect("release signal dropped");
             }
 
-            Ok(IoBufsMut::from(self.page.as_ref().clone()))
-        }
-
-        async fn write_at(
-            &self,
-            _offset: u64,
-            _bufs: impl Into<crate::IoBufs> + Send,
-        ) -> Result<(), Error> {
-            Ok(())
-        }
-
-        async fn resize(&self, _len: u64) -> Result<(), Error> {
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            Ok(())
-        }
-    }
-
-    /// A blob that blocks its first physical page read until released, then fails every read.
-    #[derive(Clone)]
-    struct ControlledErrorBlob {
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-        reads: Arc<AtomicUsize>,
-    }
-
-    impl Blob for ControlledErrorBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufsMut::default()).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            _offset: u64,
-            _len: usize,
-            _bufs: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            if self.reads.fetch_add(1, Ordering::Relaxed) == 0 {
-                let sender = self.started.lock().take().unwrap();
-                let _ = sender.send(());
-
-                let release = self.release.lock().take().unwrap();
-                release.await.expect("release signal dropped");
+            match &self.result {
+                ControlledBlobResult::Success(page) => Ok(IoBufsMut::from(page.as_ref().clone())),
+                ControlledBlobResult::Error => Err(Error::ReadFailed),
             }
-
-            Err(Error::ReadFailed)
         }
 
         async fn write_at(
@@ -908,8 +870,8 @@ mod tests {
             let blob = ControlledBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
-                page: Arc::new(physical_page),
                 reads: reads.clone(),
+                result: ControlledBlobResult::Success(Arc::new(physical_page)),
             };
 
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
@@ -1020,10 +982,11 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
-            let blob = ControlledErrorBlob {
+            let blob = ControlledBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
                 reads: reads.clone(),
+                result: ControlledBlobResult::Error,
             };
 
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
