@@ -1343,6 +1343,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// Return `true` if the dealer was already present in the log, in which
     /// case its log will be replaced.
     pub fn record(&mut self, dealer: P, log: DealerLog<V, P>) -> bool {
+        self.known.remove(&dealer);
         self.logs.insert(dealer, log).is_some()
     }
 
