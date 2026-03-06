@@ -19,8 +19,9 @@ use commonware_cryptography::{
             variant::Variant,
         },
     },
+    ed25519::Batch,
     transcript::Summary,
-    Hasher, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
@@ -144,6 +145,7 @@ where
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
@@ -520,7 +522,11 @@ where
                         }
                         let (success, next_round, next_output, next_share) =
                             if let Some(ps) = player_state.take() {
-                                match ps.finalize::<N3f1>(logs, &Sequential) {
+                                match ps.finalize::<N3f1, Batch>(
+                                    logs,
+                                    &mut self.context,
+                                    &Sequential,
+                                ) {
                                     Ok((new_output, new_share)) => (
                                         true,
                                         epoch_state.round + 1,
@@ -535,7 +541,12 @@ where
                                     ),
                                 }
                             } else {
-                                match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
+                                match observe::<_, _, N3f1, Batch>(
+                                    round.clone(),
+                                    logs,
+                                    &mut self.context,
+                                    &Sequential,
+                                ) {
                                     Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,

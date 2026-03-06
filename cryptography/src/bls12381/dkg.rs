@@ -280,8 +280,9 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize::<N3f1>(
+//!     let (output, share) = player.finalize::<N3f1, ed25519::Batch>(
 //!       logs.clone(),
+//!       &mut rng,
 //!       &commonware_parallel::Sequential,
 //!     )?;
 //!     println!("Player {:?} got share at index {}", player_pk, share.index);
@@ -289,9 +290,10 @@
 //! }
 //!
 //! // Step 5: Observer can also compute the public output
-//! let observer_output = observe::<MinSig, ed25519::PublicKey, N3f1>(
+//! let observer_output = observe::<MinSig, ed25519::PublicKey, N3f1, ed25519::Batch>(
 //!     info,
 //!     logs,
+//!     &mut rng,
 //!     &commonware_parallel::Sequential,
 //! )?;
 //! println!("DKG completed with threshold {}", observer_output.quorum::<N3f1>());
@@ -309,7 +311,7 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    PublicKey, Secret, Signer,
+    BatchVerifier, PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -325,7 +327,7 @@ use commonware_utils::{
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
@@ -606,8 +608,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     #[must_use]
-    fn check_dealer_log<M: Faults>(
+    fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
         &self,
+        rng: &mut impl CryptoRngCore,
+        strategy: &impl Strategy,
         round_transcript: &Transcript,
         dealer: &P,
         log: &DealerLog<V, P>,
@@ -622,12 +626,16 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let transcript = transcript_for_ack(round_transcript, dealer, &log.pub_msg);
+        let mut ack_batch = B::new();
+        let ack_message = transcript.summarize();
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
+        let mut reveal_eval_points = Vec::new();
+        let mut reveal_sum = Scalar::zero();
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    if !transcript.verify(player, &ack.sig) {
+                    if !ack_batch.add(b"", ack_message.as_ref(), player, &ack.sig) {
                         return false;
                     }
                 }
@@ -636,13 +644,27 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                     if reveal_count > max_reveals {
                         return false;
                     }
-                    if !self.check_dealer_priv_msg(player, &log.pub_msg, priv_msg) {
+                    let Ok(player_scalar) = self.player_scalar(player) else {
                         return false;
-                    }
+                    };
+                    let coeff = Scalar::random(&mut *rng);
+                    reveal_eval_points.push((coeff.clone(), player_scalar));
+                    priv_msg
+                        .share
+                        .expose(|share| reveal_sum += &(coeff * share));
                 }
             }
         }
-        true
+        if !ack_batch.verify(&mut *rng) {
+            return false;
+        }
+        let lhs = log.pub_msg.commitment.lin_comb_eval(
+            reveal_eval_points
+                .into_iter()
+                .map(|(coeff, point)| (coeff, Cow::Owned(point))),
+            strategy,
+        );
+        lhs == V::Public::generator() * &reveal_sum
     }
 }
 
@@ -1300,15 +1322,19 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// This method can amortize work over a batch of items. It's more efficient
     /// to call it after several [`Self::record`], rather than after
     /// each call.
-    pub fn pre_verify(&mut self, info: &Info<V, P>) {
+    pub fn pre_verify<B: BatchVerifier<PublicKey = P>>(
+        &mut self,
+        info: &Info<V, P>,
+        rng: &mut impl CryptoRngCore,
+        strategy: &impl Strategy,
+    ) {
         let required_commitments = info.required_commitments::<M>() as usize;
         let transcript = transcript_for_round(info);
         let mut valid = 0;
         for (dealer, log) in self.logs.iter() {
-            let this_dealer_valid = *self
-                .known
-                .entry(dealer.clone())
-                .or_insert_with(|| info.check_dealer_log::<M>(&transcript, dealer, log));
+            let this_dealer_valid = *self.known.entry(dealer.clone()).or_insert_with(|| {
+                info.check_dealer_log::<M, B>(rng, strategy, &transcript, dealer, log)
+            });
             if this_dealer_valid {
                 valid += 1;
                 if valid >= required_commitments {
@@ -1321,8 +1347,13 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// Given the logs we've received, determine which dealer logs to use, if any.
     ///
     /// This might return an error if there are not enough good logs that we can use.
-    fn select(mut self, info: &Info<V, P>) -> Result<Map<P, DealerLog<V, P>>, Error> {
-        self.pre_verify(info);
+    fn select<B: BatchVerifier<PublicKey = P>>(
+        mut self,
+        info: &Info<V, P>,
+        rng: &mut impl CryptoRngCore,
+        strategy: &impl Strategy,
+    ) -> Result<Map<P, DealerLog<V, P>>, Error> {
+        self.pre_verify::<B>(info, rng, strategy);
         let out: Map<_, _> = self
             .logs
             .into_iter()
@@ -1551,12 +1582,13 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey, M: Faults>(
+pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
     info: Info<V, P>,
     logs: Logs<V, P, M>,
+    rng: &mut impl CryptoRngCore,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
-    let selected = logs.select(&info)?;
+    let selected = logs.select::<B>(&info, rng, strategy)?;
     ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
 }
 
@@ -1693,16 +1725,17 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// However, this player's share is not recoverable without external intervention.
     ///
     /// Otherwise, the only error this function can return is [`Error::DkgFailed`].
-    pub fn finalize<M: Faults>(
+    pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
         logs: Logs<V, S::PublicKey, M>,
+        rng: &mut impl CryptoRngCore,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         // `Logs::select` verifies ack signatures, so any ack present in `selected`
         // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
         // then we're missing a dealing.
-        let selected = logs.select(&self.info)?;
+        let selected = logs.select::<B>(&self.info, rng, strategy)?;
         if selected
             .iter_pairs()
             .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
@@ -2496,7 +2529,9 @@ mod test_plan {
                 for (dealer, log) in &dealer_logs {
                     logs.record(dealer.clone(), log.clone());
                 }
-                let selection = logs.clone().select(&info);
+                let selection = logs
+                    .clone()
+                    .select::<ed25519::Batch>(&info, &mut rng, &Sequential);
                 if let Ok(ref selection) = selection {
                     let good_pks = selection
                         .iter_pairs()
@@ -2509,7 +2544,12 @@ mod test_plan {
                     }
                 }
                 // Run observer
-                let observe_result = observe::<_, _, N3f1>(info.clone(), logs.clone(), &Sequential);
+                let observe_result = observe::<_, _, N3f1, ed25519::Batch>(
+                    info.clone(),
+                    logs.clone(),
+                    &mut rng,
+                    &Sequential,
+                );
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2601,7 +2641,11 @@ mod test_plan {
                             replay_without,
                         )
                         .expect("resume should succeed with stale logs");
-                        let finalize_res = resumed.finalize::<N3f1>(logs.clone(), &Sequential);
+                        let finalize_res = resumed.finalize::<N3f1, ed25519::Batch>(
+                            logs.clone(),
+                            &mut rng,
+                            &Sequential,
+                        );
                         assert!(
                             matches!(finalize_res, Err(Error::MissingPlayerDealing)),
                             "finalize without dealer {dealer_idx} message should return MissingPlayerDealing for player {i_player}"
@@ -2642,7 +2686,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize::<N3f1>(logs.clone(), &Sequential)
+                        .finalize::<N3f1, ed25519::Batch>(logs.clone(), &mut rng, &Sequential)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(
