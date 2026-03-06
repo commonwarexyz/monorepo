@@ -122,7 +122,6 @@ fn fuzz(input: FuzzInput) {
         let mut keys_set = Vec::new();
         let mut set_locations = Vec::new(); // Track locations that contain Set operations
         let mut last_commit_loc = None;
-        let mut uncommitted_ops = Vec::new();
 
         for op in input.operations {
             match op {
@@ -138,7 +137,6 @@ fn fuzz(input: FuzzInput) {
                         if let Ok(()) = db.set(key, value.clone()).await {
                             keys_set.push((key, loc));
                             set_locations.push((key, loc));
-                            uncommitted_ops.push((key, loc));
                         }
                     }
                 }
@@ -160,7 +158,6 @@ fn fuzz(input: FuzzInput) {
 
                     let _ = db.commit(metadata).await.unwrap();
                     last_commit_loc = Some(db.bounds().await.end - 1);
-                    uncommitted_ops.clear();
                 }
 
                 ImmutableOperation::Prune { loc } => {
@@ -169,7 +166,7 @@ fn fuzz(input: FuzzInput) {
                         let safe_loc = Location::new(safe_loc);
                         let _ = db.commit(None).await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
-                        uncommitted_ops.clear();
+
                         db.prune(safe_loc).await.expect("prune should not fail");
                         let oldest = db.bounds().await.start;
                         set_locations.retain(|(_, l)| *l >= oldest);
@@ -187,9 +184,6 @@ fn fuzz(input: FuzzInput) {
                         let safe_start = Location::new(safe_start);
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-                        let _ = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
-                        uncommitted_ops.clear();
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                             let root = db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
@@ -203,7 +197,7 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     let op_count = db.bounds().await.end;
-                    if op_count > 0 && uncommitted_ops.is_empty() {
+                    if op_count > 0 {
                         let safe_size = (size % op_count.as_u64()).max(1);
                         let safe_size = Location::new(safe_size);
                         let safe_start = start_loc % safe_size.as_u64();
@@ -211,8 +205,6 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        let _ = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
                         if safe_start >= db.bounds().await.start {
                             let _ = db
                                 .historical_proof(safe_size, safe_start, safe_max_ops)
@@ -234,9 +226,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::Root => {
-                    let _ = db.commit(None).await.unwrap();
-                    last_commit_loc = Some(db.bounds().await.end - 1);
-                    uncommitted_ops.clear();
                     let _ = db.root();
                 }
             }

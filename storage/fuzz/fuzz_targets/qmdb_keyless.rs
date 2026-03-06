@@ -205,7 +205,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let _ = db.commit(None).await.expect("Commit should not fail");
                     let _ = db.root();
                 }
 
@@ -217,7 +216,6 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let _ = db.commit(None).await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc);
@@ -239,7 +237,6 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let _ = db.commit(None).await.expect("Commit should not fail");
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
