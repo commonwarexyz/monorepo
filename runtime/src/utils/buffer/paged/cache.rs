@@ -23,10 +23,14 @@ use tracing::{debug, error, trace};
 // [Shared]. The IoBuf contains only the logical (validated) bytes of the page.
 type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
 
+// Shared handle to one in-flight fetch. The cache keeps one copy in `page_fetches`, and each
+// waiter clones the Arc while it is still interested in the result.
 type PageFetch = Arc<InFlightPageFetch>;
 
 struct InFlightPageFetch {
+    // Shared future that reads and validates the logical page exactly once.
     future: PageFetchFut,
+    // Count of waiters that still need cancellation cleanup for this fetch.
     waiters: AtomicUsize,
 }
 
@@ -337,9 +341,8 @@ impl CacheRef {
                     };
 
                     // Make the future shareable and insert it into the map.
-                    let shareable = future.boxed().shared();
                     let fetch = Arc::new(InFlightPageFetch {
-                        future: shareable.clone(),
+                        future: future.boxed().shared(),
                         waiters: AtomicUsize::new(1),
                     });
                     v.insert(fetch.clone());
