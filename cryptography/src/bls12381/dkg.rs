@@ -1413,13 +1413,15 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         strategy: &impl Strategy,
     ) -> Result<Map<P, DealerLog<V, P>>, Error> {
         self.pre_verify::<B>(info, rng, strategy);
+        let required_commitments = info.required_commitments::<M>() as usize;
         let out: Map<_, _> = self
             .logs
             .into_iter()
             .filter(|(dealer, _)| matches!(self.known.get(dealer), Some(true)))
+            .take(required_commitments)
             .try_collect()
             .expect("dealers should be unique");
-        if out.len() < info.required_commitments::<M>() as usize {
+        if out.len() < required_commitments {
             return Err(Error::DkgFailed);
         }
         Ok(out)
