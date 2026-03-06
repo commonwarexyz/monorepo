@@ -320,20 +320,22 @@ impl CacheRef {
                 return Ok(count);
             }
 
-            let entry = cache.page_fetches.entry((blob_id, page_num));
-            let fetch = match entry {
+            let key = (blob_id, page_num);
+            match cache.page_fetches.entry(key) {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
-                    let fetch = o.get().clone();
+                    let fetch = Arc::clone(o.get());
                     fetch.waiters.fetch_add(1, Ordering::Relaxed);
-                    fetch
+                    (
+                        fetch.future.clone(),
+                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
+                    )
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
                     // work. get_page_from_blob handles CRC validation and returns only logical bytes.
                     let blob = blob.clone();
-                    let cache = self.cache.clone();
-                    let key = (blob_id, page_num);
+                    let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
@@ -356,16 +358,15 @@ impl CacheRef {
                         future: future.boxed().shared(),
                         waiters: AtomicUsize::new(1),
                     });
-                    v.insert(fetch.clone());
+                    let fetch_future = fetch.future.clone();
+                    v.insert(Arc::clone(&fetch));
 
-                    fetch
+                    (
+                        fetch_future,
+                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
+                    )
                 }
-            };
-
-            (
-                fetch.future.clone(),
-                PageFetchGuard::new(self.cache.clone(), (blob_id, page_num), fetch),
-            )
+            }
         };
 
         // Await the shared fetch. The future itself caches the resolved page and removes the
