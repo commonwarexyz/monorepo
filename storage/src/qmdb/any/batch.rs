@@ -107,8 +107,6 @@ impl<V> DiffEntry<V> {
 
 /// A single snapshot index mutation to apply to the base DB's snapshot.
 pub(crate) enum SnapshotDiff<K> {
-    // Locations are always committed-DB-relative (never uncommitted locations
-    // from intermediate batches).
     /// Replace key's location: old_loc -> new_loc.
     Update {
         key: K,
