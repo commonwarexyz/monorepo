@@ -374,7 +374,6 @@ impl CacheRef {
         // fetch is still unresolved.
         let fetch_result = fetch_future.await;
         fetch_guard.disarm();
-
         let page_buf = match fetch_result {
             Ok(page_buf) => page_buf,
             Err(err) => {
@@ -874,12 +873,12 @@ mod tests {
         executor.start(|context| async move {
             let blob_id = 0;
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+
             // Return one valid full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
             let crc = Crc32::checksum(&logical_page);
             let mut physical_page = logical_page.clone();
             physical_page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
-
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
@@ -899,7 +898,6 @@ mod tests {
                     .read(&blob_for_first, blob_id, &mut first_buf, 0)
                     .await;
             });
-
             started_rx.await.expect("first read never started");
 
             // Join as a follower while the first fetch is still blocked in the blob.
@@ -967,11 +965,11 @@ mod tests {
 
             // Let the single underlying fetch complete and satisfy both surviving waiters.
             let _ = release_tx.send(());
-
             let second_buf = second.await.expect("second task failed");
             let third_buf = third.await.expect("third task failed");
             assert_eq!(second_buf, logical_page);
             assert_eq!(third_buf, logical_page);
+
             // All waiters should have shared the same blob read.
             assert_eq!(reads.load(Ordering::Relaxed), 1);
 
@@ -1027,7 +1025,6 @@ mod tests {
                     .read(&blob_for_first, blob_id, &mut first_buf, 0)
                     .await
             });
-
             started_rx.await.expect("first erroring read never started");
 
             // Join with a second waiter that should observe the same failure.
@@ -1071,7 +1068,6 @@ mod tests {
                 "erroring fetch should leave no stale page_fetches entry"
             );
             drop(page_cache);
-
             let mut cached = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(cache_ref.read_cached(blob_id, &mut cached, 0), 0);
 
