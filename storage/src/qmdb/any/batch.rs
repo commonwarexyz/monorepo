@@ -158,6 +158,9 @@ where
     /// Inactivity floor location before this batch.
     base_inactivity_floor_loc: Location,
 
+    /// Size of the database when this batch was created.
+    db_size: u64,
+
     /// Active key count before this batch.
     base_active_keys: usize,
 }
@@ -194,6 +197,9 @@ where
 
     /// Location of the CommitFloor operation appended by this batch.
     pub(crate) new_last_commit_loc: Location,
+
+    /// Total operation count after this batch.
+    total_size: u64,
 
     /// Total active keys after this batch.
     total_active_keys: usize,
@@ -472,6 +478,7 @@ where
             base_operations: self.base_operations,
             new_inactivity_floor_loc: floor,
             new_last_commit_loc: commit_loc,
+            total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
         })
@@ -503,7 +510,6 @@ where
         BTreeMap<K, Option<V::Value>>,
         Merkleizer<'a, E, K, V, C, I, H, U, P>,
     ) {
-        let chain_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
         (
             self.mutations,
             Merkleizer {
@@ -512,7 +518,7 @@ where
                 base_diff: self.base_diff,
                 base_operations: self.base_operations,
                 base_size: self.base_size,
-                db_size: self.base_size - chain_len,
+                db_size: self.db_size,
                 base_inactivity_floor_loc: self.base_inactivity_floor_loc,
                 base_active_keys: self.base_active_keys,
             },
@@ -990,17 +996,14 @@ where
         U,
         authenticated::MerkleizedBatch<'a, H, P, Operation<K, V, U>>,
     > {
-        let db_size = *self.db.last_commit_loc + 1;
-        let chain_ops_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
-        let total_size = db_size + chain_ops_len;
-
         UnmerkleizedBatch {
             db: self.db,
             journal_batch: self.journal_batch.new_batch(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
             base_operations: self.base_operations.clone(),
-            base_size: total_size,
+            base_size: self.total_size,
+            db_size: self.db_size,
             base_inactivity_floor_loc: self.new_inactivity_floor_loc,
             base_active_keys: self.total_active_keys,
         }
@@ -1097,6 +1100,7 @@ where
             base_diff: Arc::new(BTreeMap::new()),
             base_operations: Vec::new(),
             base_size: journal_size,
+            db_size: journal_size,
             base_inactivity_floor_loc: self.inactivity_floor_loc,
             base_active_keys: self.active_keys,
         }
