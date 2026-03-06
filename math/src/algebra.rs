@@ -7,6 +7,7 @@
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
@@ -59,13 +60,11 @@ fn monoid_exp<T: Clone>(
     acc
 }
 
-/// Return `[1, base, base^2, ..., base^(len - 1)]`.
-pub fn powers<R: Ring>(base: &R, len: usize) -> impl Iterator<Item = R> + '_ {
-    (0..len).scan(R::one(), move |state, _| {
-        let out = state.clone();
-        *state *= base;
-        Some(out)
-    })
+/// Return `shift, shift * base, shift * base^2, ...`.
+///
+/// Use `powers(R::one(), base)` if you just want the standard powers.
+pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
+    iter::successors(Some(shift), move |state: &R| Some(state.clone() * base))
 }
 
 /// A basic trait we expect algebraic data structures to implement.
@@ -708,7 +707,7 @@ commonware_macros::stability_scope!(ALPHA {
             ExpOne(F),
             ExpZero(F),
             Exp(F, u32, u32),
-            PowersMatchesExp(F, u16),
+            PowersMatchesExp(F, F, u16),
             ScaleOne(F),
             ScaleZero(F),
             Scale(F, u32, u32),
@@ -729,11 +728,12 @@ commonware_macros::stability_scope!(ALPHA {
                         let b = u64::from(b);
                         assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
                     }
-                    Self::PowersMatchesExp(base, index) => {
-                        let pow_i = powers(&base, usize::from(index) + 1)
+                    Self::PowersMatchesExp(shift, base, index) => {
+                        let pow_i = powers(shift, &base)
+                            .take(usize::from(index) + 1)
                             .last()
                             .expect("len=index+1 guarantees at least one item");
-                        assert_eq!(pow_i, base.exp(&[u64::from(index)]));
+                        assert_eq!(pow_i, shift * base.exp(&[u64::from(index)]));
                     }
                     Self::ScaleOne(x) => {
                         assert_eq!(x.scale(&[1]), x);
