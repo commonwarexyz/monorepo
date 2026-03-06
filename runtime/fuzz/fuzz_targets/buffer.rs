@@ -181,10 +181,15 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Some(ref cache) = cache_ref {
-                        append_buffer =
-                            Append::new(blob, initial_size as u64, buffer_size, cache.clone())
-                                .await
-                                .ok();
+                        append_buffer = Append::new(
+                            blob,
+                            initial_size as u64,
+                            buffer_size,
+                            cache.clone(),
+                            false,
+                        )
+                        .await
+                        .ok();
                     }
                 }
 

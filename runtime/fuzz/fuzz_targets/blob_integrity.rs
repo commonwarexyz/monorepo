@@ -114,7 +114,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot open blob");
 
-        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
+        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone(), false)
             .await
             .expect("cannot create append wrapper");
 
@@ -160,7 +160,8 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await {
+        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone(), false).await
+        {
             Ok(a) => a,
             Err(_) => {
                 // Corruption was severe enough to fail initialization - this is acceptable.

@@ -2,11 +2,10 @@
 //! the underlying blob which has a page-oriented structure that provides integrity guarantees. The
 //! wrapper also provides read caching managed by a page cache.
 //!
-//! # Immutability
+//! # Compaction
 //!
-//! The wrapper can be created in (or converted to) an immutable state, which will prevent any
-//! modifications while still supporting cached reads. This can be used to reduce its memory
-//! footprint and/or to prevent unintended modifications.
+//! The wrapper can optionally compact the initial buffered tail on creation, which reduces memory
+//! footprint by detaching it from page-backed pooled storage. The wrapper remains fully mutable.
 //!
 //! # Recovery
 //!
@@ -16,10 +15,8 @@
 //! written, then the write will overwrite only the checksum with the lesser length value. Should
 //! this write fail, the previously committed page state can still be recovered.
 //!
-//! During non-immutable blob initialization, the wrapper will back up over any page that is not
-//! accompanied by a valid CRC, treating it as the result of an incomplete write that may be
-//! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
-//! validated by a CRC.
+//! During initialization, the wrapper will back up over any page that is not accompanied by a
+//! valid CRC, treating it as the result of an incomplete write that may be invalid.
 
 use super::read::{PageReader, Replay};
 use crate::{
@@ -94,13 +91,17 @@ fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
 impl<B: Blob> Append<B> {
     /// Create a new [Append] wrapper of the provided `blob` that is known to have `blob_size`
     /// underlying physical bytes, using the provided `cache_ref` for read caching, and a write
-    /// buffer with capacity `capacity`. Rewinds the blob if necessary to ensure it only contains
-    /// checksum-validated data.
+    /// buffer with capacity `capacity`.
+    ///
+    /// If `compact` is `true`, any partial tail loaded from disk is copied into detached exact-size
+    /// storage instead of retaining pooled page-backed storage. Rewinds the blob if necessary to
+    /// ensure it only contains checksum-validated data.
     pub async fn new(
         blob: B,
         original_blob_size: u64,
         capacity: usize,
         cache_ref: CacheRef,
+        compact: bool,
     ) -> Result<Self, Error> {
         let (partial_page_state, pages, invalid_data_found) =
             Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
@@ -140,7 +141,7 @@ impl<B: Blob> Append<B> {
             blob_state.current_page * cache_ref.page_size(),
             partial_data.unwrap_or_default(),
             capacity,
-            false,
+            compact,
             cache_ref.pool().clone(),
         );
 
@@ -150,100 +151,6 @@ impl<B: Blob> Append<B> {
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
-    }
-
-    /// Return a new [Append] wrapper of the provided `blob` that is known to have `blob_size`
-    /// underlying physical bytes, using the provided `cache_ref` for read caching. The wrapper is
-    /// for read-only data, and any append attempts will return error. The provided `capacity` is
-    /// used only if the blob is later turned into a mutable one. Immutable blobs are assumed
-    /// consistent on disk, so any CRC verification failure results in an error without any recovery
-    /// attempt.
-    pub async fn new_immutable(
-        blob: B,
-        blob_size: u64,
-        capacity: usize,
-        cache_ref: CacheRef,
-    ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, blob_size, cache_ref.page_size()).await?;
-        if invalid_data_found {
-            // Invalid data was detected, so this blob is not consistent.
-            return Err(Error::InvalidChecksum);
-        }
-
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
-
-        let (blob_state, partial_data) = match partial_page_state {
-            Some((partial_page, crc_record)) => (
-                BlobState {
-                    blob,
-                    current_page: pages - 1,
-                    partial_page_state: Some(crc_record),
-                },
-                Some(partial_page),
-            ),
-            None => (
-                BlobState {
-                    blob,
-                    current_page: pages,
-                    partial_page_state: None,
-                },
-                None,
-            ),
-        };
-        let buffer = Buffer::from(
-            blob_state.current_page * cache_ref.page_size(),
-            partial_data.unwrap_or_default(),
-            capacity,
-            true,
-            cache_ref.pool().clone(),
-        );
-
-        Ok(Self {
-            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
-            id: cache_ref.next_id(),
-            cache_ref,
-            buffer: Arc::new(AsyncRwLock::new(buffer)),
-        })
-    }
-
-    /// Returns `true` if this blob is in the immutable state.
-    pub async fn is_immutable(&self) -> bool {
-        self.buffer.read().await.is_immutable()
-    }
-
-    /// Convert this blob to the immutable state if it's not already in it.
-    ///
-    /// If there is unwritten data in the buffer, it will be flushed and synced before returning.
-    pub async fn to_immutable(&self) -> Result<(), Error> {
-        // Flush any buffered data. When flush_internal returns, write_at has completed and data
-        // has been written to the underlying blob.
-        let mut buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Ok(());
-        }
-        buf_guard.set_immutable(false);
-        self.flush_internal(buf_guard, true).await?;
-
-        // Compact tip backing after flush to match the post-flush logical view.
-        {
-            let mut buf_guard = self.buffer.write().await;
-            buf_guard.set_immutable(true);
-        }
-
-        // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
-        // event of a crash.
-        let blob_state = self.blob_state.read().await;
-        blob_state.blob.sync().await
-    }
-
-    /// Convert this blob to the mutable state if it's not already in it.
-    pub async fn to_mutable(&self) {
-        let mut buffer = self.buffer.write().await;
-        if !buffer.is_immutable() {
-            return;
-        }
-        buffer.set_mutable();
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
@@ -316,14 +223,8 @@ impl<B: Blob> Append<B> {
 
     /// Append all bytes in `buf` to the tip of the blob.
     ///
-    /// # Errors
-    ///
-    /// * `Error::ImmutableBlob` - The blob is in the immutable state.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if buffer.is_immutable() {
-            return Err(Error::ImmutableBlob);
-        }
 
         if !buffer.append(buf) {
             return Ok(());
@@ -743,12 +644,8 @@ impl<B: Blob> Append<B> {
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
-        {
-            let buf_guard = self.buffer.write().await;
-            if !buf_guard.is_immutable() {
-                self.flush_internal(buf_guard, true).await?;
-            }
-        }
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true).await?;
 
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
@@ -794,9 +691,6 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Ok(());
-        }
         self.flush_internal(buf_guard, true).await?;
 
         // Sync the underlying blob. We need the blob read lock here since sync() requires access
@@ -841,9 +735,6 @@ impl<B: Blob> Append<B> {
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Err(Error::ImmutableBlob);
-        }
         let mut blob_guard = self.blob_state.write().await;
 
         // Calculate the physical size needed for the new logical size.
@@ -902,8 +793,8 @@ mod tests {
     use crate::{deterministic, BufferPool, BufferPoolConfig, Runner as _, Storage as _};
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use prometheus_client::registry::Registry;
     use commonware_utils::{NZUsize, NZU16};
+    use prometheus_client::registry::Registry;
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -921,7 +812,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -935,7 +826,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0); // There was no need to write a crc since there was no data.
 
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -955,7 +846,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -996,7 +887,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // Physical page = 103 logical + 12 Checksum = 115 bytes (padded partial page)
             assert_eq!(blob_size, 115);
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 10); // CRC should be stripped after verification
@@ -1024,7 +915,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // 2 physical pages: 2 * 115 = 230 bytes
             assert_eq!(blob_size, 230);
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 110);
@@ -1049,7 +940,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // Physical size should be exactly 2 pages: 115 * 2 = 230 bytes
             assert_eq!(blob_size, 230);
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref, false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 206);
@@ -1077,11 +968,14 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref, false)
                 .await
                 .unwrap();
 
-            append.append(&vec![7; PAGE_SIZE.get() as usize]).await.unwrap();
+            append
+                .append(&vec![7; PAGE_SIZE.get() as usize])
+                .await
+                .unwrap();
 
             // One pooled slot backs the page cache and one backs the mutable tip.
             assert!(
@@ -1117,7 +1011,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper and write some data.
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref, false)
                 .await
                 .unwrap();
             append.append(&[1, 2, 3, 4]).await.unwrap();
@@ -1221,7 +1115,7 @@ mod tests {
 
             // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot1_prot").await.unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -1230,7 +1124,7 @@ mod tests {
 
             // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot1_prot").await.unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1281,7 +1175,7 @@ mod tests {
             assert_eq!(slot0_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 4: Extend to 50 bytes → new CRC goes to slot 0, slot 1 protected ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1347,7 +1241,7 @@ mod tests {
 
             // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -1356,7 +1250,7 @@ mod tests {
 
             // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1368,7 +1262,7 @@ mod tests {
 
             // === Step 3: Extend to 50 bytes → slot 0 authoritative (len=50) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1419,7 +1313,7 @@ mod tests {
             assert_eq!(slot1_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 5: Extend to 70 bytes → new CRC goes to slot 1, slot 0 protected ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1486,7 +1380,7 @@ mod tests {
                 .open("test_partition", b"prefix_test")
                 .await
                 .unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             let data1: Vec<u8> = (1..=20).collect();
@@ -1514,7 +1408,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // === Step 3: Extend to 40 bytes ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1572,7 +1466,7 @@ mod tests {
 
             // === Step 1: Write 50 bytes → slot 0 authoritative ===
             let (blob, _) = context.open("test_partition", b"boundary").await.unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append.append(&(1..=50).collect::<Vec<u8>>()).await.unwrap();
@@ -1581,7 +1475,7 @@ mod tests {
 
             // === Step 2: Extend to 80 bytes → slot 1 authoritative ===
             let (blob, size) = context.open("test_partition", b"boundary").await.unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1617,7 +1511,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // === Step 3: Extend past page boundary (80 + 40 = 120, PAGE_SIZE=103) ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1671,7 +1565,7 @@ mod tests {
             );
 
             // Verify data integrity
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 120);
@@ -1703,7 +1597,7 @@ mod tests {
                 .open("test_partition", b"crc_fallback")
                 .await
                 .unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             let data1: Vec<u8> = (1..=10).collect();
@@ -1716,7 +1610,7 @@ mod tests {
                 .open("test_partition", b"crc_fallback")
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append
@@ -1749,7 +1643,7 @@ mod tests {
             assert_eq!(crc.len1, 10, "Slot 0 should have len=10");
 
             // Verify we can read all 30 bytes before corruption
-            let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 30);
@@ -1776,7 +1670,7 @@ mod tests {
             assert_eq!(crc.crc2, 0xDEADBEEF, "crc2 should be our corrupted value");
 
             // === Step 4: Re-open and verify fallback to slot 0's 10 bytes ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -1825,7 +1719,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -1837,7 +1731,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             // Add bytes 11 through 103 (93 more bytes)
@@ -1868,7 +1762,7 @@ mod tests {
             assert!(crc.len2 > crc.len1, "Slot 1 should be authoritative");
 
             // === Step 3: Extend past page boundary (add 10 more bytes for total of 113) ===
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             // Add bytes 104 through 113 (10 more bytes, now on page 1)
@@ -1891,7 +1785,7 @@ mod tests {
             );
 
             // Verify data is readable before corruption
-            let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 113);
@@ -1923,7 +1817,7 @@ mod tests {
             // Since page 0 is not the last page, a partial fallback is invalid.
             // Reading from page 0 should fail because the fallback CRC indicates a partial
             // page, which is not allowed for non-last pages.
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -1946,7 +1840,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
@@ -1976,7 +1870,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -2004,7 +1898,7 @@ mod tests {
 
             // Open the blob - Append::new() validates the LAST page (page 2), which is still valid.
             // So it should open successfully with size 250.
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 250);
@@ -2022,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn test_immutable_blob_rejects_append_and_resize() {
+    fn test_new_with_compact_releases_pooled_tail_and_stays_mutable() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
@@ -2032,11 +1926,11 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
 
             let (blob, size) = context
-                .open("test_partition", b"immutable_test")
+                .open("test_partition", b"compact_test")
                 .await
                 .unwrap();
 
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -2044,38 +1938,44 @@ mod tests {
             append.append(&[1, 2, 3, 4, 5]).await.unwrap();
             append.sync().await.unwrap();
             assert_eq!(append.size().await, 5);
+            drop(append);
 
-            // Convert to immutable.
-            append.to_immutable().await.unwrap();
-            assert!(append.is_immutable().await);
+            let (blob, size) = context
+                .open("test_partition", b"compact_test")
+                .await
+                .unwrap();
 
-            // Verify append() returns ImmutableBlob error.
-            let result = append.append(&[6, 7, 8]).await;
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
+                .await
+                .unwrap();
             assert!(
-                matches!(result, Err(crate::Error::ImmutableBlob)),
-                "Expected ImmutableBlob error from append(), got: {:?}",
-                result
+                append.buffer.read().await.is_pooled(),
+                "default open should retain the pooled partial-page backing"
+            );
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"compact_test")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), true)
+                .await
+                .unwrap();
+
+            assert!(
+                !append.buffer.read().await.is_pooled(),
+                "compact open should detach the partial tail from pooled backing"
             );
 
-            // Verify resize() returns ImmutableBlob error.
-            let result = append.resize(100).await;
-            assert!(
-                matches!(result, Err(crate::Error::ImmutableBlob)),
-                "Expected ImmutableBlob error from resize(), got: {:?}",
-                result
-            );
+            append.append(&[6, 7, 8]).await.unwrap();
 
-            // Verify sync() returns Ok.
-            let result = append.sync().await;
-            assert!(
-                result.is_ok(),
-                "sync() on immutable blob should return Ok, got: {:?}",
-                result
-            );
+            append.resize(6).await.unwrap();
 
-            // Verify data is still readable.
-            let data: Vec<u8> = append.read_at(0, 5).await.unwrap().coalesce().into();
-            assert_eq!(data, vec![1, 2, 3, 4, 5]);
+            append.sync().await.unwrap();
+
+            let data: Vec<u8> = append.read_at(0, 6).await.unwrap().coalesce().into();
+            assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
         });
     }
 
@@ -2093,7 +1993,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), true)
                 .await
                 .unwrap();
 
@@ -2125,7 +2025,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
-            let result = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
+            let result = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false).await;
 
             // Either returns InvalidChecksum error OR truncates the corrupted data
             // (both are acceptable behaviors - panicking is NOT acceptable)
@@ -2139,7 +2039,7 @@ mod tests {
                     );
                 }
                 Err(e) => {
-                    // Error is also acceptable (for immutable blobs)
+                    // Error is also acceptable
                     assert!(
                         matches!(e, crate::Error::InvalidChecksum),
                         "Expected InvalidChecksum error, got: {:?}",
@@ -2163,7 +2063,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false)
                 .await
                 .unwrap();
 
@@ -2192,7 +2092,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Step 3: Try to open - should NOT panic
-            let result = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
+            let result = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone(), false).await;
 
             match result {
                 Ok(append) => {

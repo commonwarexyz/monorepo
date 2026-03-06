@@ -35,10 +35,6 @@ pub(super) struct Buffer {
     /// The maximum size of the buffer.
     pub(super) capacity: usize,
 
-    /// Whether this buffer should allow new data.
-    // TODO(#2371): Use a distinct state-type for immutable vs immutable.
-    immutable: bool,
-
     /// Pool used to allocate backing buffers.
     pool: BufferPool,
 }
@@ -53,29 +49,28 @@ impl Buffer {
 
     /// Creates a new buffer seeded with existing logical bytes.
     ///
-    /// Mutable buffers preserve the provided `data` as-is so callers can keep zero-copy bytes
-    /// loaded from disk until a subsequent write actually needs mutable backing. Immutable buffers
-    /// compact the seed bytes to exact-size detached storage so oversized page-backed views are
-    /// not retained.
+    /// If `compact` is `true`, the seed bytes are copied into detached exact-size storage so
+    /// oversized page-backed views are not retained. Otherwise the provided `data` is preserved
+    /// as-is so callers can keep zero-copy bytes loaded from disk until a subsequent write
+    /// actually needs mutable backing.
     pub(super) fn from(
         offset: u64,
         data: IoBuf,
         capacity: usize,
-        immutable: bool,
+        compact: bool,
         pool: BufferPool,
     ) -> Self {
-        let len = data.len();
-        let data = if immutable {
+        let data = if compact {
             Self::compact(data.as_ref())
         } else {
             data
         };
+        let len = data.len();
         Self {
             data,
             len,
             offset,
             capacity,
-            immutable,
             pool,
         }
     }
@@ -95,31 +90,13 @@ impl Buffer {
         self.len == 0
     }
 
-    /// Returns true if the buffer is immutable.
-    pub(super) const fn is_immutable(&self) -> bool {
-        self.immutable
+    /// Returns true when the current backing references pooled storage.
+    #[cfg(test)]
+    pub(super) fn is_pooled(&self) -> bool {
+        self.data.is_pooled()
     }
 
-    /// Set the buffer immutable.
-    ///
-    /// If `compact` is true, backing storage is compacted to the current logical length.
-    /// This is idempotent for both state and compaction behavior.
-    pub(super) fn set_immutable(&mut self, compact: bool) {
-        self.immutable = true;
-        if !compact {
-            return;
-        }
-        // Use detached exact-size storage so sealing a partial page releases any pooled
-        // page-aligned backing instead of pinning a storage-pool slot per immutable tip.
-        self.data = Self::compact(self.as_ref());
-    }
-
-    /// Set the buffer mutable.
-    pub(super) const fn set_mutable(&mut self) {
-        self.immutable = false;
-    }
-
-    /// Copy into detached exact-size storage so immutable tips do not retain oversized backing.
+    /// Copy into detached exact-size storage so compacted tips do not retain oversized backing.
     fn compact(data: &[u8]) -> IoBuf {
         if data.is_empty() {
             IoBuf::default()
@@ -209,7 +186,7 @@ impl Buffer {
 
     /// Returns a mutable tip buffer with capacity for at least `needed` bytes.
     ///
-    /// This consumes current immutable backing and preserves existing contents.
+    /// This consumes current backing and preserves existing contents.
     ///
     /// - If backing is uniquely owned and has enough capacity, no allocation occurs.
     /// - If backing is shared (for example, because a flushed/read view is still alive) or too
@@ -423,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_from_preserves_immutable_bytes_until_mutated() {
+    fn test_tip_from_preserves_seed_bytes_until_mutated() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
         let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, false, pool);
@@ -438,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_from_immutable_compacts_seed_data() {
+    fn test_tip_from_compact_compacts_seed_data() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
         let mut oversized = pool.alloc(16);
@@ -449,25 +426,8 @@ mod tests {
 
         let buffer = Buffer::from(7, oversized, 16, true, pool);
 
-        assert!(buffer.is_immutable());
         assert_eq!(buffer.offset, 7);
         assert_eq!(buffer.len(), 3);
-        assert_eq!(buffer.as_ref(), b"abc");
-        assert!(!buffer.data.is_pooled());
-    }
-
-    #[test]
-    fn test_set_immutable_compact_releases_pooled_backing() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
-        let mut buffer = Buffer::new(0, 16, pool);
-
-        assert!(!buffer.append(b"abc"));
-        assert!(buffer.data.is_pooled());
-
-        buffer.set_immutable(true);
-
-        assert!(buffer.is_immutable());
         assert_eq!(buffer.as_ref(), b"abc");
         assert!(!buffer.data.is_pooled());
     }

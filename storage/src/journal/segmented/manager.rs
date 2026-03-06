@@ -95,6 +95,7 @@ impl<B: Blob> BufferFactory<B> for AppendFactory {
             size,
             self.write_buffer.get(),
             self.page_cache_ref.clone(),
+            false,
         )
         .await
     }
