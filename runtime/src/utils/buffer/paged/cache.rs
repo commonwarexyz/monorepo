@@ -1062,12 +1062,13 @@ mod tests {
             assert_eq!(reads.load(Ordering::Relaxed), 1);
 
             // The failed generation must remove its in-flight entry and avoid caching data.
-            let page_cache = cache_ref.cache.read();
-            assert!(
-                !page_cache.page_fetches.contains_key(&(blob_id, 0)),
-                "erroring fetch should leave no stale page_fetches entry"
-            );
-            drop(page_cache);
+            {
+                let page_cache = cache_ref.cache.read();
+                assert!(
+                    !page_cache.page_fetches.contains_key(&(blob_id, 0)),
+                    "erroring fetch should leave no stale page_fetches entry"
+                );
+            }
             let mut cached = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(cache_ref.read_cached(blob_id, &mut cached, 0), 0);
 
