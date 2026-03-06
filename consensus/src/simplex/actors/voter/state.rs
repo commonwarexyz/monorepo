@@ -30,6 +30,28 @@ use tracing::{debug, warn};
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentPayloadError {
+    ParentNotBeforeProposal {
+        proposal_view: View,
+        parent_view: View,
+    },
+    ParentBeforeFinalized {
+        proposal_view: View,
+        parent_view: View,
+        last_finalized: View,
+    },
+    MissingNullification {
+        proposal_view: View,
+        parent_view: View,
+        missing_view: View,
+    },
+    ParentNotCertified {
+        proposal_view: View,
+        parent_view: View,
+    },
+}
+
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
@@ -497,7 +519,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
         let (leader, proposal) = self.views.get(&view)?.should_verify()?;
-        let parent_payload = self.parent_payload(&proposal)?;
+        let parent_payload = match self.parent_payload(&proposal) {
+            Ok(parent_payload) => parent_payload,
+            Err(err) => {
+                debug!(
+                    %view,
+                    ?proposal,
+                    ?err,
+                    "proposal exists but ancestry is not yet certified"
+                );
+                return None;
+            }
+        };
         if !self.views.get_mut(&view)?.try_verify() {
             return None;
         }
@@ -644,27 +677,44 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// - It is greater-than-or-equal-to the last finalized view.
     /// - It is certified (or finalized, which implies certification).
     /// - There exist nullifications for all views between it and the proposal view.
-    fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
+    fn parent_payload(&self, proposal: &Proposal<D>) -> Result<D, ParentPayloadError> {
         // Sanity check that the parent view is less than the proposal view.
         let (view, parent) = (proposal.view(), proposal.parent);
         if view <= parent {
-            return None;
+            return Err(ParentPayloadError::ParentNotBeforeProposal {
+                proposal_view: view,
+                parent_view: parent,
+            });
         }
 
         // Ignore any requests for outdated parent views.
         if parent < self.last_finalized {
-            return None;
+            return Err(ParentPayloadError::ParentBeforeFinalized {
+                proposal_view: view,
+                parent_view: parent,
+                last_finalized: self.last_finalized,
+            });
         }
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        if !View::range(parent.next(), view).all(|v| self.is_nullified(v)) {
-            return None;
+        if let Some(missing_view) = View::range(parent.next(), view).find(|v| !self.is_nullified(*v))
+        {
+            return Err(ParentPayloadError::MissingNullification {
+                proposal_view: view,
+                parent_view: parent,
+                missing_view,
+            });
         }
 
         // May return `None` if the parent view is not yet either:
         // - notarized and certified
         // - finalized
-        self.is_certified(parent).copied()
+        self.is_certified(parent)
+            .copied()
+            .ok_or(ParentPayloadError::ParentNotCertified {
+                proposal_view: view,
+                parent_view: parent,
+            })
     }
 
     /// Returns the certificate for the parent of the proposal at the given view.
@@ -1276,7 +1326,13 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([9u8; 32]),
             );
-            assert!(state.parent_payload(&proposal).is_none());
+            assert_eq!(
+                state.parent_payload(&proposal),
+                Err(ParentPayloadError::ParentNotCertified {
+                    proposal_view: View::new(2),
+                    parent_view,
+                })
+            );
 
             // Add notarization certificate
             let notarization_votes: Vec<_> = schemes
@@ -1289,15 +1345,20 @@ mod tests {
             state.add_notarization(notarization);
 
             // The parent is still not certified
-            assert!(state.parent_payload(&proposal).is_none());
+            assert_eq!(
+                state.parent_payload(&proposal),
+                Err(ParentPayloadError::ParentNotCertified {
+                    proposal_view: View::new(2),
+                    parent_view,
+                })
+            );
 
             // Set certify handle then certify the parent
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
             state.set_certify_handle(parent_view, handle);
             state.certified(parent_view, true);
-            let digest = state.parent_payload(&proposal).expect("parent payload");
-            assert_eq!(digest, parent_payload);
+            assert_eq!(state.parent_payload(&proposal), Ok(parent_payload));
         });
     }
 
@@ -1406,7 +1467,14 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([3u8; 32]),
             );
-            assert!(state.parent_payload(&proposal).is_none());
+            assert_eq!(
+                state.parent_payload(&proposal),
+                Err(ParentPayloadError::MissingNullification {
+                    proposal_view: View::new(3),
+                    parent_view,
+                    missing_view: View::new(2),
+                })
+            );
         });
     }
 
@@ -1449,8 +1517,7 @@ mod tests {
                 Sha256Digest::from([8u8; 32]),
             );
             let genesis = Sha256Digest::from([0u8; 32]);
-            let digest = state.parent_payload(&proposal).expect("genesis payload");
-            assert_eq!(digest, genesis);
+            assert_eq!(state.parent_payload(&proposal), Ok(genesis));
         });
     }
 
@@ -1495,7 +1562,14 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([6u8; 32]),
             );
-            assert!(state.parent_payload(&proposal).is_none());
+            assert_eq!(
+                state.parent_payload(&proposal),
+                Err(ParentPayloadError::ParentBeforeFinalized {
+                    proposal_view: View::new(4),
+                    parent_view: View::new(2),
+                    last_finalized: View::new(3),
+                })
+            );
         });
     }
 
