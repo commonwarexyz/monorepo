@@ -152,7 +152,7 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     let mut out = Vec::new();
     for (compromised_idx, compromised) in compromised.iter().enumerate() {
         for (scenario_idx, scenario) in scenarios.iter().enumerate() {
-            let case_seed = seed ^ ((compromised_idx as u64) << 32) ^ ((scenario_idx as u64) << 16);
+            let case_seed = derive_case_seed(seed, compromised_idx, scenario_idx, scenarios.len());
             out.push(Case {
                 compromised: compromised.clone(),
                 scenario: scenario.clone(),
@@ -303,6 +303,39 @@ fn combination_from_rank(n: usize, k: usize, mut rank: u128) -> Vec<usize> {
     set
 }
 
+fn derive_case_seed(seed: u64, compromised_idx: usize, scenario_idx: usize, scenarios: usize) -> u64 {
+    let case_idx = compromised_idx
+        .checked_mul(scenarios)
+        .and_then(|offset| offset.checked_add(scenario_idx))
+        .expect("case index overflow");
+    seed ^ u64::try_from(case_idx).expect("case index should fit in u64")
+}
+
+fn sample_unique_indices(rng: &mut StdRng, total: u128, samples: usize) -> Vec<u128> {
+    assert!(
+        (samples as u128) <= total,
+        "cannot sample more unique indices than total domain size"
+    );
+    if samples == 0 {
+        return Vec::new();
+    }
+
+    // Floyd's algorithm samples without replacement in O(samples) time with no retry loop.
+    let mut sampled = Vec::with_capacity(samples);
+    let mut seen = HashSet::with_capacity(samples);
+    for idx in (total - samples as u128)..total {
+        let candidate = rng.gen_range(0..=idx);
+        if seen.insert(candidate) {
+            sampled.push(candidate);
+        } else {
+            let inserted = seen.insert(idx);
+            debug_assert!(inserted, "tail index should be unique in Floyd sampling");
+            sampled.push(idx);
+        }
+    }
+    sampled
+}
+
 fn generate_scenarios(
     seed: u64,
     n: usize,
@@ -328,18 +361,15 @@ fn generate_scenarios(
 
         // Deterministically prune by sampling unique arrangement indices instead
         // of taking a lexicographic prefix.
-        let mut seen = HashSet::new();
-        let mut sampled = Vec::with_capacity(max_scenarios);
-        while sampled.len() < max_scenarios {
-            let idx = rng.gen_range(0..total);
-            if seen.insert(idx) {
-                sampled.push(idx);
-            }
-        }
-        return sampled
+        return sample_unique_indices(&mut rng, total as u128, max_scenarios)
             .into_iter()
             .map(|idx| Scenario {
-                rounds: index_to_round_scenarios(idx, base, rounds, &options),
+                rounds: index_to_round_scenarios(
+                    usize::try_from(idx).expect("arrangement index should fit in usize"),
+                    base,
+                    rounds,
+                    &options,
+                ),
             })
             .collect();
     }
@@ -394,15 +424,10 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut picked = HashSet::new();
-    let mut sampled = Vec::with_capacity(max_sets);
-    while sampled.len() < max_sets {
-        let idx = rng.gen_range(0..total);
-        if picked.insert(idx) {
-            sampled.push(combination_from_rank(n, faults, idx));
-        }
-    }
-    sampled
+    sample_unique_indices(&mut rng, total, max_sets)
+        .into_iter()
+        .map(|idx| combination_from_rank(n, faults, idx))
+        .collect()
 }
 
 #[cfg(test)]
@@ -442,6 +467,26 @@ mod tests {
             assert_eq!(a.scenario, b.scenario);
             assert_eq!(a.seed, b.seed);
         }
+    }
+
+    #[test]
+    fn case_seeds_do_not_collide_for_large_scenario_indices() {
+        let seed = 42;
+        let scenarios = 65_537;
+        let first = derive_case_seed(seed, 0, 65_536, scenarios);
+        let second = derive_case_seed(seed, 1, 0, scenarios);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unique_index_sampling_handles_near_full_ranges() {
+        let total = 100_000u128;
+        let samples = 99_999usize;
+        let mut rng = StdRng::seed_from_u64(9);
+        let sampled = sample_unique_indices(&mut rng, total, samples);
+        assert_eq!(sampled.len(), samples);
+        assert_eq!(sampled.iter().copied().collect::<HashSet<_>>().len(), samples);
+        assert!(sampled.into_iter().all(|idx| idx < total));
     }
 
     #[test]
