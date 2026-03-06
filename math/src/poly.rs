@@ -13,6 +13,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+use std::borrow::Cow;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -145,7 +146,7 @@ impl<K> Poly<K> {
     /// This returns `0` if the iterator is empty.
     pub fn lin_comb_eval<'a, R: Ring + 'a>(
         &self,
-        into_iter: impl IntoIterator<Item = (&'a R, &'a R)>,
+        into_iter: impl IntoIterator<Item = (R, Cow<'a, R>)>,
         strategy: &impl Strategy,
     ) -> K
     where
@@ -159,10 +160,10 @@ impl<K> Poly<K> {
             };
 
             let len = self.len_usize();
-            let mut out: Vec<_> = powers(b0, len).map(|b0_j| b0_j * a0).collect();
+            let mut out: Vec<_> = powers(b0.as_ref(), len).map(|b0_j| b0_j * &a0).collect();
             for (ai, bi) in iter {
-                powers(bi, len)
-                    .map(|bi_j| bi_j * ai)
+                powers(bi.as_ref(), len)
+                    .map(|bi_j| bi_j * &ai)
                     .zip(out.iter_mut())
                     .for_each(|(c_j, o_j)| *o_j += &c_j);
             }
@@ -628,7 +629,10 @@ pub mod fuzz {
                         acc += &(*a * &f.eval(b));
                         acc
                     });
-                    let lin_comb = f.lin_comb_eval(pairs.iter().map(|(a, b)| (a, b)), &Sequential);
+                    let lin_comb = f.lin_comb_eval(
+                        pairs.iter().map(|(a, b)| (*a, Cow::Borrowed(b))),
+                        &Sequential,
+                    );
                     assert_eq!(naive_eval, lin_comb);
                 }
                 Self::Interpolate(f) => {
