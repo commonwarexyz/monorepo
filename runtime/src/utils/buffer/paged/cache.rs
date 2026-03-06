@@ -330,12 +330,12 @@ impl CacheRef {
                         }
                         .await;
 
-                        let mut cache = cache.write();
                         // This shared future still owns `page_fetches[key]`. As long as at least
                         // one waiter remains armed, that entry pins this generation in place, so a
                         // replacement fetch for the same page cannot be inserted before we cache
                         // the successful result below. Only when every waiter cancels can the last
                         // guard remove the entry and let a later reader start a new generation.
+                        let mut cache = cache.write();
                         if let Ok(page) = &result {
                             cache.cache(blob_id, page.as_ref(), page_num);
                         }
