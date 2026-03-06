@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, Proof, StandardHasher as Standard},
     qmdb::{
-        any::{ordered::fixed::Db, FixedConfig as Config},
+        any::{ordered::fixed::Db as AnyDb, FixedConfig as Config},
         store::LogStore as _,
         verify_proof,
     },
@@ -23,6 +23,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+type Db = AnyDb<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 const MAX_OPS: usize = 25;
 
@@ -64,6 +65,29 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(555);
 const PAGE_CACHE_SIZE: usize = 100;
 
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+) {
+    let finalized = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch.write(k, v);
+        }
+        batch.merkleize(None).await.unwrap().finalize()
+    };
+    db.apply_batch(finalized)
+        .await
+        .expect("commit should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+}
+
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
@@ -86,7 +110,7 @@ fn fuzz(data: FuzzInput) {
             ),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = Db::init(context.clone(), cfg.clone())
             .await
             .expect("init qmdb");
 
@@ -97,25 +121,6 @@ fn fuzz(data: FuzzInput) {
         let mut pending_deletes: HashSet<RawKey> = HashSet::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
-
-        // Helper closure: merge pending state into committed state.
-        macro_rules! commit_pending {
-            ($db:expr, $pending_writes:expr, $committed_state:expr,
-             $pending_inserts:expr, $pending_deletes:expr) => {{
-                let finalized = {
-                    let mut batch = $db.new_batch();
-                    for (k, v) in $pending_writes.drain(..) {
-                        batch.write(k, v);
-                    }
-                    batch.merkleize(None).await.unwrap().finalize()
-                };
-                $db.apply_batch(finalized).await.expect("commit should not fail");
-                for key in $pending_deletes.drain() {
-                    $committed_state.remove(&key);
-                }
-                $committed_state.extend($pending_inserts.drain());
-            }};
-        }
 
         for op in data.operations.iter().take(MAX_OPS) {
             match op {
@@ -141,25 +146,25 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Commit => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                 }
 
                 QmdbOperation::Root => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     db.root();
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     let actual_op_count = db.bounds().await.end;
 
                     if actual_op_count > 0 {
@@ -184,10 +189,10 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     let actual_op_count = db.bounds().await.end;
 
                     let proof = Proof {
@@ -245,10 +250,10 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all operations are persisted.
         if !pending_writes.is_empty() {
-            commit_pending!(
-                db, pending_writes, committed_state,
-                pending_inserts, pending_deletes
-            );
+            commit_pending(
+                &mut db, &mut pending_writes, &mut committed_state,
+                &mut pending_inserts, &mut pending_deletes,
+            ).await;
         }
 
         // Comprehensive final verification - check ALL keys ever touched.

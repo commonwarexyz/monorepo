@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
-        current::{ordered::fixed::Db as Current, FixedConfig as Config},
+        current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
         store::LogStore as _,
     },
     translator::TwoCap,
@@ -22,6 +22,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
+type Db = CurrentDb<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -83,6 +84,29 @@ const MMR_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+) {
+    let finalized = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch.write(k, v);
+        }
+        batch.merkleize(None).await.unwrap().finalize()
+    };
+    db.apply_batch(finalized)
+        .await
+        .expect("commit should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+}
+
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -106,7 +130,7 @@ fn fuzz(data: FuzzInput) {
             thread_pool: None,
         };
 
-        let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
+        let mut db = Db::init(context.clone(), cfg)
             .await
             .expect("Failed to initialize Current database");
 
@@ -118,24 +142,6 @@ fn fuzz(data: FuzzInput) {
         let mut all_keys = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut committed_op_count = Location::new(1);
-
-        macro_rules! commit_pending {
-            ($db:expr, $pending_writes:expr, $committed_state:expr,
-             $pending_inserts:expr, $pending_deletes:expr) => {{
-                let finalized = {
-                    let mut batch = $db.new_batch();
-                    for (k, v) in $pending_writes.drain(..) {
-                        batch.write(k, v);
-                    }
-                    batch.merkleize(None).await.unwrap().finalize()
-                };
-                $db.apply_batch(finalized).await.expect("commit should not fail");
-                for key in $pending_deletes.drain() {
-                    $committed_state.remove(&key);
-                }
-                $committed_state.extend($pending_inserts.drain());
-            }};
-        }
 
         for op in &data.operations {
             match op {
@@ -193,27 +199,27 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::Commit => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                 }
 
                 CurrentOperation::Prune => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                     db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                     let _root = db.root();
                 }
@@ -224,10 +230,10 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
@@ -242,7 +248,7 @@ fn fuzz(data: FuzzInput) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            Db::verify_range_proof(
                                 &mut hasher,
                                 &proof,
                                 start_loc,
@@ -260,10 +266,10 @@ fn fuzz(data: FuzzInput) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
 
                     let current_op_count = db.bounds().await.end;
@@ -278,7 +284,7 @@ fn fuzz(data: FuzzInput) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
-                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            assert!(!Db::verify_range_proof(
                                 &mut hasher,
                                 &bad_proof,
                                 start_loc,
@@ -290,7 +296,7 @@ fn fuzz(data: FuzzInput) {
 
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
-                            assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            assert!(!Db::verify_range_proof(
                                 &mut hasher,
                                 &range_proof,
                                 start_loc,
@@ -305,17 +311,17 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
                     match db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
-                            let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
+                            let verification_result = Db::verify_key_value_proof(
                                 &mut hasher,
                                 k,
                                 value,
@@ -336,16 +342,16 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    commit_pending!(
-                        db, pending_writes, committed_state,
-                        pending_inserts, pending_deletes
-                    );
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
                     match db.exclusion_proof(&mut hasher, &k).await {
                         Ok(proof) => {
-                            let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
+                            let verification_result = Db::verify_exclusion_proof(
                                 &mut hasher,
                                 &k,
                                 &proof,
@@ -366,10 +372,10 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all pending operations are persisted.
         if !pending_writes.is_empty() {
-            commit_pending!(
-                db, pending_writes, committed_state,
-                pending_inserts, pending_deletes
-            );
+            commit_pending(
+                &mut db, &mut pending_writes, &mut committed_state,
+                &mut pending_inserts, &mut pending_deletes,
+            ).await;
         }
 
         let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();

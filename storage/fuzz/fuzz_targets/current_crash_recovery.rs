@@ -115,6 +115,62 @@ fn make_config(
     }
 }
 
+/// Remove affected keys from committed since their recovered value is unknown.
+fn forget_pending(
+    pending: &HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for key in pending.keys() {
+        committed.remove(key);
+    }
+}
+
+/// Merge pending changes into committed after a successful commit.
+fn apply_pending(
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for (k, v) in pending.drain() {
+        match v {
+            Some(val) => {
+                committed.insert(k, val);
+            }
+            None => {
+                committed.remove(&k);
+            }
+        }
+    }
+}
+
+/// Commit pending writes. Returns `true` on success, `false` on error.
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) -> bool {
+    let result = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch.write(k, v);
+        }
+        let merkleized = match batch.merkleize(None).await {
+            Ok(m) => m,
+            Err(_) => {
+                forget_pending(pending, committed);
+                return false;
+            }
+        };
+        db.apply_batch(merkleized.finalize()).await
+    };
+    if result.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    apply_pending(pending, committed);
+    true
+}
+
 fn fuzz(input: FuzzInput) {
     if input.operations.is_empty() {
         return;
@@ -166,59 +222,9 @@ fn fuzz(input: FuzzInput) {
             // Uncommitted changes since the last commit. None = delete, Some = upsert.
             let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
 
-            // A failed commit may have partially persisted pending operations.
-            // Remove affected keys from committed since their recovered value is unknown.
-            let forget_pending =
-                |pending: &HashMap<RawKey, Option<RawValue>>,
-                 committed: &mut HashMap<RawKey, RawValue>| {
-                    for key in pending.keys() {
-                        committed.remove(key);
-                    }
-                };
-
-            // Merge pending changes into committed after a successful commit.
-            let apply_pending =
-                |pending: &mut HashMap<RawKey, Option<RawValue>>,
-                 committed: &mut HashMap<RawKey, RawValue>| {
-                    for (k, v) in pending.drain() {
-                        match v {
-                            Some(val) => {
-                                committed.insert(k, val);
-                            }
-                            None => {
-                                committed.remove(&k);
-                            }
-                        }
-                    }
-                };
-
             // Accumulate writes until Commit, matching the intended
             // pending/committed separation.
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
-
-            macro_rules! commit_pending {
-                () => {{
-                    let result = {
-                        let mut batch = db.new_batch();
-                        for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
-                        }
-                        let merkleized = match batch.merkleize(None).await {
-                            Ok(m) => m,
-                            Err(_) => {
-                                forget_pending(&pending, &mut committed);
-                                break;
-                            }
-                        };
-                        db.apply_batch(merkleized.finalize()).await
-                    };
-                    if result.is_err() {
-                        forget_pending(&pending, &mut committed);
-                        break;
-                    }
-                    apply_pending(&mut pending, &mut committed);
-                }};
-            }
 
             for op in &operations {
                 match op {
@@ -231,10 +237,28 @@ fn fuzz(input: FuzzInput) {
                         pending.insert(*key, None);
                     }
                     CurrentOperation::Commit => {
-                        commit_pending!();
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
+                            break;
+                        }
                     }
                     CurrentOperation::Prune => {
-                        commit_pending!();
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
+                            break;
+                        }
                         let floor = db.inactivity_floor_loc();
                         if db.prune(floor).await.is_err() {
                             break;

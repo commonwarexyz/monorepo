@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
-        any::{unordered::fixed::Db, FixedConfig as Config},
+        any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
         store::LogStore as _,
         verify_proof,
     },
@@ -23,6 +23,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+type Db = AnyDb<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QmdbOperation {
@@ -42,6 +43,25 @@ struct FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(223);
 const PAGE_CACHE_SIZE: usize = 100;
+
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, Option<RawValue>>,
+    pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
+) {
+    let finalized = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch.write(k, v);
+        }
+        batch.merkleize(None).await.unwrap().finalize()
+    };
+    db.apply_batch(finalized)
+        .await
+        .expect("commit should not fail");
+    committed_state.extend(pending_expected.drain());
+}
 
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
@@ -65,7 +85,7 @@ fn fuzz(data: FuzzInput) {
             ),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = Db::init(context.clone(), cfg.clone())
             .await
             .expect("init qmdb");
 
@@ -75,21 +95,6 @@ fn fuzz(data: FuzzInput) {
         let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
-
-        // Helper closure: commit pending writes and merge pending_expected.
-        macro_rules! commit_pending {
-            ($db:expr, $pending_writes:expr, $committed_state:expr, $pending_expected:expr) => {{
-                let finalized = {
-                    let mut batch = $db.new_batch();
-                    for (k, v) in $pending_writes.drain(..) {
-                        batch.write(k, v);
-                    }
-                    batch.merkleize(None).await.unwrap().finalize()
-                };
-                $db.apply_batch(finalized).await.expect("commit should not fail");
-                $committed_state.extend($pending_expected.drain());
-            }};
-        }
 
         for op in &data.operations {
             match op {
@@ -120,11 +125,11 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Commit => {
-                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                 }
 
                 QmdbOperation::Root => {
-                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                     db.root();
                 }
 
@@ -134,7 +139,7 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    commit_pending!(db, pending_writes, committed_state, pending_expected);
+                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                     let current_root = db.root();
                     let actual_op_count = db.bounds().await.end;
                     let adjusted_start = Location::new(*start_loc % *actual_op_count);
@@ -190,7 +195,7 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all operations are persisted.
         if !pending_writes.is_empty() {
-            commit_pending!(db, pending_writes, committed_state, pending_expected);
+            commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
         }
 
         // Comprehensive final verification - check ALL keys ever touched.
