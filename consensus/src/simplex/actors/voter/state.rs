@@ -2159,6 +2159,91 @@ mod tests {
     }
 
     #[test]
+    fn late_nullification_unblocks_follower_verify() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            // With RoundRobin (epoch=1), view 3 leader is index 0, so signer index 1 is a follower.
+            let local_scheme = schemes[1].clone();
+            let cfg = Config {
+                scheme: local_scheme,
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_secs(30),
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let parent_view = View::new(1);
+            let blocked_view = parent_view.next();
+            let child_view = blocked_view.next();
+            let parent_payload = Sha256Digest::from([88u8; 32]);
+            let parent_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                parent_payload,
+            );
+
+            // Certify the parent view, but leave the intermediate view missing its nullification.
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(parent_view, true).is_some());
+
+            // Move into the child view as a follower and inject a proposal that depends on view 1.
+            assert!(state.enter_view(child_view));
+            state.set_leader(child_view, None);
+            assert_eq!(state.current_view(), child_view);
+            assert_eq!(state.leader_index(child_view), Some(Participant::new(0)));
+
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                parent_view,
+                Sha256Digest::from([89u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal.clone()));
+
+            // Missing nullification should stall verification without expiring the timeout.
+            let initial_deadline = state.next_timeout_deadline();
+            assert!(initial_deadline > context.current());
+            assert!(state.try_verify().is_none());
+            assert_eq!(state.next_timeout_deadline(), initial_deadline);
+
+            // Once the intermediate nullification arrives, the same proposal should become verifiable.
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), blocked_view))
+                        .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+
+            let verified = state.try_verify().expect("verify context should exist");
+            let (ctx, proposal) = verified;
+            assert_eq!(ctx.round.view(), child_view);
+            assert_eq!(ctx.parent, (parent_view, parent_payload));
+            assert_eq!(proposal, child_proposal);
+        });
+    }
+
+    #[test]
     fn only_notarize_before_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
