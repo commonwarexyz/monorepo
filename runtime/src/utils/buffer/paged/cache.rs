@@ -70,7 +70,9 @@ impl Drop for PageFetchGuard {
         // A resolved fetch removes `page_fetches[key]` before waiters resume and disarm their
         // guards. If that fetch failed, the page remains uncached, so a new reader can install a
         // new fetch for the same key before an old waiter is cancelled. Ignore drops from stale
-        // waiters so they cannot decrement or remove a newer generation.
+        // waiters so they cannot decrement or remove a newer generation. A surviving waiter keeps
+        // the current generation installed, which lets the shared future finish and cache the page
+        // on success.
         if !Arc::ptr_eq(current, &self.fetch) {
             return;
         }
@@ -329,10 +331,11 @@ impl CacheRef {
                         .await;
 
                         let mut cache = cache.write();
-                        // This shared future still owns `page_fetches[key]`. A replacement fetch
-                        // for the same page cannot be inserted before we reach this point:
-                        // unresolved entries are removed only by the last armed guard, which means
-                        // no waiter remains to keep this shared future alive.
+                        // This shared future still owns `page_fetches[key]`. As long as at least
+                        // one waiter remains armed, that entry pins this generation in place, so a
+                        // replacement fetch for the same page cannot be inserted before we cache
+                        // the successful result below. Only when every waiter cancels can the last
+                        // guard remove the entry and let a later reader start a new generation.
                         if let Ok(page) = &result {
                             cache.cache(blob_id, page.as_ref(), page_num);
                         }
