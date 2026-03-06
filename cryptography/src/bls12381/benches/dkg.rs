@@ -3,7 +3,7 @@ use commonware_cryptography::{
         dkg::{deal, Dealer, Info, Logs, Player},
         primitives::variant::MinSig,
     },
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{Batch, PrivateKey, PublicKey},
     Signer as _,
 };
 use commonware_math::algebra::Random;
@@ -140,10 +140,23 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
+                            let mut finalize_rng = StdRng::seed_from_u64(0);
                             if concurrency > 1 {
-                                black_box(player.finalize::<N3f1>(logs, &strategy).unwrap());
+                                black_box(
+                                    player
+                                        .finalize::<N3f1, Batch>(logs, &mut finalize_rng, &strategy)
+                                        .unwrap(),
+                                );
                             } else {
-                                black_box(player.finalize::<N3f1>(logs, &Sequential).unwrap());
+                                black_box(
+                                    player
+                                        .finalize::<N3f1, Batch>(
+                                            logs,
+                                            &mut finalize_rng,
+                                            &Sequential,
+                                        )
+                                        .unwrap(),
+                                );
                             }
                         },
                         BatchSize::SmallInput,
