@@ -30,22 +30,33 @@ use tracing::{debug, warn};
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Reasons a proposal's ancestry cannot yet produce a verification context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 enum ParentPayloadError {
+    #[error("proposal view {proposal_view} is not after parent view {parent_view}")]
     ParentNotBeforeProposal {
         proposal_view: View,
         parent_view: View,
     },
+    #[error(
+        "proposal view {proposal_view} references parent view {parent_view} below last finalized view {last_finalized}"
+    )]
     ParentBeforeFinalized {
         proposal_view: View,
         parent_view: View,
         last_finalized: View,
     },
+    #[error(
+        "proposal view {proposal_view} references parent view {parent_view} but view {missing_view} is not nullified"
+    )]
     MissingNullification {
         proposal_view: View,
         parent_view: View,
         missing_view: View,
     },
+    #[error(
+        "proposal view {proposal_view} references parent view {parent_view} but the parent is not certified"
+    )]
     ParentNotCertified {
         proposal_view: View,
         parent_view: View,
