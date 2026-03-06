@@ -123,7 +123,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        self.metrics.connection_created.remove(&metrics::Peer::new(peer));
+        self.metrics
+            .connection_created
+            .remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
     }

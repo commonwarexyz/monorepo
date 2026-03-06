@@ -137,7 +137,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        self.metrics.connection_created.remove(&metrics::Peer::new(peer));
+        self.metrics
+            .connection_created
+            .remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
