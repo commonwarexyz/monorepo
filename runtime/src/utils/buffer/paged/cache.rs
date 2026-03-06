@@ -874,6 +874,7 @@ mod tests {
         executor.start(|context| async move {
             let blob_id = 0;
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            // Return one valid full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
             let crc = Crc32::checksum(&logical_page);
             let mut physical_page = logical_page.clone();
@@ -889,6 +890,7 @@ mod tests {
                 result: ControlledBlobResult::Success(Arc::new(physical_page)),
             };
 
+            // Start the fetch that installs the shared in-flight entry.
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_first = cache_ref.clone();
             let blob_for_first = blob.clone();
@@ -900,6 +902,7 @@ mod tests {
 
             started_rx.await.expect("first read never started");
 
+            // Join as a follower while the first fetch is still blocked in the blob.
             let mut second_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_second = cache_ref.clone();
             let blob_for_second = blob.clone();
@@ -911,6 +914,7 @@ mod tests {
                 second_buf
             });
 
+            // Wait until both tasks are registered against the same in-flight fetch.
             loop {
                 let joined = {
                     let page_cache = cache_ref.cache.read();
@@ -926,9 +930,12 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
+            // Cancel the original fetcher; the follower should keep the generation alive.
             first.abort();
             assert!(matches!(first.await, Err(Error::Closed)));
 
+            // A later reader should still join the existing in-flight fetch instead of starting a
+            // second blob read.
             let mut third_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_third = cache_ref.clone();
             let blob_for_third = blob.clone();
@@ -940,6 +947,8 @@ mod tests {
                 third_buf
             });
 
+            // Either the third reader bumps the waiter count back to 2, or a bug starts a second
+            // blob read.
             loop {
                 let third_entered = {
                     let page_cache = cache_ref.cache.read();
@@ -956,14 +965,17 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
+            // Let the single underlying fetch complete and satisfy both surviving waiters.
             let _ = release_tx.send(());
 
             let second_buf = second.await.expect("second task failed");
             let third_buf = third.await.expect("third task failed");
             assert_eq!(second_buf, logical_page);
             assert_eq!(third_buf, logical_page);
+            // All waiters should have shared the same blob read.
             assert_eq!(reads.load(Ordering::Relaxed), 1);
 
+            // The successful fetch should populate the cache for later readers.
             let mut cached = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(
                 cache_ref.read_cached(blob_id, &mut cached, 0),
@@ -971,6 +983,7 @@ mod tests {
             );
             assert_eq!(cached, logical_page);
 
+            // A later read should hit the cached page and avoid touching the blob again.
             let mut fourth_buf = vec![0u8; PAGE_SIZE.get() as usize];
             cache_ref
                 .read(&blob, blob_id, &mut fourth_buf, 0)
@@ -994,6 +1007,7 @@ mod tests {
             let blob_id = 0;
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
 
+            // Hold one shared fetch in flight, then make the underlying read fail.
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
@@ -1004,6 +1018,7 @@ mod tests {
                 result: ControlledBlobResult::Error,
             };
 
+            // Start the fetch that creates the in-flight entry.
             let mut first_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_first = cache_ref.clone();
             let blob_for_first = blob.clone();
@@ -1015,6 +1030,7 @@ mod tests {
 
             started_rx.await.expect("first erroring read never started");
 
+            // Join with a second waiter that should observe the same failure.
             let mut second_buf = vec![0u8; PAGE_SIZE.get() as usize];
             let cache_ref_for_second = cache_ref.clone();
             let blob_for_second = blob.clone();
@@ -1024,6 +1040,7 @@ mod tests {
                     .await
             });
 
+            // Wait until both tasks share the same in-flight fetch entry.
             loop {
                 let joined = {
                     let page_cache = cache_ref.cache.read();
@@ -1039,12 +1056,15 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
+            // Release the blocked read so the shared fetch resolves with an error.
             let _ = release_tx.send(());
 
             assert!(matches!(first.await, Ok(Err(Error::ReadFailed))));
             assert!(matches!(second.await, Ok(Err(Error::ReadFailed))));
+            // Both waiters should still have shared a single blob read.
             assert_eq!(reads.load(Ordering::Relaxed), 1);
 
+            // The failed generation must remove its in-flight entry and avoid caching data.
             let page_cache = cache_ref.cache.read();
             assert!(
                 !page_cache.page_fetches.contains_key(&(blob_id, 0)),
@@ -1055,6 +1075,7 @@ mod tests {
             let mut cached = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(cache_ref.read_cached(blob_id, &mut cached, 0), 0);
 
+            // A later read should start a fresh fetch rather than reusing stale error state.
             let mut third_buf = vec![0u8; PAGE_SIZE.get() as usize];
             assert!(matches!(
                 cache_ref.read(&blob, blob_id, &mut third_buf, 0).await,
