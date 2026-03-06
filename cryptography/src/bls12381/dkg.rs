@@ -1311,7 +1311,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Default for Logs<V, P, M> {
 }
 
 impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
-    fn check_dealers_in_parallel<B: BatchVerifier<PublicKey = P>>(
+    fn check_dealers<B: BatchVerifier<PublicKey = P>>(
         info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
         strategy: &impl Strategy,
@@ -1325,6 +1325,11 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
                 ((*dealer).clone(), log, seed)
             })
             .collect();
+        // This uses signature batch verification only for a particular dealer's
+        // signatures. We could batch across all dealers, but in practice this starts
+        // performing worse than just using parallelism with at least 4 threads,
+        // and also introduces a slow path if any dealer has a bad sig. This slow
+        // path can easily be exercised by an adversary.
         strategy.map_collect_vec(checks, |(dealer, log, seed)| {
             let mut local_rng = Transcript::resume(seed).noise(NOISE_PRE_VERIFY);
             let valid =
@@ -1378,8 +1383,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         let first_group_len = needed.max(unknown_in_required_prefix).min(unknown.len());
         let (first_group, remaining_group) = unknown.split_at(first_group_len);
 
-        let first_results =
-            Self::check_dealers_in_parallel::<B>(info, rng, strategy, &transcript, first_group);
+        let first_results = Self::check_dealers::<B>(info, rng, strategy, &transcript, first_group);
         for (dealer, is_valid) in first_results {
             self.known.insert(dealer, is_valid);
             if is_valid {
@@ -1392,7 +1396,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
 
         let remaining_results =
-            Self::check_dealers_in_parallel::<B>(info, rng, strategy, &transcript, remaining_group);
+            Self::check_dealers::<B>(info, rng, strategy, &transcript, remaining_group);
         for (dealer, is_valid) in remaining_results {
             self.known.insert(dealer, is_valid);
         }
