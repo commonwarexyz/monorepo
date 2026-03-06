@@ -60,11 +60,6 @@ impl Dirty {
         v.sort_by_key(|a| a.1);
         v
     }
-
-    /// Remove all dirty nodes at positions >= cutoff.
-    pub(crate) fn remove_above(&mut self, cutoff: Position) {
-        let _ = self.dirty_nodes.split_off(&(cutoff, 0));
-    }
 }
 
 /// Configuration for initializing an [Mmr].
@@ -446,31 +441,19 @@ impl<D: Digest> Mmr<D> {
     /// This is the only way to transfer batch changes into the base MMR.
     /// After apply, the base's root matches the batch's root.
     pub fn apply(&mut self, changeset: super::batch::Changeset<D>) {
-        // 1. Truncate: if batch popped into base range, remove tail nodes.
-        if changeset.parent_retained < self.size() {
-            let keep = (*changeset.parent_retained - *self.pruned_to_pos) as usize;
-            self.nodes.truncate(keep);
-        }
-
-        // 2. Overwrite: write modified digests into surviving base nodes.
+        // 1. Overwrite: write modified digests into surviving base nodes.
         for (pos, digest) in changeset.overwrites {
             let index = self.pos_to_index(pos);
             self.nodes[index] = digest;
         }
 
-        // 3. Append: push new nodes onto the end.
+        // 2. Append: push new nodes onto the end.
         for digest in changeset.appended {
             self.nodes.push_back(digest);
         }
 
-        // 4. Root: set the pre-computed root from the batch.
+        // 3. Root: set the pre-computed root from the batch.
         self.root = changeset.root;
-
-        // 5. Prune: if pruning advanced, physically prune and pin.
-        //    Must be last because prune_to_pos needs all nodes present.
-        if changeset.pruned_to_pos > self.pruned_to_pos {
-            self.prune_to_pos(changeset.pruned_to_pos);
-        }
     }
 }
 
@@ -494,10 +477,6 @@ impl<D: Digest> Readable<D> for Mmr<D> {
 
 impl<D: Digest> BatchChainInfo<D> for Mmr<D> {
     fn base_size(&self) -> Position {
-        self.size()
-    }
-
-    fn retained_size(&self) -> Position {
         self.size()
     }
 
@@ -843,80 +822,6 @@ mod tests {
                 mmr.prune_all();
                 assert_eq!(mmr.root(), reference_mmr.root());
             }
-        });
-    }
-
-    #[test]
-    fn test_mem_mmr_pop() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            const NUM_ELEMENTS: u64 = 100;
-
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
-
-            // Pop off one node at a time until empty, confirming the root matches reference.
-            for i in (0..NUM_ELEMENTS).rev() {
-                let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch.pop().unwrap();
-                    batch.merkleize(&mut hasher).finalize()
-                };
-                mmr.apply(changeset);
-                let root = *mmr.root();
-                let reference_mmr = Mmr::new(&mut hasher);
-                let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
-                assert_eq!(
-                    root,
-                    *reference_mmr.root(),
-                    "root mismatch after pop at {i}"
-                );
-            }
-            // Pop on empty should fail
-            {
-                let mut batch = mmr.new_batch();
-                assert!(
-                    matches!(batch.pop().unwrap_err(), Error::Empty),
-                    "pop on empty MMR should fail"
-                );
-            }
-
-            // Re-add elements, then test pop with pruning
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                for i in 0u64..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
-                    batch.add(&mut hasher, &element);
-                }
-                batch.merkleize(&mut hasher).finalize()
-            };
-            mmr.apply(changeset);
-
-            let leaf_pos = Position::try_from(Location::new(100)).unwrap();
-            mmr.prune_to_pos(leaf_pos);
-
-            // Pop all elements down to the pruning boundary
-            while mmr.size() > leaf_pos {
-                let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch.pop().unwrap();
-                    batch.merkleize(&mut hasher).finalize()
-                };
-                mmr.apply(changeset);
-            }
-            let reference_mmr = Mmr::new(&mut hasher);
-            let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
-            assert_eq!(*mmr.root(), *reference_mmr.root());
-
-            // Pop past pruning boundary should fail
-            {
-                let mut batch = mmr.new_batch();
-                let result = batch.pop();
-                assert!(matches!(result, Err(Error::ElementPruned(_))));
-            }
-            assert!(mmr.bounds().is_empty());
         });
     }
 
