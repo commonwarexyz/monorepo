@@ -537,7 +537,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                     %view,
                     ?proposal,
                     ?err,
-                    "proposal exists but ancestry is not yet certified"
+                    "proposal exists but ancestry is not certified"
                 );
                 return None;
             }
