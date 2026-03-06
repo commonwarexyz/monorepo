@@ -40,8 +40,7 @@
 //! * If leader `l` has not been active in last `lookback` views, set `t_l` and `t_a` to 0
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
-//!     previous view `v_m`, request `v_m`
-//!   * On failure: set `t_l` to 0
+//!     previous view, do nothing (retry on next iteration)
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Set `t_l` to `None`
@@ -199,7 +198,6 @@
 //! | `nullification(v)` | Certificate of `≥ Q` `nullify(v)` votes.                              |
 //! | `finalize(c, v)` | Vote to finalize container `c` in view `v` after certification.          |
 //! | `finalization(c, v)` | Certificate of `≥ Q` `finalize(c, v)` votes.                          |
-//! | `request(v_m)` | Catch-up request for missing proof material from prior view `v_m`.       |
 //!
 //! ## 5. Replica State and Timers
 //!
@@ -247,15 +245,13 @@
 //! // Application-level certification gate for notarized containers.
 //! fn certify(c) -> bool;
 //!
-//! // Request missing view proof material.
-//! fn request(v_m);
 //! ```
 //!
 //! ### 6.1 Helpers
 //!
 //! ```text
 //! // Selects the best parent proof for a leader proposal in view `v`.
-//! // Returns either a parent `(c_parent, v_parent)` or a missing view `v_m` that must be requested.
+//! // Returns either a parent `(c_parent, v_parent)` or a missing view `v_m`.
 //! fn select_parent(r, v) -> Result<(c_parent, v_parent), v_m> {
 //!     let i = v - 1;
 //!     while i > 0 {
@@ -361,7 +357,7 @@
 //!    1. If `l` has not been active in the last `lookback` views, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = select_parent(r, v)`.
-//!       1. If `parent = Err(v_m)`, send `request(v_m)`, set `r.round[v].t_l = 0`, and return.
+//!       1. If `parent = Err(_)`, return.
 //!       1. Let `c = propose(v, parent)`.
 //!       1. If `c = None`, set `r.round[v].t_l = 0`, and return.
 //!       1. Set `r.round[v].broadcast_notarize = true`.
