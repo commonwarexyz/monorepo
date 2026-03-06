@@ -1703,8 +1703,9 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
     mode: Mode,
     players: Set<P>,
 ) -> DealResult<V, P> {
-    if players.is_empty() {
-        return Err(Error::NumPlayers(0));
+    let participant_range = 1..u32::MAX as usize;
+    if !participant_range.contains(&players.len()) {
+        return Err(Error::NumPlayers(players.len()));
     }
     let n = NZU32!(players.len() as u32);
     let t = players.quorum::<M>();
