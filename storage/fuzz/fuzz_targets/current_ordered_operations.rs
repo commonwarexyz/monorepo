@@ -117,7 +117,7 @@ fn fuzz(data: FuzzInput) {
         let mut pending_deletes: HashSet<RawKey> = HashSet::new();
         let mut all_keys = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
-        let mut committed_op_count = Location::new(0);
+        let mut committed_op_count = Location::new(1);
 
         macro_rules! commit_pending {
             ($db:expr, $pending_writes:expr, $committed_state:expr,
