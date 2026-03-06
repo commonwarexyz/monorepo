@@ -43,6 +43,7 @@ pub(crate) trait FloorScan {
 }
 
 /// Sequential scan: every location is a candidate.
+// TODO(#1829): Always use bitmap for floor raising.
 pub(crate) struct SequentialScan;
 
 impl FloorScan for SequentialScan {
