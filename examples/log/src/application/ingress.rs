@@ -1,33 +1,17 @@
+use commonware_actor::ingress;
 use commonware_consensus::{
     simplex::types::Context, types::Epoch, Automaton as Au, CertifiableAutomaton as CAu,
     Relay as Re,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::oneshot;
 
-pub enum Message<D: Digest> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
-    Propose {
-        response: oneshot::Sender<D>,
-    },
-    Verify {
-        response: oneshot::Sender<bool>,
-    },
-}
+ingress! {
+    Mailbox<D: Digest>,
 
-/// Mailbox for the application.
-#[derive(Clone)]
-pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
-}
-
-impl<D: Digest> Mailbox<D> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
-        Self { sender }
-    }
+    pub ask read_write GetGenesis { epoch: Epoch } -> D;
+    pub subscribe CreateProposal -> D;
+    pub subscribe VerifyProposal -> bool;
 }
 
 impl<D: Digest> Au for Mailbox<D> {
@@ -35,12 +19,7 @@ impl<D: Digest> Au for Mailbox<D> {
     type Context = Context<Self::Digest, PublicKey>;
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
-        receiver.await.expect("Failed to receive genesis")
+        self.get_genesis(epoch).await.expect("must get genesis")
     }
 
     async fn propose(
@@ -49,12 +28,7 @@ impl<D: Digest> Au for Mailbox<D> {
     ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Propose { response })
-            .await
-            .expect("Failed to send propose");
-        receiver
+        self.create_proposal()
     }
 
     async fn verify(
@@ -66,12 +40,7 @@ impl<D: Digest> Au for Mailbox<D> {
         //
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Verify { response })
-            .await
-            .expect("Failed to send verify");
-        receiver
+        self.verify_proposal()
     }
 }
 
