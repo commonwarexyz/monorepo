@@ -127,7 +127,7 @@ where
 /// A k/v store that supports making batched changes.
 pub trait Batchable: Gettable<Key: Key, Value: CodecShared + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
-    fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
+    fn new_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
         Self: Sized + Sync,
         Self::Value: Send + Sync,

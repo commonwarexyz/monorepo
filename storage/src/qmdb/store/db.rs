@@ -999,7 +999,7 @@ mod test {
             let key = Digest::random(&mut ctx);
             let value = vec![2, 3, 4, 5];
 
-            let mut batch = db.start_batch();
+            let mut batch = db.new_batch();
 
             // Attempt to get a key that does not exist
             let result = batch.get(&key).await;
@@ -1026,7 +1026,7 @@ mod test {
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Insert a key-value pair
-            let mut batch = db.start_batch();
+            let mut batch = db.new_batch();
             batch.update(key, value.clone()).await.unwrap();
 
             // Persist the changes
