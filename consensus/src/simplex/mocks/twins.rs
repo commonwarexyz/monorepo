@@ -52,20 +52,47 @@ impl Scenario {
     }
 
     /// Routes a message from sender to the correct twin half at a given view.
-    pub fn route<P: Clone + PartialEq>(
-        &self,
-        view: View,
-        sender: &P,
-        participants: &[P],
-    ) -> SplitTarget {
-        let (primary, secondary) = self.partitions(view, participants);
-        route_with_groups(sender, &primary, &secondary)
+    ///
+    /// Unlike [`partitions`](Self::partitions), this avoids allocating temporary
+    /// Vecs by comparing bitmasks directly.
+    pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
+        let idx = view.get().saturating_sub(1) as usize;
+        if let Some(round) = self.rounds.get(idx) {
+            return route_with_masks(
+                sender,
+                round.primary_mask,
+                round.secondary_mask,
+                participants,
+            );
+        }
+        // After attack rounds, both halves see everyone.
+        SplitTarget::Both
     }
 }
 
 fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
     let in_primary = primary.contains(sender);
     let in_secondary = secondary.contains(sender);
+    match (in_primary, in_secondary) {
+        (true, true) => SplitTarget::Both,
+        (true, false) => SplitTarget::Primary,
+        (false, true) => SplitTarget::Secondary,
+        (false, false) => SplitTarget::None,
+    }
+}
+
+fn route_with_masks<P: PartialEq>(
+    sender: &P,
+    primary_mask: u64,
+    secondary_mask: u64,
+    participants: &[P],
+) -> SplitTarget {
+    let Some(sender_idx) = participants.iter().position(|p| p == sender) else {
+        return SplitTarget::None;
+    };
+    let bit = 1u64 << sender_idx;
+    let in_primary = (primary_mask & bit) != 0;
+    let in_secondary = (secondary_mask & bit) != 0;
     match (in_primary, in_secondary) {
         (true, true) => SplitTarget::Both,
         (true, false) => SplitTarget::Primary,
@@ -303,7 +330,12 @@ fn combination_from_rank(n: usize, k: usize, mut rank: u128) -> Vec<usize> {
     set
 }
 
-fn derive_case_seed(seed: u64, compromised_idx: usize, scenario_idx: usize, scenarios: usize) -> u64 {
+fn derive_case_seed(
+    seed: u64,
+    compromised_idx: usize,
+    scenario_idx: usize,
+    scenarios: usize,
+) -> u64 {
     let case_idx = compromised_idx
         .checked_mul(scenarios)
         .and_then(|offset| offset.checked_add(scenario_idx))
@@ -485,7 +517,10 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(9);
         let sampled = sample_unique_indices(&mut rng, total, samples);
         assert_eq!(sampled.len(), samples);
-        assert_eq!(sampled.iter().copied().collect::<HashSet<_>>().len(), samples);
+        assert_eq!(
+            sampled.iter().copied().collect::<HashSet<_>>().len(),
+            samples
+        );
         assert!(sampled.into_iter().all(|idx| idx < total));
     }
 
