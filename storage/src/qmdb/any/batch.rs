@@ -1141,6 +1141,7 @@ where
         self.log.apply_batch(batch.journal_finalized).await?;
 
         // 2. Flush journal to disk.
+        // TODO(#3118): allow fsync with non-mutable reference to database.
         self.log.commit().await?;
 
         // 3. Apply snapshot diffs to the in-memory index.
