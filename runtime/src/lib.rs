@@ -815,8 +815,9 @@ stability_scope!(BETA, cfg(feature = "external") {
     impl<F> FutureExt for F where F: Future + Send {}
 });
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;

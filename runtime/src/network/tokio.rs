@@ -297,8 +297,9 @@ impl crate::Network for Network {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use crate::{
         network::{tests, tokio as TokioNetwork},
         BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,

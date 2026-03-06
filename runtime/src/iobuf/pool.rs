@@ -1273,8 +1273,9 @@ unsafe impl BufMut for PooledBufMut {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use bytes::BytesMut;
     use std::{sync::mpsc, thread};

@@ -79,9 +79,10 @@ impl Metrics {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 #[cfg(not(target_os = "windows"))]
-mod tests {
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
 
     #[test]

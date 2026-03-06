@@ -238,8 +238,9 @@ impl arbitrary::Arbitrary<'_> for Checksum {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
 
     #[test]

@@ -231,8 +231,9 @@ impl crate::Blob for Blob {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::{Header, *};
     use crate::{storage::tests::run_storage_tests, Blob, BufferPoolConfig, Storage as _};
 

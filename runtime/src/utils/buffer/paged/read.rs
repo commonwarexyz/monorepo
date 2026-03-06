@@ -364,8 +364,9 @@ impl<B: Blob> Buf for Replay<B> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::{super::append::Append, *};
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;

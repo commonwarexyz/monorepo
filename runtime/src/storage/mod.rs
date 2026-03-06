@@ -83,7 +83,8 @@ stability_scope!(BETA {
         pub(crate) const MAGIC_LENGTH: usize = 4;
 
         /// Length of version fields.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fuzz"))]
+        #[cfg_attr(not(test), allow(dead_code))]
         pub(crate) const VERSION_LENGTH: usize = 2;
 
         /// Magic bytes identifying a valid commonware blob.
@@ -202,8 +203,9 @@ impl arbitrary::Arbitrary<'_> for Header {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::{Header, HeaderError};
     use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};

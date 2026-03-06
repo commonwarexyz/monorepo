@@ -190,8 +190,9 @@ impl<N: crate::Network> crate::Network for Network<N> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use crate::{
         deterministic::Auditor,
         network::{

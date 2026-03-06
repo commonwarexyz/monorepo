@@ -8,8 +8,9 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use crate::{deterministic, Blob as _, Error, Runner, Storage};
     use commonware_macros::test_traced;

@@ -145,8 +145,9 @@ impl crate::Network for Network {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use crate::network::{deterministic as DeterministicNetwork, tests};
     use commonware_macros::test_group;
 

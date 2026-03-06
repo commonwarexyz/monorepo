@@ -14,8 +14,9 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
     pub(crate) mod iouring;
 });
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use futures::join;
     use std::net::SocketAddr;

@@ -922,8 +922,9 @@ impl<B: Blob> Blob for Append<B> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_codec::ReadExt;

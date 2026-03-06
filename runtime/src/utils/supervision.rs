@@ -124,8 +124,9 @@ impl Tree {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use crate::utils::MetricHandle;
     use futures::future::{pending, AbortHandle, Abortable};

@@ -2074,8 +2074,9 @@ pub trait EncodeExt: EncodeSize + Write {
 
 impl<T: EncodeSize + Write> EncodeExt for T {}
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode, RangeCfg};

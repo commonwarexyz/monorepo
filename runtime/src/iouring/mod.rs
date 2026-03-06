@@ -1106,8 +1106,9 @@ pub const fn should_retry(return_value: i32) -> bool {
         || return_value == -libc::EINTR
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::*;
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use io_uring::{

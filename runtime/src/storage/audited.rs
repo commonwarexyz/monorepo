@@ -133,8 +133,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use crate::{
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
