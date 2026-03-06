@@ -79,11 +79,6 @@ impl Dirty {
         v.sort_by_key(|a| a.1);
         v
     }
-
-    /// Remove all dirty nodes at positions >= cutoff.
-    pub(crate) fn remove_above(&mut self, cutoff: Position) {
-        let _ = self.dirty_nodes.split_off(&(cutoff, 0));
-    }
 }
 
 /// Configuration for initializing an [Mmr].
@@ -433,33 +428,21 @@ impl<D: Digest> CleanMmr<D> {
     /// This is the only way to transfer batch changes into the base MMR.
     /// After apply, the base's root matches the batch's root.
     pub fn apply(&mut self, changeset: super::batch::Changeset<D>) {
-        // 1. Truncate: if batch popped into base range, remove tail nodes.
-        if changeset.parent_retained < self.size() {
-            let keep = (*changeset.parent_retained - *self.pruned_to_pos) as usize;
-            self.nodes.truncate(keep);
-        }
-
-        // 2. Overwrite: write modified digests into surviving base nodes.
+        // 1. Overwrite: write modified digests into surviving base nodes.
         for (pos, digest) in changeset.overwrites {
             let index = self.pos_to_index(pos);
             self.nodes[index] = digest;
         }
 
-        // 3. Append: push new nodes onto the end.
+        // 2. Append: push new nodes onto the end.
         for digest in changeset.appended {
             self.nodes.push_back(digest);
         }
 
-        // 4. Root: set the pre-computed root from the batch.
+        // 3. Root: set the pre-computed root from the batch.
         self.state = Clean {
             root: changeset.root,
         };
-
-        // 5. Prune: if pruning advanced, physically prune and pin.
-        //    Must be last because prune_to_pos needs all nodes present.
-        if changeset.pruned_to_pos > self.pruned_to_pos {
-            self.prune_to_pos(changeset.pruned_to_pos);
-        }
     }
 }
 
@@ -483,10 +466,6 @@ impl<D: Digest> Readable<D> for CleanMmr<D> {
 
 impl<D: Digest> BatchChainInfo<D> for CleanMmr<D> {
     fn base_size(&self) -> Position {
-        self.size()
-    }
-
-    fn retained_size(&self) -> Position {
         self.size()
     }
 

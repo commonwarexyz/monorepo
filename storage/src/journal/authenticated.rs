@@ -117,9 +117,6 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChainInfo<H::Digest>, Item: Se
     fn base_size(&self) -> Position {
         self.inner.base_size()
     }
-    fn retained_size(&self) -> Position {
-        self.inner.retained_size()
-    }
     fn collect_overwrites(&self, into: &mut BTreeMap<Position, H::Digest>) {
         self.inner.collect_overwrites(into);
     }
