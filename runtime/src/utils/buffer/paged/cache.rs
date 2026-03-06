@@ -11,27 +11,32 @@ use std::{
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
 use tracing::{debug, error, trace};
 
-// Type alias for the future we'll be storing for each in-flight page fetch.
-//
-// We wrap [Error] in an Arc so it will be cloneable, which is required for the future to be
-// [Shared]. The IoBuf contains only the logical (validated) bytes of the page.
-type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
+/// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
+/// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
+type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
 
-// Shared handle to one in-flight fetch. The cache keeps one copy in `page_fetches`, and each
-// waiter clones the Arc while it is still interested in the result.
-type PageFetch = Arc<InFlightPageFetch>;
+/// Shared handle to one in-flight fetch generation. The cache keeps one copy in `page_fetches`,
+/// and each waiter clones the `Arc` while it is still interested in the result.
+type PageFetch = Arc<PageFetchFuture>;
 
-struct InFlightPageFetch {
-    // Shared future that reads and validates the logical page exactly once.
-    future: PageFetchFut,
-    // Count of waiters that still need cancellation cleanup for this fetch.
-    waiters: AtomicUsize,
+/// One in-flight fetch generation for a single `(blob_id, page_num)`.
+///
+/// `fetch` is shared by every waiter that joined this generation. `waiters` counts the still
+/// armed waiters whose drop path may need to remove this entry if they become the last
+/// unresolved waiter. If `page_fetches[key]` is later replaced by a newer generation, stale
+/// waiters from the old generation must ignore it and rely on `Arc::ptr_eq` against their saved
+/// `fetch`.
+struct PageFetchEntry {
+    /// Shared page fetch future that reads and validates the logical page exactly once.
+    fetch: PageFetch,
+    /// Count of waiters that still need cancellation cleanup for this fetch generation.
+    waiters: usize,
 }
 
 /// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
@@ -97,14 +102,16 @@ impl Drop for PageFetchGuard {
         // the current generation installed, which lets the shared future finish and cache the page
         // on success.
         let mut cache = self.cache.write();
-        let Some(current) = cache.page_fetches.get(&self.key) else {
+        let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {
             return;
         };
-        if !Arc::ptr_eq(current, &self.fetch) {
+        if !Arc::ptr_eq(&current.get().fetch, &self.fetch) {
             return;
         }
-        if self.fetch.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let _ = cache.page_fetches.remove(&self.key);
+        if current.get().waiters == 1 {
+            current.remove();
+        } else {
+            current.get_mut().waiters -= 1;
         }
     }
 }
@@ -151,7 +158,7 @@ struct Cache {
 
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
-    page_fetches: HashMap<(u64, u64), PageFetch>,
+    page_fetches: HashMap<(u64, u64), PageFetchEntry>,
 }
 
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
@@ -324,10 +331,12 @@ impl CacheRef {
             match cache.page_fetches.entry(key) {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
-                    let fetch = Arc::clone(o.get());
-                    fetch.waiters.fetch_add(1, Ordering::Relaxed);
+                    let entry = o.into_mut();
+                    entry.waiters += 1;
+                    let fetch_future = entry.fetch.as_ref().clone();
+                    let fetch = Arc::clone(&entry.fetch);
                     (
-                        fetch.future.clone(),
+                        fetch_future,
                         PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
                     )
                 }
@@ -357,12 +366,12 @@ impl CacheRef {
                     };
 
                     // Make the future shareable and insert it into the map.
-                    let fetch = Arc::new(InFlightPageFetch {
-                        future: future.boxed().shared(),
-                        waiters: AtomicUsize::new(1),
+                    let fetch_future = future.boxed().shared();
+                    let fetch = Arc::new(fetch_future.clone());
+                    v.insert(PageFetchEntry {
+                        fetch: Arc::clone(&fetch),
+                        waiters: 1,
                     });
-                    let fetch_future = fetch.future.clone();
-                    v.insert(Arc::clone(&fetch));
 
                     (
                         fetch_future,
@@ -552,7 +561,10 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::{
         num::NonZeroU16,
-        sync::{atomic::AtomicUsize, Arc},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
         time::Duration,
     };
 
@@ -577,7 +589,11 @@ mod tests {
             _len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
         ) -> Result<IoBufsMut, Error> {
-            let sender = self.started.lock().take().unwrap();
+            let sender = self
+                .started
+                .lock()
+                .take()
+                .expect("blocking blob read started more than once");
             let _ = sender.send(());
             pending::<()>().await;
             unreachable!()
@@ -627,10 +643,18 @@ mod tests {
             _bufs: impl Into<IoBufsMut> + Send,
         ) -> Result<IoBufsMut, Error> {
             if self.reads.fetch_add(1, Ordering::Relaxed) == 0 {
-                let sender = self.started.lock().take().unwrap();
+                let sender = self
+                    .started
+                    .lock()
+                    .take()
+                    .expect("controlled blob start signal consumed more than once");
                 let _ = sender.send(());
 
-                let release = self.release.lock().take().unwrap();
+                let release = self
+                    .release
+                    .lock()
+                    .take()
+                    .expect("controlled blob release receiver consumed more than once");
                 release.await.expect("release signal dropped");
             }
 
@@ -919,7 +943,7 @@ mod tests {
                     page_cache
                         .page_fetches
                         .get(&(blob_id, 0))
-                        .map(|fetch| fetch.waiters.load(Ordering::Relaxed) == 2)
+                        .map(|fetch| fetch.waiters == 2)
                         .unwrap_or(false)
                 };
                 if joined {
@@ -954,7 +978,7 @@ mod tests {
                         || page_cache
                             .page_fetches
                             .get(&(blob_id, 0))
-                            .map(|fetch| fetch.waiters.load(Ordering::Relaxed) == 2)
+                            .map(|fetch| fetch.waiters == 2)
                             .unwrap_or(false)
                 };
                 if third_entered {
@@ -1044,7 +1068,7 @@ mod tests {
                     page_cache
                         .page_fetches
                         .get(&(blob_id, 0))
-                        .map(|fetch| fetch.waiters.load(Ordering::Relaxed) == 2)
+                        .map(|fetch| fetch.waiters == 2)
                         .unwrap_or(false)
                 };
                 if joined {
