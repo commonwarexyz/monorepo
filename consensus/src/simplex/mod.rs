@@ -391,8 +391,8 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as Elector, Random, RoundRobin},
-            mocks::twins::Strategy,
+            elector::{Config as Elector, Elector as Elected, Random, RoundRobin},
+            mocks::twins,
             scheme::{
                 bls12381_multisig,
                 bls12381_threshold::{
@@ -407,7 +407,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Round},
+        types::{Epoch, Participant, Round},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -428,12 +428,12 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -5640,20 +5640,131 @@ mod tests {
         );
     }
 
-    /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
-    fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
+    #[derive(Clone, Copy, Debug)]
+    struct TwinsCampaign {
+        n: u32,
+        rounds: usize,
+        max_partitions: usize,
+        max_scenarios: usize,
+        max_compromised_sets: usize,
+        required_containers: View,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TwinsElector<C> {
+        fallback: C,
+        round_leaders: Arc<[Participant]>,
+        honest_leaders: Arc<[Participant]>,
+    }
+
+    impl<C: Default> Default for TwinsElector<C> {
+        fn default() -> Self {
+            Self {
+                fallback: C::default(),
+                round_leaders: Arc::from(Vec::new()),
+                honest_leaders: Arc::from(Vec::new()),
+            }
+        }
+    }
+
+    impl<C> TwinsElector<C> {
+        fn new(
+            fallback: C,
+            scenario: &twins::Scenario,
+            compromised: &[usize],
+            participants: usize,
+        ) -> Self {
+            let compromised: HashSet<_> = compromised.iter().copied().collect();
+            let round_leaders: Vec<_> = scenario
+                .rounds()
+                .iter()
+                .map(|round| {
+                    assert!(
+                        round.leader() < participants,
+                        "scenario leader out of bounds"
+                    );
+                    Participant::new(round.leader() as u32)
+                })
+                .collect();
+            let honest_leaders: Vec<_> = (0..participants)
+                .filter(|idx| !compromised.contains(idx))
+                .map(|idx| Participant::new(idx as u32))
+                .collect();
+            assert!(
+                !honest_leaders.is_empty(),
+                "twins campaign requires at least one honest participant"
+            );
+            Self {
+                fallback,
+                round_leaders: Arc::from(round_leaders),
+                honest_leaders: Arc::from(honest_leaders),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TwinsElectorState<E> {
+        fallback: E,
+        round_leaders: Arc<[Participant]>,
+        honest_leaders: Arc<[Participant]>,
+    }
+
+    impl<S, C> Elector<S> for TwinsElector<C>
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        C: Elector<S>,
+    {
+        type Elector = TwinsElectorState<C::Elector>;
+
+        fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+            TwinsElectorState {
+                fallback: self.fallback.build(participants),
+                round_leaders: self.round_leaders,
+                honest_leaders: self.honest_leaders,
+            }
+        }
+    }
+
+    impl<S, E> Elected<S> for TwinsElectorState<E>
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        E: Elected<S>,
+    {
+        fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+            let idx = round.view().get().saturating_sub(1) as usize;
+            if let Some(&leader) = self.round_leaders.get(idx) {
+                return leader;
+            }
+            if self.honest_leaders.is_empty() {
+                return self.fallback.elect(round, certificate);
+            }
+            let honest_idx = (round.epoch().get().wrapping_add(round.view().get())) as usize
+                % self.honest_leaders.len();
+            self.honest_leaders[honest_idx]
+        }
+    }
+
+    fn twins_case<S, F, L>(case: twins::Case, campaign: TwinsCampaign, link: Link, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let faults = N3f1::max_faults(n);
-        let required_containers = View::new(100);
+        let faults = N3f1::max_faults(campaign.n) as usize;
+        let scenario = case.scenario.clone();
+        let twin_indices = case.compromised.clone();
+        assert_eq!(
+            twin_indices.len(),
+            faults,
+            "unexpected twins count for n={} (expected f={faults})",
+            campaign.n
+        );
+
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
-            .with_seed(seed)
+            .with_seed(case.seed)
             .with_timeout(Some(Duration::from_secs(900)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
@@ -5671,20 +5782,21 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, &namespace, n);
+            } = fixture(&mut context, &namespace, campaign.n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-            // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest
-            // after receiving a vote (implicitly respecting the partitioning)
-            let elector = L::default();
+            let elector =
+                TwinsElector::new(L::default(), &scenario, &twin_indices, campaign.n as usize);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
+            let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
 
-            // Create twin engines (f Byzantine twins)
-            for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
+            // Create twin engines (f Byzantine twins).
+            for idx in twin_indices.iter().copied() {
+                let validator = &participants[idx];
                 let (
                     (vote_sender, vote_receiver),
                     (certificate_sender, certificate_receiver),
@@ -5693,58 +5805,57 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
 
-                // Create forwarder closures for votes
                 let make_vote_forwarder = || {
                     let participants = participants.clone();
+                    let scenario = scenario.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         let (primary, secondary) =
-                            strategy.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                         }
                     }
                 };
-                // Create forwarder closures for certificates
                 let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
+                    let scenario = scenario.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
-                            strategy.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                         }
                     }
                 };
-                let make_drop_forwarder =
+                let make_resolver_forwarder =
                     || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
-                // Create router closures for votes
                 let make_vote_router = || {
                     let participants = participants.clone();
+                    let scenario = scenario.clone();
                     move |(sender, message): &(_, IoBuf)| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                        strategy.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                // Create router closures for certificates
                 let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
+                    let scenario = scenario.clone();
                     move |(sender, message): &(_, IoBuf)| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        strategy.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
+                let make_resolver_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
-                // Apply view-based forwarder and router to pending and recovered channel
                 let (vote_sender_primary, vote_sender_secondary) =
                     vote_sender.split_with(make_vote_forwarder());
                 let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
@@ -5759,13 +5870,12 @@ mod tests {
                         make_certificate_router(),
                     );
 
-                // Prevent any resolver messages from being sent or received by twins (these messages aren't cleanly mapped to a view and allowing them to bypass partitions seems wrong)
                 let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(make_drop_forwarder());
+                    resolver_sender.split_with(make_resolver_forwarder());
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
                     .split_with(
                         context.with_label(&format!("resolver_split_{idx}")),
-                        make_drop_router(),
+                        make_resolver_router(),
                     );
 
                 for (twin_label, pending, recovered, resolver) in [
@@ -5839,8 +5949,14 @@ mod tests {
                 }
             }
 
-            // Create honest engines
-            for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
+            let honest_start = reporters.len();
+
+            // Create honest engines.
+            for (idx, validator) in participants.iter().enumerate() {
+                if twin_index_set.contains(&idx) {
+                    continue;
+                }
+
                 let label = format!("honest_{idx}");
                 let context = context.with_label(&label);
 
@@ -5899,20 +6015,19 @@ mod tests {
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
-            // Wait for progress (liveness check)
+            // Wait for progress (liveness check) on honest replicas only.
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(honest_start) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers {
+                    while latest < campaign.required_containers {
                         latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
             join_all(finalizers).await;
 
-            // Verify safety: no conflicting finalizations across honest reporters
-            let honest_start = faults as usize * 2; // Each twin produces 2 reporters
+            // Verify safety: no conflicting finalizations across honest reporters.
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter().skip(honest_start) {
                 let finalizations = reporter.finalizations.lock();
@@ -5929,33 +6044,64 @@ mod tests {
                 }
             }
 
-            // Verify no invalid signatures were observed
+            // Verify no invalid signatures were observed by honest replicas.
             for reporter in reporters.iter().skip(honest_start) {
                 let invalid = reporter.invalid.lock();
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
-            // Ensure faults are attributable to twins
-            let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
+            // Ensure faults are attributable to twins.
+            let twin_identities: HashSet<_> = twin_indices
+                .iter()
+                .map(|idx| participants[*idx].clone())
+                .collect();
             for reporter in reporters.iter().skip(honest_start) {
                 let faults = reporter.faults.lock();
                 for (faulter, _) in faults.iter() {
                     assert!(
-                        twin_identities.contains(&faulter),
+                        twin_identities.contains(faulter),
                         "fault from non-twin participant"
                     );
                 }
             }
 
-            // Ensure blocked connections are attributable to twins
             let blocked = oracle.blocked().await.unwrap();
-            for (_, faulter) in blocked.iter() {
+            for (_, faulter) in blocked {
                 assert!(
                     twin_identities.contains(&faulter),
-                    "blocked connection from non-twin participant"
+                    "blocked peer attributed to non-twin participant"
                 );
             }
         });
+    }
+
+    /// Runs a bounded paper-style twins campaign across generated scenarios.
+    fn twins_campaign<S, F, L>(seed: u64, campaign: TwinsCampaign, link: Link, mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        let cases = twins::cases(
+            seed,
+            twins::Framework {
+                participants: campaign.n as usize,
+                faults: N3f1::max_faults(campaign.n) as usize,
+                rounds: campaign.rounds,
+                max_partitions: campaign.max_partitions,
+                max_scenarios: campaign.max_scenarios,
+                max_compromised_sets: campaign.max_compromised_sets,
+            },
+        );
+        assert!(
+            !cases.is_empty(),
+            "twins campaign should generate at least one case"
+        );
+        for case in cases {
+            twins_case::<S, _, L>(case, campaign, link.clone(), |context, namespace, n| {
+                fixture(context, namespace, n)
+            });
+        }
     }
 
     fn test_twins<S, F, L>(mut fixture: F)
@@ -5964,29 +6110,85 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        for strategy in [
-            Strategy::View,
-            Strategy::Fixed(3),
-            Strategy::Isolate(4),
-            Strategy::Broadcast,
-            Strategy::Shuffle,
+        let campaign = TwinsCampaign {
+            n: 5,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 4,
+            max_compromised_sets: 5, // f=1 for n=5: cover each compromised identity.
+            required_containers: View::new(100),
+        };
+        for link in [
+            Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.75,
+            },
         ] {
-            for link in [
-                Link {
-                    latency: Duration::from_millis(10),
-                    jitter: Duration::from_millis(1),
-                    success_rate: 1.0,
-                },
-                Link {
-                    latency: Duration::from_millis(200),
-                    jitter: Duration::from_millis(150),
-                    success_rate: 0.75,
-                },
-            ] {
-                twins::<S, _, L>(0, 5, strategy, link, |namespace, context, n| {
-                    fixture(namespace, context, n)
-                });
-            }
+            twins_campaign::<S, _, L>(0, campaign, link, |context, namespace, n| {
+                fixture(context, namespace, n)
+            });
+        }
+    }
+
+    #[test]
+    fn twins_elector_uses_scenario_leaders_then_honest_suffix() {
+        let framework = twins::Framework {
+            participants: 5,
+            faults: 1,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 1,
+            max_compromised_sets: 1,
+        };
+        let case = twins::cases(0, framework)
+            .into_iter()
+            .next()
+            .expect("expected at least one generated twins case");
+        let cfg = TwinsElector::new(
+            RoundRobin::<Sha256>::default(),
+            &case.scenario,
+            &case.compromised,
+            framework.participants,
+        );
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(
+            &mut rng,
+            b"twins_elector_script",
+            framework.participants as u32,
+        );
+        let participants = Set::try_from(participants).expect("participants should be unique");
+        let elector = <TwinsElector<RoundRobin<Sha256>> as Elector<ed25519::Scheme>>::build(
+            cfg,
+            &participants,
+        );
+
+        for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
+            let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
+            assert_eq!(
+                elector.elect(round, None),
+                Participant::new(round_scenario.leader() as u32),
+                "unexpected leader in scripted attack round"
+            );
+        }
+
+        let compromised: HashSet<_> = case
+            .compromised
+            .iter()
+            .map(|idx| Participant::new(*idx as u32))
+            .collect();
+        for view in 4..=20 {
+            let round = Round::new(Epoch::new(0), View::new(view));
+            let leader = elector.elect(round, None);
+            assert!(
+                !compromised.contains(&leader),
+                "synchronous suffix should avoid compromised leaders"
+            );
         }
     }
 
@@ -6041,10 +6243,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_view() {
-        twins::<_, _, Random>(
+        let campaign = TwinsCampaign {
+            n: 10,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 2,
+            max_compromised_sets: 1,
+            required_containers: View::new(100),
+        };
+        twins_campaign::<_, _, Random>(
             0,
-            10,
-            Strategy::View,
+            campaign,
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
@@ -6056,11 +6265,18 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_twins_large_shuffle() {
-        twins::<_, _, Random>(
-            0,
-            10,
-            Strategy::Shuffle,
+    fn test_twins_large_campaign() {
+        let campaign = TwinsCampaign {
+            n: 10,
+            rounds: 4,
+            max_partitions: 3,
+            max_scenarios: 2,
+            max_compromised_sets: 1,
+            required_containers: View::new(100),
+        };
+        twins_campaign::<_, _, Random>(
+            42,
+            campaign,
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
