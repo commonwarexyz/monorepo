@@ -708,7 +708,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        if let Some(missing_view) = View::range(parent.next(), view).find(|v| !self.is_nullified(*v))
+        if let Some(missing_view) =
+            View::range(parent.next(), view).find(|v| !self.is_nullified(*v))
         {
             return Err(ParentPayloadError::MissingNullification {
                 proposal_view: view,
