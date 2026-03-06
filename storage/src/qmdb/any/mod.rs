@@ -1490,13 +1490,13 @@ pub(crate) mod test {
             // DB B: apply as chain.
             let mut parent = db_b.new_batch();
             for (k, v) in &writes1 {
-                parent.write(*k, v.clone());
+                parent.write(*k, *v);
             }
             let parent_m = parent.merkleize(None).await.unwrap();
 
             let mut child = parent_m.new_batch();
             for (k, v) in &writes2 {
-                child.write(*k, v.clone());
+                child.write(*k, *v);
             }
             let child_m = child.merkleize(None).await.unwrap();
             let finalized = child_m.finalize();

@@ -52,6 +52,10 @@ pub trait BitmapRead<const N: usize> {
     fn pruned_chunks(&self) -> usize;
     /// Return the total number of bits.
     fn len(&self) -> u64;
+    /// Returns true if the bitmap is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<const N: usize> BitmapRead<N> for BitMap<N> {
