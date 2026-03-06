@@ -3125,6 +3125,7 @@ mod tests {
             )
             .await;
 
+            // Advance until we are a verifier in a post-finalization view.
             let me = Participant::new(0);
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
@@ -3170,6 +3171,7 @@ mod tests {
                 }
             }
 
+            // Inject a proposal whose parent is below the finalized floor.
             let target_view = current_view;
             let invalid_parent = target_view
                 .previous()
@@ -3183,6 +3185,7 @@ mod tests {
             );
             mailbox.proposal(proposal).await;
 
+            // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on invalid ancestry.
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
@@ -3203,6 +3206,7 @@ mod tests {
                 }
             }
 
+            // Ensure invalid ancestry maps to the expected timeout reason metric.
             let encoded = context.encode();
             assert!(
                 encoded.lines().any(|line| {

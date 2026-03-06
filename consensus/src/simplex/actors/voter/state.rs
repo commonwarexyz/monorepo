@@ -1621,6 +1621,7 @@ mod tests {
             );
             state.set_genesis(test_genesis());
 
+            // Finalize view 3 so view 4 is current and any parent below 3 is permanently invalid.
             let finalized_view = View::new(3);
             let finalized_proposal = Proposal::new(
                 Rnd::new(epoch, finalized_view),
@@ -1636,6 +1637,7 @@ mod tests {
                     .expect("finalization");
             state.add_finalization(finalization);
 
+            // Inject a proposal whose parent is below the finalized floor.
             let view = state.current_view();
             assert_eq!(view, View::new(4));
             let proposal = Proposal::new(
@@ -1648,6 +1650,7 @@ mod tests {
             let initial_deadline = state.next_timeout_deadline();
             assert!(initial_deadline > context.current());
 
+            // Permanent ancestry errors should immediately expire the timeout.
             assert!(state.try_verify().is_none());
             assert!(state.next_timeout_deadline() <= context.current());
         });
@@ -1673,9 +1676,12 @@ mod tests {
                 },
             );
             state.set_genesis(test_genesis());
+
+            // Move into view 2 without certifying view 1 so the parent could still arrive later.
             assert!(state.enter_view(View::new(2)));
             state.set_leader(View::new(2), None);
 
+            // Inject a proposal whose parent is missing certification but is not permanently invalid.
             let proposal = Proposal::new(
                 Rnd::new(epoch, View::new(2)),
                 View::new(1),
@@ -1686,6 +1692,7 @@ mod tests {
             let initial_deadline = state.next_timeout_deadline();
             assert!(initial_deadline > context.current());
 
+            // Missing parent certification should wait instead of forcing an immediate timeout.
             assert!(state.try_verify().is_none());
             assert_eq!(state.next_timeout_deadline(), initial_deadline);
         });
