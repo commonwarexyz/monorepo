@@ -112,12 +112,21 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
+
+    #[error("requested historical size exceeds merkleized frontier")]
+    Unmerkleized,
+
+    #[error("database has been shut down")]
+    Shutdown,
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
     fn from(e: crate::journal::authenticated::Error) -> Self {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
+            crate::journal::authenticated::Error::Mmr(crate::mmr::Error::Unmerkleized) => {
+                Self::Unmerkleized
+            }
             crate::journal::authenticated::Error::Mmr(m) => Self::Mmr(m),
         }
     }

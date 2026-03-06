@@ -34,7 +34,9 @@ use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
+pub(crate) mod concurrent;
 pub(crate) mod db;
+pub use concurrent::{Batch, Reader, Shared, SyncPolicy, Writer};
 pub(crate) mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod states;
