@@ -17,7 +17,7 @@ pub struct Metrics {
     pub reserved: Gauge,
 
     /// Unix timestamp in milliseconds when each connected peer became active.
-    pub connection_created: Family<metrics::Peer, Gauge>,
+    pub connected: Family<metrics::Peer, Gauge>,
 
     /// A count of the number of rate-limited connection events for each peer.
     pub limits: Family<metrics::Peer, Counter>,
@@ -46,9 +46,9 @@ impl Metrics {
             metrics.reserved.clone(),
         );
         context.register(
-            "connection_created",
+            "connected",
             "Unix timestamp in milliseconds when each connected peer became active",
-            metrics.connection_created.clone(),
+            metrics.connected.clone(),
         );
         context.register(
             "limits",

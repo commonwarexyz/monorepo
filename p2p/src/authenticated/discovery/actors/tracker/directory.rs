@@ -138,7 +138,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         };
         record.release();
         self.metrics
-            .connection_created
+            .connected
             .remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
 
@@ -169,7 +169,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         record.connect();
         let _ = self
             .metrics
-            .connection_created
+            .connected
             .get_or_create(&metrics::Peer::new(peer))
             .try_set(self.context.current().epoch_millis());
 
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_created_metric_tracks_active_peers() {
+    fn test_connected_metric_tracks_active_peers() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
@@ -691,7 +691,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connection_created", &pk_1.to_string()),
+                metric_value(&metrics, "connected", &pk_1.to_string()),
                 Some(connected_at)
             );
 
@@ -699,7 +699,7 @@ mod tests {
 
             let metrics = context.encode();
             assert_eq!(
-                metric_value(&metrics, "connection_created", &pk_1.to_string()),
+                metric_value(&metrics, "connected", &pk_1.to_string()),
                 None
             );
         });
