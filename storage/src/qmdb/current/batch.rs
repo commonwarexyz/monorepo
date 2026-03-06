@@ -89,7 +89,7 @@ pub(crate) struct BitmapScan<'a, B, const N: usize> {
 }
 
 impl<'a, B: BitmapRead<N>, const N: usize> BitmapScan<'a, B, N> {
-    pub(crate) fn new(bitmap: &'a B) -> Self {
+    pub(crate) const fn new(bitmap: &'a B) -> Self {
         Self { bitmap }
     }
 }
