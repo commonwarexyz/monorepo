@@ -768,6 +768,12 @@ mod tests {
     }
 
     #[test]
+    fn batch_verify_empty() {
+        let batch = Batch::new();
+        assert!(batch.verify(&mut test_rng()));
+    }
+
+    #[test]
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
         let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
