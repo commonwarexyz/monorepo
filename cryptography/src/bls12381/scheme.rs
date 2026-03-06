@@ -484,6 +484,12 @@ mod tests {
         assert!(display.contains("REDACTED"));
     }
 
+    #[test]
+    fn batch_verify_empty() {
+        let batch = Batch::new();
+        assert!(batch.verify(&mut test_rng()));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
