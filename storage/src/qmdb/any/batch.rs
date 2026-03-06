@@ -316,14 +316,20 @@ where
         mutations: &BTreeMap<K, Option<V::Value>>,
     ) -> Vec<Location> {
         let mut locations = Vec::new();
-        for key in mutations.keys() {
-            if let Some(entry) = self.base_diff.get(key) {
-                if let Some(loc) = entry.loc() {
-                    locations.push(loc);
-                }
-                continue;
+        if self.base_diff.is_empty() {
+            for key in mutations.keys() {
+                locations.extend(self.db.snapshot.get(key).copied());
             }
-            locations.extend(self.db.snapshot.get(key).copied());
+        } else {
+            for key in mutations.keys() {
+                if let Some(entry) = self.base_diff.get(key) {
+                    if let Some(loc) = entry.loc() {
+                        locations.push(loc);
+                    }
+                    continue;
+                }
+                locations.extend(self.db.snapshot.get(key).copied());
+            }
         }
         locations.sort();
         locations.dedup();
@@ -350,6 +356,9 @@ where
         &self,
         mutations: &mut BTreeMap<K, Option<V::Value>>,
     ) -> BTreeMap<K, (V::Value, Option<Location>)> {
+        if self.base_diff.is_empty() {
+            return BTreeMap::new();
+        }
         let mut creates = BTreeMap::new();
         mutations.retain(|key, value| {
             if let Some(DiffEntry::Deleted { base_old_loc }) = self.base_diff.get(key) {
