@@ -339,6 +339,9 @@ impl CacheRef {
                     let page_size = self.page_size;
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
+                        if let Err(err) = &result {
+                            error!(page_num, ?err, "Page fetch failed");
+                        }
 
                         // This shared future still owns `page_fetches[key]`. As long as at least
                         // one waiter remains armed, that entry pins this generation in place, so a
@@ -369,17 +372,14 @@ impl CacheRef {
             }
         };
 
-        // Await the shared fetch. The future itself caches the resolved page and removes the
-        // in-flight marker before it returns, so waiters only need cancellation cleanup while the
-        // fetch is still unresolved.
+        // Await the shared fetch. The future itself logs failures, caches the resolved page, and
+        // removes the in-flight marker before it returns, so waiters only need cancellation
+        // cleanup while the fetch is still unresolved.
         let fetch_result = fetch_future.await;
         fetch_guard.disarm();
         let page_buf = match fetch_result {
             Ok(page_buf) => page_buf,
-            Err(err) => {
-                error!(page_num, ?err, "Page fetch failed");
-                return Err(Error::ReadFailed);
-            }
+            Err(_) => return Err(Error::ReadFailed),
         };
 
         // Copy the requested portion of the page into the buffer.
