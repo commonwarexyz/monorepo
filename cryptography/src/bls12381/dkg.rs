@@ -333,6 +333,7 @@ use thiserror::Error;
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
 const SIG_ACK: &[u8] = b"ack";
 const SIG_LOG: &[u8] = b"log";
+const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
 
 /// The error type for the DKG protocol.
 ///
@@ -1306,6 +1307,28 @@ impl<V: Variant, P: PublicKey, M: Faults> Default for Logs<V, P, M> {
 }
 
 impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
+    fn check_dealers_in_parallel<B: BatchVerifier<PublicKey = P>>(
+        info: &Info<V, P>,
+        rng: &mut impl CryptoRngCore,
+        strategy: &impl Strategy,
+        transcript: &Transcript,
+        dealers: &[(&P, &DealerLog<V, P>)],
+    ) -> Vec<(P, bool)> {
+        let checks: Vec<_> = dealers
+            .iter()
+            .map(|&(dealer, log)| {
+                let seed = Summary::random(&mut *rng);
+                ((*dealer).clone(), log, seed)
+            })
+            .collect();
+        strategy.map_collect_vec(checks, |(dealer, log, seed)| {
+            let mut local_rng = Transcript::resume(seed).noise(NOISE_PRE_VERIFY);
+            let valid =
+                info.check_dealer_log::<M, B>(&mut local_rng, strategy, transcript, &dealer, log);
+            (dealer, valid)
+        })
+    }
+
     /// Record the log for a particular dealer.
     ///
     /// Return `true` if the dealer was already present in the log, in which
@@ -1331,16 +1354,43 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         let required_commitments = info.required_commitments::<M>() as usize;
         let transcript = transcript_for_round(info);
         let mut valid = 0;
-        for (dealer, log) in self.logs.iter() {
-            let this_dealer_valid = *self.known.entry(dealer.clone()).or_insert_with(|| {
-                info.check_dealer_log::<M, B>(rng, strategy, &transcript, dealer, log)
-            });
-            if this_dealer_valid {
-                valid += 1;
-                if valid >= required_commitments {
-                    break;
+        let mut unknown = Vec::new();
+        let mut unknown_in_required_prefix = 0usize;
+
+        for (index, (dealer, log)) in self.logs.iter().enumerate() {
+            match self.known.get(dealer) {
+                Some(true) => valid += 1,
+                Some(false) => {}
+                None => {
+                    if index < required_commitments {
+                        unknown_in_required_prefix += 1;
+                    }
+                    unknown.push((dealer, log));
                 }
             }
+        }
+
+        let needed = required_commitments.saturating_sub(valid);
+        let first_group_len = needed.max(unknown_in_required_prefix).min(unknown.len());
+        let (first_group, remaining_group) = unknown.split_at(first_group_len);
+
+        let first_results =
+            Self::check_dealers_in_parallel::<B>(info, rng, strategy, &transcript, first_group);
+        for (dealer, is_valid) in first_results {
+            self.known.insert(dealer, is_valid);
+            if is_valid {
+                valid += 1;
+            }
+        }
+
+        if valid >= required_commitments {
+            return;
+        }
+
+        let remaining_results =
+            Self::check_dealers_in_parallel::<B>(info, rng, strategy, &transcript, remaining_group);
+        for (dealer, is_valid) in remaining_results {
+            self.known.insert(dealer, is_valid);
         }
     }
 
