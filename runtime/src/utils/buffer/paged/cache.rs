@@ -26,7 +26,6 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>
 type PageFetch = Arc<InFlightPageFetch>;
 
 struct InFlightPageFetch {
-    token: Arc<()>,
     future: PageFetchFut,
     waiters: AtomicUsize,
 }
@@ -299,8 +298,6 @@ impl CacheRef {
                     let cache = self.cache.clone();
                     let key = (blob_id, page_num);
                     let page_size = self.page_size;
-                    let token = Arc::new(());
-                    let fetch_token = token.clone();
                     let future = async move {
                         let result = async {
                             let page = get_page_from_blob(&blob, page_num, page_size)
@@ -324,22 +321,20 @@ impl CacheRef {
                         .await;
 
                         let mut cache = cache.write();
-                        if matches!(
-                            cache.page_fetches.get(&key),
-                            Some(current) if Arc::ptr_eq(&current.token, &fetch_token)
-                        ) {
-                            if let Ok(page) = &result {
-                                cache.cache(blob_id, page.as_ref(), page_num);
-                            }
-                            let _ = cache.page_fetches.remove(&key);
+                        // This shared future still owns `page_fetches[key]`. A replacement fetch
+                        // for the same page cannot be inserted before we reach this point:
+                        // unresolved entries are removed only by the last armed guard, which means
+                        // no waiter remains to keep this shared future alive.
+                        if let Ok(page) = &result {
+                            cache.cache(blob_id, page.as_ref(), page_num);
                         }
+                        let _ = cache.page_fetches.remove(&key);
                         result
                     };
 
                     // Make the future shareable and insert it into the map.
                     let shareable = future.boxed().shared();
                     let fetch = Arc::new(InFlightPageFetch {
-                        token,
                         future: shareable.clone(),
                         waiters: AtomicUsize::new(1),
                     });
