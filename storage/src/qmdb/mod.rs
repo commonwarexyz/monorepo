@@ -15,16 +15,21 @@
 //!
 //! # Database Lifecycle
 //!
-//! An authenticated database is always merkleized and supports all operations (reads, writes,
-//! authentication, pruning, and persistence) through a single type:
-//! - `init()` returns a database ready for use
-//! - `new_batch()` creates a batch for collecting mutations
-//! - `batch.merkleize(metadata)` resolves mutations and computes the new root
-//! - `db.apply_batch(finalized)` durably persists the batch (called via `&mut self`)
-//! - `sync()`, `prune()`, `destroy()` manage persistence
+//! The database is primarily modified through the batch API:
+//! 1. `db.new_batch()` -- create a batch for collecting mutations
+//! 2. `batch.write(key, value)` -- stage updates to the database
+//! 3. `batch.merkleize(metadata)` -- calculate root digest if the batch were applied
+//! 4. `batch.finalize()` -- turn the batch into a changeset that can be applied to the database
+//! 4. `db.apply_batch(finalized)` -- apply the batch's changes to the database
 //!
-//! The database implements [store::LogStore], [store::MerkleizedStore], [store::PrunableStore],
-//! [crate::Persistable], and [crate::kv::Gettable].
+//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
+//! and `destroy()`.
+//!
+//! # Traits
+//!
+//! All variants implement [store::LogStore] and [store::MerkleizedStore]. Keyed mutable
+//! variants ([any] and [current]) also implement [store::PrunableStore] and
+//! [crate::Persistable]. The [immutable] variant implements [crate::kv::Gettable].
 //!
 //! # Acknowledgments
 //!
