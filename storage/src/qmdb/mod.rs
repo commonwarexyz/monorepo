@@ -15,12 +15,20 @@
 //!
 //! # Database Lifecycle
 //!
-//! The database is primarily modified through the batch API:
-//! 1. `db.new_batch()` -- create a batch for collecting mutations
-//! 2. `batch.write(key, value)` -- stage updates to the database
-//! 3. `batch.merkleize(metadata)` -- calculate root digest if the batch were applied
-//! 4. `batch.finalize()` -- turn the batch into a changeset that can be applied to the database
-//! 4. `db.apply_batch(finalized)` -- apply the batch's changes to the database
+//! All variants are modified through a batch API that follows a common pattern:
+//! 1. Create a batch from the database.
+//! 2. Stage mutations on the batch.
+//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//!    the Merkle root that would result from applying them.
+//! 4. Inspect the root or create child batches.
+//! 5. Finalize the batch into a changeset.
+//! 6. Apply the changeset to the database.
+//!
+//! A merkleized batch can spawn child batches, forming a tree of speculative states that
+//! share a common ancestor. Only the finalized leaf needs to be applied.
+//!
+//! The specific mutation methods vary by variant.
+//! See each variant's module documentation for the concrete API and usage examples.
 //!
 //! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
 //! and `destroy()`.

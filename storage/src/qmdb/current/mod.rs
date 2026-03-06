@@ -1,6 +1,18 @@
 //! A _Current_ authenticated database provides succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it.
 //!
+//! # Examples
+//!
+//! The batch API mirrors [crate::qmdb::any]:
+//!
+//! ```ignore
+//! let mut batch = db.new_batch();
+//! batch.write(key, Some(value));
+//! let merkleized = batch.merkleize(None).await?;
+//! let finalized = merkleized.finalize();
+//! db.apply_batch(finalized).await?;
+//! ```
+//!
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some

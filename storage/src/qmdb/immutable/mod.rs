@@ -1,5 +1,15 @@
 //! An authenticated database that only supports adding new keyed values (no updates or
 //! deletions), where values can have varying sizes.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! let mut batch = db.new_batch();
+//! batch.set(key, value);
+//! let merkleized = batch.merkleize(None);  // synchronous
+//! let finalized = merkleized.finalize();
+//! db.apply_batch(finalized).await?;
+//! ```
 
 use crate::{
     index::{unordered::Index, Unordered as _},

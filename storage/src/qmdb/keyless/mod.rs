@@ -1,5 +1,15 @@
 //! The [Keyless] qmdb allows for append-only storage of arbitrary variable-length data that can
 //! later be retrieved by its location.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! let mut batch = db.new_batch();
+//! let loc = batch.append(value);  // returns the location
+//! let merkleized = batch.merkleize(None);  // synchronous
+//! let finalized = merkleized.finalize();
+//! db.apply_batch(finalized).await?;
+//! ```
 
 use crate::{
     journal::{

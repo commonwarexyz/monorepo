@@ -8,6 +8,32 @@
 //! - Ordered: The database maintains a total order over active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
+//!
+//! # Examples
+//!
+//! ```ignore
+//! // Create a batch, stage mutations, merkleize, and apply.
+//! let mut batch = db.new_batch();
+//! batch.write(key, Some(value));   // upsert
+//! batch.write(other_key, None);    // delete
+//! let merkleized = batch.merkleize(None).await?;
+//! let root = merkleized.root();
+//! let finalized = merkleized.finalize();
+//! db.apply_batch(finalized).await?;
+//!
+//! // Batches can fork: a merkleized batch can spawn child batches
+//! // to explore speculative states without committing the parent.
+//! let mut batch = db.new_batch();
+//! batch.write(key_a, Some(val_a));
+//! let parent = batch.merkleize(None).await?;
+//!
+//! let mut child = parent.new_batch();
+//! child.write(key_b, Some(val_b));
+//! let merkleized_child = child.merkleize(None).await?;
+//! // Finalize the child (consumes the entire chain).
+//! let finalized = merkleized_child.finalize();
+//! db.apply_batch(finalized).await?;
+//! ```
 
 use crate::{
     index::Unordered as UnorderedIndex,
