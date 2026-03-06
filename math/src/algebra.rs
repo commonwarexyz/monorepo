@@ -7,10 +7,10 @@
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
-use std::iter;
 
 /// Yield all the bits in a u64, from lowest to highest.
 fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {
@@ -64,7 +64,7 @@ fn monoid_exp<T: Clone>(
 ///
 /// Use `powers(R::one(), base)` if you just want the standard powers.
 pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
-    iter::successors(Some(shift), move |state| Some(state.clone() * base))
+    iter::successors(Some(shift), move |state: &R| Some(state.clone() * base))
 }
 
 /// A basic trait we expect algebraic data structures to implement.
