@@ -1,0 +1,522 @@
+use super::{
+    disrupter::MinimmitDisrupter,
+    invariants as minimmit_invariants,
+    strategy::{MinimmitAnyScope, MinimmitFutureScope, MinimmitSmallScope},
+    Minimmit,
+};
+use crate::{
+    simplex::strategy::StrategyChoice,
+    utils::{link_peers, register, Action, Partition},
+    FuzzInput, FuzzMode, NetworkChannels, EPOCH, MAX_SLEEP_DURATION, NAMESPACE, PAGE_CACHE_SIZE,
+    PAGE_SIZE,
+};
+use commonware_codec::{Decode, DecodeExt};
+use commonware_consensus::{
+    minimmit::{
+        config,
+        mocks::{application, relay, reporter, twins::Strategy},
+        types::{Certificate, Vote},
+        Engine,
+    },
+    types::{Epoch, View, ViewDelta},
+    Monitor, Viewable,
+};
+use commonware_cryptography::{
+    certificate::{mocks::Fixture, Scheme as CertificateScheme},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
+};
+use commonware_p2p::{
+    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
+    Recipients,
+};
+use commonware_parallel::Sequential;
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+};
+use commonware_utils::{channel::mpsc::Receiver, Faults, FuzzRng, N5f1, NZUsize};
+use futures::future::join_all;
+use std::{collections::HashMap, panic, sync::Arc, time::Duration};
+
+async fn setup_network<P: Minimmit>(
+    context: &mut deterministic::Context,
+    input: &FuzzInput,
+) -> (
+    Oracle<Ed25519PublicKey, deterministic::Context>,
+    Vec<Ed25519PublicKey>,
+    Vec<P::Scheme>,
+    HashMap<Ed25519PublicKey, NetworkChannels>,
+) {
+    let (network, mut oracle) = Network::new(
+        context.with_label("network"),
+        NetworkConfig {
+            max_size: 1024 * 1024,
+            disconnect_on_block: false,
+            tracked_peer_sets: None,
+        },
+    );
+    network.start();
+
+    let Fixture {
+        participants,
+        schemes,
+        verifier: _,
+        ..
+    } = P::fixture(context, NAMESPACE, input.configuration.n);
+
+    let registrations = register(&mut oracle, &participants).await;
+
+    let link = Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    };
+    link_peers(
+        &mut oracle,
+        &participants,
+        Action::Link(link),
+        input.partition.filter(),
+    )
+    .await;
+
+    if input.partition == Partition::Connected
+        && input.configuration == crate::N6F1C5
+        && input.degraded_network
+    {
+        crate::setup_degraded_network(&mut oracle, &participants).await;
+    }
+
+    (oracle, participants, schemes, registrations)
+}
+
+fn start_disrupter<P: Minimmit>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    strategy: &StrategyChoice,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+) {
+    match *strategy {
+        StrategyChoice::SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => {
+            let disrupter = MinimmitDisrupter::new(
+                context,
+                scheme,
+                MinimmitSmallScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                },
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::AnyScope => {
+            let disrupter = MinimmitDisrupter::new(context, scheme, MinimmitAnyScope);
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => {
+            let disrupter = MinimmitDisrupter::new(
+                context,
+                scheme,
+                MinimmitFutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                },
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+    }
+}
+
+fn spawn_disrupter<P: Minimmit>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    input: &FuzzInput,
+    channels: NetworkChannels,
+) {
+    let (vote_network, certificate_network, resolver_network) = channels;
+    start_disrupter::<P>(
+        context.with_label("disrupter"),
+        scheme,
+        &input.strategy,
+        vote_network,
+        certificate_network,
+        resolver_network,
+    );
+}
+
+fn spawn_honest_validator<P: Minimmit>(
+    context: deterministic::Context,
+    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    participants: &[Ed25519PublicKey],
+    scheme: P::Scheme,
+    validator: Ed25519PublicKey,
+    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
+    channels: NetworkChannels,
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    let elector = P::Elector::default();
+    let reporter_cfg = reporter::Config {
+        participants: participants.try_into().expect("public keys are unique"),
+        scheme: scheme.clone(),
+        elector: elector.clone(),
+    };
+    let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+    let (pending, recovered, resolver) = channels;
+
+    let app_cfg = application::Config {
+        hasher: Sha256::default(),
+        relay,
+        me: validator.clone(),
+        propose_latency: (10.0, 5.0),
+        verify_latency: (10.0, 5.0),
+        certify_latency: (10.0, 5.0),
+        should_certify: application::Certifier::Sometimes,
+    };
+    let (actor, application) =
+        application::Application::new(context.with_label("application"), app_cfg);
+    actor.start();
+
+    let blocker = oracle.control(validator.clone());
+    let engine_cfg = config::Config {
+        blocker,
+        scheme,
+        elector,
+        automaton: application.clone(),
+        relay: application.clone(),
+        reporter: reporter.clone(),
+        partition: validator.to_string(),
+        mailbox_size: 1024,
+        epoch: Epoch::new(EPOCH),
+        leader_timeout: Duration::from_secs(1),
+        notarization_timeout: Duration::from_secs(2),
+        nullify_retry: Duration::from_secs(10),
+        fetch_timeout: Duration::from_secs(1),
+        activity_timeout: ViewDelta::new(10),
+        skip_timeout: ViewDelta::new(5),
+        fetch_concurrent: 1,
+        replay_buffer: NZUsize!(1024 * 1024),
+        write_buffer: NZUsize!(1024 * 1024),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        strategy: Sequential,
+    };
+    let engine = Engine::new(context.with_label("engine"), engine_cfg);
+    engine.start(pending, recovered, resolver);
+
+    reporter
+}
+
+fn run<P: Minimmit>(input: FuzzInput) {
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(|mut context| async move {
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
+
+        let relay = Arc::new(relay::Relay::new());
+        let mut reporters = Vec::new();
+        let config = input.configuration;
+
+        // Spawn Byzantine nodes (Disrupters only)
+        for i in 0..config.faults as usize {
+            let validator = participants[i].clone();
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+        }
+
+        // Spawn honest validators
+        for i in (config.faults as usize)..(config.n as usize) {
+            let validator = participants[i].clone();
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            let reporter = spawn_honest_validator::<P>(
+                ctx,
+                &oracle,
+                &participants,
+                schemes[i].clone(),
+                validator,
+                relay.clone(),
+                channels,
+            );
+            reporters.push(reporter);
+        }
+
+        // Wait for finalization or timeout
+        let can_finalize = config.faults <= N5f1::max_faults(config.n);
+        if input.partition == Partition::Connected && can_finalize {
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let required_containers = input.required_containers;
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest.get() < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        } else {
+            context.sleep(MAX_SLEEP_DURATION).await;
+        }
+
+        let states = minimmit_invariants::extract(reporters, config.n as usize);
+        minimmit_invariants::check::<P>(config.n, states);
+    });
+}
+
+fn run_with_twin_mutator<P: Minimmit>(input: FuzzInput) {
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(|mut context| async move {
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
+        let participants: Arc<[_]> = participants.into();
+
+        let strategy = Strategy::View;
+        let relay = Arc::new(relay::Relay::new());
+        let mut reporters = Vec::new();
+        let config = input.configuration;
+
+        // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
+        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
+            let context = context.with_label(&format!("twin_{idx}"));
+            let scheme = schemes[idx].clone();
+            let (vote_network, certificate_network, resolver_network) = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+
+            let make_vote_forwarder = || {
+                let participants = participants.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_certificate_forwarder = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                        &mut message.as_ref(),
+                        &codec,
+                    ) else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_resolver_forwarder = || {
+                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
+                    Some(recipients.clone())
+                }
+            };
+
+            let make_vote_router = || {
+                let participants = participants.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
+                        return SplitTarget::None;
+                    };
+                    strategy.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+            let make_certificate_router = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                        &mut message.as_ref(),
+                        &codec,
+                    ) else {
+                        return SplitTarget::None;
+                    };
+                    strategy.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
+
+            let (vote_sender, vote_receiver) = vote_network;
+            let (certificate_sender, certificate_receiver) = certificate_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
+
+            let (vote_sender_primary, vote_sender_secondary) =
+                vote_sender.split_with(make_vote_forwarder());
+            let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                context.with_label(&format!("pending_split_{idx}")),
+                make_vote_router(),
+            );
+            let (certificate_sender_primary, certificate_sender_secondary) =
+                certificate_sender.split_with(make_certificate_forwarder());
+            let (certificate_receiver_primary, certificate_receiver_secondary) =
+                certificate_receiver.split_with(
+                    context.with_label(&format!("recovered_split_{idx}")),
+                    make_certificate_router(),
+                );
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                resolver_sender.split_with(make_resolver_forwarder());
+            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                .split_with(
+                    context.with_label(&format!("resolver_split_{idx}")),
+                    make_resolver_router(),
+                );
+
+            // Primary: legitimate engine
+            let primary_label = format!("twin_{idx}_primary");
+            let primary_context = context.with_label(&primary_label);
+            let primary_elector = P::Elector::default();
+            let reporter_cfg = reporter::Config {
+                participants: participants
+                    .as_ref()
+                    .try_into()
+                    .expect("public keys are unique"),
+                scheme: scheme.clone(),
+                elector: primary_elector.clone(),
+            };
+            let reporter =
+                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+
+            let app_cfg = application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
+            };
+            let (actor, application) =
+                application::Application::new(primary_context.with_label("application"), app_cfg);
+            actor.start();
+
+            let blocker = oracle.control(validator.clone());
+            let engine_cfg = config::Config {
+                blocker,
+                scheme: scheme.clone(),
+                elector: primary_elector,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: primary_label,
+                mailbox_size: 1024,
+                epoch: Epoch::new(EPOCH),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
+            engine.start(
+                (vote_sender_primary, vote_receiver_primary),
+                (certificate_sender_primary, certificate_receiver_primary),
+                (resolver_sender_primary, resolver_receiver_primary),
+            );
+
+            // Secondary: Disrupter
+            start_disrupter::<P>(
+                context.with_label(&format!("twin_{idx}_secondary")),
+                scheme.clone(),
+                &input.strategy,
+                (vote_sender_secondary, vote_receiver_secondary),
+                (certificate_sender_secondary, certificate_receiver_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            );
+        }
+
+        // Spawn honest validators
+        for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
+            let ctx = context.with_label(&format!("honest_{idx}"));
+            let channels = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+            let reporter = spawn_honest_validator::<P>(
+                ctx,
+                &oracle,
+                participants.as_ref(),
+                schemes[idx].clone(),
+                validator.clone(),
+                relay.clone(),
+                channels,
+            );
+            reporters.push(reporter);
+        }
+
+        // Wait for finalization or timeout
+        let can_finalize = config.faults <= N5f1::max_faults(config.n);
+        if input.partition == Partition::Connected && can_finalize {
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let required_containers = input.required_containers;
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest.get() < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        } else {
+            context.sleep(MAX_SLEEP_DURATION).await;
+        }
+
+        let states = minimmit_invariants::extract(reporters, config.n as usize);
+        minimmit_invariants::check::<P>(config.n, states);
+    });
+}
+
+pub fn fuzz<P: Minimmit, M: FuzzMode>(input: FuzzInput) {
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = if M::TWIN {
+        panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_twin_mutator::<P>(input)
+        }))
+    } else {
+        panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
+    };
+
+    match run_result {
+        Ok(()) => {}
+        Err(payload) => {
+            println!("Panicked with raw_bytes: {:?}", raw_bytes);
+            panic::resume_unwind(payload);
+        }
+    }
+}

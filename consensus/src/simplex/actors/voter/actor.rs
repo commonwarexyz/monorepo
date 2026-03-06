@@ -4,9 +4,9 @@ use super::{
     Config, Mailbox,
 };
 use crate::{
+    elector::Config as Elector,
     simplex::{
         actors::{batcher, resolver},
-        elector::Config as Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
