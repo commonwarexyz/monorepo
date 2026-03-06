@@ -544,6 +544,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             Ok(parent_payload) => parent_payload,
             Err(err) => {
                 if err.invalid_proposal() {
+                    warn!(round = ?proposal.round, ?err, "proposal failed verification");
                     self.trigger_timeout(view, TimeoutReason::InvalidProposal);
                 } else {
                     debug!(
