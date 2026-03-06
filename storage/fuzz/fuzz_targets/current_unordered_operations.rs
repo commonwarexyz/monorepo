@@ -318,8 +318,6 @@ fn fuzz(data: FuzzInput) {
             commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
         }
 
-        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
-        db.apply_batch(finalized).await.expect("Final commit should not fail");
 
         for key in &all_keys {
             let k = Key::new(*key);
