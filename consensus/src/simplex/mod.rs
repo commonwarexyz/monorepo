@@ -37,7 +37,9 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = now+2Δ`, retry `t_r = None` and advance (certification) `t_a = now+3Δ`
-//! * If leader `l` has not been active in last `lookback` views, set `t_l` and `t_a` to 0
+//! * If `r != l` and leader `l` has not been active in the last `lookback` rounds observed by `r`,
+//!   set `t_l` and `t_a` to `0` (immediate local timeout).
+//! * If `r == l`, do not fast-timeout solely due to inactivity; still attempt proposal.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view, do nothing (retry on next iteration)
@@ -143,8 +145,8 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "advance timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Skip "leader timeout" and "advance timeout" for non-leaders when the designated leader has
+//!   not participated in the local lookback window.
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -174,7 +176,7 @@
 //! - Genesis is view `0` and is implicitly finalized.
 //! - Partial synchrony: after GST, messages arrive within `Δ`.
 //! - Byzantine threshold is parameterized by `f`, with quorum threshold `Q` according to `utils/src/faults.rs`.
-//! - `lookback` is the leader-activity window (for fast skip of inactive leaders).
+//! - `lookback` is a per-replica leader-activity window used by non-leaders to fast-skip inactive leaders; activity is evaluated over the replica's most recently tracked rounds, which may be non-contiguous after view jumps.
 //! - `T` is the retry period used by the retry timer.
 //!
 //! ## 3. Quorums and Certificates
@@ -325,7 +327,7 @@
 //!     r.round[next].t_l = now + 2Δ;
 //!     r.round[next].t_r = None;
 //!     r.round[next].t_a = now + 3Δ;
-//!     if r.leader has not been active in the last lookback views {
+//!     if r != r.leader and r.leader has not been active in the last lookback locally tracked rounds {
 //!         r.round[next].t_l = 0;
 //!         r.round[next].t_a = 0;
 //!     }
@@ -354,7 +356,8 @@
 //!
 //! 1. On entering view `v`:
 //!    1. Determine leader `l = leader(v)`.
-//!    1. If `l` has not been active in the last `lookback` views, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!    1. If `r != l` and `l` has not been active in the last `lookback` locally tracked rounds,
+//!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = select_parent(r, v)`.
 //!       1. If `parent = Err(_)`, return.
@@ -447,13 +450,15 @@
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
 //!    and possess nullification certificates for every view between `v_p` and `v+k`.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l`, `t_r` or `t_a`)
-//!    or when certification fails.
+//! 3. An honest participant broadcasts `nullify(v)` in exactly three cases:
+//!    a timeout fires (`t_l`, `t_r` or `t_a`), certification fails, or
+//!    `nullification(v)` is observed first and the participant has not yet broadcast `finalize(c,v)`.
 //!
 //! Therefore, if view `v` completes without timeout and certification succeeds, no honest
-//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
-//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
-//! that certificate, no future leader can skip view `v`, and the notarized payload must be
+//! participant has broadcast a pre-certificate `nullify(v)`. With at most `f` Byzantine participants,
+//! at most `f` such votes exist, which is insufficient to form `nullification(v)`. The
+//! certificate-triggered `nullify(v)` case cannot occur without `nullification(v)` already existing.
+//! Without that certificate, no future leader can skip view `v`, and the notarized payload must be
 //! included as an ancestor in all subsequent proposals.
 //!
 //! ### Optimistic Finality
