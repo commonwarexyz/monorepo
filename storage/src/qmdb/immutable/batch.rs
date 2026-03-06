@@ -107,7 +107,7 @@ where
     T: Translator,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
 {
-    /// Set a key to a value. Sync -- just a BTreeMap insert, no I/O.
+    /// Set a key to a value.
     pub fn set(&mut self, key: K, value: V) {
         self.mutations.insert(key, value);
     }

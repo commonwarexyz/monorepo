@@ -459,8 +459,7 @@ where
     Operation<K, V, U>: Codec,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
 {
-    /// Record a mutation. Sync -- just inserts into BTreeMap, no I/O.
-    /// Use `Some(value)` for update/create, `None` for delete.
+    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     pub fn write(&mut self, key: K, value: Option<V::Value>) {
         self.mutations.insert(key, value);
     }

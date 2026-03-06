@@ -367,7 +367,7 @@ where
         }
     }
 
-    /// Record a mutation. Sync -- delegates to the inner any batch.
+    /// Record a mutation.
     pub fn write(&mut self, key: K, value: Option<V::Value>) {
         self.inner.write(key, value);
     }

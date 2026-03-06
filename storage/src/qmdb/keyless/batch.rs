@@ -77,7 +77,7 @@ where
     H: Hasher,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<V>>,
 {
-    /// Append a value. Sync -- just a Vec push, no I/O.
+    /// Append a value.
     /// Returns the uncommitted location where this value will be placed.
     pub fn append(&mut self, value: V) -> Location {
         let loc = Location::new(self.base_size + self.appends.len() as u64);
