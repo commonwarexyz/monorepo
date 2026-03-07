@@ -280,17 +280,18 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // This handles both cases: metadata ahead (crash during prune) and metadata stale.
         //
         // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
-        // next leaf-aligned position. This is safe because any nodes before the journal boundary
-        // are already gone.
-        let journal_boundary_nearest =
-            PeakIterator::to_nearest_size(Position::new(journal_bounds_start));
-        let journal_boundary_leaf_aligned = if *journal_boundary_nearest < journal_bounds_start {
-            let leaves = Location::try_from(journal_boundary_nearest)?;
+        // position of the first leaf after the boundary.
+        let nearest_size = PeakIterator::to_nearest_size(Position::new(journal_bounds_start));
+        let journal_boundary_leaf_aligned_pos = if *nearest_size < journal_bounds_start {
+            // If the nearest size required backing up over the boundary, we need to round up to the
+            // next leaf position which is guaranteed to be above the boundary.
+            let leaves = Location::try_from(nearest_size)?;
             Position::try_from(Location::new(*leaves + 1))?
         } else {
-            journal_boundary_nearest
+            nearest_size
         };
-        let effective_prune_pos = std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned);
+        let effective_prune_pos =
+            std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
 
         let last_valid_size = PeakIterator::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
@@ -752,7 +753,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     }
 
     #[cfg(test)]
-    pub async fn simulate_pruning_failure(mut self, prune_to_pos: Position) -> Result<(), Error> {
+    pub async fn simulate_pruning_failure(mut self, prune_to: Location) -> Result<(), Error> {
+        let prune_to_pos = Position::try_from(prune_to)?;
         assert!(prune_to_pos <= self.inner.get_mut().mem_mmr.size());
 
         // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
@@ -816,7 +818,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             }
         };
 
-        let new_size = Position::try_from(Location::new(destination_leaf)).expect("valid leaf");
+        let destination_loc = Location::new(destination_leaf);
+        let new_size = Position::try_from(destination_loc).expect("valid leaf");
 
         let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
         if new_size < pruned_to_pos {
@@ -845,7 +848,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                     Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
                 );
             }
-            inner.mem_mmr = MemMmr::from_components(hasher, vec![], new_size, pinned_nodes)?;
+            inner.mem_mmr = MemMmr::from_components(hasher, vec![], destination_loc, pinned_nodes)?;
             Self::add_extra_pinned_nodes(
                 &mut inner.mem_mmr,
                 &self.metadata,
@@ -1442,7 +1445,7 @@ mod tests {
             // Prune the MMR in increments of 10 making sure the journal is still able to compute
             // roots and accept new elements.
             for i in 0usize..300 {
-                let prune_loc = Location::new(i as u64 * 10);
+                let prune_loc = Location::new(std::cmp::min(i as u64 * 10, *pruned_mmr.leaves()));
                 pruned_mmr.prune(prune_loc).await.unwrap();
                 assert_eq!(prune_loc, pruned_mmr.bounds().start);
 
@@ -1584,15 +1587,13 @@ mod tests {
                 .await
                 .unwrap();
                 let start_size = mmr.size();
-                let prune_pos = std::cmp::min(i as u64 * 50, *start_size);
-                let prune_pos = Position::new(prune_pos);
+                let start_leaves = *mmr.leaves();
+                let prune_loc = Location::new(std::cmp::min(i as u64 * 50, start_leaves));
                 if i % 5 == 0 {
-                    mmr.simulate_pruning_failure(prune_pos).await.unwrap();
+                    mmr.simulate_pruning_failure(prune_loc).await.unwrap();
                     continue;
                 }
-                mmr.prune(Location::try_from(prune_pos).unwrap())
-                    .await
-                    .unwrap();
+                mmr.prune(prune_loc).await.unwrap();
 
                 // add new elements, simulating a partial write after each.
                 for j in 0..10 {
@@ -2106,12 +2107,13 @@ mod tests {
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
 
-            // Prune to position 20 (this stores pinned nodes in metadata for position 20)
-            let prune_loc = Location::new(11);
+            // Prune enough that the journal boundary's pinned nodes span pruned blobs.
+            let prune_loc = Location::new(25);
             mmr.prune(prune_loc).await.unwrap();
             drop(mmr);
 
-            // Tamper with metadata to have a stale (lower) pruning boundary
+            // Simulate a crash after journal prune but before metadata was updated:
+            // clear all metadata and write only a stale pruning boundary of 0 (no pinned nodes).
             let meta_cfg = MConfig {
                 partition: test_config(&context).metadata_partition,
                 codec_config: ((0..).into(), ()),
@@ -2120,8 +2122,7 @@ mod tests {
                 Metadata::<_, U64, Vec<u8>>::init(context.with_label("meta_tamper"), meta_cfg)
                     .await
                     .unwrap();
-
-            // Set pruning boundary to 0 (stale)
+            metadata.clear();
             let key = U64::new(PRUNED_TO_PREFIX, 0);
             metadata.put(key, 0u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();

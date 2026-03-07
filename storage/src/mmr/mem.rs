@@ -104,6 +104,10 @@ pub struct Mmr<D: Digest> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
+    ///
+    /// # Invariant
+    ///
+    /// This position is always that of a leaf when the MMR is non-empty.
     pruned_to_pos: Position,
 
     /// The auxiliary map from node position to the digest of any pinned node.
@@ -170,18 +174,21 @@ impl<D: Digest> Mmr<D> {
         })
     }
 
-    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    /// Re-initialize the MMR with the given nodes, pruned_to location, and pinned_nodes.
     ///
     /// # Errors
     ///
     /// Returns [Error::InvalidPinnedNodes] if the length of `pinned_nodes_vec` does not match the
-    /// number of nodes required to be pinned at `pruned_to_pos`.
+    /// number of nodes required to be pinned at the pruning boundary.
+    ///
+    /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::mmr::MAX_LOCATION].
     pub fn from_components(
         hasher: &mut impl Hasher<Digest = D>,
         nodes: Vec<D>,
-        pruned_to_pos: Position,
+        pruned_to: Location,
         pinned_nodes_vec: Vec<D>,
     ) -> Result<Self, Error> {
+        let pruned_to_pos = Position::try_from(pruned_to)?;
         let expected_count = nodes_to_pin(pruned_to_pos).count();
         if pinned_nodes_vec.len() != expected_count {
             return Err(Error::InvalidPinnedNodes);
