@@ -383,15 +383,9 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(
-                blob.clone(),
-                blob_size,
-                BUFFER_PAGES * 115,
-                cache_ref,
-                false,
-            )
-            .await
-            .unwrap();
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+                .await
+                .unwrap();
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
@@ -427,15 +421,9 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(
-                blob.clone(),
-                blob_size,
-                BUFFER_PAGES * 115,
-                cache_ref,
-                false,
-            )
-            .await
-            .unwrap();
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+                .await
+                .unwrap();
 
             // Write data that doesn't fill the last page
             let data: Vec<u8> = (1u8..=(PAGE_SIZE.get() + 10) as u8).collect();
@@ -462,15 +450,9 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(
-                blob.clone(),
-                blob_size,
-                BUFFER_PAGES * 115,
-                cache_ref,
-                false,
-            )
-            .await
-            .unwrap();
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+                .await
+                .unwrap();
 
             // Write data spanning 4 pages (4 * 103 = 412 bytes, with last page partial)
             let data: Vec<u8> = (0u8..=255).cycle().take(400).collect();
@@ -524,15 +506,9 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(
-                blob.clone(),
-                blob_size,
-                BUFFER_PAGES * 115,
-                cache_ref,
-                false,
-            )
-            .await
-            .unwrap();
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+                .await
+                .unwrap();
 
             // Don't write any data - blob remains empty
             assert_eq!(append.size().await, 0);
@@ -569,15 +545,9 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(
-                blob.clone(),
-                blob_size,
-                BUFFER_PAGES * 115,
-                cache_ref,
-                false,
-            )
-            .await
-            .unwrap();
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+                .await
+                .unwrap();
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();

@@ -44,27 +44,11 @@ impl Buffer {
     ///
     /// The buffer starts detached, mutable, and allocates backing on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
-        Self::from(offset, IoBuf::default(), capacity, false, pool)
+        Self::from(offset, IoBuf::default(), capacity, pool)
     }
 
     /// Creates a new buffer seeded with existing logical bytes.
-    ///
-    /// If `compact` is `true`, the seed bytes are copied into detached exact-size storage so
-    /// oversized page-backed views are not retained. Otherwise the provided `data` is preserved
-    /// as-is so callers can keep zero-copy bytes loaded from disk until a subsequent write
-    /// actually needs mutable backing.
-    pub(super) fn from(
-        offset: u64,
-        data: IoBuf,
-        capacity: usize,
-        compact: bool,
-        pool: BufferPool,
-    ) -> Self {
-        let data = if compact {
-            Self::compact(data.as_ref())
-        } else {
-            data
-        };
+    pub(super) fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
         let len = data.len();
         Self {
             data,
@@ -94,15 +78,6 @@ impl Buffer {
     #[cfg(test)]
     pub(super) fn is_pooled(&self) -> bool {
         self.data.is_pooled()
-    }
-
-    /// Copy into detached exact-size storage so compacted tips do not retain oversized backing.
-    fn compact(data: &[u8]) -> IoBuf {
-        if data.is_empty() {
-            IoBuf::default()
-        } else {
-            IoBuf::copy_from_slice(data)
-        }
     }
 
     /// Returns immutable logical bytes for `range`.
@@ -403,7 +378,7 @@ mod tests {
     fn test_tip_from_preserves_seed_bytes_until_mutated() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
-        let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, false, pool);
+        let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, pool);
 
         assert_eq!(buffer.offset, 7);
         assert_eq!(buffer.len(), 3);
@@ -412,23 +387,5 @@ mod tests {
 
         assert!(!buffer.append(b"def"));
         assert_eq!(buffer.as_ref(), b"abcdef");
-    }
-
-    #[test]
-    fn test_tip_from_compact_compacts_seed_data() {
-        let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
-        let mut oversized = pool.alloc(16);
-        oversized.put_slice(b"abc");
-        oversized.put_bytes(0, 13);
-        let oversized = oversized.freeze().slice(..3);
-        assert!(oversized.is_pooled());
-
-        let buffer = Buffer::from(7, oversized, 16, true, pool);
-
-        assert_eq!(buffer.offset, 7);
-        assert_eq!(buffer.len(), 3);
-        assert_eq!(buffer.as_ref(), b"abc");
-        assert!(!buffer.data.is_pooled());
     }
 }

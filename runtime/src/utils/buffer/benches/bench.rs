@@ -27,7 +27,7 @@ type MemBlob = <Context as commonware_runtime::Storage>::Blob;
 /// Create a new Append wrapper for benchmarking.
 async fn create_append(ctx: &Context, name: &[u8], cache_ref: CacheRef) -> Append<MemBlob> {
     let (blob, size) = ctx.open("bench_partition", name).await.unwrap();
-    Append::new(blob, size, WRITE_BUFFER_SIZE, cache_ref, false)
+    Append::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
         .await
         .unwrap()
 }
