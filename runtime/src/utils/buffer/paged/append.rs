@@ -263,12 +263,12 @@ impl<B: Blob> Append<B> {
         // Drain the provided buffer of the full pages that are now cached in the page cache and
         // will be written to the blob. If the tip is fully drained, detach its backing so empty
         // append buffers don't retain pooled storage.
-        let bytes_to_drain = buffer.len() - remaining_byte_count;
         if remaining_byte_count == 0 {
             let _ = buffer
                 .take()
                 .expect("take must succeed when flush drains all buffered bytes");
         } else {
+            let bytes_to_drain = buffer.len() - remaining_byte_count;
             buffer.drop_prefix(bytes_to_drain);
             buffer.offset += bytes_to_drain as u64;
         }
