@@ -637,7 +637,6 @@ impl<B: Blob> Append<B> {
             let buf_guard = self.buffer.write().await;
             self.flush_internal(buf_guard, true).await?;
         }
-
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
         // Convert buffer size (bytes) to page count
