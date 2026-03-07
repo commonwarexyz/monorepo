@@ -54,12 +54,10 @@ mod tests {
         async fn block_once_on_read(&self) {
             let rx = {
                 let mut gate = self.gate.lock();
-                if let Some(read_started) = gate.read_started.take() {
+                gate.read_started.take().map(|read_started| {
                     let _ = read_started.send(());
-                    Some(gate.release_read.take().expect("release signal missing"))
-                } else {
-                    None
-                }
+                    gate.release_read.take().expect("release signal missing")
+                })
             };
             if let Some(rx) = rx {
                 let _ = rx.await;
