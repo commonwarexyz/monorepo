@@ -146,7 +146,7 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Storage I/O preset: page-aligned, page_size to 64KB buffers, 32 per class,
+    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 32 per class,
     /// not prefilled.
     ///
     /// Page alignment is required for direct I/O and efficient DMA transfers.
@@ -154,7 +154,7 @@ impl BufferPoolConfig {
         let page = NZUsize!(page_size());
         Self {
             min_size: page,
-            max_size: NZUsize!(64 * 1024),
+            max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZUsize!(32),
             prefill: false,
             alignment: page,
@@ -1562,10 +1562,19 @@ mod tests {
         let config = BufferPoolConfig::for_storage();
         config.validate();
         assert_eq!(config.min_size.get(), page_size());
-        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 32);
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
+    }
+
+    #[test]
+    fn test_storage_config_supports_default_allocations() {
+        let mut registry = test_registry();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+
+        let buf = pool.try_alloc(8 * 1024 * 1024).unwrap();
+        assert_eq!(buf.capacity(), 8 * 1024 * 1024);
     }
 
     #[test]
