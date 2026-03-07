@@ -4,6 +4,23 @@
 
 Reshare a threshold secret over an epoched log.
 
+## Overview
+
+`commonware-reshare` demonstrates how to build an application that employs [commonware_consensus::simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html)
+and [commonware_cryptography::bls12381::dkg](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html)
+to periodically reshare a BLS12-381 threshold secret across epochs with a dynamic validator set.
+
+The system starts by bootstrapping consensus with Ed25519 signatures (non-threshold) and executes a distributed key
+generation (DKG) protocol to establish threshold shares. Once the DKG completes, consensus transitions to BLS12-381
+threshold signing. At each subsequent epoch boundary, the secret is reshared to accommodate validator set changes.
+
+Key features:
+- Two startup modes: trusted setup (pre-generated shares) or DKG (distributed share generation).
+- Epoch-based consensus with dynamic dealer selection per epoch.
+- Persistent DKG state via [commonware_storage](https://docs.rs/commonware-storage) journals for crash recovery.
+- Byzantine fault tolerance using the Simplex consensus protocol with an N3f1 threshold.
+- Authenticated peer-to-peer networking via [commonware_p2p](https://docs.rs/commonware-p2p) with 6 muxed channels for votes, certificates, resolver, broadcast, marshal, and DKG messages.
+
 ## Setup
 
 _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [`mprocs`](https://github.com/pvolok/mprocs)._
