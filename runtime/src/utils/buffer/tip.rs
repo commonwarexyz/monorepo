@@ -365,6 +365,26 @@ mod tests {
     }
 
     #[test]
+    fn test_tip_writable_copies_when_slice_is_live() {
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(0, 16, pool);
+
+        assert!(!buffer.append(b"abc"));
+        let snapshot = buffer.slice(..);
+
+        let mut writable = buffer.writable(6);
+        assert_eq!(writable.as_ref(), b"abc");
+        assert_ne!(writable.as_ref().as_ptr(), snapshot.as_ref().as_ptr());
+
+        writable.put_slice(b"def");
+        writable.as_mut()[0] = b'X';
+
+        assert_eq!(snapshot.as_ref(), b"abc");
+        assert_eq!(writable.as_ref(), b"Xbcdef");
+    }
+
+    #[test]
     fn test_tip_from_preserves_seed_bytes_until_mutated() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);

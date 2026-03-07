@@ -30,7 +30,7 @@ mod tests {
     /// Used to assert lock ordering / contention behavior in writer read-path tests.
     #[derive(Clone)]
     struct BlockingReadBlob {
-        data: Arc<Vec<u8>>,
+        data: Arc<Mutex<Vec<u8>>>,
         gate: Arc<Mutex<BlockingReadGate>>,
     }
 
@@ -40,7 +40,7 @@ mod tests {
             let (release_read_tx, release_read_rx) = oneshot::channel();
             (
                 Self {
-                    data: Arc::new(data),
+                    data: Arc::new(Mutex::new(data)),
                     gate: Arc::new(Mutex::new(BlockingReadGate {
                         read_started: Some(read_started_tx),
                         release_read: Some(release_read_rx),
@@ -54,10 +54,16 @@ mod tests {
         async fn block_once_on_read(&self) {
             let rx = {
                 let mut gate = self.gate.lock();
-                let _ = gate.read_started.take().unwrap().send(());
-                gate.release_read.take().unwrap()
+                if let Some(read_started) = gate.read_started.take() {
+                    let _ = read_started.send(());
+                    Some(gate.release_read.take().expect("release signal missing"))
+                } else {
+                    None
+                }
             };
-            let _ = rx.await;
+            if let Some(rx) = rx {
+                let _ = rx.await;
+            }
         }
     }
 
@@ -76,24 +82,36 @@ mod tests {
 
             let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
             let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
-            if end > self.data.len() {
+            let data = self.data.lock();
+            if end > data.len() {
                 return Err(Error::BlobInsufficientLength);
             }
 
             let mut out = buf.into();
-            out.put_slice(&self.data[start..end]);
+            out.put_slice(&data[start..end]);
             Ok(out)
         }
 
         async fn write_at(
             &self,
-            _offset: u64,
-            _buf: impl Into<IoBufs> + Send,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
+            let buf = buf.into().coalesce();
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+
+            let mut data = self.data.lock();
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf.as_ref());
             Ok(())
         }
 
-        async fn resize(&self, _len: u64) -> Result<(), Error> {
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.data.lock().resize(len, 0);
             Ok(())
         }
 
@@ -943,6 +961,7 @@ mod tests {
                 BlockingReadBlob::new(b"abcdefghij".to_vec());
             let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
             let reader = writer.clone();
+            let verifier = writer.clone();
 
             // This read is entirely in persisted blob bytes (no buffered tip overlap).
             let read_task = context
@@ -971,6 +990,9 @@ mod tests {
             let read_result = read_task.await.expect("read task failed").coalesce();
             assert_eq!(read_result.as_ref(), b"abcd");
             write_task.await.expect("write task failed");
+
+            let updated = verifier.read_at(0, 4).await.unwrap().coalesce();
+            assert_eq!(updated.as_ref(), b"WXYZ");
         });
     }
 
@@ -981,6 +1003,7 @@ mod tests {
             let (blob, read_started_rx, release_read_tx) =
                 BlockingReadBlob::new(b"abcdefghij".to_vec());
             let writer = Write::from_pooler(&context, blob, 10, NZUsize!(8));
+            let verifier = writer.clone();
 
             // This creates a tip buffer with "XYZ" at offset 10.
             writer.write_at(10, b"XYZ").await.unwrap();
@@ -1013,6 +1036,9 @@ mod tests {
             let read_result = read_task.await.expect("read task failed").coalesce();
             assert_eq!(read_result.as_ref(), b"ijXYZ");
             write_task.await.expect("write task failed");
+
+            let updated = verifier.read_at(8, 5).await.unwrap().coalesce();
+            assert_eq!(updated.as_ref(), b"ijUVW");
         });
     }
 
