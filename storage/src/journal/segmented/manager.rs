@@ -18,13 +18,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
-/// Minimal per-section buffer interface used by [`Manager`].
-///
-/// [`Manager`] only needs lifecycle operations over a section: report logical size,
-/// durably flush, and truncate. It does not require the full [`Blob`] I/O surface (for
-/// example, random reads or writes). Keeping this trait narrow decouples manager logic
-/// from concrete buffer adapters while still allowing both [`Append`] and [`Write`] to be
-/// used.
+/// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> impl Future<Output = u64> + Send;
