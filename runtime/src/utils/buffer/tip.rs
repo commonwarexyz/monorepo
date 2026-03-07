@@ -74,12 +74,6 @@ impl Buffer {
         self.len == 0
     }
 
-    /// Returns true when the current backing references pooled storage.
-    #[cfg(test)]
-    pub(super) fn is_pooled(&self) -> bool {
-        self.data.is_pooled()
-    }
-
     /// Returns immutable logical bytes for `range`.
     ///
     /// # Panics
@@ -293,7 +287,6 @@ mod tests {
         assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
         assert_eq!(taken.1, 50);
         assert_eq!(buffer.size(), 53);
-        assert!(!buffer.data.is_pooled());
         assert!(buffer.take().is_none());
 
         // Fill the buffer to capacity.
@@ -325,7 +318,6 @@ mod tests {
         assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
         assert_eq!(resized.1, 50);
         assert_eq!(buffer.size(), 60);
-        assert!(!buffer.data.is_pooled());
         assert!(buffer.take().is_none());
 
         buffer.append(&[4, 5, 6]);
@@ -355,7 +347,6 @@ mod tests {
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
         let mut buffer = Buffer::new(0, 16, pool);
         assert!(buffer.data.is_empty());
-        assert!(!buffer.data.is_pooled());
 
         assert!(buffer.merge(b"abc", 0));
         assert_eq!(buffer.data.as_ref(), b"abc");
@@ -383,7 +374,6 @@ mod tests {
         assert_eq!(buffer.offset, 7);
         assert_eq!(buffer.len(), 3);
         assert_eq!(buffer.as_ref(), b"abc");
-        assert!(!buffer.data.is_pooled());
 
         assert!(!buffer.append(b"def"));
         assert_eq!(buffer.as_ref(), b"abcdef");
