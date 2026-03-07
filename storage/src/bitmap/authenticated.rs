@@ -354,7 +354,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         let mmr = Mmr::init(
             Config {
                 nodes: Vec::new(),
-                pruned_to_pos: mmr_size,
+                pruned_to: Location::new(pruned_chunks as u64),
                 pinned_nodes,
             },
             hasher,
@@ -425,9 +425,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         // Update authenticated length
         self.authenticated_len = self.complete_chunks();
 
-        // This will never panic because chunk is always less than MAX_LOCATION.
-        let mmr_pos = Position::try_from(Location::new(chunk as u64)).unwrap();
-        self.mmr.prune_to_pos(mmr_pos);
+        self.mmr.prune(Location::new(chunk as u64))?;
         Ok(())
     }
 

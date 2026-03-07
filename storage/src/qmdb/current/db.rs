@@ -399,9 +399,9 @@ where
         // 6. Prune the grafted MMR to match.
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > self.grafted_mmr.bounds().start {
-                self.grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            let prune_loc = Location::new(pruned_chunks);
+            if prune_loc > self.grafted_mmr.bounds().start {
+                self.grafted_mmr.prune(prune_loc)?;
             }
         }
 
@@ -693,12 +693,11 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     // Build a base Mmr: either from pruned components or empty.
     let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
-        let grafted_pruned_to_pos = Position::try_from(Location::new(pruned_chunks as u64))
-            .expect("pruned_chunks overflow");
+        let grafted_pruned_to = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
             &mut grafted_hasher,
             Vec::new(),
-            grafted_pruned_to_pos,
+            grafted_pruned_to,
             pinned_nodes.to_vec(),
         )?
     } else {
