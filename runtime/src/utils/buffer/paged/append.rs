@@ -1906,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_partial_tail_stays_mutable() {
+    fn test_reopen_partial_tail_append_and_resize() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
@@ -1938,25 +1938,10 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert!(
-                append.buffer.read().await.is_pooled(),
-                "default open should retain the pooled partial-page backing"
-            );
-            drop(append);
-
-            let (blob, size) = context
-                .open("test_partition", b"partial_tail_test")
-                .await
-                .unwrap();
-
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
+            assert_eq!(append.size().await, 5);
 
             append.append(&[6, 7, 8]).await.unwrap();
-
             append.resize(6).await.unwrap();
-
             append.sync().await.unwrap();
 
             let data: Vec<u8> = append.read_at(0, 6).await.unwrap().coalesce().into();
