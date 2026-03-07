@@ -1061,7 +1061,8 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db: C = open_db(context.with_label("db"), "stale-side-effect-free".into()).await;
+            let mut db: C =
+                open_db(context.with_label("db"), "stale-side-effect-free".into()).await;
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
