@@ -449,8 +449,8 @@ impl<
         // (blocking the peer also removes any targets associated with it)
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
-        self.metrics.fetch.inc(Status::Failure);
         if exhausted {
+            self.metrics.fetch.inc(Status::Failure);
             self.fetcher.add_retry(key);
         }
     }
