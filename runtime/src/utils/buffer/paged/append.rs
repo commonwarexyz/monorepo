@@ -212,7 +212,6 @@ impl<B: Blob> Append<B> {
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
-    ///
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
 
