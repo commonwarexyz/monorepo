@@ -59,8 +59,8 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async rwlock with Option to allow ownership transfers.
-    database: AsyncRwLock<Option<DB>>,
+    /// The database wrapped in async rwlock.
+    database: AsyncRwLock<DB>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -77,7 +77,7 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: AsyncRwLock::new(Some(database)),
+            database: AsyncRwLock::new(database),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
@@ -125,19 +125,12 @@ where
         let new_operations_len = new_operations.len();
         // Add operations to database and get the new root
         let root = {
-            let mut db_opt = state.database.write().await;
-            let database = db_opt.take().expect("database should exist");
-            match database.add_operations(new_operations).await {
-                Ok(database) => {
-                    let root = database.root();
-                    *db_opt = Some(database);
-                    root
-                }
-                Err(err) => {
-                    error!(?err, "failed to add operations to database");
-                    return Err(err.into());
-                }
+            let mut database = state.database.write().await;
+            if let Err(err) = database.add_operations(new_operations).await {
+                error!(?err, "failed to add operations to database");
+                return Err(err.into());
             }
+            database.root()
         };
         state.ops_counter.inc_by(new_operations_len as u64);
         let root_hex = root
@@ -167,8 +160,7 @@ where
 
     // Get the current database state
     let (root, inactivity_floor, size) = {
-        let db_opt = state.database.read().await;
-        let database = db_opt.as_ref().expect("database should exist");
+        let database = state.database.read().await;
         (
             database.root(),
             database.inactivity_floor().await,
@@ -198,14 +190,13 @@ where
     state.request_counter.inc();
     request.validate()?;
 
-    let db_opt = state.database.read().await;
-    let database = db_opt.as_ref().expect("database should exist");
+    let database = state.database.read().await;
 
     // Check if we have enough operations
     let db_size = database.size().await;
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
-            "start_loc >= database size ({}) >= ({})",
+            "start_loc ({}) >= database size ({})",
             request.start_loc, db_size
         )));
     }
@@ -229,7 +220,7 @@ where
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
-    drop(db_opt);
+    drop(database);
 
     let (proof, operations) = result.map_err(|err| {
         warn!(?err, "failed to generate historical proof");
@@ -394,7 +385,7 @@ where
 
 /// Initialize and display database state with initial operations.
 async fn initialize_database<DB, E>(
-    database: DB,
+    mut database: DB,
     config: &Config,
     context: &mut E,
 ) -> Result<DB, Box<dyn std::error::Error>>
@@ -410,7 +401,7 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    let database = database.add_operations(initial_ops).await?;
+    database.add_operations(initial_ops).await?;
 
     // Display database state
     let root = database.root();

@@ -22,7 +22,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
-/// Database type alias for the Clean state.
+/// Database type alias.
 pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
@@ -79,37 +79,32 @@ where
     }
 
     async fn add_operations(
-        self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<Self, commonware_storage::qmdb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(self);
+            return Ok(());
         }
-        let mut db = self.into_mutable();
-        let num_ops = operations.len();
 
-        for (i, operation) in operations.into_iter().enumerate() {
+        let mut batch = self.new_batch();
+        for operation in operations {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    db.write_batch([(key, Some(value))]).await?;
+                    batch.write(key, Some(value));
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)]).await?;
+                    batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let (durable_db, _) = db.commit(metadata).await?;
-                    if i == num_ops - 1 {
-                        // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
-                    }
-                    // Not the last operation - continue in mutable state
-                    db = durable_db.into_mutable();
+                    let finalized = batch.merkleize(metadata).await?.finalize();
+                    self.apply_batch(finalized).await?;
+                    batch = self.new_batch();
                 }
             }
         }
-        panic!("operations should end with a commit");
+        Ok(())
     }
 
     fn root(&self) -> Key {

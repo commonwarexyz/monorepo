@@ -153,24 +153,21 @@ fn fuzz(mut input: FuzzInput) {
         let cfg = test_config(TEST_NAME, &context);
         let mut db = FixedDb::init(context.clone(), cfg)
             .await
-            .expect("Failed to init source db")
-            .into_mutable();
+            .expect("Failed to init source db");
         let mut restarts = 0usize;
 
         let mut sync_id = 0;
 
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+
         for op in &input.ops {
             match op {
                 Operation::Update { key, value } => {
-                    db.write_batch([(Key::new(*key), Some(Value::new(*value)))])
-                        .await
-                        .expect("Update should not fail");
+                    pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Key::new(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    pending_writes.push((Key::new(*key), None));
                 }
 
                 Operation::Commit => {
@@ -186,20 +183,26 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let (durable_db, _) = db
-                        .commit(Some(FixedBytes::new(commit_id)))
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(Some(FixedBytes::new(commit_id)))
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
-                    merkleized_db
-                        .prune(merkleized_db.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
@@ -209,18 +212,26 @@ fn fuzz(mut input: FuzzInput) {
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
                     commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
-                    let (durable_db, _) = db
-                        .commit(Some(FixedBytes::new(commit_id)))
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_writes.drain(..) {
+                            batch.write(k, v);
+                        }
+                        batch
+                            .merkleize(Some(FixedBytes::new(commit_id)))
+                            .await
+                            .unwrap()
+                            .finalize()
+                    };
+                    db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
-
                     let target = sync::Target {
-                        root: clean_db.root(),
-                        range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
+                        root: db.root(),
+                        range: db.inactivity_floor_loc()..db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(clean_db);
+                    let wrapped_src = Arc::new(db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -231,13 +242,13 @@ fn fuzz(mut input: FuzzInput) {
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
-                        .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_mutable();
+                        .unwrap_or_else(|_| panic!("Failed to unwrap src"));
                     sync_id += 1;
                 }
 
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
+                    pending_writes.clear();
                     drop(db);
 
                     let cfg = test_config(TEST_NAME, &context);
@@ -248,15 +259,22 @@ fn fuzz(mut input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init source db")
-                    .into_mutable();
+                    .expect("Failed to init source db");
                     restarts += 1;
                 }
             }
         }
 
-        let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
+        let finalized = {
+            let mut batch = db.new_batch();
+            for (k, v) in pending_writes.drain(..) {
+                batch.write(k, v);
+            }
+            batch.merkleize(None).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized)
+            .await
+            .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }

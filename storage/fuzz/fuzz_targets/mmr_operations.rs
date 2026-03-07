@@ -3,13 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::CleanMmr, Location, Position, StandardHasher as Standard};
+use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MmrOperation {
     Add { data: Vec<u8> },
-    Pop,
     UpdateLeaf { location: u8, new_data: Vec<u8> },
     GetNode { pos: u64 },
     GetSize,
@@ -48,28 +47,6 @@ impl ReferenceMmr {
         // Track nodes added (leaf + any parent nodes)
         let nodes_after = self.calculate_mmr_size(self.leaf_positions.len());
         self.total_nodes_added = nodes_after;
-    }
-
-    fn pop(&mut self) -> Result<(), ()> {
-        if self.leaf_positions.is_empty() {
-            return Err(());
-        }
-
-        // Check if the last leaf would be pruned - if so, we can't pop it
-        let last_leaf_pos = *self.leaf_positions.last().unwrap();
-        if last_leaf_pos < self.pruned_to_pos {
-            return Err(()); // Element is pruned, can't pop
-        }
-
-        self.leaf_positions.pop();
-        self.leaf_data.pop();
-
-        if self.leaf_positions.is_empty() {
-            self.total_nodes_added = 0;
-        } else {
-            self.total_nodes_added = self.calculate_mmr_size(self.leaf_positions.len());
-        }
-        Ok(())
     }
 
     fn update_leaf(&mut self, idx: usize, new_data: Vec<u8>) {
@@ -132,7 +109,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = Mmr::new(&mut hasher);
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -152,9 +129,12 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_pos = dirty_mmr.add(&mut hasher, limited_data);
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
+                    let (mmr_pos, changeset) = {
+                        let mut batch = mmr.new_batch();
+                        let mmr_pos_inner = batch.add(&mut hasher, limited_data);
+                        (mmr_pos_inner, batch.merkleize(&mut hasher).finalize())
+                    };
+                    mmr.apply(changeset).unwrap();
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
@@ -173,32 +153,6 @@ fn fuzz(input: FuzzInput) {
                         mmr.get_node(mmr_pos).is_some(),
                         "Operation {op_idx}: Should be able to get added node"
                     );
-                }
-
-                MmrOperation::Pop => {
-                    let leaves_before = mmr.leaves();
-                    let size_before = mmr.size();
-                    let mut dirty_mmr = mmr.into_dirty();
-                    let mmr_result = dirty_mmr.pop();
-                    mmr = dirty_mmr.merkleize(&mut hasher, None);
-                    let ref_result = reference.pop();
-
-                    assert_eq!(
-                        mmr_result.is_ok(), ref_result.is_ok(),
-                        "Operation {op_idx}: Pop result mismatch - MMR: {mmr_result:?}, Ref: {ref_result:?}",
-                    );
-
-                    if mmr_result.is_ok() {
-                        assert!(
-                            mmr.size() < size_before,
-                            "Operation {op_idx}: Size should decrease after successful pop"
-                        );
-                        assert_eq!(
-                            mmr.leaves(),
-                            leaves_before - 1,
-                            "Operation {op_idx}: Leaves should decrease after successful pop"
-                        );
-                    }
                 }
 
                 MmrOperation::UpdateLeaf { location, new_data } => {

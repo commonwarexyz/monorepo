@@ -38,7 +38,7 @@ impl Conformance for ContiguousFixed {
             context.fill(&mut data_to_write[..]);
 
             for item in data_to_write.iter() {
-                journal.append(*item).await.unwrap();
+                journal.append(item).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -76,7 +76,7 @@ impl Conformance for ContiguousVariable {
             }
 
             for item in data_to_write {
-                journal.append(item).await.unwrap();
+                journal.append(&item).await.unwrap();
             }
             journal.sync().await.unwrap();
             drop(journal);
@@ -110,7 +110,7 @@ impl Conformance for SegmentedFixed {
             // Distribute items across sections 0, 1, 2
             for (i, item) in data_to_write.iter().enumerate() {
                 let section = (i % 3) as u64;
-                journal.append(section, *item).await.unwrap();
+                journal.append(section, item).await.unwrap();
             }
 
             // Sync all sections
@@ -198,7 +198,7 @@ impl Conformance for SegmentedVariable {
             // Distribute items across sections 0, 1, 2
             for (i, item) in data_to_write.iter().enumerate() {
                 let section = (i % 3) as u64;
-                journal.append(section, item.clone()).await.unwrap();
+                journal.append(section, item).await.unwrap();
             }
 
             // Sync all sections

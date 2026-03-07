@@ -261,7 +261,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         // Store item in journal
         let record = Record::new(index, value);
         let section = self.section(index);
-        let (offset, _) = self.journal.append(section, record).await?;
+        let (offset, _) = self.journal.append(section, &record).await?;
 
         // Store index
         self.indices.insert(index, offset);
