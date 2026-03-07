@@ -111,72 +111,33 @@ commonware_macros::stability_scope!(ALPHA {
     /// let (commitment, shards) =
     ///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     ///
-    /// // Each person produces weak shards, their own checked shard, and checking data
-    /// // to check other peoples weak shards.
-    /// let (mut checking_data_w_shard, weak_shards): (Vec<_>, Vec<_>) = shards
+    /// // Each participant checks their shard against the commitment.
+    /// let checked_shards: Vec<_> = shards
     ///         .into_iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             let (checking_data, checked_shard, weak_shard) = RS::weaken(&config, &commitment, i as u16, shard).unwrap();
-    ///             ((checking_data, checked_shard), weak_shard)
+    ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
     ///         })
     ///         .collect();
-    /// // Let's pretend that the last item is "ours"
-    /// let (checking_data, checked_shard) = checking_data_w_shard.pop().unwrap();
-    /// // We can use this checking_data to check the other shards.
-    /// let mut checked_shards = Vec::new();
-    /// checked_shards.push(checked_shard);
-    /// for (i, weak_shard) in weak_shards.into_iter().enumerate().skip(1) {
-    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, weak_shard).unwrap())
-    /// }
     ///
-    /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
+    /// // Decode from any minimum_shards-sized subset.
+    /// let data2 = RS::decode(&config, &commitment, &checked_shards[..2], &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data2[..]);
     ///
     /// // Decoding works with different shards, with a guarantee to get the same result.
-    /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
+    /// let data3 = RS::decode(&config, &commitment, &checked_shards[1..], &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
-    ///
-    /// # Guarantees
-    ///
-    /// Here are additional properties that implementors of this trait need to
-    /// consider, and that users of this trait can rely on.
-    ///
-    /// ## Weaken vs Check
-    ///
-    /// [`Scheme::weaken`] and [`Scheme::check`] should agree, even for malicious encoders.
-    ///
-    /// It should not be possible for parties A and B to call `weaken` successfully,
-    /// but then have either of them fail on the other's shard when calling `check`.
-    ///
-    /// In other words, if an honest party considers their shard to be correctly
-    /// formed, then other honest parties which have successfully constructed their
-    /// checking data will also agree with the shard being correct.
-    ///
-    /// A violation of this property would be, for example, if a malicious payload
-    /// could convince two parties that they both have valid shards, but then the
-    /// checking data they produce from the malicious payload reports issues with
-    /// those shards.
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
-        /// A strong shard of data, to be received by a participant.
-        type StrongShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-        /// A weak shard shared with other participants, to aid them in reconstruction.
-        ///
-        /// In most cases, this will be the same as `StrongShard`, but some schemes might
-        /// have extra information in `StrongShard` that may not be necessary to reconstruct
-        /// the data.
-        type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-        /// Data which can assist in checking shards.
-        type CheckingData: Clone + Send + Sync;
+        /// A shard of data, to be received by a participant.
+        type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// A shard that has been checked for inclusion in the commitment.
         ///
-        /// This allows excluding [Scheme::WeakShard]s which are invalid, and shouldn't
-        /// be considered as progress towards meeting the minimum number of shards.
+        /// This allows excluding invalid shards from the function signature of [Self::decode].
         type CheckedShard: Clone + Send + Sync;
-        /// The type of errors that can occur during encoding, weakening, checking, and decoding.
+        /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
@@ -188,37 +149,17 @@ commonware_macros::stability_scope!(ALPHA {
             config: &Config,
             data: impl Buf,
             strategy: &impl Strategy,
-        ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-        /// Take your own shard, check it, and produce a [Scheme::WeakShard] to forward to others.
+        /// Check the integrity of a shard, producing a checked shard.
         ///
-        /// This takes in an index, which is the index you expect the shard to be.
-        ///
-        /// This will produce a [Scheme::CheckedShard] which counts towards the minimum
-        /// number of shards you need to reconstruct the data, in [Scheme::decode].
-        ///
-        /// You also get [Scheme::CheckingData], which has information you can use to check
-        /// the shards you receive from others.
-        #[allow(clippy::type_complexity)]
-        fn weaken(
-            config: &Config,
-            commitment: &Self::Commitment,
-            index: u16,
-            shard: Self::StrongShard,
-        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
-
-        /// Check the integrity of a weak shard, producing a checked shard.
-        ///
-        /// This requires the [Scheme::CheckingData] produced by [Scheme::weaken].
-        ///
-        /// This takes in an index, to make sure that the weak shard you're checking
+        /// This takes in an index, to make sure that the shard you're checking
         /// is associated with the participant you expect it to be.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
-            checking_data: &Self::CheckingData,
             index: u16,
-            weak_shard: Self::WeakShard,
+            shard: Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -234,7 +175,6 @@ commonware_macros::stability_scope!(ALPHA {
         fn decode(
             config: &Config,
             commitment: &Self::Commitment,
-            checking_data: Self::CheckingData,
             shards: &[Self::CheckedShard],
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
@@ -271,50 +211,27 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_SHARD_SIZE,
         };
-        for (i, shard) in shards.iter().enumerate() {
-            // Strong shard codec roundtrip.
-            let decoded_shard = S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+        for shard in shards.iter() {
+            // Shard codec roundtrip.
+            let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
-
-            // Weak shard codec roundtrip.
-            let (_, _, weak_shard) =
-                S::weaken(config, &commitment, i as u16, shard.clone()).unwrap();
-            let decoded_weak_shard =
-                S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
-            assert_eq!(decoded_weak_shard, weak_shard);
         }
 
-        // Collect selected shards for decoding. The first selected shard
-        // goes through `weaken`, the rest go through `check`.
+        // Collect selected shards for decoding.
         let mut checked_shards = Vec::new();
-        let mut checking_data = None;
         for (i, shard) in shards.into_iter().enumerate() {
             if !selected.contains(&(i as u16)) {
                 continue;
             }
-            let (cd, checked, weak_shard) =
-                S::weaken(config, &commitment, i as u16, shard).unwrap();
-            if let Some(cd) = &checking_data {
-                let checked = S::check(config, &commitment, cd, i as u16, weak_shard).unwrap();
-                checked_shards.push(checked);
-            } else {
-                checking_data = Some(cd);
-                checked_shards.push(checked);
-            }
+            let checked = S::check(config, &commitment, i as u16, shard.clone()).unwrap();
+            checked_shards.push(checked);
         }
 
         // Shuffle the checked shards to verify decode is order-independent.
         checked_shards.reverse();
 
         // Decode from the selected shards and verify data integrity.
-        let decoded = S::decode(
-            config,
-            &commitment,
-            checking_data.unwrap(),
-            &checked_shards,
-            &Sequential,
-        )
-        .unwrap();
+        let decoded = S::decode(config, &commitment, &checked_shards, &Sequential).unwrap();
         assert_eq!(decoded, data);
     }
 
