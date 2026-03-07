@@ -61,8 +61,8 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
     // Update security groups in each region
     let mut changes = Vec::new();
     for region in all_regions {
-        let ec2_client = ec2::create_client(Region::new(region.clone())).await;
-        info!(region = region.as_str(), "created EC2 client");
+        info!(region = region.as_str(), "creating EC2 client");
+        let ec2_client = ec2::create_client(Region::new(region)).await;
 
         // Iterate over all security groups
         let security_groups = find_security_groups_by_tag(&ec2_client, tag).await?;
