@@ -637,9 +637,9 @@ impl<B: Blob> Append<B> {
             let buf_guard = self.buffer.write().await;
             self.flush_internal(buf_guard, true).await?;
         }
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
         // Convert buffer size (bytes) to page count
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
         let prefetch_pages = buffer_size.get() / physical_page_size as usize;
         let prefetch_pages = prefetch_pages.max(1); // At least 1 page
         let blob_guard = self.blob_state.read().await;
