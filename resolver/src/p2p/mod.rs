@@ -72,7 +72,7 @@ mod tests {
         mocks::{Consumer, Event, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::Resolver;
+    use crate::{RequestType, Resolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -84,8 +84,13 @@ mod tests {
         Blocker, Manager, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, NZU32};
-    use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+    use commonware_utils::{
+        channel::{fallible::OneshotExt, oneshot},
+        non_empty_vec,
+        sync::Mutex,
+        NZU32,
+    };
+    use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
@@ -178,6 +183,30 @@ mod tests {
             .add_link(peers[to].clone(), peers[from].clone(), link)
             .await
             .unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct DynamicProducer {
+        data: Arc<Mutex<HashMap<Key, Bytes>>>,
+    }
+
+    impl DynamicProducer {
+        fn insert(&self, key: Key, value: Bytes) {
+            self.data.lock().insert(key, value);
+        }
+    }
+
+    impl super::Producer for DynamicProducer {
+        type Key = Key;
+
+        async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            let value = self.data.lock().get(&key).cloned();
+            if let Some(value) = value {
+                sender.send_lossy(value);
+            }
+            receiver
+        }
     }
 
     fn setup_and_spawn_actor(
@@ -1306,6 +1335,483 @@ mod tests {
                     assert_eq!(value, valid_data);
                 }
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_urgent_upgrades_in_flight_request() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let warm_key = Key(10);
+            let target_key = Key(20);
+            let warm_data = Bytes::from("warm data");
+            let target_data = Bytes::from("target data");
+
+            // Peer 2 is fast initially so it becomes the preferred peer.
+            let mut prod2 = Producer::default();
+            prod2.insert(warm_key.clone(), warm_data.clone());
+
+            // Only peer 3 has the target data.
+            let mut prod3 = Producer::default();
+            prod3.insert(target_key.clone(), target_data.clone());
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(warm_key.clone(), warm_data.clone());
+            cons1.add_expected(target_key.clone(), target_data.clone());
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            // Wait for peer set to be established, then train peer 2 as the best peer.
+            context.sleep(Duration::from_millis(100)).await;
+            mailbox1.fetch(warm_key.clone()).await;
+            match cons_out1.recv().await.unwrap() {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, warm_key);
+                    assert_eq!(value, warm_data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("warm fetch failed unexpectedly for {key_actual:?}")
+                }
+            }
+
+            // Make peer 2 too slow to satisfy the request before timeout.
+            let slow_link = Link {
+                latency: TIMEOUT + Duration::from_millis(200),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+            add_link(&mut oracle, slow_link, &peers, 0, 1).await;
+
+            // Start a regular fetch. It should stick to the preferred peer 2 and make no progress yet.
+            mailbox1.fetch(target_key.clone()).await;
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("regular fetch unexpectedly resolved before escalation: {event:?}");
+                },
+                _ = context.sleep(Duration::from_millis(150)) => {}
+            };
+
+            // Escalate the in-flight request so the resolver fans out to all peers immediately.
+            mailbox1
+                .fetch_with_type(target_key.clone(), RequestType::Urgent)
+                .await;
+
+            match select! {
+                event = cons_out1.recv() => event.unwrap(),
+                _ = context.sleep(Duration::from_millis(200)) => {
+                    panic!("expected urgent fetch to resolve before the slow peer timed out");
+                },
+            } {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, target_key);
+                    assert_eq!(value, target_data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("urgent fetch failed unexpectedly for {key_actual:?}");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_urgent_upgrade_preserves_original_in_flight_response() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2, 3],
+                    Quota::per_second(NZU32!(2)),
+                )
+                .await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let warm_key = Key(30);
+            let target_key = Key(31);
+            let warm_data = Bytes::from("warm data");
+            let target_data = Bytes::from("target data");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(warm_key.clone(), warm_data.clone());
+            prod2.insert(target_key.clone(), target_data.clone());
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(warm_key.clone(), warm_data.clone());
+            cons1.add_expected(target_key.clone(), target_data.clone());
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(),
+            );
+
+            // Wait for peer set to be established, then train peer 2 as the best peer.
+            context.sleep(Duration::from_millis(100)).await;
+            mailbox1.fetch(warm_key.clone()).await;
+            match cons_out1.recv().await.unwrap() {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, warm_key);
+                    assert_eq!(value, warm_data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("warm fetch failed unexpectedly for {key_actual:?}")
+                }
+            }
+
+            // Slow peer 2 down so the original request stays in flight long enough to upgrade.
+            let slow_link = Link {
+                latency: Duration::from_millis(150),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+            add_link(&mut oracle, slow_link, &peers, 0, 1).await;
+
+            // Start a regular fetch to peer 2, then upgrade it while the response is still in flight.
+            mailbox1.fetch(target_key.clone()).await;
+            context.sleep(Duration::from_millis(20)).await;
+            mailbox1
+                .fetch_with_type(target_key.clone(), RequestType::Urgent)
+                .await;
+
+            match select! {
+                event = cons_out1.recv() => event.unwrap(),
+                _ = context.sleep(Duration::from_millis(350)) => {
+                    panic!("expected urgent upgrade to preserve the original in-flight response");
+                },
+            } {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, target_key);
+                    assert_eq!(value, target_data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("urgent fetch failed unexpectedly for {key_actual:?}");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_active_urgent_fetch_retries_rate_limited_escalation() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2, 3],
+                    Quota::with_period(Duration::from_millis(100)).unwrap(),
+                )
+                .await;
+
+            let warm_peer2_link = LINK;
+            let warm_peer3_link = Link {
+                latency: Duration::from_millis(50),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let fast_peer3_link = LINK;
+            let slow_peer2_link = Link {
+                latency: Duration::from_millis(600),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+
+            add_link(&mut oracle, warm_peer2_link, &peers, 0, 1).await;
+            add_link(&mut oracle, warm_peer3_link, &peers, 0, 2).await;
+
+            let warm_key2 = Key(41);
+            let warm_key3 = Key(42);
+            let target_key = Key(43);
+            let warm_data2 = Bytes::from("warm peer2");
+            let warm_data3 = Bytes::from("warm peer3");
+            let target_data = Bytes::from("target data");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(warm_key2.clone(), warm_data2.clone());
+            prod2.insert(target_key.clone(), target_data.clone());
+
+            let mut prod3 = Producer::default();
+            prod3.insert(warm_key3.clone(), warm_data3.clone());
+            prod3.insert(target_key.clone(), target_data.clone());
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(warm_key2.clone(), warm_data2.clone());
+            cons1.add_expected(warm_key3.clone(), warm_data3.clone());
+            cons1.add_expected(target_key.clone(), target_data.clone());
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            mailbox1.fetch(warm_key2.clone()).await;
+            match cons_out1.recv().await.unwrap() {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, warm_key2);
+                    assert_eq!(value, warm_data2);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("warm fetch failed unexpectedly for {key_actual:?}")
+                }
+            }
+
+            mailbox1
+                .fetch_targeted(warm_key3.clone(), non_empty_vec![peers[2].clone()])
+                .await;
+            match cons_out1.recv().await.unwrap() {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, warm_key3);
+                    assert_eq!(value, warm_data3);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("warm targeted fetch failed unexpectedly for {key_actual:?}")
+                }
+            }
+
+            oracle
+                .remove_link(peers[0].clone(), peers[2].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[2].clone(), peers[0].clone())
+                .await
+                .unwrap();
+            add_link(&mut oracle, fast_peer3_link, &peers, 0, 2).await;
+
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+            add_link(&mut oracle, slow_peer2_link, &peers, 0, 1).await;
+
+            mailbox1.fetch(target_key.clone()).await;
+            context.sleep(Duration::from_millis(20)).await;
+            mailbox1
+                .fetch_with_type(target_key.clone(), RequestType::Urgent)
+                .await;
+
+            match select! {
+                event = cons_out1.recv() => event.unwrap(),
+                _ = context.sleep(Duration::from_millis(250)) => {
+                    panic!("expected rate-limited escalation to retry before the slow peer timed out");
+                },
+            } {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, target_key);
+                    assert_eq!(value, target_data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("urgent fetch failed unexpectedly for {key_actual:?}");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_repeated_urgent_fetch_requeues_pending_request_immediately() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(40);
+            let data = Bytes::from("late data");
+            let prod2 = DynamicProducer::default();
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key.clone(), data.clone());
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine1, mut mailbox1) = Engine::new(
+                context.with_label(&format!("actor_{public_key}")),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: cons1,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: Duration::from_secs(1),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            engine1.start(connections.remove(0));
+
+            let scheme = schemes.remove(0);
+            let public_key = scheme.public_key();
+            let (engine2, _mailbox2) = Engine::new(
+                context.with_label(&format!("actor_{public_key}")),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer: Consumer::dummy(),
+                    producer: prod2.clone(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: Duration::from_secs(1),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            engine2.start(connections.remove(0));
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            // The first urgent fetch gets a "no data" response and falls back to retry.
+            mailbox1
+                .fetch_with_type(key.clone(), RequestType::Urgent)
+                .await;
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("request should not resolve before the producer has data: {event:?}");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Once the peer learns the data, a second urgent request should re-queue immediately
+            // instead of waiting for the original retry timeout.
+            prod2.insert(key.clone(), data.clone());
+            mailbox1
+                .fetch_with_type(key.clone(), RequestType::Urgent)
+                .await;
+
+            match select! {
+                event = cons_out1.recv() => event.unwrap(),
+                _ = context.sleep(Duration::from_millis(250)) => {
+                    panic!("expected repeated urgent fetch to retry immediately");
+                },
+            } {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, data);
+                }
+                Event::Failed(key_actual) => {
+                    panic!("urgent fetch failed unexpectedly for {key_actual:?}");
+                }
             }
         });
     }
