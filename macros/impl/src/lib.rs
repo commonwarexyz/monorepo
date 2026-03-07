@@ -158,10 +158,17 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
+/// Input for the `stability_scope!` macro:
+/// `level [, cfg(predicate)] { items... } [else [level] { fallback_items... }]...`
 struct StabilityScopeInput {
     level: StabilityLevel,
     predicate: Option<syn::Meta>,
+    items: Vec<syn::Item>,
+    else_arms: Vec<StabilityScopeElseArm>,
+}
+
+struct StabilityScopeElseArm {
+    level: Option<StabilityLevel>,
     items: Vec<syn::Item>,
 }
 
@@ -193,10 +200,43 @@ impl Parse for StabilityScopeInput {
             items.push(content.parse()?);
         }
 
+        let mut else_arms = Vec::new();
+        let mut saw_catch_all_else = false;
+        while input.peek(Token![else]) {
+            if saw_catch_all_else {
+                return Err(Error::new(
+                    input.span(),
+                    "no `else` arms are allowed after a catch-all `else { ... }` arm",
+                ));
+            }
+
+            input.parse::<Token![else]>()?;
+
+            let level = if input.peek(syn::token::Brace) {
+                saw_catch_all_else = true;
+                None
+            } else {
+                Some(input.parse::<StabilityLevel>()?)
+            };
+
+            let fallback_content;
+            braced!(fallback_content in input);
+            let mut fallback_items = Vec::new();
+            while !fallback_content.is_empty() {
+                fallback_items.push(fallback_content.parse()?);
+            }
+
+            else_arms.push(StabilityScopeElseArm {
+                level,
+                items: fallback_items,
+            });
+        }
+
         Ok(Self {
             level,
             predicate,
             items,
+            else_arms,
         })
     }
 }
@@ -207,11 +247,11 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
         level,
         predicate,
         items,
+        else_arms,
     } = parse_macro_input!(input as StabilityScopeInput);
 
     let exclude_names = exclusion_cfg_names(level.value);
-
-    let cfg_attr = predicate.map_or_else(
+    let cfg_attr = predicate.as_ref().map_or_else(
         || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
         |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
     );
@@ -226,8 +266,55 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let mut previous_level = level.value;
+    let mut expanded_fallback_items = Vec::new();
+
+    for arm in else_arms {
+        let arm_cfg_attr = if let Some(arm_level) = arm.level {
+            if arm_level.value <= previous_level {
+                return Error::new(
+                    Span::call_site(),
+                    "stability_scope! else levels must be strictly increasing",
+                )
+                .to_compile_error()
+                .into();
+            }
+
+            let prev_exclude_names = exclusion_cfg_names(previous_level);
+            let arm_exclude_names = exclusion_cfg_names(arm_level.value);
+            previous_level = arm_level.value;
+
+            predicate.as_ref().map_or_else(
+                || {
+                    quote! {
+                        #[cfg(all(any(#(#prev_exclude_names),*), not(any(#(#arm_exclude_names),*))))]
+                    }
+                },
+                |pred| {
+                    quote! {
+                        #[cfg(all(#pred, any(#(#prev_exclude_names),*), not(any(#(#arm_exclude_names),*))))]
+                    }
+                },
+            )
+        } else {
+            let prev_exclude_names = exclusion_cfg_names(previous_level);
+            predicate.as_ref().map_or_else(
+                || quote! { #[cfg(any(#(#prev_exclude_names),*))] },
+                |pred| quote! { #[cfg(all(#pred, any(#(#prev_exclude_names),*)))] },
+            )
+        };
+
+        expanded_fallback_items.extend(arm.items.into_iter().map(|item| {
+            quote! {
+                #arm_cfg_attr
+                #item
+            }
+        }));
+    }
+
     let expanded = quote! {
         #(#expanded_items)*
+        #(#expanded_fallback_items)*
     };
 
     TokenStream::from(expanded)
