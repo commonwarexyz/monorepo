@@ -2,12 +2,6 @@
 //! the underlying blob which has a page-oriented structure that provides integrity guarantees. The
 //! wrapper also provides read caching managed by a page cache.
 //!
-//! # Immutability
-//!
-//! The wrapper can be created in (or converted to) an immutable state, which will prevent any
-//! modifications while still supporting cached reads. This can be used to reduce its memory
-//! footprint and/or to prevent unintended modifications.
-//!
 //! # Recovery
 //!
 //! On `sync`, this wrapper will durably write buffered data to the underlying blob in pages. All
@@ -16,10 +10,8 @@
 //! written, then the write will overwrite only the checksum with the lesser length value. Should
 //! this write fail, the previously committed page state can still be recovered.
 //!
-//! During non-immutable blob initialization, the wrapper will back up over any page that is not
-//! accompanied by a valid CRC, treating it as the result of an incomplete write that may be
-//! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
-//! validated by a CRC.
+//! During initialization, the wrapper will back up over any page that is not accompanied by a
+//! valid CRC, treating it as the result of an incomplete write that may be invalid.
 
 use super::read::{PageReader, Replay};
 use crate::{
@@ -136,15 +128,12 @@ impl<B: Blob> Append<B> {
             ),
         };
 
-        let mut buffer = Buffer::new(
+        let buffer = Buffer::from(
             blob_state.current_page * cache_ref.page_size(),
+            partial_data.unwrap_or_default(),
             capacity,
             cache_ref.pool().clone(),
         );
-        if let Some(partial_page) = partial_data {
-            let over_capacity = buffer.append(partial_page.as_ref());
-            assert!(!over_capacity);
-        }
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
@@ -152,103 +141,6 @@ impl<B: Blob> Append<B> {
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
-    }
-
-    /// Return a new [Append] wrapper of the provided `blob` that is known to have `blob_size`
-    /// underlying physical bytes, using the provided `cache_ref` for read caching. The wrapper is
-    /// for read-only data, and any append attempts will return error. The provided `capacity` is
-    /// used only if the blob is later turned into a mutable one. Immutable blobs are assumed
-    /// consistent on disk, so any CRC verification failure results in an error without any recovery
-    /// attempt.
-    pub async fn new_immutable(
-        blob: B,
-        blob_size: u64,
-        capacity: usize,
-        cache_ref: CacheRef,
-    ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, blob_size, cache_ref.page_size()).await?;
-        if invalid_data_found {
-            // Invalid data was detected, so this blob is not consistent.
-            return Err(Error::InvalidChecksum);
-        }
-
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
-
-        let (blob_state, partial_data) = match partial_page_state {
-            Some((partial_page, crc_record)) => (
-                BlobState {
-                    blob,
-                    current_page: pages - 1,
-                    partial_page_state: Some(crc_record),
-                },
-                Some(partial_page),
-            ),
-            None => (
-                BlobState {
-                    blob,
-                    current_page: pages,
-                    partial_page_state: None,
-                },
-                None,
-            ),
-        };
-        let mut buffer = Buffer::new(
-            blob_state.current_page * cache_ref.page_size(),
-            capacity,
-            cache_ref.pool().clone(),
-        );
-        if let Some(partial_page) = partial_data {
-            let over_capacity = buffer.append(partial_page.as_ref());
-            assert!(!over_capacity);
-        }
-        buffer.set_immutable(true);
-
-        Ok(Self {
-            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
-            id: cache_ref.next_id(),
-            cache_ref,
-            buffer: Arc::new(AsyncRwLock::new(buffer)),
-        })
-    }
-
-    /// Returns `true` if this blob is in the immutable state.
-    pub async fn is_immutable(&self) -> bool {
-        self.buffer.read().await.is_immutable()
-    }
-
-    /// Convert this blob to the immutable state if it's not already in it.
-    ///
-    /// If there is unwritten data in the buffer, it will be flushed and synced before returning.
-    pub async fn to_immutable(&self) -> Result<(), Error> {
-        // Flush any buffered data. When flush_internal returns, write_at has completed and data
-        // has been written to the underlying blob.
-        let mut buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Ok(());
-        }
-        buf_guard.set_immutable(false);
-        self.flush_internal(buf_guard, true).await?;
-
-        // Compact tip backing after flush to match the post-flush logical view.
-        {
-            let mut buf_guard = self.buffer.write().await;
-            buf_guard.set_immutable(true);
-        }
-
-        // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
-        // event of a crash.
-        let blob_state = self.blob_state.read().await;
-        blob_state.blob.sync().await
-    }
-
-    /// Convert this blob to the mutable state if it's not already in it.
-    pub async fn to_mutable(&self) {
-        let mut buffer = self.buffer.write().await;
-        if !buffer.is_immutable() {
-            return;
-        }
-        buffer.set_mutable();
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
@@ -320,15 +212,8 @@ impl<B: Blob> Append<B> {
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
-    ///
-    /// # Errors
-    ///
-    /// * `Error::ImmutableBlob` - The blob is in the immutable state.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if buffer.is_immutable() {
-            return Err(Error::ImmutableBlob);
-        }
 
         if !buffer.append(buf) {
             return Ok(());
@@ -376,10 +261,17 @@ impl<B: Blob> Append<B> {
         }
 
         // Drain the provided buffer of the full pages that are now cached in the page cache and
-        // will be written to the blob.
-        let bytes_to_drain = buffer.len() - remaining_byte_count;
-        buffer.drop_prefix(bytes_to_drain);
-        buffer.offset += bytes_to_drain as u64;
+        // will be written to the blob. If the tip is fully drained, detach its backing so empty
+        // append buffers don't retain pooled storage.
+        if remaining_byte_count == 0 {
+            let _ = buffer
+                .take()
+                .expect("take must succeed when flush drains all buffered bytes");
+        } else {
+            let bytes_to_drain = buffer.len() - remaining_byte_count;
+            buffer.drop_prefix(bytes_to_drain);
+            buffer.offset += bytes_to_drain as u64;
+        }
         let new_offset = buffer.offset;
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
@@ -743,14 +635,11 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data (without fsync) so the reader sees all written data.
         {
             let buf_guard = self.buffer.write().await;
-            if !buf_guard.is_immutable() {
-                self.flush_internal(buf_guard, true).await?;
-            }
+            self.flush_internal(buf_guard, true).await?;
         }
 
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-
         // Convert buffer size (bytes) to page count
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
         let prefetch_pages = buffer_size.get() / physical_page_size as usize;
         let prefetch_pages = prefetch_pages.max(1); // At least 1 page
         let blob_guard = self.blob_state.read().await;
@@ -792,9 +681,6 @@ impl<B: Blob> Append<B> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Ok(());
-        }
         self.flush_internal(buf_guard, true).await?;
 
         // Sync the underlying blob. We need the blob read lock here since sync() requires access
@@ -839,9 +725,6 @@ impl<B: Blob> Append<B> {
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
-        if buf_guard.is_immutable() {
-            return Err(Error::ImmutableBlob);
-        }
         let mut blob_guard = self.blob_state.write().await;
 
         // Calculate the physical size needed for the new logical size.
@@ -897,10 +780,11 @@ impl<B: Blob> Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{deterministic, BufferPool, BufferPoolConfig, Runner as _, Storage as _};
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
+    use prometheus_client::registry::Registry;
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
@@ -1054,6 +938,51 @@ mod tests {
             // Verify data is still readable after reopen.
             let read_buf = append.read_at(0, 206).await.unwrap().coalesce();
             assert_eq!(read_buf, &expected[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_releases_tip_pool_slot_after_full_drain() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut registry = Registry::default();
+            let pool = BufferPool::new(
+                BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(2)),
+                &mut registry,
+            );
+            let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"release_tip_backing")
+                .await
+                .unwrap();
+            assert_eq!(blob_size, 0);
+
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append
+                .append(&vec![7; PAGE_SIZE.get() as usize])
+                .await
+                .unwrap();
+
+            // One pooled slot backs the page cache and one backs the mutable tip.
+            assert!(
+                matches!(
+                    pool.try_alloc(BUFFER_SIZE),
+                    Err(crate::iobuf::PoolError::Exhausted)
+                ),
+                "full-page tip should occupy the remaining pooled slot before sync"
+            );
+
+            append.sync().await.unwrap();
+
+            // After a full drain, the tip should no longer pin that slot.
+            assert!(
+                pool.try_alloc(BUFFER_SIZE).is_ok(),
+                "sync should release pooled backing when no partial tail remains"
+            );
         });
     }
 
@@ -1977,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn test_immutable_blob_rejects_append_and_resize() {
+    fn test_reopen_partial_tail_append_and_resize() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
@@ -1987,7 +1916,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
 
             let (blob, size) = context
-                .open("test_partition", b"immutable_test")
+                .open("test_partition", b"partial_tail_test")
                 .await
                 .unwrap();
 
@@ -1999,38 +1928,24 @@ mod tests {
             append.append(&[1, 2, 3, 4, 5]).await.unwrap();
             append.sync().await.unwrap();
             assert_eq!(append.size().await, 5);
+            drop(append);
 
-            // Convert to immutable.
-            append.to_immutable().await.unwrap();
-            assert!(append.is_immutable().await);
+            let (blob, size) = context
+                .open("test_partition", b"partial_tail_test")
+                .await
+                .unwrap();
 
-            // Verify append() returns ImmutableBlob error.
-            let result = append.append(&[6, 7, 8]).await;
-            assert!(
-                matches!(result, Err(crate::Error::ImmutableBlob)),
-                "Expected ImmutableBlob error from append(), got: {:?}",
-                result
-            );
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 5);
 
-            // Verify resize() returns ImmutableBlob error.
-            let result = append.resize(100).await;
-            assert!(
-                matches!(result, Err(crate::Error::ImmutableBlob)),
-                "Expected ImmutableBlob error from resize(), got: {:?}",
-                result
-            );
+            append.append(&[6, 7, 8]).await.unwrap();
+            append.resize(6).await.unwrap();
+            append.sync().await.unwrap();
 
-            // Verify sync() returns Ok.
-            let result = append.sync().await;
-            assert!(
-                result.is_ok(),
-                "sync() on immutable blob should return Ok, got: {:?}",
-                result
-            );
-
-            // Verify data is still readable.
-            let data: Vec<u8> = append.read_at(0, 5).await.unwrap().coalesce().into();
-            assert_eq!(data, vec![1, 2, 3, 4, 5]);
+            let data: Vec<u8> = append.read_at(0, 6).await.unwrap().coalesce().into();
+            assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
         });
     }
 
@@ -2094,7 +2009,7 @@ mod tests {
                     );
                 }
                 Err(e) => {
-                    // Error is also acceptable (for immutable blobs)
+                    // Error is also acceptable
                     assert!(
                         matches!(e, crate::Error::InvalidChecksum),
                         "Expected InvalidChecksum error, got: {:?}",

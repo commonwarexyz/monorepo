@@ -7,12 +7,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 /// # Allocation Semantics
 ///
-/// - [Self::new] allocates tip backing eagerly at `capacity`.
-/// - Most writes reuse that backing, copy-on-write allocation only occurs when buffered data is
-///   shared (for example, after handing out immutable views) or a merge needs more capacity.
+/// - [Self::new] starts with a detached tip buffer and allocates backing on first buffered write.
+/// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
+///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
-/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) drain
-///   logical bytes to the blob while keeping tip backing available for reuse.
+/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
+///   bytes to the blob and leave the tip detached until the next buffered write.
 ///
 /// # Example
 ///
@@ -83,10 +83,6 @@ impl<B: Blob> Write<B> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        if len == 0 {
-            return Ok(IoBufs::default());
-        }
-
         // Ensure the read doesn't overflow.
         let end_offset = offset
             .checked_add(len as u64)
@@ -98,6 +94,12 @@ impl<B: Blob> Write<B> {
         // If the data required is beyond the size of the blob, return an error.
         if end_offset > buffer.size() {
             return Err(Error::BlobInsufficientLength);
+        }
+
+        // Keep the zero-length fast path after the bounds check so offset > size still preserves
+        // the BlobInsufficientLength contract.
+        if len == 0 {
+            return Ok(IoBufs::default());
         }
 
         // Entirely in buffered tip.
