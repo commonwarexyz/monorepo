@@ -96,8 +96,10 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Read { pos } => {
-                    if *pos >= oldest_retained_pos && *pos < journal_size {
-                        journal.reader().await.read(*pos).await.unwrap();
+                    let reader = journal.reader().await;
+                    let bounds = reader.bounds();
+                    if bounds.contains(pos) {
+                        reader.read(*pos).await.unwrap();
                     }
                 }
 
@@ -115,6 +117,7 @@ fn fuzz(input: FuzzInput) {
                         journal.rewind(*size).await.unwrap();
                         journal.sync().await.unwrap();
                         journal_size = *size;
+                        oldest_retained_pos = journal.reader().await.bounds().start;
                     }
                 }
 
@@ -125,24 +128,17 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Prune { min_pos } => {
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
-                        oldest_retained_pos = oldest_retained_pos.max(*min_pos);
+                        oldest_retained_pos = journal.reader().await.bounds().start;
                     }
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    // Ensure start_pos is within valid range [oldest_retained_pos, journal_size]
-                    let start_pos = if journal_size > oldest_retained_pos {
-                        oldest_retained_pos
-                            + (*start_pos % (journal_size - oldest_retained_pos + 1))
-                    } else {
-                        oldest_retained_pos
-                    };
-                    match journal
-                        .reader()
-                        .await
-                        .replay(NZUsize!(*buffer), start_pos)
-                        .await
-                    {
+                    let reader = journal.reader().await;
+                    let bounds = reader.bounds();
+                    let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
+                    let replay = reader.replay(NZUsize!(*buffer), start_pos).await;
+
+                    match replay {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -172,8 +168,7 @@ fn fuzz(input: FuzzInput) {
                     restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size().await;
-                    let bounds = journal.reader().await.bounds();
-                    oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
+                    oldest_retained_pos = journal.reader().await.bounds().start;
                 }
 
                 JournalOperation::Destroy => {
