@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_sync_releases_tip_backing_when_no_partial_tail_remains() {
+    fn test_sync_releases_tip_pool_slot_after_full_drain() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let mut registry = Registry::default();
