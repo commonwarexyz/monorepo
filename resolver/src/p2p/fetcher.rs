@@ -68,6 +68,8 @@ enum UrgentTrigger {
     Immediate,
     /// Schedule escalation at the given rate-limit expiry time.
     RateLimited(SystemTime),
+    /// Schedule escalation after transient send failures.
+    Retry(SystemTime),
 }
 
 /// Configuration for the fetcher.
@@ -121,9 +123,9 @@ pub struct Config<P: PublicKey> {
 /// Peers whose responses arrive after the key is canceled (e.g. because a faster peer already
 /// provided valid data) are silently dropped without performance updates.
 ///
-/// When an urgent fan-out is partially blocked by outbound rate limits, the fetcher schedules a
-/// retry via [`escalation_pending`](Self::escalation_pending) for when the earliest rate limit
-/// expires.
+/// When an urgent fan-out cannot reach every eligible peer immediately, the fetcher schedules a
+/// retry via [`escalation_pending`](Self::escalation_pending) at the earliest rate-limit expiry
+/// or after [`retry_timeout`](Self::retry_timeout) for transient send failures.
 pub struct Fetcher<E, P, Key, NetS>
 where
     E: Clock + Rng + Metrics,
@@ -171,7 +173,7 @@ where
     /// attempted due snapshot, so later pending deadlines cannot be starved.
     waiter: Option<SystemTime>,
 
-    /// Urgent fetches that should be retried when additional peers exit rate limiting.
+    /// Urgent fetches that should be retried after escalation cannot reach every peer.
     ///
     /// This can apply to keys that are still active or have timed out into pending.
     escalation_pending: PrioritySet<Key, SystemTime>,
@@ -444,6 +446,9 @@ where
             UrgentTrigger::RateLimited(deadline) => {
                 self.escalation_pending.put(key.clone(), deadline);
             }
+            UrgentTrigger::Retry(deadline) => {
+                self.escalation_pending.put(key.clone(), deadline);
+            }
         }
     }
 
@@ -452,11 +457,11 @@ where
     /// If no eligible peers exist, we clear the escalation and wait for an
     /// external topology or target change to wake the urgent key.
     fn sync_urgent_after_pending_attempt(&mut self, key: &Key, attempt: &PendingAttempt) {
-        let trigger = if let Some(not_until) = attempt.earliest_rate_limit {
-            UrgentTrigger::RateLimited(not_until)
-        } else {
-            UrgentTrigger::Clear
-        };
+        let trigger = attempt
+            .earliest_rate_limit
+            .map_or(UrgentTrigger::Clear, |not_until| {
+                UrgentTrigger::RateLimited(not_until)
+            });
         self.sync_urgent_trigger(key, trigger);
     }
 
@@ -519,11 +524,13 @@ where
         };
         let mut sent_now = Vec::new();
         let mut earliest_rate_limit: Option<SystemTime> = None;
+        let mut found_additional_peer = false;
 
         for peer in peers {
             if sent_already.contains(&peer) {
                 continue;
             }
+            found_additional_peer = true;
 
             let checked = match sender.check(Recipients::One(peer.clone())).await {
                 Ok(checked) => checked,
@@ -556,6 +563,9 @@ where
 
         if let Some(not_until) = earliest_rate_limit {
             self.sync_urgent_trigger(key, UrgentTrigger::RateLimited(not_until));
+        } else if sent_now.is_empty() && found_additional_peer {
+            let deadline = self.context.current() + self.retry_timeout;
+            self.sync_urgent_trigger(key, UrgentTrigger::Retry(deadline));
         }
 
         if sent_now.is_empty() {
@@ -2349,6 +2359,46 @@ mod tests {
     }
 
     #[test]
+    fn test_escalate_schedules_retry_when_additional_peers_send_fail() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.clone());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
+            let me = PrivateKey::from_seed(0).public_key();
+            let original_peer = PrivateKey::from_seed(1).public_key();
+            let additional_peer = PrivateKey::from_seed(2).public_key();
+            let key = MockKey(111);
+            let id = 71;
+            let now = context.current();
+
+            fetcher.reconcile(&[me, original_peer.clone(), additional_peer]);
+            fetcher.active.put(id, now + Duration::from_secs(5));
+            fetcher.requests.insert(
+                id,
+                ActiveRequest {
+                    key: key.clone(),
+                    peers: HashMap::from([(original_peer, now)]),
+                },
+            );
+            fetcher.key_to_id.insert(key.clone(), id);
+            fetcher.mark_urgent(key.clone());
+
+            fetcher.escalate(&key, &mut sender).await;
+
+            let deadline = fetcher
+                .get_pending_deadline()
+                .expect("expected urgent escalation retry wakeup after send failure");
+            assert!(
+                deadline <= context.current() + fetcher.retry_timeout,
+                "urgent escalation should schedule a retry before waiting for full active timeout"
+            );
+        });
+    }
+
+    #[test]
     fn test_waiter_does_not_starve_later_pending_deadlines() {
         let runner = Runner::default();
         runner.start(|context| async move {
@@ -2590,9 +2640,9 @@ mod tests {
 
             fetcher.reconcile(&[me, first_peer.clone(), second_peer.clone()]);
 
-            let deadline = fetcher
-                .get_pending_deadline()
-                .expect("active urgent fetch should schedule immediate escalation on peer-set expansion");
+            let deadline = fetcher.get_pending_deadline().expect(
+                "active urgent fetch should schedule immediate escalation on peer-set expansion",
+            );
             assert!(deadline <= context.current());
 
             fetcher.fetch(&mut sender).await;
