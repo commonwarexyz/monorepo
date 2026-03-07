@@ -633,8 +633,10 @@ impl<B: Blob> Append<B> {
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
-        let buf_guard = self.buffer.write().await;
-        self.flush_internal(buf_guard, true).await?;
+        {
+            let buf_guard = self.buffer.write().await;
+            self.flush_internal(buf_guard, true).await?;
+        }
 
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
