@@ -92,11 +92,7 @@ mod tests {
             Ok(out)
         }
 
-        async fn write_at(
-            &self,
-            offset: u64,
-            buf: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
             let buf = buf.into().coalesce();
             let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
             let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
