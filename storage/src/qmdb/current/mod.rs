@@ -1048,6 +1048,59 @@ pub mod tests {
         });
     }
 
+    /// Run `test_stale_changeset_side_effect_free` against a database factory.
+    ///
+    /// The stale batch must be rejected without mutating the committed state.
+    pub fn test_stale_changeset_side_effect_free<C, F, Fut>(mut open_db: F)
+    where
+        C: DbAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db: C = open_db(context.with_label("db"), "stale-side-effect-free".into()).await;
+
+            let key1 = <C::Key as TestKey>::from_seed(1);
+            let key2 = <C::Key as TestKey>::from_seed(2);
+            let value1 = <<C as LogStore>::Value as TestValue>::from_seed(10);
+            let value2 = <<C as LogStore>::Value as TestValue>::from_seed(20);
+
+            let changeset_a = {
+                let mut batch = db.new_batch();
+                batch.write(key1, Some(value1.clone()));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let changeset_b = {
+                let mut batch = db.new_batch();
+                batch.write(key2, Some(value2));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            db.apply_batch(changeset_a).await.unwrap();
+            let expected_root = db.root();
+            let expected_bounds = db.bounds().await;
+            let expected_metadata = db.get_metadata().await.unwrap();
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
+            assert_eq!(db.get(&key2).await.unwrap(), None);
+
+            let result = db.apply_batch(changeset_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset error, got {result:?}"
+            );
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.bounds().await, expected_bounds);
+            assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            assert_eq!(db.get(&key2).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{test_group, test_traced};
@@ -1206,6 +1259,14 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
             for_all_variants!(simple: test_sync_persists_bitmap_pruning_boundary);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_stale_changeset_side_effect_free() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_stale_changeset_side_effect_free);
         });
     }
 
