@@ -140,17 +140,16 @@ impl Buffer {
             return None;
         }
 
-        let len = self.len;
+        // Clear the logical length up front so the tip is empty even if the returned buffer
+        // still aliases the old backing.
+        let len = std::mem::take(&mut self.len);
         let offset = self.offset;
-        let data = std::mem::take(&mut self.data);
-        let buf = if len == data.len() {
-            data
-        } else {
-            data.slice(..len)
-        };
-        self.len = 0;
         self.offset += len as u64;
-        Some((buf, offset))
+
+        // Hand the buffered prefix to the caller without copying. If `data` retained extra
+        // capacity or trailing bytes, `split_to` leaves them behind in the discarded remainder.
+        let mut data = std::mem::take(&mut self.data);
+        Some((data.split_to(len), offset))
     }
 
     /// Returns a mutable tip buffer with capacity for at least `needed` bytes.
