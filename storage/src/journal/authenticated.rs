@@ -335,6 +335,15 @@ where
     /// same parent for speculative execution, but only one may be applied. Applying
     /// a stale changeset returns an error.
     pub async fn apply_batch(&mut self, batch: Changeset<H::Digest, C::Item>) -> Result<(), Error> {
+        let actual = self.mmr.size();
+        if batch.changeset.base_size != actual {
+            return Err(MmrError::StaleChangeset {
+                expected: batch.changeset.base_size,
+                actual,
+            }
+            .into());
+        }
+
         for items in &batch.items {
             for item in items.iter() {
                 self.journal.append(item).await?;
@@ -1839,21 +1848,25 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_empty_journal(context, "stale-sibling").await;
+            let op_a = create_operation(1);
+            let op_b = create_operation(2);
 
             // Create two batches from the same base.
             let finalized_a = {
                 let mut batch = journal.new_batch();
-                batch.add(create_operation(1));
+                batch.add(op_a.clone());
                 batch.merkleize().finalize()
             };
             let finalized_b = {
                 let mut batch = journal.new_batch();
-                batch.add(create_operation(2));
+                batch.add(op_b);
                 batch.merkleize().finalize()
             };
 
             // Apply A -- should succeed.
             journal.apply_batch(finalized_a).await.unwrap();
+            let expected_root = journal.root();
+            let expected_size = journal.size().await;
 
             // Apply B -- should fail (stale).
             let result = journal.apply_batch(finalized_b).await;
@@ -1864,6 +1877,12 @@ mod tests {
                 ),
                 "expected StaleChangeset, got {result:?}"
             );
+
+            // The stale batch must not mutate the journal or desync it from the MMR.
+            assert_eq!(journal.root(), expected_root);
+            assert_eq!(journal.size().await, expected_size);
+            let (_, ops) = journal.proof(Location::new(0), NZU64!(1)).await.unwrap();
+            assert_eq!(ops, vec![op_a]);
         });
     }
 
