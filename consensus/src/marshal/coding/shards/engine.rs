@@ -1088,24 +1088,29 @@ where
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
+        let index = shard.index;
+
+        // Store data for equivocation detection first (move), then clone
+        // once for check. This avoids a second clone compared to cloning
+        // for both check and storage.
+        self.common.received_shards.insert(index, shard.data);
+        let data = self.common.received_shards.get(&index).unwrap();
         let Ok(checked) = C::check(
             &commitment.config(),
             &commitment.root(),
-            shard.index,
-            shard.data.clone(),
+            index,
+            data.clone(),
         ) else {
+            self.common.received_shards.remove(&index);
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
         };
 
-        self.common
-            .received_shards
-            .insert(shard.index, shard.data.clone());
-        self.common.contributed.set(u64::from(shard.index), true);
+        self.common.contributed.set(u64::from(index), true);
         self.common.checked_shards.push(checked);
         self.common.own_shard_verified = true;
         self.common.pending_action = Some(if is_participant {
-            ValidatedShardAction::Broadcast(Shard::new(commitment, shard.index, shard.data))
+            ValidatedShardAction::Broadcast(Shard::new(commitment, index, data.clone()))
         } else {
             ValidatedShardAction::NotifyOnly
         });
@@ -1284,7 +1289,7 @@ where
     /// - Exact duplicate of a previously received shard for the same index.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Shards that arrive after the state has transitioned to [`Ready`]
+    /// - Shards that arrive after the state has transitioned to [`ReconstructionState::Ready`]
     ///   (i.e., batch validation has already passed).
     /// - When the leader is not yet known, shards are buffered at the
     ///   engine level in bounded per-peer queues until
