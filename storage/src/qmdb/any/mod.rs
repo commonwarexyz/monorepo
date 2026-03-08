@@ -44,7 +44,7 @@ use crate::{
             variable::{Config as VConfig, Journal as VJournal},
         },
     },
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::operation::{Operation, Update},
         operation::{Committable, Key},
@@ -181,7 +181,7 @@ where
         page_cache: cfg.page_cache,
     };
 
-    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
+    let log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -192,7 +192,8 @@ where
     if log.size().await == 0 {
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
+        let mut hasher = StandardHasher::<H>::new();
+        log.append(&commit_floor, &mut hasher).await?;
         log.sync().await?;
     }
 
@@ -238,7 +239,7 @@ where
         write_buffer: cfg.log_write_buffer,
     };
 
-    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
+    let log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
@@ -249,7 +250,8 @@ where
     if log.size().await == 0 {
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
+        let mut hasher = StandardHasher::<H>::new();
+        log.append(&commit_floor, &mut hasher).await?;
         log.sync().await?;
     }
 

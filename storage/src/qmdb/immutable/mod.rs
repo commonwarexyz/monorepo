@@ -23,7 +23,7 @@ use crate::{
     kv,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Proof,
+        Location, Proof, StandardHasher,
     },
     qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
@@ -267,7 +267,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             write_buffer: cfg.log_write_buffer,
         };
 
-        let mut journal = Journal::new(
+        let journal = Journal::new(
             context.clone(),
             mmr_cfg,
             journal_cfg,
@@ -277,7 +277,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         if journal.size().await == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            journal.append(&Operation::Commit(None)).await?;
+            let mut hasher = StandardHasher::<H>::new();
+            journal
+                .append(&Operation::Commit(None), &mut hasher)
+                .await?;
             journal.sync().await?;
         }
 
@@ -1482,8 +1485,8 @@ pub(super) mod test {
                 batch.set(key3, vec![3]);
                 batch.merkleize(None).finalize()
             };
-
-            // Apply child A.
+            // Apply child A directly from the original base. Child B should
+            // then be stale because both children flatten the same parent.
             db.apply_batch(child_a).await.unwrap();
 
             // Child B is stale.
@@ -1516,12 +1519,11 @@ pub(super) mod test {
             child.set(key2, vec![2]);
             let child_changeset = child.merkleize(None).finalize();
 
-            // Apply parent first.
+            // Apply parent first. Child is now stale because its finalized
+            // changeset already includes the parent segment.
             let parent_changeset = parent_m.finalize();
             db.apply_batch(parent_changeset).await.unwrap();
 
-            // Child is stale because it expected to be applied on top of the
-            // pre-parent DB state.
             let result = db.apply_batch(child_changeset).await;
             assert!(
                 matches!(result, Err(Error::StaleChangeset { .. })),
@@ -1553,10 +1555,9 @@ pub(super) mod test {
             let child_changeset = child.merkleize(None).finalize();
             let parent_changeset = parent_m.finalize();
 
-            // Apply child first (it carries all parent ops too).
+            // Apply child first: parent is now stale because the child already
+            // flattened the parent segment.
             db.apply_batch(child_changeset).await.unwrap();
-
-            // Parent is stale.
             let result = db.apply_batch(parent_changeset).await;
             assert!(
                 matches!(result, Err(Error::StaleChangeset { .. })),

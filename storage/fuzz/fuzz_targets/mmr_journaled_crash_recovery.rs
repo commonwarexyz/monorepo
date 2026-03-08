@@ -277,7 +277,7 @@ fn fuzz(input: FuzzInput) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             ctx.with_label("recovered"),
             &mut hasher,
             mmr_config(

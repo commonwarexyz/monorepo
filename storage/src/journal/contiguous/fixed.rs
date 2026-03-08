@@ -839,7 +839,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
 }
 
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A> {
-    async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
+    async fn append(&self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
 

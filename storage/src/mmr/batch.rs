@@ -50,17 +50,74 @@
 //! // Apply the changeset back to the base MMR.
 //! mmr.apply(changeset).unwrap();
 //! ```
+//!
+//! The simplest workflow is to finalize a merkleized batch and apply it directly to the live MMR:
+//!
+//! ```ignore
+//! let batch = batch.merkleize(&mut hasher);
+//! let changeset = batch.finalize();
+//! mmr.apply(changeset).unwrap();
+//! ```
+//!
+//! [`MerkleizedBatch::finalize`] is the normal API. It flattens the full retained batch chain and
+//! produces a changeset relative to the current live MMR.
+//!
+//! [`MerkleizedBatch::finalize_incremental`] is the advanced form. It emits only this batch's delta
+//! relative to its immediate parent. This is useful for a single-writer pipeline that keeps
+//! building the next batch while the previous batch is being applied and, at higher layers,
+//! committed through a potentially slow `fsync`.
+//!
+//! A single-writer pipelined flow looks like:
+//!
+//! ```ignore
+//! let parent = batch.merkleize(&mut hasher);
+//! let parent_changeset = parent.finalize_incremental();
+//!
+//! // Start the child from the retained merkleized parent.
+//! let mut child = parent.new_batch();
+//! child.add(&mut hasher, b"leaf-2");
+//!
+//! // While the parent is being applied, keep building the child.
+//! mmr.apply(parent_changeset).unwrap();
+//!
+//! // Once the parent is live, merkleize and rebase the child to drop one retained ancestor.
+//! let child = child.merkleize(&mut hasher);
+//! let child = child.rebase(&mmr).unwrap();
+//! let child_changeset = child.finalize_incremental();
+//!
+//! // Apply just the child's delta.
+//! mmr.apply(child_changeset).unwrap();
+//! ```
+//!
+//! This flow assumes a single writer. If some other writer advances the live MMR before rebasing
+//! the child, rebasing can fail.
+//!
+//! This example is only one stage ahead: while one finalized batch is being applied, work can
+//! proceed on at most one child batch derived from that parent. To move further ahead without the
+//! retained chain growing indefinitely, the child should be rebased onto the now-live parent
+//! before spawning the next child.
+//!
+//! Once the oldest prepared parent has been applied, descendants can be compacted back onto the
+//! live MMR with [`MerkleizedBatch::rebase`]. This drops one speculative ancestor level without
+//! copying the batch-local delta.
+//!
+//! Manual rebasing is only needed to bound retained chain depth. If you never rebase, speculative
+//! reads continue to work, but they keep traversing the retained parent chain.
+//!
+//! Rebasing is valid only once the live parent matches the frozen parent state captured by the
+//! batch. Calling [`MerkleizedBatch::rebase`] too early, or on the wrong live MMR, returns
+//! [`Error::RebaseParentMismatch`] or [`Error::RebaseParentRootMismatch`].
 
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-    mem::{Clean, Dirty, State},
+    mem::Dirty,
     read::{BatchChainInfo, Readable},
     Error, Location, Position,
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use commonware_cryptography::Digest;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -69,41 +126,63 @@ cfg_if::cfg_if! {
     }
 }
 
-/// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
+/// A mutable batch of mutations against a parent MMR, which may itself be a
+/// merkleized batch.
+pub struct Batch<'a, D: Digest, P: Readable<D>> {
     /// The parent MMR.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
     appended: Vec<D>,
     /// Overwritten nodes at positions < parent.size(). Shadows parent data; later writes win.
     overwrites: BTreeMap<Position, D>,
-    /// Type-state: Dirty (mutable, no root) or `Clean<D>` (immutable, has root).
-    state: S,
+    /// Non-leaf nodes whose digests must be recomputed before merkleization.
+    state: Dirty,
     /// Thread pool for parallel merkleization.
     #[cfg(feature = "std")]
     pool: Option<ThreadPool>,
 }
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
+pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P>;
 
-/// A batch whose root digest has been computed.
-pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
+/// An immutable merkleized batch that can be retained as a speculative parent
+/// while its finalized changeset is being applied.
+pub struct MerkleizedBatch<'a, D: Digest, P: Readable<D>> {
+    /// The parent MMR.
+    parent: &'a P,
+    /// The parent MMR root when this batch was merkleized.
+    parent_root: D,
+    /// The parent MMR size when this batch was merkleized.
+    parent_size: Position,
+    /// The parent pruning boundary when this batch was merkleized.
+    parent_pruned_to_pos: Position,
+    /// The original base size for the entire batch chain.
+    parent_base_size: Position,
+    /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
+    appended: Arc<Vec<D>>,
+    /// Overwritten nodes at positions < parent.size(). Shadows parent data; later writes win.
+    overwrites: Arc<BTreeMap<Position, D>>,
+    /// The root digest of the MMR after this batch is applied.
+    root: D,
+    /// Thread pool for parallel merkleization.
+    #[cfg(feature = "std")]
+    pool: Option<ThreadPool>,
+}
 
 /// Owned set of changes against a base MMR.
 /// Apply via [`super::mem::Mmr::apply`].
 pub struct Changeset<D: Digest> {
     /// Nodes appended after the base MMR's existing nodes.
-    pub(crate) appended: Vec<D>,
+    pub(crate) appended: Arc<Vec<D>>,
     /// Overwritten nodes within the base MMR's range.
-    pub(crate) overwrites: BTreeMap<Position, D>,
+    pub(crate) overwrites: Arc<BTreeMap<Position, D>>,
     /// Root digest after applying the changeset.
     pub(crate) root: D,
     /// Size of the base MMR when this changeset was created.
     pub(crate) base_size: Position,
 }
 
-impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<D>> Batch<'a, D, P> {
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -254,7 +333,10 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     /// Consume this batch and produce an immutable [MerkleizedBatch] with computed root.
-    pub fn merkleize(mut self, hasher: &mut impl Hasher<Digest = D>) -> MerkleizedBatch<'a, D, P> {
+    pub fn merkleize(mut self, hasher: &mut impl Hasher<Digest = D>) -> MerkleizedBatch<'a, D, P>
+    where
+        P: BatchChainInfo<D>,
+    {
         let dirty = self.state.take_sorted_by_height();
 
         #[cfg(feature = "std")]
@@ -281,11 +363,15 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        Batch {
+        MerkleizedBatch {
             parent: self.parent,
-            appended: self.appended,
-            overwrites: self.overwrites,
-            state: Clean { root },
+            parent_root: self.parent.root(),
+            parent_size: self.parent.size(),
+            parent_pruned_to_pos: self.parent.pruned_to_pos(),
+            parent_base_size: self.parent.base_size(),
+            appended: Arc::new(self.appended),
+            overwrites: Arc::new(self.overwrites),
+            root,
             #[cfg(feature = "std")]
             pool: self.pool,
         }
@@ -399,6 +485,28 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
+impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
+    /// The total number of nodes visible through this batch.
+    pub(crate) fn size(&self) -> Position {
+        Position::new(*self.parent_size + self.appended.len() as u64)
+    }
+
+    /// Resolve a node: overwrites -> appended -> parent.
+    fn get_node(&self, pos: Position) -> Option<D> {
+        if pos >= self.size() {
+            return None;
+        }
+        if let Some(d) = self.overwrites.get(&pos) {
+            return Some(*d);
+        }
+        if pos >= self.parent_size {
+            let index = (*pos - *self.parent_size) as usize;
+            return self.appended.get(index).copied();
+        }
+        self.parent.get_node(pos)
+    }
+}
+
 impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
     fn size(&self) -> Position {
         self.size()
@@ -409,11 +517,11 @@ impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
     }
 
     fn root(&self) -> D {
-        self.state.root
+        self.root
     }
 
     fn pruned_to_pos(&self) -> Position {
-        self.parent.pruned_to_pos()
+        self.parent_pruned_to_pos
     }
 }
 
@@ -421,13 +529,13 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
     for MerkleizedBatch<'a, D, P>
 {
     fn base_size(&self) -> Position {
-        self.parent.base_size()
+        self.parent_base_size
     }
 
     fn collect_overwrites(&self, into: &mut BTreeMap<Position, D>) {
         self.parent.collect_overwrites(into);
-        let base_size = self.parent.base_size();
-        for (&pos, &digest) in &self.overwrites {
+        let base_size = self.parent_base_size;
+        for (&pos, &digest) in self.overwrites.iter() {
             if pos < base_size {
                 into.insert(pos, digest);
             }
@@ -456,12 +564,54 @@ impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
         batch
     }
 
+    /// Rebase this batch onto an equivalent live parent after that parent has
+    /// been applied, dropping one speculative ancestor from the read-through
+    /// chain.
+    pub fn rebase<'b, Q>(&self, parent: &'b Q) -> Result<MerkleizedBatch<'b, D, Q>, Error>
+    where
+        Q: Readable<D> + BatchChainInfo<D>,
+    {
+        let actual_size = parent.size();
+        let actual_pruned_to_pos = parent.pruned_to_pos();
+        if actual_size != self.parent_size || actual_pruned_to_pos != self.parent_pruned_to_pos {
+            return Err(Error::RebaseParentMismatch {
+                expected_size: self.parent_size,
+                expected_pruned_to_pos: self.parent_pruned_to_pos,
+                actual_size,
+                actual_pruned_to_pos,
+            });
+        }
+        let actual_root = parent.root();
+        if actual_root != self.parent_root {
+            return Err(Error::RebaseParentRootMismatch);
+        }
+
+        Ok(MerkleizedBatch {
+            parent,
+            parent_root: actual_root,
+            parent_size: actual_size,
+            parent_pruned_to_pos: actual_pruned_to_pos,
+            parent_base_size: parent.base_size(),
+            appended: self.appended.clone(),
+            overwrites: self.overwrites.clone(),
+            root: self.root,
+            #[cfg(feature = "std")]
+            pool: self.pool.clone(),
+        })
+    }
+
     /// Convert back to a dirty batch for further mutations.
     pub fn into_dirty(self) -> UnmerkleizedBatch<'a, D, P> {
         Batch {
             parent: self.parent,
-            appended: self.appended,
-            overwrites: self.overwrites,
+            appended: match Arc::try_unwrap(self.appended) {
+                Ok(appended) => appended,
+                Err(appended) => (*appended).clone(),
+            },
+            overwrites: match Arc::try_unwrap(self.overwrites) {
+                Ok(overwrites) => overwrites,
+                Err(overwrites) => (*overwrites).clone(),
+            },
             state: Dirty::default(),
             #[cfg(feature = "std")]
             pool: self.pool,
@@ -470,28 +620,40 @@ impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
 }
 
 impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> MerkleizedBatch<'a, D, P> {
-    /// Flatten this batch chain into a single [`Changeset`] relative to the
-    /// ultimate base MMR.
-    pub fn finalize(self) -> Changeset<D> {
-        let base_size = self.parent.base_size();
-        let effective = self.size();
-
-        // Resolve nodes at [base_size, effective).
-        let mut appended = Vec::with_capacity((*effective - *base_size) as usize);
-        for i in *base_size..*effective {
-            appended.push(self.get_node(Position::new(i)).expect("node in range"));
-        }
-
-        // Collect overwrites from entire chain, filtered to positions < base_size.
+    /// Finalize this batch into a [`Changeset`] relative to the base of the
+    /// entire retained batch chain.
+    pub fn finalize(&self) -> Changeset<D> {
+        let base_size = self.base_size();
         let mut overwrites = BTreeMap::new();
         self.collect_overwrites(&mut overwrites);
-        overwrites.retain(|&pos, _| pos < base_size);
+
+        let mut appended = Vec::with_capacity((*self.size() - *base_size) as usize);
+        for pos in *base_size..*self.size() {
+            appended.push(
+                self.get_node(Position::new(pos))
+                    .expect("flattened appended node missing"),
+            );
+        }
 
         Changeset {
-            appended,
-            overwrites,
-            root: self.state.root,
+            appended: Arc::new(appended),
+            overwrites: Arc::new(overwrites),
+            root: self.root,
             base_size,
+        }
+    }
+}
+
+impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
+    /// Finalize this batch into a [`Changeset`] relative to its immediate
+    /// parent. This is the form used with [`Self::rebase`] for pipelined
+    /// speculative execution.
+    pub fn finalize_incremental(&self) -> Changeset<D> {
+        Changeset {
+            appended: self.appended.clone(),
+            overwrites: self.overwrites.clone(),
+            root: self.root,
+            base_size: self.parent_size,
         }
     }
 }
@@ -709,9 +871,9 @@ mod tests {
         });
     }
 
-    /// Base <- A <- B. B.finalize() captures both A and B changes. Apply to base, verify.
+    /// Base <- A <- B. Apply A, then B, and verify the final root and nodes.
     #[test]
-    fn test_fork_of_fork_flattened_changeset() {
+    fn test_fork_of_fork_incremental_changesets() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -734,11 +896,12 @@ mod tests {
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);
+            let a_changeset = merkleized_a.finalize_incremental();
             let b_root = merkleized_b.root();
+            let b_changeset = merkleized_b.finalize_incremental();
 
-            let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
-            base.apply(changeset).unwrap();
+            base.apply(a_changeset).unwrap();
+            base.apply(b_changeset).unwrap();
 
             assert_eq!(*base.root(), b_root);
 
@@ -752,6 +915,139 @@ mod tests {
                     "node mismatch at pos {pos}"
                 );
             }
+        });
+    }
+
+    /// Finalizing a merkleized batch leaves it available as a speculative
+    /// parent for further branching.
+    #[test]
+    fn test_finalize_leaves_merkleized_batch_available_for_children() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let base = build_reference(&mut hasher, 50);
+
+            let parent = {
+                let mut batch = UnmerkleizedBatch::new(&base);
+                for i in 50u64..60 {
+                    hasher.inner().update(&i.to_be_bytes());
+                    let element = hasher.inner().finalize();
+                    batch.add(&mut hasher, &element);
+                }
+                batch.merkleize(&mut hasher)
+            };
+            let parent_finalized = parent.finalize_incremental();
+            assert_eq!(parent_finalized.base_size, base.size());
+
+            let child = {
+                let mut batch = parent.new_batch();
+                for i in 60u64..70 {
+                    hasher.inner().update(&i.to_be_bytes());
+                    let element = hasher.inner().finalize();
+                    batch.add(&mut hasher, &element);
+                }
+                batch.merkleize(&mut hasher)
+            };
+            let child_root = child.root();
+            let child_finalized = child.finalize_incremental();
+            assert_eq!(child_finalized.base_size, parent.size());
+            assert_eq!(
+                Position::new(*child_finalized.base_size + child_finalized.appended.len() as u64),
+                build_reference(&mut hasher, 70).size(),
+            );
+            assert_eq!(child_root, *build_reference(&mut hasher, 70).root());
+        });
+    }
+
+    /// After the parent is applied, a child batch can be rebased onto the live
+    /// MMR so future descendants no longer depend on the old speculative parent.
+    #[test]
+    fn test_rebase_compacts_one_parent_level() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let base = build_reference(&mut hasher, 50);
+            let mut live_after_parent = base.clone();
+
+            let parent = {
+                let mut batch = UnmerkleizedBatch::new(&base);
+                for i in 50u64..60 {
+                    hasher.inner().update(&i.to_be_bytes());
+                    let element = hasher.inner().finalize();
+                    batch.add(&mut hasher, &element);
+                }
+                batch.merkleize(&mut hasher)
+            };
+            let parent_finalized = parent.finalize_incremental();
+            live_after_parent.apply(parent_finalized).unwrap();
+
+            let rebased_child = {
+                let mut batch = parent.new_batch();
+                for i in 60u64..70 {
+                    hasher.inner().update(&i.to_be_bytes());
+                    let element = hasher.inner().finalize();
+                    batch.add(&mut hasher, &element);
+                }
+                let child = batch.merkleize(&mut hasher);
+                child.rebase(&live_after_parent).unwrap()
+            };
+            drop(parent);
+
+            let grandchild = {
+                let mut batch = rebased_child.new_batch();
+                for i in 70u64..75 {
+                    hasher.inner().update(&i.to_be_bytes());
+                    let element = hasher.inner().finalize();
+                    batch.add(&mut hasher, &element);
+                }
+                batch.merkleize(&mut hasher)
+            };
+            let expected_root = grandchild.root();
+
+            let mut live_after_grandchild = live_after_parent.clone();
+            live_after_grandchild
+                .apply(rebased_child.finalize_incremental())
+                .unwrap();
+            live_after_grandchild
+                .apply(grandchild.finalize_incremental())
+                .unwrap();
+
+            let reference = build_reference(&mut hasher, 75);
+            assert_eq!(*live_after_grandchild.root(), expected_root);
+            assert_eq!(live_after_grandchild.root(), reference.root());
+        });
+    }
+
+    /// Rebasing must fail if the candidate live parent no longer matches the
+    /// frozen parent state captured by the batch.
+    #[test]
+    fn test_rebase_rejects_mismatched_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let base = build_reference(&mut hasher, 10);
+
+            let parent = {
+                let mut batch = UnmerkleizedBatch::new(&base);
+                batch.add(&mut hasher, b"a");
+                batch.merkleize(&mut hasher)
+            };
+            let child = {
+                let mut batch = parent.new_batch();
+                batch.add(&mut hasher, b"b");
+                batch.merkleize(&mut hasher)
+            };
+
+            let other = build_reference(&mut hasher, 12);
+            let result = child.rebase(&other);
+            assert!(matches!(
+                result,
+                Err(Error::RebaseParentMismatch {
+                    expected_size,
+                    actual_size,
+                    ..
+                }) if expected_size == parent.size() && actual_size == other.size()
+            ));
         });
     }
 
@@ -1040,9 +1336,9 @@ mod tests {
         });
     }
 
-    /// Base <- A (overwrites leaf 5) <- B (adds). B's changeset includes A's overwrite.
+    /// Base <- A (overwrites leaf 5) <- B (adds). Apply A, then B, preserving the overwrite.
     #[test]
-    fn test_flattened_changeset_preserves_overwrites() {
+    fn test_incremental_changeset_preserves_overwrites() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -1067,9 +1363,10 @@ mod tests {
             let merkleized_b = batch_b.merkleize(&mut hasher);
             let b_root = merkleized_b.root();
 
-            let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
-            base.apply(changeset).unwrap();
+            let a_changeset = merkleized_a.finalize();
+            let b_changeset = merkleized_b.finalize();
+            base.apply(a_changeset).unwrap();
+            base.apply(b_changeset).unwrap();
 
             assert_eq!(*base.root(), b_root);
 
@@ -1080,7 +1377,7 @@ mod tests {
     }
 
     /// Base <- A (overwrite leaf 5) <- B (overwrite leaf 10) <- C (add 10).
-    /// Flatten C's changeset, apply to base, verify root matches building the equivalent directly.
+    /// Apply A, then B, then C, and verify the result matches building the equivalent directly.
     #[test]
     fn test_three_deep_stacking() {
         let executor = deterministic::Runner::default();
@@ -1115,11 +1412,12 @@ mod tests {
             let merkleized_c = batch_c.merkleize(&mut hasher);
             let c_root = merkleized_c.root();
 
-            // Flatten C's changeset all the way to base.
-            let changeset = merkleized_c.finalize();
-            drop(merkleized_b);
-            drop(merkleized_a);
-            base.apply(changeset).unwrap();
+            let a_changeset = merkleized_a.finalize();
+            let b_changeset = merkleized_b.finalize();
+            let c_changeset = merkleized_c.finalize();
+            base.apply(a_changeset).unwrap();
+            base.apply(b_changeset).unwrap();
+            base.apply(c_changeset).unwrap();
 
             assert_eq!(*base.root(), c_root);
 
@@ -1155,7 +1453,7 @@ mod tests {
     }
 
     /// A overwrites leaf 5 with X, B overwrites leaf 5 with Y.
-    /// Flattened changeset should have Y (last writer wins).
+    /// Applying A then B should leave Y as the last writer.
     #[test]
     fn test_overwrite_collision_in_stack() {
         let executor = deterministic::Runner::default();
@@ -1181,9 +1479,10 @@ mod tests {
             let merkleized_b = batch_b.merkleize(&mut hasher);
             let b_root = merkleized_b.root();
 
-            let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
-            base.apply(changeset).unwrap();
+            let a_changeset = merkleized_a.finalize();
+            let b_changeset = merkleized_b.finalize();
+            base.apply(a_changeset).unwrap();
+            base.apply(b_changeset).unwrap();
 
             assert_eq!(*base.root(), b_root);
 

@@ -452,13 +452,13 @@ impl<D: Digest> Mmr<D> {
         }
 
         // 1. Overwrite: write modified digests into surviving base nodes.
-        for (pos, digest) in changeset.overwrites {
+        for (&pos, &digest) in changeset.overwrites.iter() {
             let index = self.pos_to_index(pos);
             self.nodes[index] = digest;
         }
 
         // 2. Append: push new nodes onto the end.
-        for digest in changeset.appended {
+        for &digest in changeset.appended.iter() {
             self.nodes.push_back(digest);
         }
 
@@ -1334,15 +1334,17 @@ mod tests {
             let child_a = {
                 let mut batch = parent.new_batch();
                 batch.add(&mut hasher, b"leaf-2a");
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize_incremental()
             };
             let child_b = {
                 let mut batch = parent.new_batch();
                 batch.add(&mut hasher, b"leaf-2b");
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize_incremental()
             };
+            let parent = parent.finalize_incremental();
 
-            // Apply child_a, then child_b should be stale.
+            // Apply parent, then child_a. child_b should then be stale.
+            mmr.apply(parent).unwrap();
             mmr.apply(child_a).unwrap();
             let result = mmr.apply(child_b);
             assert!(
@@ -1369,17 +1371,13 @@ mod tests {
             let child = {
                 let mut batch = parent.new_batch();
                 batch.add(&mut hasher, b"leaf-1");
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize_incremental()
             };
-            let parent = parent.finalize();
+            let parent = parent.finalize_incremental();
 
-            // Apply parent first -- child should now be stale.
+            // Apply parent first -- child should now apply successfully.
             mmr.apply(parent).unwrap();
-            let result = mmr.apply(child);
-            assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset for child after parent applied, got {result:?}"
-            );
+            mmr.apply(child).unwrap();
         });
     }
 
@@ -1400,17 +1398,17 @@ mod tests {
             let child = {
                 let mut batch = parent.new_batch();
                 batch.add(&mut hasher, b"leaf-1");
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize_incremental()
             };
-            let parent = parent.finalize();
+            let parent = parent.finalize_incremental();
 
-            // Apply child first -- parent should now be stale.
-            mmr.apply(child).unwrap();
-            let result = mmr.apply(parent);
+            // Apply child first -- child should be stale until parent is applied.
+            let result = mmr.apply(child);
             assert!(
                 matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset for parent after child applied, got {result:?}"
+                "expected StaleChangeset for child before parent applied, got {result:?}"
             );
+            mmr.apply(parent).unwrap();
         });
     }
 }

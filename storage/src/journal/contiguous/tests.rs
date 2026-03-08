@@ -102,7 +102,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("bounds-with-items".into()).await.unwrap();
+    let journal = factory("bounds-with-items".into()).await.unwrap();
 
     // Append some items
     for i in 0..10 {
@@ -174,7 +174,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("append-and-size".into()).await.unwrap();
+    let journal = factory("append-and-size".into()).await.unwrap();
 
     let pos1 = journal.append(&100).await.unwrap();
     let pos2 = journal.append(&200).await.unwrap();
@@ -199,7 +199,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("sequential-appends".into()).await.unwrap();
+    let journal = factory("sequential-appends".into()).await.unwrap();
 
     for i in 0..25u64 {
         let pos = journal.append(&(i * 10)).await.unwrap();
@@ -221,7 +221,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay-from-start".into()).await.unwrap();
+    let journal = factory("replay-from-start".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(&(i * 10)).await.unwrap();
@@ -253,7 +253,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay-from-middle".into()).await.unwrap();
+    let journal = factory("replay-from-middle".into()).await.unwrap();
 
     for i in 0..15u64 {
         journal.append(&(i * 10)).await.unwrap();
@@ -318,10 +318,10 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("through-trait".into()).await.unwrap();
+    let journal = factory("through-trait".into()).await.unwrap();
 
-    let pos1 = Mutable::append(&mut journal, &42).await.unwrap();
-    let pos2 = Mutable::append(&mut journal, &100).await.unwrap();
+    let pos1 = Mutable::append(&journal, &42).await.unwrap();
+    let pos2 = Mutable::append(&journal, &100).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
@@ -453,7 +453,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("sync-behavior".into()).await.unwrap();
+    let journal = factory("sync-behavior".into()).await.unwrap();
 
     for i in 0..5u64 {
         journal.append(&i).await.unwrap();
@@ -502,7 +502,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay-at-exact-size".into()).await.unwrap();
+    let journal = factory("replay-at-exact-size".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(&i).await.unwrap();
@@ -586,7 +586,7 @@ where
 
     // Create journal and append items
     {
-        let mut journal = factory(test_name.clone()).await.unwrap();
+        let journal = factory(test_name.clone()).await.unwrap();
 
         for i in 0..15u64 {
             let pos = journal.append(&(i * 10)).await.unwrap();
@@ -658,7 +658,7 @@ where
 
     // Re-open and verify pruned state persists
     {
-        let mut journal = factory(test_name.clone()).await.unwrap();
+        let journal = factory(test_name.clone()).await.unwrap();
 
         // size should still be 25
         assert_eq!(get_bounds(&journal).await.end, 25);
@@ -712,7 +712,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("read-by-position".into()).await.unwrap();
+    let journal = factory("read-by-position".into()).await.unwrap();
 
     for i in 0..1000u64 {
         journal.append(&(i * 100)).await.unwrap();
@@ -733,7 +733,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("read-out-of-range".into()).await.unwrap();
+    let journal = factory("read-out-of-range".into()).await.unwrap();
 
     journal.append(&42).await.unwrap();
 
