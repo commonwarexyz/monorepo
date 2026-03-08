@@ -133,6 +133,84 @@ pub mod test {
         CurrentTest::init(context, cfg).await.unwrap()
     }
 
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_prepare_commit_finish_apply_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "split-apply".to_string();
+            let mut db = open_db(context.with_label("db"), partition).await;
+            let key = Sha256::fill(0x11);
+            let value = Sha256::fill(0x22);
+            let old_root = db.root();
+
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            let pending = db.prepare_apply_batch(finalized).await.unwrap();
+
+            // The log has been extended, but Current readers still observe the
+            // last published state until finish_apply_batch runs.
+            assert_eq!(db.get(&key).await.unwrap(), None);
+            assert_eq!(db.root(), old_root);
+
+            let committed = db.commit_pending_batch(pending).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), None);
+            assert_eq!(db.root(), old_root);
+
+            db.finish_apply_batch(committed).unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            assert_ne!(db.root(), old_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_pending_apply_mismatch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db_a = open_db(context.with_label("db_a"), "current-a".into()).await;
+            let db_b = open_db(context.with_label("db_b"), "current-b".into()).await;
+            let key = Sha256::fill(0x11);
+            let value = Sha256::fill(0x22);
+
+            let finalized = {
+                let mut batch = db_a.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            let pending = db_a.prepare_apply_batch(finalized).await.unwrap();
+
+            assert!(matches!(
+                db_b.commit_pending_batch(pending).await,
+                Err(crate::qmdb::Error::PendingApplyMismatch)
+            ));
+
+            let mut db_c = open_db(context.with_label("db_c"), "current-c".into()).await;
+            let mut db_d = open_db(context.with_label("db_d"), "current-d".into()).await;
+            let finalized = {
+                let mut batch = db_c.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let pending = db_c.prepare_apply_batch(finalized).await.unwrap();
+            let committed = db_c.commit_pending_batch(pending).await.unwrap();
+            assert!(matches!(
+                db_d.finish_apply_batch(committed),
+                Err(crate::qmdb::Error::PendingApplyMismatch)
+            ));
+
+            db_a.destroy().await.unwrap();
+            db_b.destroy().await.unwrap();
+            db_c.destroy().await.unwrap();
+            db_d.destroy().await.unwrap();
+        });
+    }
+
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
     /// key is active. We specifically test over the partial chunk case, since these bits are yet to
     /// be committed to the underlying MMR.

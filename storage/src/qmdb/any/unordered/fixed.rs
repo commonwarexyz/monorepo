@@ -230,6 +230,114 @@ pub(crate) mod test {
         db.apply_batch(finalized).await.unwrap();
     }
 
+    #[test_traced("WARN")]
+    fn test_any_fixed_db_prepare_commit_finish_apply_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            let pending = db.prepare_apply_batch(finalized).await.unwrap();
+
+            // The journal has been extended, but reads still observe the last
+            // published snapshot until finish_apply_batch runs.
+            assert_eq!(db.get(&key).await.unwrap(), None);
+
+            let committed = db.commit_pending_batch(pending).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), None);
+
+            db.finish_apply_batch(committed).unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_any_fixed_db_pending_apply_mismatch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db_a = create_test_db(context.with_label("db_a")).await;
+            let db_b = create_test_db(context.with_label("db_b")).await;
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+
+            let finalized = {
+                let mut batch = db_a.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            let pending = db_a.prepare_apply_batch(finalized).await.unwrap();
+
+            assert!(matches!(
+                db_b.commit_pending_batch(pending).await,
+                Err(crate::qmdb::Error::PendingApplyMismatch)
+            ));
+
+            let mut db_c = create_test_db(context.with_label("db_c")).await;
+            let mut db_d = create_test_db(context.with_label("db_d")).await;
+            let finalized = {
+                let mut batch = db_c.new_batch();
+                batch.write(key, Some(value));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let pending = db_c.prepare_apply_batch(finalized).await.unwrap();
+            let committed = db_c.commit_pending_batch(pending).await.unwrap();
+            assert!(matches!(
+                db_d.finish_apply_batch(committed),
+                Err(crate::qmdb::Error::PendingApplyMismatch)
+            ));
+
+            db_a.destroy().await.unwrap();
+            db_b.destroy().await.unwrap();
+            db_c.destroy().await.unwrap();
+            db_d.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_any_fixed_db_second_prepare_is_stale() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.with_label("db")).await;
+            let key_a = Sha256::hash(b"key-a");
+            let value_a = Sha256::hash(b"value-a");
+            let key_b = Sha256::hash(b"key-b");
+            let value_b = Sha256::hash(b"value-b");
+
+            let finalized_a = {
+                let mut batch = db.new_batch();
+                batch.write(key_a, Some(value_a));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            let finalized_b = {
+                let mut batch = db.new_batch();
+                batch.write(key_b, Some(value_b));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+
+            let pending = db.prepare_apply_batch(finalized_a).await.unwrap();
+
+            assert!(matches!(
+                db.prepare_apply_batch(finalized_b).await,
+                Err(crate::qmdb::Error::StaleChangeset { .. })
+            ));
+
+            let committed = db.commit_pending_batch(pending).await.unwrap();
+            db.finish_apply_batch(committed).unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
     // in the snapshot.
     #[test_traced("WARN")]

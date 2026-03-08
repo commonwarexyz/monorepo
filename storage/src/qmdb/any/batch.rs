@@ -227,6 +227,42 @@ pub struct Changeset<K, D: Digest, Item: Send> {
     db_size: u64,
 }
 
+/// Opaque token returned by [`Db::prepare_apply_batch`] and consumed by
+/// [`Db::commit_pending_batch`].
+///
+/// This represents a batch that has been appended to the authenticated log but
+/// has not yet been published to the in-memory snapshot and metadata.
+pub struct PendingApply<K, D: Digest> {
+    /// The location of the first operation written by the batch.
+    start_loc: Location,
+
+    /// The prepared authenticated-log root after the batch was appended.
+    prepared_root: D,
+
+    /// Snapshot mutations to apply, in order.
+    snapshot_diffs: Vec<SnapshotDiff<K>>,
+
+    /// Net change in active key count.
+    active_keys_delta: isize,
+
+    /// Inactivity floor location after this batch's floor raise.
+    new_inactivity_floor_loc: Location,
+
+    /// Location of the CommitFloor operation appended by this batch.
+    new_last_commit_loc: Location,
+
+    /// The database size when the batch was created. Used to detect stale publication.
+    db_size: u64,
+}
+
+/// Opaque token returned by [`Db::commit_pending_batch`] and consumed by
+/// [`Db::finish_apply_batch`].
+///
+/// This represents a batch that has been appended to the authenticated log,
+/// durably committed, but not yet published to the in-memory snapshot and
+/// metadata.
+pub struct CommittedPendingApply<K, D: Digest>(PendingApply<K, D>);
+
 /// Batch-infrastructure state used during merkleization.
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending
@@ -1140,7 +1176,27 @@ where
         &mut self,
         batch: Changeset<K, H::Digest, Operation<K, V, U>>,
     ) -> Result<Range<Location>, Error> {
-        let journal_size = *self.last_commit_loc + 1;
+        let pending = self.prepare_apply_batch(batch).await?;
+        let committed = self.commit_pending_batch(pending).await?;
+        self.finish_apply_batch(committed)
+    }
+
+    /// Append a changeset to the authenticated log but do not yet publish it to
+    /// the in-memory snapshot and metadata.
+    ///
+    /// This split phase is intended for callers that coordinate access with an
+    /// outer upgradable lock. They can:
+    /// 1. hold exclusive access long enough to call `prepare_apply_batch`,
+    /// 2. downgrade to shared access and call `commit_pending_batch`, and then
+    /// 3. re-acquire exclusive access and call `finish_apply_batch`.
+    ///
+    /// Errors returned from mutable journal operations are fatal; the database
+    /// should be reopened before further use.
+    pub async fn prepare_apply_batch(
+        &mut self,
+        batch: Changeset<K, H::Digest, Operation<K, V, U>>,
+    ) -> Result<PendingApply<K, H::Digest>, Error> {
+        let journal_size = *self.log.size().await;
         if batch.db_size != journal_size {
             return Err(Error::StaleChangeset {
                 expected: batch.db_size,
@@ -1152,12 +1208,58 @@ where
         // 1. Write all operations to the authenticated journal + apply MMR changeset.
         self.log.apply_batch(batch.journal_finalized).await?;
 
-        // 2. Flush journal to disk.
-        // TODO(#3118): allow fsync with non-mutable reference to database.
+        Ok(PendingApply {
+            start_loc,
+            prepared_root: self.log.root(),
+            snapshot_diffs: batch.snapshot_diffs,
+            active_keys_delta: batch.active_keys_delta,
+            new_inactivity_floor_loc: batch.new_inactivity_floor_loc,
+            new_last_commit_loc: batch.new_last_commit_loc,
+            db_size: batch.db_size,
+        })
+    }
+
+    /// Flush a previously prepared batch to disk.
+    ///
+    /// This persists the journal changes staged by `prepare_apply_batch` without
+    /// requiring mutable access to the database. Snapshot-based reads such as
+    /// `get()` may proceed during this call, but methods that expose the
+    /// underlying log/MMR state should remain serialized until
+    /// `finish_apply_batch` completes.
+    pub async fn commit_pending_batch(
+        &self,
+        pending: PendingApply<K, H::Digest>,
+    ) -> Result<CommittedPendingApply<K, H::Digest>, Error> {
+        if self.log.root() != pending.prepared_root {
+            return Err(Error::PendingApplyMismatch);
+        }
         self.log.commit().await?;
+        Ok(CommittedPendingApply(pending))
+    }
+
+    /// Publish a previously prepared and committed batch to the in-memory
+    /// snapshot and metadata.
+    ///
+    /// Errors returned from mutable journal operations are fatal; the database
+    /// should be reopened before further use.
+    pub fn finish_apply_batch(
+        &mut self,
+        committed: CommittedPendingApply<K, H::Digest>,
+    ) -> Result<Range<Location>, Error> {
+        let pending = committed.0;
+        let journal_size = *self.last_commit_loc + 1;
+        if pending.db_size != journal_size {
+            return Err(Error::StaleChangeset {
+                expected: pending.db_size,
+                actual: journal_size,
+            });
+        }
+        if self.log.root() != pending.prepared_root {
+            return Err(Error::PendingApplyMismatch);
+        }
 
         // 3. Apply snapshot diffs to the in-memory index.
-        for diff in batch.snapshot_diffs {
+        for diff in pending.snapshot_diffs {
             match diff {
                 SnapshotDiff::Update {
                     key,
@@ -1176,20 +1278,20 @@ where
         }
 
         // 4. Update DB metadata.
-        let new_active_keys = self.active_keys as isize + batch.active_keys_delta;
+        let new_active_keys = self.active_keys as isize + pending.active_keys_delta;
         debug_assert!(
             new_active_keys >= 0,
             "active_keys underflow: base={}, delta={}",
             self.active_keys,
-            batch.active_keys_delta
+            pending.active_keys_delta
         );
         self.active_keys = new_active_keys as usize;
-        self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
-        self.last_commit_loc = batch.new_last_commit_loc;
+        self.inactivity_floor_loc = pending.new_inactivity_floor_loc;
+        self.last_commit_loc = pending.new_last_commit_loc;
 
         // 5. Return the committed location range.
         let end_loc = Location::new(*self.last_commit_loc + 1);
-        Ok(start_loc..end_loc)
+        Ok(pending.start_loc..end_loc)
     }
 }
 

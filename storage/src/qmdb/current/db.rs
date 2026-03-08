@@ -86,6 +86,47 @@ pub struct Db<
     pub(super) root: DigestOf<H>,
 }
 
+/// Opaque token returned by [`Db::prepare_apply_batch`] and consumed by
+/// [`Db::commit_pending_batch`].
+///
+/// This represents a batch that has been appended to the inner Any database
+/// but has not yet been published to the Current-layer bitmap, grafted MMR,
+/// and canonical root.
+pub struct PendingApply<K, D: Digest> {
+    /// Pending publication for the inner Any database state.
+    inner: any::batch::PendingApply<K, D>,
+
+    /// The published canonical root before prepare_apply_batch ran.
+    base_root: D,
+
+    /// One bool per operation in the batch chain (pushes applied before clears).
+    bitmap_pushes: Vec<bool>,
+
+    /// Locations of bits to clear after pushing.
+    bitmap_clears: Vec<Location>,
+
+    /// Changeset for the grafted MMR.
+    grafted_changeset: mmr::Changeset<D>,
+
+    /// Precomputed canonical root.
+    canonical_root: D,
+}
+
+/// Opaque token returned by [`Db::commit_pending_batch`] and consumed by
+/// [`Db::finish_apply_batch`].
+///
+/// This represents a batch that has been appended to the inner Any database,
+/// durably committed, but not yet published to the Current-layer bitmap,
+/// grafted MMR, and canonical root.
+pub struct CommittedPendingApply<K, D: Digest> {
+    inner: any::batch::CommittedPendingApply<K, D>,
+    base_root: D,
+    bitmap_pushes: Vec<bool>,
+    bitmap_clears: Vec<Location>,
+    grafted_changeset: mmr::Changeset<D>,
+    canonical_root: D,
+}
+
 // Shared read-only functionality.
 impl<E, K, V, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
@@ -373,25 +414,94 @@ where
         &mut self,
         batch: super::batch::Changeset<K, H::Digest, Operation<K, V, U>, N>,
     ) -> Result<Range<Location>, Error> {
-        // 1. Apply inner any batch (writes ops, updates snapshot).
-        let range = self.any.apply_batch(batch.inner).await?;
+        let pending = self.prepare_apply_batch(batch).await?;
+        let committed = self.commit_pending_batch(pending).await?;
+        self.finish_apply_batch(committed)
+    }
+
+    /// Append a changeset to the inner Any database but do not yet publish it
+    /// to the Current-layer bitmap, grafted MMR, or canonical root.
+    ///
+    /// This split phase is intended for callers that coordinate access with an
+    /// outer upgradable lock. They can:
+    /// 1. hold exclusive access long enough to call `prepare_apply_batch`,
+    /// 2. downgrade to shared access and call `commit_pending_batch`, and then
+    /// 3. re-acquire exclusive access and call `finish_apply_batch`.
+    ///
+    /// Errors returned from mutable journal operations are fatal; the database
+    /// should be reopened before further use.
+    pub async fn prepare_apply_batch(
+        &mut self,
+        batch: super::batch::Changeset<K, H::Digest, Operation<K, V, U>, N>,
+    ) -> Result<PendingApply<K, H::Digest>, Error> {
+        let inner = self.any.prepare_apply_batch(batch.inner).await?;
+        Ok(PendingApply {
+            inner,
+            base_root: self.root,
+            bitmap_pushes: batch.bitmap_pushes,
+            bitmap_clears: batch.bitmap_clears,
+            grafted_changeset: batch.grafted_changeset,
+            canonical_root: batch.canonical_root,
+        })
+    }
+
+    /// Flush a previously prepared batch to disk.
+    ///
+    /// This persists the journal changes staged by `prepare_apply_batch`
+    /// without requiring mutable access to the database. Snapshot-based reads
+    /// such as `get()` and the published canonical `root()` may proceed during
+    /// this call, but methods that expose the underlying ops log state such as
+    /// `bounds()` or `ops_root()` should remain serialized until
+    /// `finish_apply_batch` completes.
+    pub async fn commit_pending_batch(
+        &self,
+        pending: PendingApply<K, H::Digest>,
+    ) -> Result<CommittedPendingApply<K, H::Digest>, Error> {
+        if self.root != pending.base_root {
+            return Err(Error::PendingApplyMismatch);
+        }
+        let committed_inner = self.any.commit_pending_batch(pending.inner).await?;
+        Ok(CommittedPendingApply {
+            inner: committed_inner,
+            base_root: pending.base_root,
+            bitmap_pushes: pending.bitmap_pushes,
+            bitmap_clears: pending.bitmap_clears,
+            grafted_changeset: pending.grafted_changeset,
+            canonical_root: pending.canonical_root,
+        })
+    }
+
+    /// Publish a previously prepared and committed batch to the Current-layer
+    /// in-memory state.
+    ///
+    /// Errors returned from mutable journal operations are fatal; the database
+    /// should be reopened before further use.
+    pub fn finish_apply_batch(
+        &mut self,
+        committed: CommittedPendingApply<K, H::Digest>,
+    ) -> Result<Range<Location>, Error> {
+        if self.root != committed.base_root {
+            return Err(Error::PendingApplyMismatch);
+        }
+        // 1. Publish inner any batch (snapshot + metadata).
+        let range = self.any.finish_apply_batch(committed.inner)?;
 
         // 2. Push new bits FIRST. Must happen before clears because for chained
         //    batches, some clears target locations within the push range
         //    (ancestor-segment superseded ops that were pushed as active by an
         //    ancestor and then superseded by a descendant).
-        for &bit in &batch.bitmap_pushes {
+        for &bit in &committed.bitmap_pushes {
             self.status.push(bit);
         }
 
         // 3. Clear superseded locations: previous commit inactivation, diff
         //    base_old_locs, and ancestor-segment superseded locations (chaining).
-        for loc in &batch.bitmap_clears {
+        for loc in &committed.bitmap_clears {
             self.status.set_bit(**loc, false);
         }
 
         // 4. Apply precomputed grafted MMR changeset from merkleize().
-        self.grafted_mmr.apply(batch.grafted_changeset)?;
+        self.grafted_mmr.apply(committed.grafted_changeset)?;
 
         // 5. Prune bitmap chunks fully below the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc);
@@ -406,7 +516,7 @@ where
         }
 
         // 7. Use precomputed canonical root from merkleize().
-        self.root = batch.canonical_root;
+        self.root = committed.canonical_root;
 
         Ok(range)
     }

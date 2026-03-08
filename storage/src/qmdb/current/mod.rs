@@ -13,6 +13,27 @@
 //! db.apply_batch(finalized).await?;
 //! ```
 //!
+//! If the database is wrapped in an outer
+//! [commonware_utils::sync::UpgradableAsyncRwLock], callers can split apply
+//! into append, fsync, and publish phases so snapshot-based reads such as
+//! `get()` are not blocked during the underlying journal commit:
+//!
+//! ```ignore
+//! let upgradable = shared_db.upgradable_read().await;
+//! let mut writer = upgradable.upgrade().await;
+//! let pending = writer.prepare_apply_batch(finalized).await?;
+//! let upgradable = writer.downgrade_to_upgradable();
+//!
+//! let committed = upgradable.commit_pending_batch(pending).await?;
+//!
+//! let mut writer = upgradable.upgrade().await;
+//! writer.finish_apply_batch(committed)?;
+//! ```
+//!
+//! Methods that expose the underlying ops log state, such as `bounds()`,
+//! `ops_root()`, or `new_batch()`, may observe the prepared-but-unpublished
+//! state and should remain serialized until `finish_apply_batch` completes.
+//!
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some

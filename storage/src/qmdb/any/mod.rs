@@ -34,6 +34,28 @@
 //! let finalized = merkleized_child.finalize();
 //! db.apply_batch(finalized).await?;
 //! ```
+//!
+//! If the database is wrapped in an outer
+//! [commonware_utils::sync::UpgradableAsyncRwLock], callers can split apply
+//! into append, fsync, and publish phases so snapshot-based reads such as
+//! `get()` are not blocked during the underlying journal commit:
+//!
+//! ```ignore
+//! let upgradable = shared_db.upgradable_read().await;
+//! let mut writer = upgradable.upgrade().await;
+//! let pending = writer.prepare_apply_batch(finalized).await?;
+//! let upgradable = writer.downgrade_to_upgradable();
+//!
+//! let committed = upgradable.commit_pending_batch(pending).await?;
+//!
+//! let mut writer = upgradable.upgrade().await;
+//! writer.finish_apply_batch(committed)?;
+//! ```
+//!
+//! Methods that expose the underlying log/MMR state, such as `root()`,
+//! `bounds()`, proof generation, or `new_batch()`, may observe the
+//! prepared-but-unpublished state and should remain serialized until
+//! `finish_apply_batch` completes.
 
 use crate::{
     index::Unordered as UnorderedIndex,

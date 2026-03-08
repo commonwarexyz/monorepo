@@ -112,6 +112,10 @@ pub enum Error {
     /// The changeset was created from a different database state than the current one.
     #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
     StaleChangeset { expected: u64, actual: u64 },
+
+    /// The pending apply token does not match the database's prepared state.
+    #[error("pending apply does not match the database's prepared state")]
+    PendingApplyMismatch,
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
