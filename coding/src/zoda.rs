@@ -441,7 +441,14 @@ struct CheckingData<D: Digest> {
 }
 
 impl<D: Digest> CheckingData<D> {
-    /// Derive checking data from the shard's metadata and commitment.
+    /// Calculate the values of this struct, based on information received.
+    ///
+    /// We control `config`.
+    ///
+    /// We're provided with `commitment`, which should hash over `root`,
+    /// and `data_bytes`.
+    ///
+    /// We're also given a `checksum` matrix used to check the shards we receive.
     fn reckon(
         config: &Config,
         commitment: &Summary,

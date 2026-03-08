@@ -128,6 +128,28 @@ commonware_macros::stability_scope!(ALPHA {
     /// let data3 = RS::decode(&config, &commitment, &checked_shards[1..], &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
+    ///
+    /// # Guarantees
+    ///
+    /// Here are additional properties that implementors of this trait need to
+    /// consider, and that users of this trait can rely on.
+    ///
+    /// ## Check Agreement
+    ///
+    /// [`Scheme::check`] should agree across honest parties, even for malicious
+    /// encoders.
+    ///
+    /// It should not be possible for parties A and B to both call `check`
+    /// successfully on their own shards, but then have either of them fail
+    /// when calling `check` on the other's shard.
+    ///
+    /// In other words, if an honest party considers their shard to be correctly
+    /// formed, then other honest parties which have also successfully checked
+    /// their own shards will agree with that shard being correct.
+    ///
+    /// A violation of this property would be, for example, if a malicious
+    /// payload could convince two parties that they both have valid shards, but
+    /// then checking each other's shards reports issues with those shards.
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;

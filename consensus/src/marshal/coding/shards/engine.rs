@@ -13,8 +13,8 @@
 //!    validates them and reconstructs the original block once enough valid
 //!    shards are available. Both participants and non-participants can
 //!    reconstruct blocks: participants receive their own indexed shard from
-//!    the leader while non-participants receive the leader's shard. All
-//!    participants gossip their validated shard to peers.
+//!    the leader, while non-participants reconstruct from shards gossiped
+//!    by participants. All participants gossip their validated shard to peers.
 //!
 //! # Message Flow
 //!
@@ -1012,6 +1012,10 @@ where
 }
 
 /// Phase data for `ReconstructionState::AwaitingQuorum`.
+///
+/// In this phase, the leader is known. The leader's shard for our index is
+/// verified eagerly via `C::check`. Other shards are buffered in
+/// `pending_shards` until enough are available to attempt batch validation.
 struct AwaitingQuorumState<P, C, H>
 where
     P: PublicKey,
@@ -1024,6 +1028,9 @@ where
 }
 
 /// Phase data for `ReconstructionState::Ready`.
+///
+/// Batch validation has passed. Checked shards are available for
+/// reconstruction.
 struct ReadyState<P, C, H>
 where
     P: PublicKey,
