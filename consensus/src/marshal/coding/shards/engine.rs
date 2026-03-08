@@ -52,7 +52,7 @@
 //!    Accumulate checked shards until minimum_shards reached
 //!         |                    |                    |
 //!         v                    v                    v
-//!    Batch verify pending shards at quorum
+//!            Batch verify pending shards at quorum
 //!         |                    |                    |
 //!         v                    v                    v
 //!    +-------------+      +-------------+      +-------------+
@@ -987,6 +987,12 @@ enum ValidatedShardAction<C: CodingScheme, H: Hasher> {
     NotifyOnly,
 }
 
+/// A coding shard paired with its participant index.
+struct IndexedShard<C: CodingScheme> {
+    index: u16,
+    data: C::Shard,
+}
+
 /// State shared across all reconstruction phases.
 struct CommonState<P, C, H>
 where
@@ -1024,7 +1030,7 @@ where
 {
     common: CommonState<P, C, H>,
     /// Shards pending batch validation, keyed by sender.
-    pending_shards: BTreeMap<P, (u16, C::Shard)>,
+    pending_shards: BTreeMap<P, IndexedShard<C>>,
 }
 
 /// Phase data for `ReconstructionState::Ready`.
@@ -1078,16 +1084,15 @@ where
         &mut self,
         sender: P,
         commitment: Commitment,
-        index: u16,
-        shard_data: C::Shard,
+        shard: IndexedShard<C>,
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let Ok(checked) = C::check(
             &commitment.config(),
             &commitment.root(),
-            index,
-            shard_data.clone(),
+            shard.index,
+            shard.data.clone(),
         ) else {
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
@@ -1095,12 +1100,12 @@ where
 
         self.common
             .received_shards
-            .insert(index, shard_data.clone());
-        self.common.contributed.set(u64::from(index), true);
+            .insert(shard.index, shard.data.clone());
+        self.common.contributed.set(u64::from(shard.index), true);
         self.common.checked_shards.push(checked);
         self.common.own_shard_verified = true;
         self.common.pending_action = Some(if is_participant {
-            ValidatedShardAction::Broadcast(Shard::new(commitment, index, shard_data))
+            ValidatedShardAction::Broadcast(Shard::new(commitment, shard.index, shard.data))
         } else {
             ValidatedShardAction::NotifyOnly
         });
@@ -1124,8 +1129,13 @@ where
         // Batch-validate all pending shards in parallel.
         let pending = std::mem::take(&mut self.pending_shards);
         let (new_checked, to_block) =
-            strategy.map_partition_collect_vec(pending, |(peer, (index, shard_data))| {
-                let checked = C::check(&commitment.config(), &commitment.root(), index, shard_data);
+            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
+                let checked = C::check(
+                    &commitment.config(),
+                    &commitment.root(),
+                    shard.index,
+                    shard.data,
+                );
                 (peer, checked.ok())
             });
 
@@ -1240,6 +1250,46 @@ where
     ///
     /// Returns `true` only when the shard caused state progress (buffered,
     /// validated, or transitioned), and `false` when rejected/blocked.
+    ///
+    /// ## Peer Blocking Rules
+    ///
+    /// The `sender` may be blocked via the provided [`Blocker`] if any of
+    /// the following rules are violated:
+    ///
+    /// - MUST be sent by a participant in the current epoch. Non-participant
+    ///   senders are blocked.
+    /// - If the sender is the leader: the shard index MUST match the
+    ///   recipient's own participant index (when the recipient is a
+    ///   participant) or the leader's participant index (when the recipient
+    ///   is a non-participant).
+    /// - If the sender is not the leader: the shard index MUST match the
+    ///   sender's participant index. Each non-leader participant may only
+    ///   gossip their own shard.
+    /// - A mismatched shard index results in blocking the sender.
+    /// - Each shard index may only contribute ONE shard per commitment.
+    ///   Sending a second shard for the same index with different data
+    ///   (equivocation) results in blocking the sender.
+    /// - The leader's shard is verified eagerly via [`CodingScheme::check`].
+    ///   If verification fails, the leader is blocked.
+    /// - Non-leader shards are buffered in `pending_shards` and
+    ///   batch-validated when quorum is reached. Invalid shards discovered
+    ///   during batch validation result in blocking their respective
+    ///   senders.
+    ///
+    /// ## Silent Discard Rules
+    ///
+    /// The following conditions cause a shard to be silently ignored
+    /// without blocking the sender:
+    ///
+    /// - Exact duplicate of a previously received shard for the same index.
+    /// - The index has already been marked as contributed (via the bitmap,
+    ///   e.g. after batch validation).
+    /// - Shards that arrive after the state has transitioned to [`Ready`]
+    ///   (i.e., batch validation has already passed).
+    /// - When the leader is not yet known, shards are buffered at the
+    ///   engine level in bounded per-peer queues until
+    ///   [`Discovered`](super::Message::Discovered) creates a
+    ///   reconstruction state for this commitment.
     async fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
@@ -1257,29 +1307,28 @@ where
             return false;
         };
         let commitment = shard.commitment();
-        let index = shard.index();
-        let shard_data = shard.into_inner();
+        let indexed = IndexedShard {
+            index: shard.index(),
+            data: shard.into_inner(),
+        };
 
         // Determine expected index based on sender role.
         let is_from_leader = sender == self.common().leader;
-        let expected_index: u16 = if is_from_leader {
-            let me_or_sender = ctx.scheme.me().unwrap_or(sender_index);
-            me_or_sender
-                .get()
-                .try_into()
-                .expect("participant index impossibly out of bounds")
+        let expected_participant = if is_from_leader {
+            ctx.scheme.me().unwrap_or(sender_index)
         } else {
             sender_index
-                .get()
-                .try_into()
-                .expect("participant index impossibly out of bounds")
         };
+        let expected_index: u16 = expected_participant
+            .get()
+            .try_into()
+            .expect("participant index impossibly out of bounds");
 
-        if index != expected_index {
+        if indexed.index != expected_index {
             commonware_p2p::block!(
                 blocker,
                 sender,
-                shard_index = index,
+                shard_index = indexed.index,
                 expected_index,
                 "shard index does not match expected index"
             );
@@ -1287,15 +1336,15 @@ where
         }
 
         // Equivocation/duplicate check.
-        if let Some(existing) = self.common().received_shards.get(&index) {
-            if existing != &shard_data {
+        if let Some(existing) = self.common().received_shards.get(&indexed.index) {
+            if existing != &indexed.data {
                 commonware_p2p::block!(blocker, sender, "shard equivocation");
             }
             return false;
         }
 
         // Check if this index already contributed (via batch validation).
-        if self.common().contributed.get(u64::from(index)) {
+        if self.common().contributed.get(u64::from(indexed.index)) {
             return false;
         }
 
@@ -1307,8 +1356,7 @@ where
                         .verify_own_shard(
                             sender,
                             commitment,
-                            index,
-                            shard_data,
+                            indexed,
                             ctx.scheme.me().is_some(),
                             blocker,
                         )
@@ -1320,11 +1368,13 @@ where
             // Buffer for batch validation.
             self.common_mut()
                 .received_shards
-                .insert(index, shard_data.clone());
-            self.common_mut().contributed.set(u64::from(index), true);
+                .insert(indexed.index, indexed.data.clone());
+            self.common_mut()
+                .contributed
+                .set(u64::from(indexed.index), true);
             match self {
                 Self::AwaitingQuorum(state) => {
-                    state.pending_shards.insert(sender, (index, shard_data));
+                    state.pending_shards.insert(sender, indexed);
                     true
                 }
                 Self::Ready(_) => false,
