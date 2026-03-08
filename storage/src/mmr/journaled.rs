@@ -598,7 +598,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let pos = Position::try_from(loc)?;
         {
             let inner = self.inner.get_mut();
-            assert!(pos <= inner.mem_mmr.size());
+            assert!(loc <= inner.mem_mmr.leaves());
             if pos <= inner.pruned_to_pos {
                 return Ok(());
             }
