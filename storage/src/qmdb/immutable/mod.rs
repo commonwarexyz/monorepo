@@ -1434,6 +1434,11 @@ pub(super) mod test {
 
             // Apply the first -- should succeed.
             db.apply_batch(changeset_a).await.unwrap();
+            let expected_root = db.root();
+            let expected_bounds = db.bounds().await;
+            assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&key2).await.unwrap(), None);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Apply the second -- should fail because the DB was modified.
             let result = db.apply_batch(changeset_b).await;
@@ -1441,6 +1446,11 @@ pub(super) mod test {
                 matches!(result, Err(Error::StaleChangeset { .. })),
                 "expected StaleChangeset error, got {result:?}"
             );
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.bounds().await, expected_bounds);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&key2).await.unwrap(), None);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
