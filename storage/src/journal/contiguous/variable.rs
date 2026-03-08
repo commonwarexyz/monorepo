@@ -904,7 +904,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
-    async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
+    async fn append(&self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
 

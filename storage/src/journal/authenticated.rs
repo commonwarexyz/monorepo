@@ -4,6 +4,59 @@
 //! Range (MMR). The item at index i in the journal corresponds to the leaf at Location i in the
 //! MMR. This structure enables efficient proofs that an item is included in the journal at a
 //! specific location.
+//!
+//! Merkleized journal batches can be retained as speculative parents while
+//! their finalized changesets are being appended and committed:
+//!
+//! ```ignore
+//! let merkleized = batch.merkleize();
+//! let pending_changeset = merkleized.finalize_incremental();
+//!
+//! let mut child = merkleized.new_batch();
+//! child.add(next_item);
+//! let child_changeset = child.merkleize().finalize_incremental();
+//! ```
+//!
+//! Branching from a retained merkleized batch is speculative. This branches
+//! from the prepared parent state, not from the last applied state of the live
+//! journal.
+//!
+//! Once the oldest prepared parent has been applied, descendants can be
+//! compacted back onto the live journal with [`Journal::rebase_batch`]. This
+//! drops one speculative ancestor level without copying the batch-local items
+//! or MMR delta.
+//!
+//! Manual rebasing is only needed to bound retained chain depth. If you never
+//! rebase, speculative reads continue to work, but they keep traversing the
+//! retained parent chain.
+//!
+//! A typical flow is:
+//!
+//! ```ignore
+//! let parent = batch.merkleize();
+//! let parent_changeset = parent.finalize_incremental();
+//!
+//! let child = {
+//!     let mut batch = parent.new_batch();
+//!     batch.add(next_item);
+//!     batch.merkleize()
+//! };
+//!
+//! // Parent is now reflected in the live journal/MMR.
+//! journal.apply_batch(parent_changeset).await?;
+//! journal.commit().await?;
+//!
+//! // Rebase the child onto the live journal to drop one speculative ancestor.
+//! let child = journal.rebase_batch(&child)?;
+//! let child_changeset = child.finalize_incremental();
+//! journal.apply_batch(child_changeset).await?;
+//! ```
+//!
+//! Rebasing is valid only once the live journal/MMR matches the frozen parent
+//! state captured by the batch. Calling [`Journal::rebase_batch`] too early, or
+//! on the wrong journal, returns [`Error::Mmr`] wrapping
+//! [`crate::mmr::Error::RebaseParentMismatch`] or
+//! [`crate::mmr::Error::RebaseParentRootMismatch`].
 
 use crate::{
     journal::{
@@ -69,7 +122,10 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Encode> UnmerkleizedBatch<'a, 
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item> {
+    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item>
+    where
+        P: BatchChainInfo<H::Digest>,
+    {
         MerkleizedBatch {
             inner: self.inner.merkleize(&mut self.hasher),
             items: Arc::new(self.items),
@@ -116,6 +172,7 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChainInfo<H::Digest>, Item: Se
     fn base_size(&self) -> Position {
         self.inner.base_size()
     }
+
     fn collect_overwrites(&self, into: &mut BTreeMap<Position, H::Digest>) {
         self.inner.collect_overwrites(into);
     }
@@ -125,8 +182,8 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChain<Item>, Item: Send + Sync
     for MerkleizedBatch<'a, H, P, Item>
 {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>) {
-        self.inner.parent().collect(into); // recurse to parent first
-        into.push(self.items.clone()); // Arc clone, not data clone
+        self.inner.parent().collect(into);
+        into.push(self.items.clone());
     }
 }
 
@@ -146,18 +203,43 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync + Encode>
     }
 }
 
-impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
+impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item> {
+    /// Rebase this batch onto an equivalent live parent after that parent has
+    /// been applied, dropping one speculative ancestor from the item/MMR chain.
+    pub fn rebase<'b, Q>(&self, parent: &'b Q) -> Result<MerkleizedBatch<'b, H, Q, Item>, MmrError>
+    where
+        Q: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Item>,
+    {
+        Ok(MerkleizedBatch {
+            inner: self.inner.rebase(parent)?,
+            items: self.items.clone(),
+        })
+    }
+}
+
+impl<'a, H: Hasher, P, Item> MerkleizedBatch<'a, H, P, Item>
 where
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Item>,
+    Item: Send + Sync,
 {
-    /// Consume this batch, collecting the changes from its ancestors and itself into a
-    /// [Changeset] which can be applied to the journal.
-    pub fn finalize(self) -> Changeset<H::Digest, Item> {
+    /// Finalize this batch into a [`Changeset`] relative to the base of the
+    /// entire retained batch chain.
+    pub fn finalize(&self) -> Changeset<H::Digest, Item> {
         let mut items = Vec::new();
         self.collect(&mut items);
         Changeset {
             changeset: self.inner.finalize(),
             items,
+        }
+    }
+
+    /// Finalize this batch into a [`Changeset`] relative to its immediate
+    /// parent. This is the form used with [`Self::rebase`] for pipelined
+    /// speculative execution.
+    pub fn finalize_incremental(&self) -> Changeset<H::Digest, Item> {
+        Changeset {
+            changeset: self.inner.finalize_incremental(),
+            items: vec![self.items.clone()],
         }
     }
 }
@@ -169,6 +251,11 @@ pub struct Changeset<D: Digest, Item> {
     // The items to append.
     items: Vec<Arc<Vec<Item>>>,
 }
+
+/// A merkleized batch that is directly anchored to a live authenticated
+/// journal's MMR.
+pub type LiveMerkleizedBatch<'a, E, H, Item> =
+    MerkleizedBatch<'a, H, Mmr<E, <H as Hasher>::Digest>, Item>;
 
 /// An append-only data structure that maintains a sequential journal of items alongside a Merkle
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
@@ -187,8 +274,7 @@ where
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
     pub(crate) journal: C,
-
-    pub(crate) hasher: StandardHasher<H>,
+    pub(crate) _hasher: core::marker::PhantomData<H>,
 }
 
 impl<E, C, H> Journal<E, C, H>
@@ -214,6 +300,19 @@ where
             hasher: StandardHasher::new(),
             items: Vec::new(),
         }
+    }
+
+    /// Rebase a speculative batch onto this live journal after its oldest
+    /// parent has been applied, dropping one speculative ancestor level.
+    pub fn rebase_batch<'a, P>(
+        &'a self,
+        batch: &MerkleizedBatch<'_, H, P, C::Item>,
+    ) -> Result<LiveMerkleizedBatch<'a, E, H, C::Item>, Error>
+    where
+        P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<C::Item>,
+        C::Item: Send + Sync,
+    {
+        batch.rebase(&self.mmr).map_err(Error::Mmr)
     }
 }
 
@@ -252,7 +351,7 @@ where
         Ok(Self {
             mmr,
             journal,
-            hasher,
+            _hasher: core::marker::PhantomData,
         })
     }
 
@@ -312,16 +411,21 @@ where
         Ok(())
     }
 
-    /// Append an item to the journal and update the MMR.
-    pub async fn append(&mut self, item: &C::Item) -> Result<Location, Error> {
+    /// Append an item to the journal and update the MMR using the supplied
+    /// hasher.
+    pub async fn append(
+        &self,
+        item: &C::Item,
+        hasher: &mut StandardHasher<H>,
+    ) -> Result<Location, Error> {
         let encoded_item = item.encode();
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
         let changeset = {
             let mut batch = self.mmr.new_batch();
-            batch.add(&mut self.hasher, &encoded_item);
-            batch.merkleize(&mut self.hasher).finalize()
+            batch.add(hasher, &encoded_item);
+            batch.merkleize(hasher).finalize()
         };
         self.mmr.apply(changeset)?;
 
@@ -334,7 +438,7 @@ where
     /// batch that produced it was created. Multiple batches can be forked from the
     /// same parent for speculative execution, but only one may be applied. Applying
     /// a stale changeset returns an error.
-    pub async fn apply_batch(&mut self, batch: Changeset<H::Digest, C::Item>) -> Result<(), Error> {
+    pub async fn apply_batch(&self, batch: Changeset<H::Digest, C::Item>) -> Result<(), Error> {
         let actual = self.mmr.size();
         if batch.changeset.base_size != actual {
             return Err(MmrError::StaleChangeset {
@@ -527,7 +631,7 @@ where
         Ok(Self {
             mmr,
             journal,
-            hasher,
+            _hasher: core::marker::PhantomData,
         })
     }
 }
@@ -567,7 +671,7 @@ where
         Ok(Self {
             mmr,
             journal,
-            hasher,
+            _hasher: core::marker::PhantomData,
         })
     }
 }
@@ -595,11 +699,14 @@ where
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
-    async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
-        let res = self.append(item).await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })?;
+    async fn append(&self, item: &Self::Item) -> Result<u64, JournalError> {
+        let mut hasher = StandardHasher::<H>::new();
+        let res = Self::append(self, item, &mut hasher)
+            .await
+            .map_err(|e| match e {
+                Error::Journal(inner) => inner,
+                Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+            })?;
 
         Ok(*res)
     }
@@ -613,8 +720,9 @@ where
 
         let leaves = *self.mmr.leaves();
         if leaves > size {
+            let mut hasher = StandardHasher::<H>::new();
             self.mmr
-                .rewind((leaves - size) as usize, &mut self.hasher)
+                .rewind((leaves - size) as usize, &mut hasher)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -758,11 +866,12 @@ mod tests {
         suffix: &str,
         count: usize,
     ) -> AuthenticatedJournal {
-        let mut journal = create_empty_journal(context, suffix).await;
+        let journal = create_empty_journal(context, suffix).await;
+        let mut hasher = StandardHasher::new();
 
         for i in 0..count {
             let op = create_operation(i as u8);
-            let loc = journal.append(&op).await.unwrap();
+            let loc = journal.append(&op, &mut hasher).await.unwrap();
             assert_eq!(loc, Location::new(i as u64));
         }
 
@@ -913,11 +1022,15 @@ mod tests {
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context.with_label("first"), "mismatched").await;
+            let journal = create_empty_journal(context.with_label("first"), "mismatched").await;
+            let mut hasher = StandardHasher::new();
 
             // Add 20 uncommitted operations
             for i in 0..20 {
-                let loc = journal.append(&create_operation(i as u8)).await.unwrap();
+                let loc = journal
+                    .append(&create_operation(i as u8), &mut hasher)
+                    .await
+                    .unwrap();
                 assert_eq!(loc, Location::new(i as u64));
             }
 
@@ -1129,17 +1242,24 @@ mod tests {
                     AuthenticatedJournal::new(context, mmr_cfg, journal_cfg, |op| op.is_commit())
                         .await
                         .unwrap();
+                let mut hasher = StandardHasher::new();
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
-                    journal.append(&create_operation(i)).await.unwrap();
+                    journal
+                        .append(&create_operation(i), &mut hasher)
+                        .await
+                        .unwrap();
                 }
                 journal
-                    .append(&Operation::CommitFloor(None, Location::new(0)))
+                    .append(&Operation::CommitFloor(None, Location::new(0)), &mut hasher)
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
-                    journal.append(&create_operation(i)).await.unwrap();
+                    journal
+                        .append(&create_operation(i), &mut hasher)
+                        .await
+                        .unwrap();
                 }
                 assert_eq!(journal.size().await, 10);
 
@@ -1165,8 +1285,12 @@ mod tests {
                 assert!(bounds.is_empty());
 
                 // Test rewinding after pruning.
+                let mut hasher = StandardHasher::new();
                 for i in 0..255 {
-                    journal.append(&create_operation(i)).await.unwrap();
+                    journal
+                        .append(&create_operation(i), &mut hasher)
+                        .await
+                        .unwrap();
                 }
                 journal.prune(Location::new(100)).await.unwrap();
                 assert_eq!(journal.reader().await.bounds().start, 98);
@@ -1188,14 +1312,15 @@ mod tests {
     fn test_apply_op_and_read_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "apply_op").await;
+            let journal = create_empty_journal(context, "apply_op").await;
+            let mut hasher = StandardHasher::new();
 
             assert_eq!(journal.size().await, 0);
 
             // Add 50 operations
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                let loc = journal.append(op).await.unwrap();
+                let loc = journal.append(op, &mut hasher).await.unwrap();
                 assert_eq!(loc, Location::new(i as u64));
                 assert_eq!(journal.size().await, (i + 1) as u64);
             }
@@ -1244,10 +1369,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "read_pruned", 100).await;
+            let mut hasher = StandardHasher::new();
 
             // Add commit and prune
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1303,19 +1432,19 @@ mod tests {
     fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal =
-                create_empty_journal(context.with_label("first"), "close_pending").await;
+            let journal = create_empty_journal(context.with_label("first"), "close_pending").await;
+            let mut hasher = StandardHasher::new();
 
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                let loc = journal.append(op).await.unwrap();
+                let loc = journal.append(op, &mut hasher).await.unwrap();
                 assert_eq!(loc, Location::new(i as u64),);
             }
 
             // Add commit operation to commit the operations
             let commit_loc = journal
-                .append(&Operation::CommitFloor(None, Location::new(0)))
+                .append(&Operation::CommitFloor(None, Location::new(0)), &mut hasher)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1357,10 +1486,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "prune_to", 100).await;
+            let mut hasher = StandardHasher::new();
 
             // Add commit at position 50
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1378,9 +1511,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "prune_boundary", 100).await;
+            let mut hasher = StandardHasher::new();
 
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1404,9 +1541,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "prune_count", 100).await;
+            let mut hasher = StandardHasher::new();
 
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1440,8 +1581,12 @@ mod tests {
             // Test after pruning
             let mut journal =
                 create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
+            let mut hasher = StandardHasher::new();
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1475,8 +1620,12 @@ mod tests {
             // Test after pruning
             let mut journal =
                 create_journal_with_ops(context.with_label("pruned"), "boundary", 100).await;
+            let mut hasher = StandardHasher::new();
             journal
-                .append(&Operation::CommitFloor(None, Location::new(50)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(50)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1493,9 +1642,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "mmr_boundary", 50).await;
+            let mut hasher = StandardHasher::new();
 
             journal
-                .append(&Operation::CommitFloor(None, Location::new(25)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(25)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1650,7 +1803,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create journal with initial operations
-            let mut journal = create_journal_with_ops(context, "proof_historical", 50).await;
+            let journal = create_journal_with_ops(context, "proof_historical", 50).await;
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
@@ -1659,7 +1812,10 @@ mod tests {
 
             // Add more operations after the historical state
             for i in 50..100 {
-                journal.append(&create_operation(i as u8)).await.unwrap();
+                journal
+                    .append(&create_operation(i as u8), &mut hasher)
+                    .await
+                    .unwrap();
             }
             journal.sync().await.unwrap();
 
@@ -1692,9 +1848,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_journal_with_ops(context, "proof_pruned", 50).await;
+            let mut hasher = StandardHasher::new();
 
             journal
-                .append(&Operation::CommitFloor(None, Location::new(25)))
+                .append(
+                    &Operation::CommitFloor(None, Location::new(25)),
+                    &mut hasher,
+                )
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1769,7 +1929,7 @@ mod tests {
     fn test_speculative_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "speculative_batch", 10).await;
+            let journal = create_journal_with_ops(context, "speculative_batch", 10).await;
             let original_root = journal.root();
 
             // Fork two independent speculative batches.
@@ -1810,13 +1970,13 @@ mod tests {
     fn test_speculative_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "batch_stacking", 10).await;
+            let journal = create_journal_with_ops(context, "batch_stacking", 10).await;
 
             let op_a = create_operation(100);
             let op_b = create_operation(200);
 
             // Build stacked batches in a block so intermediate borrows drop.
-            let (expected_root, finalized) = {
+            let (parent_finalized, expected_root, finalized) = {
                 let mut batch_a = journal.new_batch();
                 batch_a.add(op_a.clone());
                 let merkleized_a = batch_a.merkleize();
@@ -1826,10 +1986,15 @@ mod tests {
                 let merkleized_b = batch_b.merkleize();
 
                 let root = merkleized_b.root();
-                (root, merkleized_b.finalize())
+                (
+                    merkleized_a.finalize_incremental(),
+                    root,
+                    merkleized_b.finalize_incremental(),
+                )
                 // merkleized_a dropped here, releasing &journal.mmr
             };
 
+            journal.apply_batch(parent_finalized).await.unwrap();
             journal.apply_batch(finalized).await.unwrap();
 
             assert_eq!(journal.root(), expected_root);
@@ -1843,11 +2008,144 @@ mod tests {
         });
     }
 
+    /// Finalizing a merkleized batch leaves it available as a speculative
+    /// parent across live journal application.
+    #[test_traced("INFO")]
+    fn test_finalize_leaves_merkleized_batch_available_across_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "retained-batch-branching", 10).await;
+
+            let op_a = create_operation(100);
+            let op_b = create_operation(200);
+
+            let parent = {
+                let mut batch = journal.new_batch();
+                batch.add(op_a.clone());
+                batch.merkleize()
+            };
+            let parent_root = parent.root();
+            let parent_finalized = parent.finalize_incremental();
+
+            journal.apply_batch(parent_finalized).await.unwrap();
+            assert_eq!(journal.root(), parent_root);
+            assert_eq!(*journal.size().await, 11);
+            assert_eq!(journal.read(Location::new(10)).await.unwrap(), op_a);
+
+            let child = {
+                let mut batch = parent.new_batch();
+                batch.add(op_b.clone());
+                batch.merkleize()
+            };
+            let child_root = child.root();
+            let child_finalized = child.finalize_incremental();
+
+            assert_eq!(child_finalized.items.len(), 1);
+            assert_eq!(&*child_finalized.items[0], &vec![op_b.clone()]);
+
+            journal.apply_batch(child_finalized).await.unwrap();
+            assert_eq!(journal.root(), child_root);
+            assert_eq!(*journal.size().await, 12);
+            assert_eq!(journal.read(Location::new(11)).await.unwrap(), op_b);
+        });
+    }
+
+    /// After the parent batch is applied, descendants can be rebased onto the
+    /// live journal so future children no longer depend on the old parent.
+    #[test_traced("INFO")]
+    fn test_rebase_batch_compacts_one_parent_level() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "rebased-batch-branching", 10).await;
+
+            let op_a = create_operation(100);
+            let op_b = create_operation(200);
+            let op_c = create_operation(201);
+
+            let parent = {
+                let mut batch = journal.new_batch();
+                batch.add(op_a.clone());
+                batch.merkleize()
+            };
+            let parent_root = parent.root();
+            journal
+                .apply_batch(parent.finalize_incremental())
+                .await
+                .unwrap();
+            assert_eq!(journal.root(), parent_root);
+
+            let rebased_child = {
+                let mut batch = parent.new_batch();
+                batch.add(op_b.clone());
+                let child = batch.merkleize();
+                journal.rebase_batch(&child).unwrap()
+            };
+            drop(parent);
+
+            let grandchild = {
+                let mut batch = rebased_child.new_batch();
+                batch.add(op_c.clone());
+                batch.merkleize()
+            };
+            let expected_root = grandchild.root();
+
+            journal
+                .apply_batch(rebased_child.finalize_incremental())
+                .await
+                .unwrap();
+            journal
+                .apply_batch(grandchild.finalize_incremental())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.root(), expected_root);
+            assert_eq!(*journal.size().await, 13);
+            assert_eq!(journal.read(Location::new(10)).await.unwrap(), op_a);
+            assert_eq!(journal.read(Location::new(11)).await.unwrap(), op_b);
+            assert_eq!(journal.read(Location::new(12)).await.unwrap(), op_c);
+        });
+    }
+
+    /// Rebasing must fail if the live journal no longer matches the frozen
+    /// parent state captured by the batch.
+    #[test_traced("INFO")]
+    fn test_rebase_batch_rejects_mismatched_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal =
+                create_journal_with_ops(context.with_label("first"), "rebased-batch-mismatch", 10)
+                    .await;
+            let other = create_journal_with_ops(
+                context.with_label("second"),
+                "rebased-batch-mismatch-other",
+                11,
+            )
+            .await;
+
+            let parent = {
+                let mut batch = journal.new_batch();
+                batch.add(create_operation(100));
+                batch.merkleize()
+            };
+            let child = {
+                let mut batch = parent.new_batch();
+                batch.add(create_operation(200));
+                batch.merkleize()
+            };
+
+            let result = other.rebase_batch(&child);
+            assert!(matches!(
+                result,
+                Err(Error::Mmr(MmrError::RebaseParentRootMismatch))
+            ));
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_stale_batch_sibling() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "stale-sibling").await;
+            let journal = create_empty_journal(context, "stale-sibling").await;
             let op_a = create_operation(1);
             let op_b = create_operation(2);
 
@@ -1890,7 +2188,7 @@ mod tests {
     fn test_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "stale-chained", 5).await;
+            let journal = create_journal_with_ops(context, "stale-chained", 5).await;
 
             // Parent batch, then fork two children.
             let parent = {
@@ -1901,16 +2199,16 @@ mod tests {
             let child_a = {
                 let mut batch = parent.new_batch();
                 batch.add(create_operation(20));
-                batch.merkleize().finalize()
+                batch.merkleize().finalize_incremental()
             };
             let child_b = {
                 let mut batch = parent.new_batch();
                 batch.add(create_operation(30));
-                batch.merkleize().finalize()
+                batch.merkleize().finalize_incremental()
             };
-            drop(parent);
+            let parent_finalized = parent.finalize_incremental();
 
-            // Apply child_a, then child_b should be stale.
+            journal.apply_batch(parent_finalized).await.unwrap();
             journal.apply_batch(child_a).await.unwrap();
             let result = journal.apply_batch(child_b).await;
             assert!(
@@ -1924,10 +2222,10 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_stale_batch_parent_before_child() {
+    fn test_child_batch_after_parent_apply() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "stale-parent-first").await;
+            let journal = create_empty_journal(context, "stale-parent-first").await;
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
@@ -1939,21 +2237,14 @@ mod tests {
                 let child = {
                     let mut batch = parent.new_batch();
                     batch.add(create_operation(2));
-                    batch.merkleize().finalize()
+                    batch.merkleize().finalize_incremental()
                 };
-                (parent.finalize(), child)
+                (parent.finalize_incremental(), child)
             };
 
-            // Apply parent first -- child should now be stale.
+            // Apply parent first -- child should now apply successfully.
             journal.apply_batch(parent_finalized).await.unwrap();
-            let result = journal.apply_batch(child_finalized).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
-                ),
-                "expected StaleChangeset for child after parent applied, got {result:?}"
-            );
+            journal.apply_batch(child_finalized).await.unwrap();
         });
     }
 
@@ -1961,7 +2252,7 @@ mod tests {
     fn test_stale_batch_child_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "stale-child-first").await;
+            let journal = create_empty_journal(context, "stale-child-first").await;
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
@@ -1973,21 +2264,21 @@ mod tests {
                 let child = {
                     let mut batch = parent.new_batch();
                     batch.add(create_operation(2));
-                    batch.merkleize().finalize()
+                    batch.merkleize().finalize_incremental()
                 };
-                (parent.finalize(), child)
+                (parent.finalize_incremental(), child)
             };
 
-            // Apply child first -- parent should now be stale.
-            journal.apply_batch(child_finalized).await.unwrap();
-            let result = journal.apply_batch(parent_finalized).await;
+            // Apply child first -- child should be stale until the parent is applied.
+            let result = journal.apply_batch(child_finalized).await;
             assert!(
                 matches!(
                     result,
                     Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
                 ),
-                "expected StaleChangeset for parent after child applied, got {result:?}"
+                "expected StaleChangeset for child before parent applied, got {result:?}"
             );
+            journal.apply_batch(parent_finalized).await.unwrap();
         });
     }
 }

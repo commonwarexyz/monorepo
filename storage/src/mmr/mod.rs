@@ -148,6 +148,17 @@ pub enum Error {
         expected: Position,
         actual: Position,
     },
+    #[error(
+        "rebase parent mismatch: expected size {expected_size} / pruned_to_pos {expected_pruned_to_pos}, actual size {actual_size} / pruned_to_pos {actual_pruned_to_pos}"
+    )]
+    RebaseParentMismatch {
+        expected_size: Position,
+        expected_pruned_to_pos: Position,
+        actual_size: Position,
+        actual_pruned_to_pos: Position,
+    },
+    #[error("rebase parent root mismatch")]
+    RebaseParentRootMismatch,
 }
 
 impl From<LocationError> for Error {

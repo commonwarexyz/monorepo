@@ -531,8 +531,8 @@ pub(crate) mod test {
                 batch.write(key3, Some(vec![40]));
                 batch.merkleize(None).await.unwrap().finalize()
             };
-
-            // Apply child_a, then child_b should be stale.
+            // Apply child_a directly from the original base. child_b should
+            // then be stale because both children flatten the same parent.
             db.apply_batch(child_a).await.unwrap();
             let result = db.apply_batch(child_b).await;
             assert!(
@@ -566,7 +566,8 @@ pub(crate) mod test {
             };
             let parent = parent.finalize();
 
-            // Apply parent first -- child should now be stale.
+            // Apply parent first -- child is now stale because its finalized
+            // changeset already includes the parent segment.
             db.apply_batch(parent).await.unwrap();
             let result = db.apply_batch(child).await;
             assert!(
@@ -600,7 +601,8 @@ pub(crate) mod test {
             };
             let parent = parent.finalize();
 
-            // Apply child first -- parent should now be stale.
+            // Apply child first -- parent is now stale because the child
+            // already flattened the parent segment.
             db.apply_batch(child).await.unwrap();
             let result = db.apply_batch(parent).await;
             assert!(
