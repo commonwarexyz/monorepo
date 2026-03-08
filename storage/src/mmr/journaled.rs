@@ -281,14 +281,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         //
         // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
         // position of the first leaf after the boundary.
-        let nearest_size = PeakIterator::to_nearest_size(Position::new(journal_bounds_start));
-        let journal_boundary_leaf_aligned_pos = if *nearest_size < journal_bounds_start {
-            // If the nearest size required backing up over the boundary, we need to round up to the
-            // next leaf position which is guaranteed to be above the boundary.
-            let leaves = Location::try_from(nearest_size)?;
-            Position::try_from(Location::new(*leaves + 1))?
+        let journal_boundary = Position::new(journal_bounds_start);
+        let floor = PeakIterator::to_nearest_size(journal_boundary);
+        let journal_boundary_leaf_aligned_pos = if floor == journal_boundary {
+            // `to_nearest_size` is a floor operation: it returns the largest valid MMR size <= the
+            // boundary. Equality therefore means the boundary is already leaf-aligned.
+            floor
         } else {
-            nearest_size
+            // If flooring backed up over the boundary, round up to the next leaf position, which
+            // is guaranteed to be above it.
+            Position::try_from(Location::try_from(floor)? + 1)?
         };
         let effective_prune_pos =
             std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
