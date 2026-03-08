@@ -152,7 +152,7 @@ where
         context.with_label("mmr"),
         mmr::journaled::SyncConfig {
             config: mmr_config,
-            range: Position::try_from(range.start)?..Position::try_from(range.end)?,
+            range: range.clone(),
             pinned_nodes,
         },
         &mut hasher,

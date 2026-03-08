@@ -87,8 +87,8 @@ pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
 
-    /// Sync range - nodes outside this range are pruned/rewound.
-    pub range: std::ops::Range<Position>,
+    /// Sync range expressed as leaf-aligned MMR bounds.
+    pub range: std::ops::Range<Location>,
 
     /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
     /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
@@ -390,6 +390,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
+        let prune_pos = Position::try_from(cfg.range.start)?;
+        let end_pos = Position::try_from(cfg.range.end)?;
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
@@ -403,11 +405,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
         let size = journal.size().await;
 
-        if size > *cfg.range.end {
+        if size > *end_pos {
             return Err(crate::journal::Error::ItemOutOfRange(size).into());
         }
-        if size <= *cfg.range.start && *cfg.range.start != 0 {
-            journal.clear_to_size(*cfg.range.start).await?;
+        if size <= *prune_pos && *prune_pos != 0 {
+            journal.clear_to_size(*prune_pos).await?;
         }
 
         let journal_size = Position::new(journal.size().await);
@@ -423,17 +425,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            Location::try_from(cfg.range.start)
-                .map_err(Error::from)?
-                .as_u64()
-                .to_be_bytes()
-                .into(),
+            cfg.range.start.as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted = nodes_to_pin(cfg.range.start);
+            let nodes_to_pin_persisted = nodes_to_pin(prune_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
@@ -459,21 +457,20 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
-        if cfg.range.start < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
-                .await?;
+        if prune_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
         }
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
         metadata.sync().await?;
 
         // Prune the journal to range.start.
-        journal.prune(*cfg.range.start).await?;
+        journal.prune(*prune_pos).await?;
 
         Ok(Self {
             inner: RwLock::new(Inner {
                 mem_mmr,
-                pruned_to_pos: cfg.range.start,
+                pruned_to_pos: prune_pos,
             }),
             journal,
             metadata,
@@ -1905,7 +1902,7 @@ mod tests {
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(&context),
-                range: Position::new(0)..Position::new(100),
+                range: Location::new(0)..Location::new(52),
                 pinned_nodes: None,
             };
 
@@ -1964,7 +1961,9 @@ mod tests {
             let original_root = mmr.root();
 
             // Sync with range.start <= existing_size <= range.end should reuse data
-            let lower_bound_pos = Position::try_from(mmr.bounds().start).unwrap();
+            let lower_bound_loc = mmr.bounds().start;
+            let upper_bound_loc = mmr.leaves();
+            let lower_bound_pos = Position::try_from(lower_bound_loc).unwrap();
             let upper_bound_pos = mmr.size();
             let mut expected_nodes = BTreeMap::new();
             for i in *lower_bound_pos..*upper_bound_pos {
@@ -1975,7 +1974,7 @@ mod tests {
             }
             let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(&context),
-                range: lower_bound_pos..upper_bound_pos,
+                range: lower_bound_loc..upper_bound_loc,
                 pinned_nodes: None,
             };
 
@@ -1990,7 +1989,7 @@ mod tests {
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.leaves(), original_leaves);
             let bounds = sync_mmr.bounds();
-            assert_eq!(bounds.start, Location::try_from(lower_bound_pos).unwrap());
+            assert_eq!(bounds.start, lower_bound_loc);
             assert!(!bounds.is_empty());
             assert_eq!(sync_mmr.root(), original_root);
             for pos in *lower_bound_pos..*upper_bound_pos {
@@ -2032,22 +2031,24 @@ mod tests {
             mmr.prune(Location::new(6)).await.unwrap();
 
             let original_size = mmr.size();
+            let original_leaves = mmr.leaves();
             let original_root = mmr.root();
-            let original_pruned_to = Position::try_from(mmr.bounds().start).unwrap();
+            let original_pruned_to = mmr.bounds().start;
+            let original_pruned_to_pos = Position::try_from(original_pruned_to).unwrap();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
-            let lower_bound_pos = original_pruned_to;
-            let upper_bound_pos = original_size + 11; // Extend beyond existing data
+            let lower_bound_loc = original_pruned_to;
+            let upper_bound_loc = original_leaves + 6; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in *lower_bound_pos..*original_size {
+            for pos in *original_pruned_to_pos..*original_size {
                 let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
             let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(&context),
-                range: lower_bound_pos..upper_bound_pos,
+                range: lower_bound_loc..upper_bound_loc,
                 pinned_nodes: None,
             };
 
@@ -2061,12 +2062,12 @@ mod tests {
             // Should have existing data in the overlapping range.
             assert_eq!(sync_mmr.size(), original_size);
             let bounds = sync_mmr.bounds();
-            assert_eq!(bounds.start, Location::try_from(lower_bound_pos).unwrap());
+            assert_eq!(bounds.start, lower_bound_loc);
             assert!(!bounds.is_empty());
             assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in *lower_bound_pos..*original_size {
+            for pos in *original_pruned_to_pos..*original_size {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
@@ -2245,10 +2246,10 @@ mod tests {
 
             // Reopen via init_sync with range.start > 0. This will prune the journal, so
             // init_sync must read pinned nodes BEFORE pruning or they'll be lost.
-            let prune_pos = Position::new(50);
+            let prune_loc = Location::new(32);
             let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: cfg,
-                range: prune_pos..Position::new(200),
+                range: prune_loc..Location::new(128),
                 pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
             };
 
@@ -2259,10 +2260,7 @@ mod tests {
             // Verify the MMR state is correct.
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.root(), original_root);
-            assert_eq!(
-                sync_mmr.bounds().start,
-                Location::try_from(prune_pos).unwrap()
-            );
+            assert_eq!(sync_mmr.bounds().start, prune_loc);
 
             sync_mmr.destroy().await.unwrap();
         });

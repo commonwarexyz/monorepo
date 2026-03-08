@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{journaled::Config as MmrConfig, Location, Position, StandardHasher},
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -71,7 +71,7 @@ where
         context.with_label("mmr"),
         crate::mmr::journaled::SyncConfig {
             config: mmr_config,
-            range: Position::try_from(range.start)?..Position::try_from(range.end)?,
+            range: range.clone(),
             pinned_nodes,
         },
         &mut hasher,

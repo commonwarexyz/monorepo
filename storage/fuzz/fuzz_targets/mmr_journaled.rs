@@ -345,15 +345,15 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     const MAX_RANGE_SIZE: u64 = 1000;
 
-                    let lower_bound_pos = Position::new(lower_bound_seed as u64 % MAX_RANGE_SIZE);
+                    let lower_bound_loc = Location::new(lower_bound_seed as u64 % MAX_RANGE_SIZE);
                     // +1 to ensure the range is non-empty
-                    let upper_bound_pos = Position::new(
-                        *(lower_bound_pos + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
+                    let upper_bound_loc = Location::new(
+                        *(lower_bound_loc + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
                     );
 
                     let sync_config = SyncConfig {
                         config: test_config("sync", &context),
-                        range: lower_bound_pos..upper_bound_pos,
+                        range: lower_bound_loc..upper_bound_loc,
                         pinned_nodes: None,
                     };
 
@@ -366,11 +366,8 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     {
-                        assert!(sync_mmr.size() <= upper_bound_pos);
-                        assert_eq!(
-                            Position::try_from(sync_mmr.bounds().start).unwrap(),
-                            lower_bound_pos
-                        );
+                        assert!(sync_mmr.leaves() <= upper_bound_loc);
+                        assert_eq!(sync_mmr.bounds().start, lower_bound_loc);
                         sync_mmr.destroy().await.unwrap();
                     }
                     restarts += 1;
