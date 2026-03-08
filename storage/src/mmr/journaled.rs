@@ -325,8 +325,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             },
             hasher,
         )?;
-        let prune_pos = effective_prune_pos;
-        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
+        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, effective_prune_pos)
+            .await?;
 
         if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
@@ -351,7 +351,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
             // Prune mem_mmr and reinstate pinned nodes.
             let mut pn = BTreeMap::new();
-            for p in nodes_to_pin(prune_pos) {
+            for p in nodes_to_pin(effective_prune_pos) {
                 let d = mem_mmr.get_node_unchecked(p);
                 pn.insert(p, *d);
             }
@@ -362,7 +362,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         Ok(Self {
             inner: RwLock::new(Inner {
                 mem_mmr,
-                pruned_to_pos: prune_pos,
+                pruned_to_pos: effective_prune_pos,
             }),
             journal,
             metadata,

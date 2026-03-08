@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    pruned_to_pos: u64,
+    pruned_to: u64,
     nodes: Vec<[u8; 32]>,
     pinned_nodes: Vec<[u8; 32]>,
 }
@@ -30,7 +30,7 @@ fn fuzz(input: FuzzInput) {
 
     let config = Config {
         nodes,
-        pruned_to: Location::new(input.pruned_to_pos),
+        pruned_to: Location::new(input.pruned_to),
         pinned_nodes,
     };
 
@@ -39,7 +39,7 @@ fn fuzz(input: FuzzInput) {
         return;
     };
 
-    if input.pruned_to_pos == u64::MAX || input.pruned_to_pos == u64::MAX - 1 {
+    if input.pruned_to == u64::MAX || input.pruned_to == u64::MAX - 1 {
         return;
     }
 
