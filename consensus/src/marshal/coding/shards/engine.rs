@@ -7,8 +7,8 @@
 //!
 //! The shard engine serves two primary functions:
 //! 1. Broadcast: When a node proposes a block, the engine broadcasts
-//!    erasure-coded shards to all participants and tracked non-participants.
-//!    The leader sends each participant their indexed shard.
+//!    erasure-coded shards to all participants. The leader sends each
+//!    participant their indexed shard.
 //! 2. Block Reconstruction: When a node receives shards from peers, the engine
 //!    validates them and reconstructs the original block once enough valid
 //!    shards are available. Both participants and non-participants can
@@ -698,8 +698,7 @@ where
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
     ///
-    /// - Participants receive the shard matching their participant index.
-    /// - Tracked non-participants receive the leader's shard.
+    /// Participants receive the shard matching their participant index.
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -733,9 +732,6 @@ where
         }
 
         let my_index = me.get() as usize;
-        let leader_shard = block
-            .shard(my_index as u16)
-            .expect("proposer's shard must exist");
 
         // Broadcast each participant their corresponding shard.
         for (index, peer) in participants.iter().enumerate() {
@@ -753,19 +749,6 @@ where
             };
             let _ = sender
                 .send(Recipients::One(peer.clone()), shard, true)
-                .await;
-        }
-
-        // Send the leader's shard to tracked peers outside the participant set.
-        let non_participants: Vec<P> = self
-            .tracked_peers
-            .iter()
-            .filter(|peer| participants.index(peer).is_none())
-            .cloned()
-            .collect();
-        if !non_participants.is_empty() {
-            let _ = sender
-                .send(Recipients::Some(non_participants), leader_shard, true)
                 .await;
         }
 
@@ -4218,7 +4201,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_broadcast_routes_participant_and_non_participant_shards() {
+    fn test_non_participant_reconstructs_via_gossip() {
+        // Non-participants no longer receive shards directly from the leader.
+        // Instead, they reconstruct blocks from shards gossiped by
+        // participants (sent via Recipients::All).
         let fixture = Fixture {
             num_non_participants: 1,
             ..Default::default()
@@ -4229,97 +4215,29 @@ mod tests {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
 
                 let leader = peers[0].public_key.clone();
-                let round = Round::new(Epoch::zero(), View::new(1));
                 peers[0].mailbox.proposed(round, coded_block.clone()).await;
 
+                // Inform participants of the leader so they validate and
+                // re-broadcast shards via Recipients::All.
                 for peer in peers[1..].iter_mut() {
                     peer.mailbox
-                        .discovered(commitment, leader.clone(), round)
-                        .await;
-                }
-                for np in non_participants.iter() {
-                    np.mailbox
                         .discovered(commitment, leader.clone(), round)
                         .await;
                 }
                 context.sleep(config.link.latency * 2).await;
 
-                // Participants should receive and validate their own shards.
-                for peer in peers.iter_mut() {
-                    peer.mailbox
-                        .subscribe_shard(commitment)
-                        .await
-                        .await
-                        .expect("participant shard subscription should complete");
-                }
-
-                // Non-participant should receive and validate the leader's shard.
-                for np in non_participants.iter() {
-                    np.mailbox
-                        .subscribe_shard(commitment)
-                        .await
-                        .await
-                        .expect("non-participant shard subscription should complete");
-                }
-                context.sleep(config.link.latency).await;
-
-                // Non-participant should reconstruct the block from received shards.
-                for np in non_participants.iter() {
-                    let reconstructed = np
-                        .mailbox
-                        .get(commitment)
-                        .await
-                        .expect("non-participant should reconstruct block");
-                    assert_eq!(reconstructed.commitment(), commitment);
-                }
-
-                let blocked = oracle.blocked().await.unwrap();
-                assert!(
-                    blocked.is_empty(),
-                    "no peer should be blocked in participant/non-participant shard routing test"
-                );
-            },
-        );
-    }
-
-    #[test_traced]
-    fn test_non_participant_reconstructs_after_discovered() {
-        let fixture = Fixture {
-            num_non_participants: 1,
-            ..Default::default()
-        };
-
-        fixture.start(
-            |config, context, oracle, mut peers, non_participants, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-                let commitment = coded_block.commitment();
-                let round = Round::new(Epoch::zero(), View::new(1));
-
-                let leader = peers[0].public_key.clone();
-                peers[0].mailbox.proposed(round, coded_block.clone()).await;
-
-                // Inform participants of the leader so they validate and re-broadcast
-                // shards.
-                for peer in peers[1..].iter_mut() {
-                    peer.mailbox
-                        .discovered(commitment, leader.clone(), round)
-                        .await;
-                }
-                context.sleep(config.link.latency).await;
-
-                // Non-participant discovers the leader after shards are already
-                // propagating through the network.
+                // Non-participant discovers the leader after participant
+                // gossip is already propagating.
                 let np = &non_participants[0];
                 let block_sub = np.mailbox.subscribe(commitment).await;
                 np.mailbox
                     .discovered(commitment, leader.clone(), round)
                     .await;
 
-                // Wait for enough shards (leader's shard + shards from
-                // participants) to arrive and reconstruct.
+                // Wait for enough gossiped shards to arrive and reconstruct.
                 select! {
                     result = block_sub => {
                         let reconstructed = result.expect("block subscription should resolve");
@@ -4334,7 +4252,7 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
-                    "no peer should be blocked in non-participant reconstruction test"
+                    "no peer should be blocked in non-participant gossip reconstruction test"
                 );
             },
         );
