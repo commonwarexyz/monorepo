@@ -535,10 +535,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Snapshot nodes in the mem_mmr that are missing from the journal, along with the pinned
         // node set for the current pruning boundary.
-        let (leaves, missing_nodes, pinned_nodes) = {
+        let (sync_target_leaves, missing_nodes, pinned_nodes) = {
             let inner = self.inner.read();
             let size = inner.mem_mmr.size();
-            let leaves = inner.mem_mmr.leaves();
+            let sync_target_leaves = inner.mem_mmr.leaves();
 
             assert!(
                 journal_size <= size,
@@ -562,7 +562,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                 pinned_nodes.insert(pos, *digest);
             }
 
-            (leaves, missing_nodes, pinned_nodes)
+            (sync_target_leaves, missing_nodes, pinned_nodes)
         };
 
         // Append missing nodes to the journal without holding the mem_mmr read lock.
@@ -580,7 +580,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let mut inner = self.inner.write();
             inner
                 .mem_mmr
-                .prune(leaves)
+                .prune(sync_target_leaves)
                 .expect("captured leaves is in bounds");
             inner.mem_mmr.add_pinned_nodes(pinned_nodes);
         }
