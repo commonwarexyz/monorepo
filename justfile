@@ -45,8 +45,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, benchmark names, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-benchmark-names check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, publish order, benchmark names, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-benchmark-names check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -70,6 +70,10 @@ check-docs *args='':
 # Lint benchmark naming conventions
 check-benchmark-names:
     python3 .github/scripts/lint_benchmark_names.py
+
+# Check publish workflow ordering against workspace dependencies
+check-publish-order:
+    python3 .github/scripts/check_publish_order.py
 
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' max_mem='4000':
