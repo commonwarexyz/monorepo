@@ -32,6 +32,17 @@
 //! Allocation requests are rounded up to the next size class. Requests larger
 //! than `max_size` return [`PoolError::Oversized`] from [`BufferPool::try_alloc`],
 //! or fall back to an untracked aligned heap allocation from [`BufferPool::alloc`].
+//!
+//! # Cache Structure
+//!
+//! Each size class uses a two-level allocator:
+//! - a small per-thread local cache for steady-state same-thread reuse
+//! - a shared global freelist for refill and spill between threads
+//!
+//! When a local cache misses, the pool refills a small batch from the global
+//! freelist before attempting to create a new tracked buffer. Returned buffers
+//! first try to re-enter the dropping thread's local cache, spilling a bounded
+//! batch back to the global freelist if needed.
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
@@ -44,6 +55,7 @@ use prometheus_client::{
 };
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
+    cell::RefCell,
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
@@ -53,6 +65,7 @@ use std::{
         Arc, Weak,
     },
 };
+use thread_local::ThreadLocal;
 
 /// Error returned when buffer pool allocation fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +419,15 @@ impl Drop for AlignedBuffer {
 }
 
 /// Per-size-class state.
+///
+/// Each class is a small two-level allocator:
+/// - a shared global freelist for tracked buffers visible to all threads
+/// - a per-thread local cache for same-thread reuse
+/// - a `created` counter that caps the total number of tracked buffers
+///
+/// Allocation prefers the local cache, then refills from the global freelist,
+/// and only creates a new tracked buffer when no free buffer is available and
+/// the class still has remaining capacity.
 struct SizeClass {
     /// The buffer size for this class.
     size: usize,
@@ -414,9 +436,13 @@ struct SizeClass {
     /// Maximum number of tracked buffers for this class.
     max: usize,
     /// Global free list of tracked buffers available for reuse.
-    freelist: ArrayQueue<AlignedBuffer>,
+    global: ArrayQueue<AlignedBuffer>,
     /// Number of tracked buffers currently in existence for this class.
     created: AtomicUsize,
+    /// Maximum number of buffers retained in the current thread's local bin.
+    local_capacity: usize,
+    /// Per-thread local free buffers for this size class.
+    local: ThreadLocal<RefCell<Vec<AlignedBuffer>>>,
 }
 
 impl SizeClass {
@@ -433,9 +459,72 @@ impl SizeClass {
             size,
             alignment,
             max,
-            freelist,
+            global: freelist,
             created: AtomicUsize::new(created),
+            local_capacity: Self::local_capacity(max),
+            local: ThreadLocal::new(),
         }
+    }
+
+    // Keep local bins small so a hot thread cannot hoard most of the class budget.
+    fn local_capacity(max: usize) -> usize {
+        let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        let effective_threads = threads.min(max);
+        (max / (2 * effective_threads)).clamp(1, 8)
+    }
+
+    fn local_bin(&self) -> &RefCell<Vec<AlignedBuffer>> {
+        self.local
+            .get_or(|| RefCell::new(Vec::with_capacity(self.local_capacity)))
+    }
+
+    fn try_reserve(&self) -> bool {
+        self.created
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
+                (created < self.max).then_some(created + 1)
+            })
+            .is_ok()
+    }
+
+    fn pop(&self) -> Option<AlignedBuffer> {
+        let mut bin = self.local_bin().borrow_mut();
+
+        // Same-thread reuse should stay entirely local on the steady path.
+        if let Some(buffer) = bin.pop() {
+            return Some(buffer);
+        }
+
+        // Refill a small batch from the shared freelist on local miss.
+        let target = (self.local_capacity / 2).max(1);
+        let buffer = self.global.pop()?;
+        while bin.len() + 1 < target {
+            let Some(buffer) = self.global.pop() else {
+                break;
+            };
+            bin.push(buffer);
+        }
+        Some(buffer)
+    }
+
+    fn push(&self, buffer: AlignedBuffer) {
+        let mut bin = self.local_bin().borrow_mut();
+        if bin.len() < self.local_capacity {
+            bin.push(buffer);
+            return;
+        }
+
+        // Spill a small batch back to the global freelist before retrying the local push.
+        let spill = bin.len().min(self.local_capacity / 2).max(1);
+        for _ in 0..spill {
+            let Some(spilled) = bin.pop() else {
+                break;
+            };
+            self.global
+                .push(spilled)
+                .unwrap_or_else(|_| unreachable!("tracked buffer should always spill to global"));
+        }
+
+        bin.push(buffer);
     }
 }
 
@@ -463,8 +552,9 @@ impl BufferPoolInner {
             size_class: class.size as u64,
         };
 
-        // Reuse an existing tracked buffer before attempting to grow the class.
-        if let Some(buffer) = class.freelist.pop() {
+        // Reuse an existing tracked buffer from the local/global free lists
+        // before attempting to grow the class.
+        if let Some(buffer) = class.pop() {
             return Some(Allocation {
                 buffer,
                 is_new: false,
@@ -472,15 +562,8 @@ impl BufferPoolInner {
         }
 
         // Reserve one creation slot if the class has not reached its tracked-buffer cap.
-        let reserved =
-            class
-                .created
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                    (created < class.max).then_some(created + 1)
-                });
-
-        // Pool exhausted (no slots available)
-        if reserved.is_err() {
+        if !class.try_reserve() {
+            // Pool exhausted (no free buffers and no creation capacity left).
             self.metrics.exhausted_total.get_or_create(&label).inc();
             return None;
         }
@@ -502,12 +585,12 @@ impl BufferPoolInner {
     fn return_buffer(&self, buffer: AlignedBuffer) {
         // Find the class for this buffer size
         if let Some(class_index) = self.config.class_index(buffer.capacity()) {
+            // Return to the local cache, spilling to global if needed.
             let class = &self.classes[class_index];
-
-            // Try to return to freelist
-            let _ = class.freelist.push(buffer);
+            class.push(buffer);
         }
-        // Buffer doesn't match any class (or freelist full) - it's dropped and deallocated
+        // Buffers that do not map to any size class are never tracked and are
+        // dropped directly instead of being returned to the pool.
     }
 }
 
@@ -566,7 +649,7 @@ impl BufferPool {
                 let label = SizeClassLabel {
                     size_class: class.size as u64,
                 };
-                let created = class.freelist.len() as i64;
+                let created = class.global.len() as i64;
                 metrics.created.get_or_create(&label).set(created);
             }
         }
@@ -1263,6 +1346,29 @@ mod tests {
         }
     }
 
+    /// Helper to get the number of checked-out tracked buffers for a size class.
+    ///
+    /// With TLS enabled, tracked buffers can be free in either the shared
+    /// freelist or the current thread's local cache.
+    fn get_allocated(pool: &BufferPool, size: usize) -> usize {
+        let class_index = pool.inner.config.class_index(size).unwrap();
+        let class = &pool.inner.classes[class_index];
+        class.created.load(Ordering::Relaxed) - class.global.len() - get_local_len(class)
+    }
+
+    /// Helper to get the number of free buffers visible to the current thread.
+    fn get_available(pool: &BufferPool, size: usize) -> i64 {
+        let class_index = pool.inner.config.class_index(size).unwrap();
+        let class = &pool.inner.classes[class_index];
+        (class.global.len() + get_local_len(class)) as i64
+    }
+
+    /// Helper to get the number of free buffers parked in the current thread's
+    /// local cache for a size class.
+    fn get_local_len(class: &SizeClass) -> usize {
+        class.local.get().map_or(0, |bin| bin.borrow().len())
+    }
+
     #[test]
     fn test_page_size() {
         let size = page_size();
@@ -1646,33 +1752,30 @@ mod tests {
     }
 
     #[test]
-    fn test_return_buffer_freelist_full_drops_extra() {
+    fn test_return_buffer_local_overflow_spills_to_global() {
         let page = page_size();
         let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
         let class_index = pool
             .inner
             .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
 
-        // Fill freelist with a returned tracked buffer.
-        let tracked = pool.try_alloc(page).expect("tracked allocation");
-        assert_eq!(pool.inner.classes[class_index].freelist.len(), 0);
-        assert_eq!(
-            pool.inner.classes[class_index]
-                .created
-                .load(Ordering::Relaxed),
-            1
-        );
-        drop(tracked);
-        assert_eq!(pool.inner.classes[class_index].freelist.len(), 1);
+        let tracked1 = pool.try_alloc(page).expect("first tracked allocation");
+        let tracked2 = pool.try_alloc(page).expect("second tracked allocation");
 
-        // Simulate one outstanding allocation, then return an extra same-class
-        // buffer while freelist is already full to hit the Err(push) branch.
-        pool.inner
-            .return_buffer(AlignedBuffer::new(page, page_size()));
-        assert_eq!(pool.inner.classes[class_index].freelist.len(), 1);
+        // The first return should stay entirely in the current thread's local cache.
+        drop(tracked1);
+        assert_eq!(pool.inner.classes[class_index].global.len(), 0);
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
+
+        // Returning another tracked buffer should spill one buffer to the global
+        // freelist and retain one in the current thread's local bin.
+        drop(tracked2);
+        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
+        assert_eq!(get_available(&pool, page), 2);
     }
 
     #[test]
@@ -1714,19 +1817,6 @@ mod tests {
         let page = page_size();
         let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new()).into_pooled();
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
-    }
-
-    /// Helper to get the number of checked-out tracked buffers for a size class.
-    fn get_allocated(pool: &BufferPool, size: usize) -> usize {
-        let class_index = pool.inner.config.class_index(size).unwrap();
-        let class = &pool.inner.classes[class_index];
-        class.created.load(Ordering::Relaxed) - class.freelist.len()
-    }
-
-    /// Helper to get the number of available buffers in freelist for a size class.
-    fn get_available(pool: &BufferPool, size: usize) -> i64 {
-        let class_index = pool.inner.config.class_index(size).unwrap();
-        pool.inner.classes[class_index].freelist.len() as i64
     }
 
     #[test]
@@ -1997,12 +2087,12 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // All buffers should be returned
-        assert_eq!(
-            get_allocated(&pool, page),
-            0,
-            "all buffers should be returned after multithreaded test"
-        );
+        // Worker threads may retain free buffers in their own local caches, so
+        // the main thread cannot assert that all of them are visible here.
+        // It should still be able to allocate successfully once the workers finish.
+        let _buf = pool
+            .try_alloc(100)
+            .expect("pool should remain usable after multithreaded test");
     }
 
     #[test]
@@ -2022,17 +2112,32 @@ mod tests {
         }
         drop(tx);
 
-        // Receive and drop on another thread
+        // Receive and drop on another thread. Those returns should populate the
+        // dropping thread's local cache, so allocations on that same thread
+        // should be able to reuse them immediately.
         let handle = thread::spawn(move || {
             while let Ok(iobuf) = rx.recv() {
                 drop(iobuf);
             }
+
+            let class_index = pool
+                .inner
+                .config
+                .class_index(page)
+                .expect("class exists for page-sized buffer");
+            assert!(
+                get_local_len(&pool.inner.classes[class_index]) >= 1,
+                "dropping thread should retain returned buffers in its local cache"
+            );
+
+            for _ in 0..50 {
+                let _buf = pool
+                    .try_alloc(100)
+                    .expect("dropping thread should be able to reuse returned buffers");
+            }
         });
 
         handle.join().unwrap();
-
-        // All buffers should be returned
-        assert_eq!(get_allocated(&pool, page), 0);
     }
 
     #[test]
