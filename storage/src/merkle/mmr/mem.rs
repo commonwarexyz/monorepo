@@ -412,12 +412,16 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
-    pub fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
+    pub fn proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
-        self.range_proof(loc..loc + 1).map_err(|e| match e {
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
             Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
@@ -431,15 +435,13 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::RangeOutOfBounds] if `range.end` > [Self::leaves()].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    pub fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
+    pub fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = D>,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
-        let positions = proof::nodes_required_for_range_proof(leaves, range)?;
-        let digests = positions
-            .into_iter()
-            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Proof { leaves, digests })
+        proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
     }
 
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
@@ -660,28 +662,30 @@ mod tests {
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
             assert!(matches!(
-                mmr.proof(Location::new(0)),
+                mmr.proof(&mut hasher, Location::new(0)),
                 Err(Error::ElementPruned(_))
             ));
             assert!(matches!(
-                mmr.proof(Location::new(6)),
+                mmr.proof(&mut hasher, Location::new(6)),
                 Err(Error::ElementPruned(_))
             ));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
-            assert!(mmr.proof(Location::new(8)).is_ok());
-            assert!(mmr.proof(Location::new(10)).is_ok());
+            assert!(mmr.proof(&mut hasher, Location::new(8)).is_ok());
+            assert!(mmr.proof(&mut hasher, Location::new(10)).is_ok());
 
             let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
-                mmr.range_proof(Location::new(5)..Location::new(9)).is_err(),
+                mmr.range_proof(&mut hasher, Location::new(5)..Location::new(9))
+                    .is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
+                mmr.range_proof(&mut hasher, Location::new(8)..mmr.leaves())
+                    .is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
@@ -1258,17 +1262,17 @@ mod tests {
             // Range end > leaves errors on empty MMR
             let mmr = Mmr::new(&mut hasher);
             assert_eq!(mmr.leaves(), Location::new(0));
-            let result = mmr.range_proof(Location::new(0)..Location::new(1));
+            let result = mmr.range_proof(&mut hasher, Location::new(0)..Location::new(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end > leaves errors on non-empty MMR
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
             assert_eq!(mmr.leaves(), Location::new(10));
-            let result = mmr.range_proof(Location::new(5)..Location::new(11));
+            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(11));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end == leaves succeeds
-            let result = mmr.range_proof(Location::new(5)..Location::new(10));
+            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(10));
             assert!(result.is_ok());
         });
     }
@@ -1281,7 +1285,7 @@ mod tests {
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
             let mmr = Mmr::new(&mut hasher);
-            let result = mmr.proof(Location::new(0));
+            let result = mmr.proof(&mut hasher, Location::new(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1290,7 +1294,7 @@ mod tests {
 
             // Test on non-empty MMR with location >= leaves
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
-            let result = mmr.proof(Location::new(10));
+            let result = mmr.proof(&mut hasher, Location::new(10));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1298,7 +1302,7 @@ mod tests {
             );
 
             // location < leaves should succeed
-            let result = mmr.proof(Location::new(9));
+            let result = mmr.proof(&mut hasher, Location::new(9));
             assert!(result.is_ok(), "expected Ok, got {:?}", result);
         });
     }

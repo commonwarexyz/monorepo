@@ -50,7 +50,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         block_on(async {
                             let mut hasher = StandardHasher::<Sha256>::new();
                             for (loc, element) in samples {
-                                let proof = mmr.proof(loc).unwrap();
+                                let proof = mmr.proof(&mut hasher, loc).unwrap();
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
                                     &element,

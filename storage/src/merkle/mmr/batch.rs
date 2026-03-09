@@ -887,7 +887,7 @@ mod tests {
 
             // Range proof.
             let range = Location::new(50)..Location::new(55);
-            let range_proof = merkleized.range_proof(range.clone()).unwrap();
+            let range_proof = merkleized.range_proof(&mut hasher, range.clone()).unwrap();
             let mut elements = Vec::new();
             for i in 50u64..55 {
                 elements.push(hasher.digest(&i.to_be_bytes()));
@@ -917,8 +917,8 @@ mod tests {
 
             // Proofs should match.
             for loc in [0u64, 10, 49] {
-                let base_proof = base.proof(Location::new(loc)).unwrap();
-                let batch_proof = merkleized.proof(Location::new(loc)).unwrap();
+                let base_proof = base.proof(&mut hasher, Location::new(loc)).unwrap();
+                let batch_proof = merkleized.proof(&mut hasher, Location::new(loc)).unwrap();
                 assert_eq!(base_proof, batch_proof, "proof mismatch at loc {loc}");
             }
         });
@@ -1011,7 +1011,7 @@ mod tests {
             ));
 
             // Proof for pruned element should fail.
-            let result = merkleized.proof(Location::new(0));
+            let result = merkleized.proof(&mut hasher, Location::new(0));
             assert!(
                 matches!(result, Err(Error::ElementPruned(_))),
                 "expected ElementPruned, got {result:?}"

@@ -12,6 +12,7 @@ use crate::{
     },
     mmr::{
         batch,
+        hasher::Hasher as MmrHasher,
         journaled::Mmr,
         read::{BatchChainInfo, Readable},
         Error as MmrError, Location, Position, Proof, StandardHasher,
@@ -451,9 +452,10 @@ where
 
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
+        let mut hasher = MmrHasher::fork(&self.hasher);
         let proof = self
             .mmr
-            .historical_range_proof(historical_leaves, start_loc..end_loc)
+            .historical_range_proof(&mut hasher, historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);

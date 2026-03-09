@@ -20,6 +20,7 @@ pub struct GetOperationsRequest {
     pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
+    pub include_pinned_nodes: bool,
 }
 
 /// Response with operations and proof.
@@ -31,6 +32,7 @@ where
     pub request_id: RequestId,
     pub proof: Proof<D>,
     pub operations: Vec<Op>,
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// Request for sync target from server.
@@ -163,6 +165,7 @@ impl Write for GetOperationsRequest {
         self.op_count.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
+        (self.include_pinned_nodes as u8).write(buf);
     }
 }
 
@@ -172,6 +175,7 @@ impl EncodeSize for GetOperationsRequest {
             + self.op_count.encode_size()
             + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
+            + 1u8.encode_size()
     }
 }
 
@@ -188,11 +192,13 @@ impl Read for GetOperationsRequest {
                 "max_ops cannot be zero",
             ));
         };
+        let include_pinned_nodes = u8::read(buf)? != 0;
         Ok(Self {
             request_id,
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         })
     }
 }
@@ -218,6 +224,15 @@ where
         self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
+        match &self.pinned_nodes {
+            Some(nodes) => {
+                1u8.write(buf);
+                nodes.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
     }
 }
 
@@ -227,7 +242,14 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size()
+            + self.proof.encode_size()
+            + self.operations.encode_size()
+            + 1u8.encode_size()
+            + self
+                .pinned_nodes
+                .as_ref()
+                .map_or(0, |nodes| nodes.encode_size())
     }
 }
 
@@ -244,10 +266,18 @@ where
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
         };
+        let has_pinned_nodes = u8::read(buf)? != 0;
+        let pinned_nodes = if has_pinned_nodes {
+            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
+            Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
+        } else {
+            None
+        };
         Ok(Self {
             request_id,
             proof,
             operations,
+            pinned_nodes,
         })
     }
 }

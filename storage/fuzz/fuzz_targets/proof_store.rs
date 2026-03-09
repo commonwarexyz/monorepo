@@ -51,11 +51,12 @@ async fn fuzz(input: FuzzInput) {
         &input.elements,
         input.start_loc,
         &input.root,
+        &[],
     ) else {
         return;
     };
 
-    if let Ok(proof) = proof_store.range_proof(input.range).await {
+    if let Ok(proof) = proof_store.range_proof(&mut hasher, input.range).await {
         let _ = proof.verify_range_inclusion(
             &mut hasher,
             &input.elements,

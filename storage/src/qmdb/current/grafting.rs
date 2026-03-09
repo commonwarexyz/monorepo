@@ -590,7 +590,7 @@ mod tests {
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
                     let loc = Location::new(0);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
 
@@ -598,20 +598,20 @@ mod tests {
                     assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
 
                     let loc = Location::new(1);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(&mut verifier, &b2, loc, &grafted_root));
 
                     let loc = Location::new(2);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
                     assert!(proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
 
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
@@ -620,7 +620,7 @@ mod tests {
                 // Verify that manipulated inputs cause proof verification to fail.
                 {
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
@@ -666,10 +666,13 @@ mod tests {
 
                 // Verify range proofs.
                 {
-                    let proof =
-                        verification::range_proof(&combined, Location::new(0)..Location::new(4))
-                            .await
-                            .unwrap();
+                    let proof = verification::range_proof(
+                        &mut standard,
+                        &combined,
+                        Location::new(0)..Location::new(4),
+                    )
+                    .await
+                    .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1, &c2]);
                     assert!(proof.verify_range_inclusion(
@@ -721,7 +724,7 @@ mod tests {
 
             // Verify inclusion proofs still work for both covered and uncovered ops leaves.
             let loc = Location::new(0);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                 .await
                 .unwrap();
 
@@ -730,7 +733,7 @@ mod tests {
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new(4);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&mut standard, &combined, loc..loc + 1)
                 .await
                 .unwrap();
             assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &grafted_root));

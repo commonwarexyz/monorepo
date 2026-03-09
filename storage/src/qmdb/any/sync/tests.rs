@@ -64,9 +64,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
         &self,
         pos: Position,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
-
-    /// Get pinned nodes from the internal cached map (used before closing db in partial match tests)
-    fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Self::Digest>;
 }
 
 /// Harness for sync tests.
@@ -1186,12 +1183,6 @@ where
             .prune(sync_db.inactivity_floor_loc().await)
             .await
             .unwrap();
-        let sync_db_original_size = sync_db.bounds().await.end;
-
-        // Get pinned nodes before closing the database
-        let pinned_nodes =
-            sync_db.pinned_nodes_from_map(Position::try_from(sync_db_original_size).unwrap());
-
         sync_db.sync().await.unwrap();
         drop(sync_db);
 
@@ -1208,6 +1199,11 @@ where
         let sync_lower_bound = target_db.inactivity_floor_loc().await;
         let sync_upper_bound = bounds.end;
         let target_hash = target_db.root();
+
+        // Get pinned nodes at the sync lower bound from the target db (which has all the data).
+        let pinned_nodes = target_db
+            .pinned_nodes_at(Position::try_from(sync_lower_bound).unwrap())
+            .await;
 
         let (mmr, journal) = target_db.into_log_components();
 

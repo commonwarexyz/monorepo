@@ -202,7 +202,7 @@ fn fuzz(input: FuzzInput) {
                         if bounds.contains(&location) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                            if let Ok(proof) = mmr.proof(location).await {
+                            if let Ok(proof) = mmr.proof(&mut hasher, location).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
                             && end_loc < mmr.leaves()
                             && mmr.bounds().contains(&range.start)
                         {
-                            if let Ok(proof) = mmr.range_proof(range.clone()).await {
+                            if let Ok(proof) = mmr.range_proof(&mut hasher, range.clone()).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_range_inclusion(
                                     &mut hasher,
@@ -253,7 +253,7 @@ fn fuzz(input: FuzzInput) {
                     let expected_root = historical_root(&leaves, requested_leaves);
 
                     let result = mmr
-                        .historical_range_proof(requested_leaves, range.clone())
+                        .historical_range_proof(&mut hasher, requested_leaves, range.clone())
                         .await;
                     match result {
                         Ok(historical_proof) => {

@@ -10,8 +10,13 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{Location, Proof},
-    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
+    mmr::{iterator::nodes_to_pin, Location, Position, Proof},
+    qmdb::{
+        build_snapshot_from_log,
+        operation::Operation as OperationTrait,
+        store::{LogStore, MerkleizedStore, PrunableStore},
+        Error,
+    },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
@@ -121,6 +126,22 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Return the pinned MMR nodes at the given location.
+    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+        let pos = Position::try_from(loc)?;
+        let mut nodes = Vec::new();
+        for p in nodes_to_pin(pos) {
+            let digest = self
+                .log
+                .mmr
+                .get_node(p)
+                .await?
+                .ok_or(crate::mmr::Error::ElementPruned(p))?;
+            nodes.push(digest);
+        }
+        Ok(nodes)
     }
 }
 
