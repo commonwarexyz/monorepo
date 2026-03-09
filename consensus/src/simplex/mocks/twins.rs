@@ -55,8 +55,6 @@ impl Scenario {
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
-    /// The harness uses this to build outbound recipient lists for split twin
-    /// senders.
     pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
@@ -106,21 +104,20 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
     }
 }
 
-/// Splits participants by `view % n` for the view-based twins harness used in
-/// fuzzing.
+/// Splits participants at index `view % n`.
 pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
     let split = (view.get() as usize) % participants.len();
     let (primary, secondary) = participants.split_at(split);
     (primary.to_vec(), secondary.to_vec())
 }
 
-/// Routes a sender using the view-based twins harness used in fuzzing.
+/// Routes a sender according to [`view_partitions`].
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
     route_with_groups(sender, &primary, &secondary)
 }
 
-/// Stateful resolver splitter for twins harnesses.
+/// Stateful resolver splitter for twin routing.
 ///
 /// Resolver requests are view-scoped, but responses only carry a request id.
 /// This splitter remembers which twin half issued each outbound request so that
