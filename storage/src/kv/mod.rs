@@ -1,10 +1,5 @@
 //! Traits for interacting with a key/value store.
 
-use commonware_macros::{stability, stability_mod};
-
-stability_mod!(ALPHA, mod batch);
-#[stability(ALPHA)]
-pub use batch::{Batch, Batchable};
 use std::future::Future;
 
 /// A readable key-value store.
@@ -81,7 +76,7 @@ pub trait Deletable: Updatable {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Batchable, Deletable, Gettable, Updatable};
+    use super::{Deletable, Gettable, Updatable};
     use commonware_codec::DecodeExt;
     use commonware_utils::sequence::FixedBytes;
 
@@ -115,10 +110,5 @@ pub(crate) mod tests {
     #[allow(dead_code)]
     pub fn assert_deletable<T: Deletable + Send>(db: &mut T, key: T::Key) {
         assert_send(db.delete(key));
-    }
-
-    #[allow(dead_code)]
-    pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
-        assert_send(db.write_batch(vec![(key, Some(value))]));
     }
 }

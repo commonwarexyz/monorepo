@@ -186,7 +186,7 @@ fn fuzz(mut input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch
                             .merkleize(Some(FixedBytes::new(commit_id)))
@@ -197,6 +197,7 @@ fn fuzz(mut input: FuzzInput) {
                     db.apply_batch(finalized)
                         .await
                         .expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
@@ -215,7 +216,7 @@ fn fuzz(mut input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch
                             .merkleize(Some(FixedBytes::new(commit_id)))
@@ -226,6 +227,7 @@ fn fuzz(mut input: FuzzInput) {
                     db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
                         range: db.inactivity_floor_loc()..db.bounds().await.end,
@@ -268,7 +270,7 @@ fn fuzz(mut input: FuzzInput) {
         let finalized = {
             let mut batch = db.new_batch();
             for (k, v) in pending_writes.drain(..) {
-                batch.write(k, v);
+                batch = batch.write(k, v);
             }
             batch.merkleize(None).await.unwrap().finalize()
         };

@@ -134,9 +134,9 @@ where
     H: Hasher,
     Operation<U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
-    /// For positions at or above the grafting height, returns grafted MMR node.
-    /// For positions below the grafting height, the ops MMR is used.
+    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
+    /// above the grafting height, returns grafted MMR node. For positions below the grafting
+    /// height, the ops MMR is used.
     fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
@@ -153,9 +153,9 @@ where
 
     /// Returns the ops MMR root.
     ///
-    /// This is the root of the raw operations log, without the activity bitmap.
-    /// It is used as the sync target because the sync engine verifies batches
-    /// against the ops MMR, not the canonical root.
+    /// This is the root of the raw operations log, without the activity bitmap. It is used as the
+    /// sync target because the sync engine verifies batches against the ops MMR, not the canonical
+    /// root.
     ///
     /// See the [Root structure](super) section in the module documentation.
     pub fn ops_root(&self) -> H::Digest {
@@ -242,9 +242,8 @@ where
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
-    /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs
-    /// incorporating the activity bitmap, this returns standard MMR proofs
-    /// suitable for state sync.
+    /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
+    /// activity bitmap, this returns standard MMR proofs suitable for state sync.
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location,
@@ -319,6 +318,12 @@ where
     H: Hasher,
     Operation<U>: Codec,
 {
+    /// Durably commit the journal state published by prior [`Db::apply_batch`]
+    /// calls.
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.any.commit().await
+    }
+
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
         self.any.sync().await?;
@@ -347,14 +352,16 @@ where
     H: Hasher,
     Operation<U>: Codec,
 {
-    /// Apply a changeset to the database.
+    /// Apply a changeset to the database, returning the range of written operations.
     ///
-    /// A changeset is only valid if the database has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from the
-    /// same parent for speculative execution, but only one may be applied. Applying
-    /// a stale changeset returns [`Error::StaleChangeset`].
+    /// A changeset is only valid if the database has not been modified since the batch that
+    /// produced it was created. Multiple batches can be forked from the same parent for speculative
+    /// execution, but only one may be applied. Applying a stale changeset returns
+    /// [`Error::StaleChangeset`].
     ///
-    /// Returns the range of locations written.
+    /// This publishes the batch to the in-memory Current view and appends it to the underlying
+    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
+    /// durability.
     pub async fn apply_batch(
         &mut self,
         batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
@@ -362,16 +369,15 @@ where
         // 1. Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
 
-        // 2. Push new bits FIRST. Must happen before clears because for chained
-        //    batches, some clears target locations within the push range
-        //    (ancestor-segment superseded ops that were pushed as active by an
-        //    ancestor and then superseded by a descendant).
+        // 2. Push new bits FIRST. Must happen before clears because for chained batches, some
+        //    clears target locations within the push range (ancestor-segment superseded ops that
+        //    were pushed as active by an ancestor and then superseded by a descendant).
         for &bit in &batch.bitmap_pushes {
             self.status.push(bit);
         }
 
-        // 3. Clear superseded locations: previous commit inactivation, diff
-        //    base_old_locs, and ancestor-segment superseded locations (chaining).
+        // 3. Clear superseded locations: previous commit inactivation, diff base_old_locs, and
+        //    ancestor-segment superseded locations (chaining).
         for loc in &batch.bitmap_clears {
             self.status.set_bit(**loc, false);
         }
@@ -410,8 +416,7 @@ where
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        // No-op, DB already in recoverable state.
-        Ok(())
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
@@ -438,19 +443,20 @@ where
     type Digest = H::Digest;
     type Operation = Operation<U>;
 
+    // Returns the `ops_root` of this Current Db.
     fn root(&self) -> H::Digest {
-        self.root()
+        self.ops_root()
     }
 
+    /// Returns the historical proof for the specified range, which will verify against the
+    /// ops_root of this Current Db.
     async fn historical_proof(
         &self,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
+        Self::ops_historical_proof(self, historical_size, start_loc, max_ops).await
     }
 }
 

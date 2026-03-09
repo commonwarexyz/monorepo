@@ -187,7 +187,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch
                             .merkleize(metadata_bytes.clone())
@@ -198,6 +198,7 @@ fn fuzz(input: FuzzInput) {
                     db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                 }
 
@@ -220,13 +221,14 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch.merkleize(None).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = db.bounds().await.end;
                     let oldest_retained_loc = db.inactivity_floor_loc();
@@ -247,13 +249,14 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch.merkleize(None).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
@@ -281,7 +284,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch.merkleize(None).await.unwrap().finalize()
                     };
@@ -305,13 +308,14 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_writes.drain(..) {
-                            batch.write(k, v);
+                            batch = batch.write(k, v);
                         }
                         batch.merkleize(None).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
                         .expect("commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     historical_roots.insert(db.bounds().await.end, db.root());
                     let _ = db.root();
                 }
@@ -319,6 +323,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
                     pending_writes.clear();
+                    historical_roots.clear();
                     drop(db);
 
                     let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
@@ -338,7 +343,7 @@ fn fuzz(input: FuzzInput) {
         let finalized = {
             let mut batch = db.new_batch();
             for (k, v) in pending_writes.drain(..) {
-                batch.write(k, v);
+                batch = batch.write(k, v);
             }
             batch.merkleize(None).await.unwrap().finalize()
         };

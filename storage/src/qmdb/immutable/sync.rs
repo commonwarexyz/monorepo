@@ -109,7 +109,7 @@ where
             )
         };
 
-        let mut db = Self {
+        let db = Self {
             journal,
             snapshot,
             last_commit_loc,
@@ -228,7 +228,7 @@ mod tests {
             for op in ops {
                 match op {
                     Operation::Set(key, value) => {
-                        batch.set(key, value);
+                        batch = batch.set(key, value);
                     }
                     Operation::Commit(_metadata) => {
                         panic!("Commit operation not supported in apply_ops");
@@ -412,7 +412,7 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify initial sync worked
             assert_eq!(synced_db.root(), target_root);

@@ -171,6 +171,7 @@ fn fuzz(input: FuzzInput) {
                         batch.merkleize(metadata_bytes.clone()).finalize()
                     };
                     db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                 }
 
                 Operation::Get { loc_offset } => {
@@ -194,6 +195,7 @@ fn fuzz(input: FuzzInput) {
                         batch.merkleize(None).finalize()
                     };
                     db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     db.prune(db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
@@ -232,6 +234,7 @@ fn fuzz(input: FuzzInput) {
                         batch.merkleize(None).finalize()
                     };
                     db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     let _ = db.root();
                 }
 
@@ -251,6 +254,7 @@ fn fuzz(input: FuzzInput) {
                         batch.merkleize(None).finalize()
                     };
                     db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc);
@@ -280,6 +284,7 @@ fn fuzz(input: FuzzInput) {
                         batch.merkleize(None).finalize()
                     };
                     db.apply_batch(finalized).await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
                     let op_count = db.bounds().await.end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;

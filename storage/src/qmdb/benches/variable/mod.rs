@@ -164,7 +164,7 @@ where
         for i in 0u64..num_elements {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-            batch.write(k, Some(v));
+            batch = batch.write(k, Some(v));
         }
         let finalized = batch.merkleize(None).await.unwrap().finalize();
         db.apply_batch(finalized).await.unwrap();
@@ -176,11 +176,11 @@ where
         for _ in 0u64..num_operations {
             let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % DELETE_FREQUENCY == 0 {
-                batch.write(rand_key, None);
+                batch = batch.write(rand_key, None);
                 continue;
             }
             let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-            batch.write(rand_key, Some(v));
+            batch = batch.write(rand_key, Some(v));
             if rng.next_u32() % commit_frequency == 0 {
                 let finalized = batch.merkleize(None).await.unwrap().finalize();
                 db.apply_batch(finalized).await.unwrap();

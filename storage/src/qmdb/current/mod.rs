@@ -3,14 +3,60 @@
 //!
 //! # Examples
 //!
-//! The batch API mirrors [crate::qmdb::any]:
-//!
 //! ```ignore
-//! let mut batch = db.new_batch();
-//! batch.write(key, Some(value));
-//! let merkleized = batch.merkleize(None).await?;
+//! // Simple mode: apply a batch, then durably commit it.
+//! let merkleized = db.new_batch()
+//!     .write(key, Some(value))
+//!     .merkleize(None).await?;
 //! let finalized = merkleized.finalize();
 //! db.apply_batch(finalized).await?;
+//! db.commit().await?;
+//!
+//! // Use `sync()` instead of `commit()` if you want the stronger durability
+//! // boundary for all database state.
+//! db.sync().await?;
+//! ```
+//!
+//! ```ignore
+//! // Batches can still fork before you apply them.
+//! let parent = db.new_batch()
+//!     .write(key_a, Some(val_a))
+//!     .merkleize(None).await?;
+//!
+//! let child_a = parent.new_batch()
+//!     .write(key_b, Some(val_b))
+//!     .merkleize(None).await?;
+//!
+//! let child_b = parent.new_batch()
+//!     .write(key_c, Some(val_c))
+//!     .merkleize(None).await?;
+//!
+//! // Only one fork can be applied; the others become stale.
+//! db.apply_batch(child_a.finalize()).await?;
+//! db.commit().await?;
+//! ```
+//!
+//! ```ignore
+//! // Advanced usage: while the previous batch is being committed, concurrently build a child
+//! // batch from the newly published state.
+//! let parent_finalized = db.new_batch()
+//!     .write(key_a, Some(val_a))
+//!     .merkleize(None).await?.finalize();
+//! db.apply_batch(parent_finalized).await?;
+//!
+//! let (child_finalized, commit_result) = futures::join!(
+//!     async {
+//!         db.new_batch()
+//!             .write(key_b, Some(val_b))
+//!             .merkleize(None).await.map(|batch| batch.finalize())
+//!     },
+//!     db.commit(),
+//! );
+//! let child_finalized = child_finalized?;
+//! commit_result?;
+//!
+//! db.apply_batch(child_finalized).await?;
+//! db.commit().await?;
 //! ```
 //!
 //! # Motivation
@@ -595,10 +641,11 @@ pub mod tests {
     ) -> Result<(), Error> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
-            batch.write(k, v);
+            batch = batch.write(k, v);
         }
         let finalized = batch.merkleize(None).await?.finalize();
         db.apply_batch(finalized).await?;
+        db.commit().await?;
         Ok(())
     }
 
@@ -989,7 +1036,7 @@ pub mod tests {
                 for i in 0u64..ELEMENTS {
                     let k: C::Key = TestKey::from_seed(i);
                     let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
-                    batch.write(k, Some(v.clone()));
+                    batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
 
@@ -1000,7 +1047,7 @@ pub mod tests {
                     }
                     let k: C::Key = TestKey::from_seed(i);
                     let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
-                    batch.write(k, Some(v.clone()));
+                    batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
 
@@ -1010,7 +1057,7 @@ pub mod tests {
                         continue;
                     }
                     let k: C::Key = TestKey::from_seed(i);
-                    batch.write(k, None);
+                    batch = batch.write(k, None);
                     map.remove(&k);
                 }
 
@@ -1069,12 +1116,12 @@ pub mod tests {
 
             let changeset_a = {
                 let mut batch = db.new_batch();
-                batch.write(key1, Some(value1.clone()));
+                batch = batch.write(key1, Some(value1.clone()));
                 batch.merkleize(None).await.unwrap().finalize()
             };
             let changeset_b = {
                 let mut batch = db.new_batch();
-                batch.write(key2, Some(value2));
+                batch = batch.write(key2, Some(value2));
                 batch.merkleize(None).await.unwrap().finalize()
             };
 
@@ -1334,7 +1381,7 @@ pub mod tests {
 
             let mut batch = db.new_batch();
             for i in 0..10 {
-                batch.write(key(i), Some(val(i)));
+                batch = batch.write(key(i), Some(val(i)));
             }
             let merkleized = batch.merkleize(None).await.unwrap();
             let speculative_root = merkleized.root();
@@ -1371,7 +1418,7 @@ pub mod tests {
             // Pre-populate A.
             {
                 let mut batch = db.new_batch();
-                batch.write(ka, Some(val(0)));
+                batch = batch.write(ka, Some(val(0)));
                 let finalized = batch.merkleize(None).await.unwrap().finalize();
                 db.apply_batch(finalized).await.unwrap();
             }
@@ -1380,8 +1427,8 @@ pub mod tests {
             let va2 = val(100);
             let vb = val(1);
             let mut batch = db.new_batch();
-            batch.write(ka, Some(va2));
-            batch.write(kb, Some(vb));
+            batch = batch.write(ka, Some(va2));
+            batch = batch.write(kb, Some(vb));
             let merkleized = batch.merkleize(None).await.unwrap();
 
             assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
@@ -1407,16 +1454,16 @@ pub mod tests {
             // Parent batch writes keys 0..5.
             let mut parent = db.new_batch();
             for i in 0..5 {
-                parent.write(key(i), Some(val(i)));
+                parent = parent.write(key(i), Some(val(i)));
             }
             let parent_m = parent.merkleize(None).await.unwrap();
 
             // Child batch writes keys 5..10 and overrides key 0.
             let mut child = parent_m.new_batch();
             for i in 5..10 {
-                child.write(key(i), Some(val(i)));
+                child = child.write(key(i), Some(val(i)));
             }
-            child.write(key(0), Some(val(999)));
+            child = child.write(key(0), Some(val(999)));
             let child_m = child.merkleize(None).await.unwrap();
 
             let child_root = child_m.root();
@@ -1435,6 +1482,86 @@ pub mod tests {
             for i in 1..10 {
                 assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applying without `commit()` publishes in memory but is not recovered after reopen.
+    #[test_traced("INFO")]
+    fn test_current_batch_apply_requires_commit_for_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "apply_requires_commit";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let committed_root = db.root();
+
+            let finalized = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), committed_root);
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// One-stage pipelining lets the next batch be built while the prior batch commits.
+    #[test_traced("INFO")]
+    fn test_current_batch_single_stage_pipeline() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("pipe", &ctx))
+                    .await
+                    .unwrap();
+
+            let parent_finalized = {
+                let mut batch = db.new_batch();
+                batch = batch.write(key(0), Some(val(0)));
+                batch.merkleize(None).await.unwrap().finalize()
+            };
+            db.apply_batch(parent_finalized).await.unwrap();
+
+            let (child_finalized, commit_result) = futures::join!(
+                async {
+                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                    let mut child = db.new_batch();
+                    child = child.write(key(1), Some(val(1)));
+                    child.merkleize(None).await.map(|batch| batch.finalize())
+                },
+                db.commit(),
+            );
+            let child_finalized = child_finalized.unwrap();
+            commit_result.unwrap();
+
+            db.apply_batch(child_finalized).await.unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
             db.destroy().await.unwrap();
         });

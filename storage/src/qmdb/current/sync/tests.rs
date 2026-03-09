@@ -73,10 +73,10 @@ mod harnesses {
                 for op in ops {
                     match op {
                         Operation::Update(Update(key, value)) => {
-                            batch.write(key, Some(value));
+                            batch = batch.write(key, Some(value));
                         }
                         Operation::Delete(key) => {
-                            batch.write(key, None);
+                            batch = batch.write(key, None);
                         }
                         Operation::CommitFloor(_, _) => {}
                     }
@@ -142,10 +142,10 @@ mod harnesses {
                 for op in ops {
                     match op {
                         Operation::Update(Update(key, value)) => {
-                            batch.write(key, Some(value));
+                            batch = batch.write(key, Some(value));
                         }
                         Operation::Delete(key) => {
-                            batch.write(key, None);
+                            batch = batch.write(key, None);
                         }
                         Operation::CommitFloor(_, _) => {}
                     }
@@ -211,10 +211,10 @@ mod harnesses {
                 for op in ops {
                     match op {
                         Operation::Update(Update { key, value, .. }) => {
-                            batch.write(key, Some(value));
+                            batch = batch.write(key, Some(value));
                         }
                         Operation::Delete(key) => {
-                            batch.write(key, None);
+                            batch = batch.write(key, None);
                         }
                         Operation::CommitFloor(_, _) => {}
                     }
@@ -280,10 +280,10 @@ mod harnesses {
                 for op in ops {
                     match op {
                         Operation::Update(Update { key, value, .. }) => {
-                            batch.write(key, Some(value));
+                            batch = batch.write(key, Some(value));
                         }
                         Operation::Delete(key) => {
-                            batch.write(key, None);
+                            batch = batch.write(key, None);
                         }
                         Operation::CommitFloor(_, _) => {}
                     }
