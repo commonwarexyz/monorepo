@@ -424,7 +424,9 @@ mod tests {
         Manager as _, Receiver as _, Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::p2p::mocks::Envelope as ResolverEnvelope;
+    use commonware_resolver::p2p::mocks::{
+        Message as ResolverMessage, Payload as ResolverPayload,
+    };
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
@@ -6243,9 +6245,9 @@ mod tests {
             peer_a_sender
                 .send(
                     Recipients::One(twin.clone()),
-                    ResolverEnvelope::Request {
+                    ResolverMessage {
                         id: 5,
-                        key: U64::from(1u64),
+                        payload: ResolverPayload::Request(U64::from(1u64)),
                     }
                     .encode(),
                     false,
@@ -6254,21 +6256,21 @@ mod tests {
                 .unwrap();
             let (sender, payload) = primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_a);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Request {
+                ResolverMessage {
                     id: 5,
-                    key: U64::from(1u64),
+                    payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
 
             peer_b_sender
                 .send(
                     Recipients::One(twin.clone()),
-                    ResolverEnvelope::Request {
+                    ResolverMessage {
                         id: 6,
-                        key: U64::from(1u64),
+                        payload: ResolverPayload::Request(U64::from(1u64)),
                     }
                     .encode(),
                     false,
@@ -6277,21 +6279,21 @@ mod tests {
                 .unwrap();
             let (sender, payload) = secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_b);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Request {
+                ResolverMessage {
                     id: 6,
-                    key: U64::from(1u64),
+                    payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
 
             primary_sender
                 .send(
                     Recipients::All,
-                    ResolverEnvelope::Request {
+                    ResolverMessage {
                         id: 7,
-                        key: U64::from(1u64),
+                        payload: ResolverPayload::Request(U64::from(1u64)),
                     }
                     .encode(),
                     false,
@@ -6300,21 +6302,21 @@ mod tests {
                 .unwrap();
             let (sender, payload) = peer_a_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Request {
+                ResolverMessage {
                     id: 7,
-                    key: U64::from(1u64),
+                    payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
 
             secondary_sender
                 .send(
                     Recipients::All,
-                    ResolverEnvelope::Request {
+                    ResolverMessage {
                         id: 8,
-                        key: U64::from(1u64),
+                        payload: ResolverPayload::Request(U64::from(1u64)),
                     }
                     .encode(),
                     false,
@@ -6323,21 +6325,21 @@ mod tests {
                 .unwrap();
             let (sender, payload) = peer_b_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Request {
+                ResolverMessage {
                     id: 8,
-                    key: U64::from(1u64),
+                    payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
 
             peer_a_sender
                 .send(
                     Recipients::One(twin.clone()),
-                    ResolverEnvelope::<U64>::Response {
+                    ResolverMessage::<U64> {
                         id: 7,
-                        data: b"response_a".as_slice().into(),
+                        payload: ResolverPayload::Response(b"response_a".as_slice().into()),
                     }
                     .encode(),
                     false,
@@ -6346,21 +6348,21 @@ mod tests {
                 .unwrap();
             let (sender, payload) = primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_a);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Response {
+                ResolverMessage {
                     id: 7,
-                    data: b"response_a".as_slice().into(),
+                    payload: ResolverPayload::Response(b"response_a".as_slice().into()),
                 }
             );
 
             peer_b_sender
                 .send(
                     Recipients::One(twin.clone()),
-                    ResolverEnvelope::<U64>::Response {
+                    ResolverMessage::<U64> {
                         id: 8,
-                        data: b"response_b".as_slice().into(),
+                        payload: ResolverPayload::Response(b"response_b".as_slice().into()),
                     }
                     .encode(),
                     false,
@@ -6369,12 +6371,12 @@ mod tests {
                 .unwrap();
             let (sender, payload) = secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_b);
-            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
             assert_eq!(
                 envelope,
-                ResolverEnvelope::Response {
+                ResolverMessage {
                     id: 8,
-                    data: b"response_b".as_slice().into(),
+                    payload: ResolverPayload::Response(b"response_b".as_slice().into()),
                 }
             );
         });

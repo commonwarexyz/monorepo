@@ -8,12 +8,13 @@
 //! 4. Execute each scenario across compromised-node assignments.
 
 use crate::types::View;
+use commonware_codec::Read;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
     simulated::{SplitOrigin, SplitTarget},
     Recipients,
 };
-use commonware_resolver::p2p::mocks::Envelope as ResolverEnvelope;
+use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::IoBuf;
 use commonware_utils::{sequence::U64, sync::Mutex, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
@@ -168,9 +169,10 @@ where
         message: &IoBuf,
     ) -> Option<Recipients<P>> {
         let mut buf = message.as_ref();
-        let envelope = ResolverEnvelope::<U64>::decode(&mut buf).ok()?;
-        match envelope {
-            ResolverEnvelope::Request { id, key } => {
+        let message = ResolverMessage::<U64>::read_cfg(&mut buf, &()).ok()?;
+        match message.payload {
+            ResolverPayload::Request(key) => {
+                let id = message.id;
                 let view = View::new(u64::from(key));
                 let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
                 let (filtered, target) = match origin {
@@ -186,26 +188,24 @@ where
                 self.requests.lock().insert(id, target);
                 Some(filtered)
             }
-            ResolverEnvelope::Response { .. } | ResolverEnvelope::Error { .. } => {
-                Some(recipients.clone())
-            }
+            ResolverPayload::Response(_) | ResolverPayload::Error => Some(recipients.clone()),
         }
     }
 
     fn route_message(&self, sender: &P, message: &IoBuf) -> SplitTarget {
         let mut buf = message.as_ref();
-        let Ok(envelope) = ResolverEnvelope::<U64>::decode(&mut buf) else {
+        let Ok(message) = ResolverMessage::<U64>::read_cfg(&mut buf, &()) else {
             return SplitTarget::None;
         };
-        match envelope {
-            ResolverEnvelope::Request { key, .. } => {
+        match message.payload {
+            ResolverPayload::Request(key) => {
                 let view = View::new(u64::from(key));
                 (self.route)(view, sender, self.participants.as_ref())
             }
-            ResolverEnvelope::Response { id, .. } | ResolverEnvelope::Error { id } => self
+            ResolverPayload::Response(_) | ResolverPayload::Error => self
                 .requests
                 .lock()
-                .remove(&id)
+                .remove(&message.id)
                 .unwrap_or(SplitTarget::None),
         }
     }
@@ -573,6 +573,7 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode;
 
     #[test]
     fn cases_cover_all_compromised_nodes_for_n5_f1() {
@@ -784,9 +785,9 @@ mod tests {
         let router = splitter.router();
 
         let outbound = IoBuf::from(
-            ResolverEnvelope::Request {
+            ResolverMessage {
                 id: 7,
-                key: U64::from(1u64),
+                payload: ResolverPayload::Request(U64::from(1u64)),
             }
             .encode(),
         );
@@ -797,9 +798,9 @@ mod tests {
         }
 
         let inbound_request = IoBuf::from(
-            ResolverEnvelope::Request {
+            ResolverMessage {
                 id: 8,
-                key: U64::from(1u64),
+                payload: ResolverPayload::Request(U64::from(1u64)),
             }
             .encode(),
         );
@@ -810,9 +811,9 @@ mod tests {
         );
 
         let response = IoBuf::from(
-            ResolverEnvelope::<U64>::Response {
+            ResolverMessage::<U64> {
                 id: 7,
-                data: Default::default(),
+                payload: ResolverPayload::Response(Default::default()),
             }
             .encode(),
         );
@@ -822,7 +823,13 @@ mod tests {
             "response should return to the originating half"
         );
 
-        let unknown = IoBuf::from(ResolverEnvelope::<U64>::Error { id: 999 }.encode());
+        let unknown = IoBuf::from(
+            ResolverMessage::<U64> {
+                id: 999,
+                payload: ResolverPayload::Error,
+            }
+            .encode(),
+        );
         assert_eq!(router(&(secondary, unknown)), SplitTarget::None);
     }
 
