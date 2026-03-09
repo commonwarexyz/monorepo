@@ -7,16 +7,19 @@
 //! 3. Arrange those round choices into full multi-round scenarios.
 //! 4. Execute each scenario across compromised-node assignments.
 
-use crate::types::View;
+use crate::{
+    simplex::elector::{Config as ElectorConfig, Elector as Elected},
+    types::{Participant, Round, View},
+};
 use commonware_codec::Read;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{certificate::Scheme, PublicKey};
 use commonware_p2p::{
     simulated::{SplitOrigin, SplitTarget},
     Recipients,
 };
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::IoBuf;
-use commonware_utils::{sequence::U64, sync::Mutex, test_rng_seeded};
+use commonware_utils::{ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -118,6 +121,77 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
     route_with_groups(sender, &primary, &secondary)
+}
+
+/// Twins leader-election config that follows scripted scenario leaders before
+/// delegating to a fallback elector.
+#[derive(Clone, Debug)]
+pub struct Elector<C> {
+    fallback: C,
+    round_leaders: Arc<[Participant]>,
+}
+
+impl<C: Default> Default for Elector<C> {
+    fn default() -> Self {
+        Self {
+            fallback: C::default(),
+            round_leaders: Arc::from(Vec::new()),
+        }
+    }
+}
+
+impl<C> Elector<C> {
+    /// Create a twins elector from a scenario and fallback elector.
+    pub fn new(fallback: C, scenario: &Scenario, participants: usize) -> Self {
+        let round_leaders: Vec<_> = scenario
+            .rounds()
+            .iter()
+            .map(|round| {
+                assert!(round.leader() < participants, "scenario leader out of bounds");
+                Participant::new(round.leader() as u32)
+            })
+            .collect();
+        Self {
+            fallback,
+            round_leaders: Arc::from(round_leaders),
+        }
+    }
+}
+
+/// Initialized twins leader elector built from [`Elector`].
+#[derive(Clone, Debug)]
+pub struct ElectorState<E> {
+    fallback: E,
+    round_leaders: Arc<[Participant]>,
+}
+
+impl<S, C> ElectorConfig<S> for Elector<C>
+where
+    S: Scheme,
+    C: ElectorConfig<S>,
+{
+    type Elector = ElectorState<C::Elector>;
+
+    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+        ElectorState {
+            fallback: self.fallback.build(participants),
+            round_leaders: self.round_leaders,
+        }
+    }
+}
+
+impl<S, E> Elected<S> for ElectorState<E>
+where
+    S: Scheme,
+    E: Elected<S>,
+{
+    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+        let idx = round.view().get().saturating_sub(1) as usize;
+        if let Some(&leader) = self.round_leaders.get(idx) {
+            return leader;
+        }
+        self.fallback.elect(round, certificate)
+    }
 }
 
 /// Stateful resolver splitter for twin routing.

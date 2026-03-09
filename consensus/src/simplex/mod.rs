@@ -392,7 +392,7 @@ mod tests {
     use crate::{
         simplex::{
             elector::{Config as Elector, Elector as Elected, Random, RoundRobin},
-            mocks::twins,
+            mocks::twins::{self, Elector as TwinsElector},
             scheme::{
                 bls12381_multisig,
                 bls12381_threshold::{
@@ -5651,76 +5651,6 @@ mod tests {
         max_scenarios: usize,
         max_compromised_sets: usize,
         required_containers: View,
-    }
-
-    #[derive(Clone, Debug)]
-    struct TwinsElector<C> {
-        fallback: C,
-        round_leaders: Arc<[Participant]>,
-    }
-
-    impl<C: Default> Default for TwinsElector<C> {
-        fn default() -> Self {
-            Self {
-                fallback: C::default(),
-                round_leaders: Arc::from(Vec::new()),
-            }
-        }
-    }
-
-    impl<C> TwinsElector<C> {
-        fn new(fallback: C, scenario: &twins::Scenario, participants: usize) -> Self {
-            let round_leaders: Vec<_> = scenario
-                .rounds()
-                .iter()
-                .map(|round| {
-                    assert!(
-                        round.leader() < participants,
-                        "scenario leader out of bounds"
-                    );
-                    Participant::new(round.leader() as u32)
-                })
-                .collect();
-            Self {
-                fallback,
-                round_leaders: Arc::from(round_leaders),
-            }
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct TwinsElectorState<E> {
-        fallback: E,
-        round_leaders: Arc<[Participant]>,
-    }
-
-    impl<S, C> Elector<S> for TwinsElector<C>
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        C: Elector<S>,
-    {
-        type Elector = TwinsElectorState<C::Elector>;
-
-        fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
-            TwinsElectorState {
-                fallback: self.fallback.build(participants),
-                round_leaders: self.round_leaders,
-            }
-        }
-    }
-
-    impl<S, E> Elected<S> for TwinsElectorState<E>
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        E: Elected<S>,
-    {
-        fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
-            let idx = round.view().get().saturating_sub(1) as usize;
-            if let Some(&leader) = self.round_leaders.get(idx) {
-                return leader;
-            }
-            self.fallback.elect(round, certificate)
-        }
     }
 
     fn twins_case<S, F, L>(case: twins::Case, campaign: TwinsCampaign, link: Link, mut fixture: F)
