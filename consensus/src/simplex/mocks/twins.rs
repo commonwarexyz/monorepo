@@ -846,6 +846,56 @@ mod tests {
     }
 
     #[test]
+    fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
+        use crate::{simplex::{elector::{Config as ElectorConfig, RoundRobin}, scheme::ed25519}, types::Epoch};
+        use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
+        use commonware_utils::ordered::Set;
+
+        let framework = Framework {
+            participants: 5,
+            faults: 1,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 1,
+            max_compromised_sets: 1,
+        };
+        let case = cases(0, framework)
+            .into_iter()
+            .next()
+            .expect("expected at least one generated twins case");
+        let participants: Vec<_> = (0..framework.participants as u64)
+            .map(|seed| PrivateKey::from_seed(seed).public_key())
+            .collect();
+        let participants = Set::try_from(participants).expect("participants should be unique");
+        let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
+            Elector::new(
+                RoundRobin::<Sha256>::default(),
+                &case.scenario,
+                framework.participants,
+            ),
+            &participants,
+        );
+        let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
+            RoundRobin::<Sha256>::default(),
+            &participants,
+        );
+
+        for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
+            let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
+            assert_eq!(
+                twins.elect(round, None),
+                Participant::new(round_scenario.leader() as u32),
+                "unexpected leader in scripted attack round"
+            );
+        }
+
+        for view in (framework.rounds as u64 + 1)..=20 {
+            let round = Round::new(Epoch::new(333), View::new(view));
+            assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+        }
+    }
+
+    #[test]
     fn resolver_splitter_routes_requests_and_responses_statefully() {
         use commonware_cryptography::{ed25519::PrivateKey, Signer};
 
@@ -906,6 +956,232 @@ mod tests {
             .encode(),
         );
         assert_eq!(router(&(secondary, unknown)), SplitTarget::None);
+    }
+
+    #[test]
+    fn twins_resolver_routes_requests_and_responses_statefully() {
+        use commonware_codec::{DecodeExt, Encode};
+        use commonware_cryptography::{ed25519::PrivateKey, Signer};
+        use commonware_p2p::{
+            simulated::{Config, Link, Network},
+            Manager as _, Receiver as _, Recipients, Sender as _,
+        };
+        use commonware_runtime::{deterministic, Metrics, Quota, Runner};
+        use std::{num::NonZeroU32, time::Duration};
+
+        const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            network.start();
+
+            let twin = PrivateKey::from_seed(30).public_key();
+            let peer_a = PrivateKey::from_seed(31).public_key();
+            let peer_b = PrivateKey::from_seed(32).public_key();
+            let mut manager = oracle.manager();
+            manager
+                .track(
+                    0,
+                    [twin.clone(), peer_a.clone(), peer_b.clone()]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+
+            let (mut peer_a_sender, mut peer_a_recv) = oracle
+                .control(peer_a.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut peer_b_sender, mut peer_b_recv) = oracle
+                .control(peer_b.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (resolver_sender, resolver_receiver) = oracle
+                .control(twin.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let resolver_splitter = ResolverSplitter::new(
+                vec![peer_a.clone(), peer_b.clone()],
+                view_partitions,
+                view_route,
+            );
+            let (mut primary_sender, mut secondary_sender) =
+                resolver_sender.split_with(resolver_splitter.clone().forwarder());
+            let (mut primary_recv, mut secondary_recv) = resolver_receiver.split_with(
+                context.with_label("resolver_split"),
+                resolver_splitter.router(),
+            );
+
+            let link = Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(peer_a.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), peer_a.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(peer_b.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), peer_b.clone(), link)
+                .await
+                .unwrap();
+
+            peer_a_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage {
+                        id: 5,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_a);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 5,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+
+            peer_b_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage {
+                        id: 6,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_b);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 6,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+
+            primary_sender
+                .send(
+                    Recipients::All,
+                    ResolverMessage {
+                        id: 7,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = peer_a_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 7,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+
+            secondary_sender
+                .send(
+                    Recipients::All,
+                    ResolverMessage {
+                        id: 8,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = peer_b_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 8,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+
+            peer_a_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage::<U64> {
+                        id: 7,
+                        payload: ResolverPayload::Response(b"response_a".as_slice().into()),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_a);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 7,
+                    payload: ResolverPayload::Response(b"response_a".as_slice().into()),
+                }
+            );
+
+            peer_b_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage::<U64> {
+                        id: 8,
+                        payload: ResolverPayload::Response(b"response_b".as_slice().into()),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_b);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 8,
+                    payload: ResolverPayload::Response(b"response_b".as_slice().into()),
+                }
+            );
+        });
     }
 
     #[test]
