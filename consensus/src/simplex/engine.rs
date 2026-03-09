@@ -68,6 +68,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                term_length: cfg.term_length,
             },
         );
 
@@ -88,6 +89,7 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
+                term_length: cfg.term_length,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,

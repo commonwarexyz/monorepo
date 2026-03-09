@@ -171,6 +171,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                term_length: cfg.term_length,
             },
         );
         (

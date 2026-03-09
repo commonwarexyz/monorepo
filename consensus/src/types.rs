@@ -312,6 +312,39 @@ impl View {
             inner: start.get()..end.get(),
         }
     }
+
+    /// Returns the first view of the term containing this view.
+    ///
+    /// Terms group consecutive views so that the same leader serves for
+    /// `term_length` views. View 0 (genesis) is its own term. For views >= 1,
+    /// term boundaries are: [1, term_length], [term_length+1, 2*term_length], ...
+    ///
+    /// When `term_length` is 1, every view is its own term (no grouping).
+    pub const fn term_start(self, term_length: u64) -> Self {
+        if self.0 == 0 || term_length <= 1 {
+            return self;
+        }
+        Self(((self.0 - 1) / term_length) * term_length + 1)
+    }
+
+    /// Returns the last view of the term containing this view.
+    ///
+    /// See [`term_start`](View::term_start) for term boundary semantics.
+    ///
+    /// When `term_length` is 1, returns `self`.
+    pub const fn term_end(self, term_length: u64) -> Self {
+        if self.0 == 0 || term_length <= 1 {
+            return self;
+        }
+        Self(((self.0 - 1) / term_length) * term_length + term_length)
+    }
+
+    /// Returns the first view of the term that follows this view's term.
+    ///
+    /// When `term_length` is 1, returns `self.next()`.
+    pub const fn next_term_start(self, term_length: u64) -> Self {
+        Self(self.term_end(term_length).0 + 1)
+    }
 }
 
 impl Display for View {

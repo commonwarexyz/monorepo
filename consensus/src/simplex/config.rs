@@ -110,6 +110,18 @@ pub struct Config<
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
+
+    /// Number of consecutive views in which a leader remains stable (a "term").
+    ///
+    /// When `term_length` is 1, every view has an independent leader (the default behavior).
+    /// When `term_length` is greater than 1, views are grouped into terms and the same
+    /// leader serves for each view in the term. If a nullification is formed in any view
+    /// of a term, participants skip the rest of the term.
+    ///
+    /// For safety, a node must not vote to finalize any block in a term if it has voted
+    /// to nullify a previous block in that term and has seen no finalization certificate
+    /// at or above the view it nullified.
+    pub term_length: u64,
 }
 
 impl<
@@ -164,6 +176,10 @@ impl<
         assert!(
             self.fetch_concurrent > 0,
             "it must be possible to fetch from at least one peer at a time"
+        );
+        assert!(
+            self.term_length > 0,
+            "term length must be greater than zero"
         );
     }
 }

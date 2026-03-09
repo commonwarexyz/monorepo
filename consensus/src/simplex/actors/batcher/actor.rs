@@ -61,6 +61,7 @@ pub struct Actor<
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
     epoch: Epoch,
+    term_length: u64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -142,6 +143,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
+                term_length: cfg.term_length,
 
                 mailbox_receiver: receiver,
 
@@ -280,7 +282,7 @@ impl<
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                    if !interesting(self.activity_timeout, finalized, current.view, view, false, self.term_length) {
                         continue;
                     }
 
@@ -323,6 +325,7 @@ impl<
                     current.view,
                     view,
                     true, // allow future
+                    self.term_length,
                 ) {
                     continue;
                 }
@@ -424,7 +427,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                if !interesting(self.activity_timeout, finalized, current.view, view, false, self.term_length) {
                     continue;
                 }
 
@@ -562,7 +565,7 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.view, view, false)
+                    !interesting(self.activity_timeout, finalized, current.view, view, false, self.term_length)
                 }) {
                     work.pop_first();
                 }
