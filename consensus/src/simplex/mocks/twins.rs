@@ -15,8 +15,8 @@ use commonware_p2p::{
 };
 use commonware_resolver::p2p::mocks::Envelope as ResolverEnvelope;
 use commonware_runtime::IoBuf;
-use commonware_utils::{sequence::U64, sync::Mutex};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{sequence::U64, sync::Mutex, test_rng_seeded};
+use rand::{rngs::StdRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -175,14 +175,14 @@ where
                 let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
                 let (filtered, target) = match origin {
                     SplitOrigin::Primary => (
-                        filter_recipients(recipients, &primary),
+                        filter_recipients(recipients, &primary)?,
                         SplitTarget::Primary,
                     ),
                     SplitOrigin::Secondary => (
-                        filter_recipients(recipients, &secondary),
+                        filter_recipients(recipients, &secondary)?,
                         SplitTarget::Secondary,
                     ),
-                }?;
+                };
                 self.requests.lock().insert(id, target);
                 Some(filtered)
             }
@@ -488,7 +488,7 @@ fn generate_scenarios(
         return Vec::new();
     }
 
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = test_rng_seeded(seed);
     let base = options.len();
     if let Some(total) = arrangement_count(base, rounds) {
         if total <= max_scenarios {
@@ -563,7 +563,7 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
         return all;
     }
 
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = test_rng_seeded(seed);
     sample_unique_indices(&mut rng, total, max_sets)
         .into_iter()
         .map(|idx| combination_from_rank(n, faults, idx))
@@ -622,7 +622,7 @@ mod tests {
     fn unique_index_sampling_handles_near_full_ranges() {
         let total = 100_000u128;
         let samples = 99_999usize;
-        let mut rng = StdRng::seed_from_u64(9);
+        let mut rng = test_rng_seeded(9);
         let sampled = sample_unique_indices(&mut rng, total, samples);
         assert_eq!(sampled.len(), samples);
         assert_eq!(
