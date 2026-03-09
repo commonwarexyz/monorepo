@@ -4263,6 +4263,81 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_withholding_leader_victim_reconstructs_via_gossip() {
+        // A Byzantine leader withholds the shard destined for one participant.
+        // That participant should still reconstruct the block from shards
+        // gossiped by other participants (sent via Recipients::All) without
+        // any backfill mechanism.
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                let leader = peers[0].public_key.clone();
+                let victim = peers[1].public_key.clone();
+
+                // Sever the link from leader to victim so the leader's
+                // direct shard never arrives.
+                oracle
+                    .remove_link(leader.clone(), victim.clone())
+                    .await
+                    .expect("remove_link should succeed");
+
+                // Leader proposes. The victim will not receive a direct shard
+                // because the link is severed.
+                peers[0].mailbox.proposed(round, coded_block.clone()).await;
+
+                // Inform all non-leader peers of the leader so they validate
+                // and re-broadcast their shards via Recipients::All.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox
+                        .discovered(commitment, leader.clone(), round)
+                        .await;
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                // The victim should reconstruct via gossiped shards from other
+                // participants even though the leader withheld.
+                let block_sub = peers[1].mailbox.subscribe(commitment).await;
+                select! {
+                    result = block_sub => {
+                        let reconstructed = result.expect("block subscription should resolve");
+                        assert_eq!(reconstructed.commitment(), commitment);
+                        assert_eq!(reconstructed.height(), coded_block.height());
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("victim did not reconstruct block despite withholding leader");
+                    },
+                }
+
+                // All other participants should also have reconstructed.
+                for peer in peers[2..].iter_mut() {
+                    let reconstructed = peer
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("block should be reconstructed");
+                    assert_eq!(reconstructed.commitment(), commitment);
+                }
+
+                // No peer should be blocked — withholding is not detectable.
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(
+                    blocked.is_empty(),
+                    "no peer should be blocked in withholding leader test"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_non_participant_reconstructs_via_gossip() {
         // Non-participants no longer receive shards directly from the leader.
         // Instead, they reconstruct blocks from shards gossiped by
