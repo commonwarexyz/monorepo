@@ -4,13 +4,7 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::nodes_to_pin;
-use crate::mmr::{
-    hasher::Hasher,
-    iterator::{PathIterator, PeakIterator},
-    Error, Location, Position,
-};
+use crate::mmr::{hasher::Hasher, iterator::PeakIterator, Error, Location, Position};
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
     vec,
@@ -19,9 +13,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use core::{cmp::Reverse, ops::Range};
-#[cfg(feature = "std")]
-use tracing::debug;
+use core::ops::Range;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
@@ -50,13 +42,16 @@ pub enum ReconstructionError {
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in the MMR from its root digest.
 ///
-/// The `digests` vector contains:
+/// The `digests` vector uses a fold-based layout:
 ///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
+/// 1. If there are peaks entirely before the proven range (fold prefix), the first digest is
+///    a single accumulator produced by folding those peaks: `fold(fold(..., peak0), peak1)`.
+///    If there are no such peaks, this entry is absent.
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
+/// 2. The digests of peaks entirely after the proven range, in peak iteration order.
+///
+/// 3. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
+///    in depth-first (forward consumption) order for each range peak.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
     /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
