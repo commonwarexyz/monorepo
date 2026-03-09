@@ -399,6 +399,8 @@ pub struct CheckedShard {
     shard: Matrix<F>,
     /// The shuffled row indices for this shard within the encoded data.
     shuffled_indices: Vec<u32>,
+    /// The commitment this shard was checked against.
+    commitment: Summary,
     /// Topology information needed for decoding.
     topology: Topology,
 }
@@ -495,6 +497,7 @@ impl<D: Digest> CheckingData<D> {
 
     fn check<H: Hasher<Digest = D>>(
         &self,
+        commitment: Summary,
         index: u16,
         shard: &Shard<D>,
     ) -> Result<CheckedShard, Error> {
@@ -536,6 +539,7 @@ impl<D: Digest> CheckingData<D> {
         Ok(CheckedShard {
             shard: shard.rows.clone(),
             shuffled_indices: these_shuffled_indices.to_vec(),
+            commitment,
             topology: self.topology,
         })
     }
@@ -551,7 +555,7 @@ pub enum Error {
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
     InsufficientUniqueRows(usize, usize),
-    #[error("checked shard has inconsistent topology")]
+    #[error("checked shard commitment does not match decode commitment")]
     InconsistentCheckedShard,
     #[error("failed to create inclusion proof: {0}")]
     FailedToCreateInclusionProof(BmtError),
@@ -667,12 +671,12 @@ impl<H: Hasher> Scheme for Zoda<H> {
             shard.root,
             shard.checksum.as_ref(),
         )?;
-        checking_data.check::<H>(index, &shard)
+        checking_data.check::<H>(*commitment, index, &shard)
     }
 
     fn decode(
         _config: &Config,
-        _commitment: &Self::Commitment,
+        commitment: &Self::Commitment,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
@@ -688,8 +692,8 @@ impl<H: Hasher> Scheme for Zoda<H> {
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
-        for shard in &shards[1..] {
-            if shard.topology != first.topology {
+        for shard in shards {
+            if &shard.commitment != commitment {
                 return Err(Error::InconsistentCheckedShard);
             }
         }
@@ -775,6 +779,31 @@ mod tests {
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_rejects_mixed_commitment_shards_same_topology() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+
+        let (commitment_a, shards_a) =
+            Zoda::<Sha256>::encode(&config, &vec![0x11; 256][..], &STRATEGY).unwrap();
+        let (commitment_b, shards_b) =
+            Zoda::<Sha256>::encode(&config, &vec![0x22; 256][..], &STRATEGY).unwrap();
+
+        let checked_a =
+            Zoda::<Sha256>::check(&config, &commitment_a, 0, shards_a[0].clone()).unwrap();
+        let checked_b =
+            Zoda::<Sha256>::check(&config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+
+        let result =
+            Zoda::<Sha256>::decode(&config, &commitment_a, &[checked_a, checked_b], &STRATEGY);
+        assert!(
+            matches!(result, Err(Error::InconsistentCheckedShard)),
+            "expected InconsistentCheckedShard, got {result:?}"
+        );
     }
 
     #[test]

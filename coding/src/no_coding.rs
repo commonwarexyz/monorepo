@@ -1,6 +1,6 @@
 use crate::Config;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -9,6 +9,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("data does not match commitment")]
     BadData,
+    #[error("checked shard commitment does not match decode commitment")]
+    CommitmentMismatch,
 }
 
 /// A trivial scheme which performs no coding at all.
@@ -55,10 +57,17 @@ impl Read for Shard {
     }
 }
 
+/// A shard that has been checked against a specific commitment.
+#[derive(Clone)]
+pub struct CheckedShard<D: Digest> {
+    data: Vec<u8>,
+    commitment: D,
+}
+
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
     type Shard = Shard;
-    type CheckedShard = Shard;
+    type CheckedShard = CheckedShard<H::Digest>;
     type Error = Error;
 
     fn encode(
@@ -84,19 +93,23 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         if &shard_commitment != commitment {
             return Err(Error::BadData);
         }
-        Ok(shard)
+        Ok(CheckedShard {
+            data: shard.0,
+            commitment: *commitment,
+        })
     }
 
     fn decode(
         _config: &Config,
-        _commitment: &Self::Commitment,
+        commitment: &Self::Commitment,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        Ok(shards
-            .first()
-            .map(|shard| shard.0.clone())
-            .unwrap_or_default())
+        let first = shards.first().ok_or(Error::BadData)?;
+        if !shards.iter().all(|s| &s.commitment == commitment) {
+            return Err(Error::CommitmentMismatch);
+        }
+        Ok(first.data.clone())
     }
 }
 
@@ -111,6 +124,27 @@ mod tests {
     use commonware_utils::NZU16;
 
     const STRATEGY: Sequential = Sequential;
+
+    #[test]
+    fn test_decode_rejects_checked_shard_from_other_commitment() {
+        let config = crate::Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let (commitment_a, _) =
+            NoCoding::<Sha256>::encode(&config, &b"alpha"[..], &STRATEGY).unwrap();
+        let (commitment_b, shards_b) =
+            NoCoding::<Sha256>::encode(&config, &b"bravo"[..], &STRATEGY).unwrap();
+
+        let checked_b =
+            NoCoding::<Sha256>::check(&config, &commitment_b, 0, shards_b[0].clone()).unwrap();
+
+        let result = NoCoding::<Sha256>::decode(&config, &commitment_a, &[checked_b], &STRATEGY);
+        assert!(
+            matches!(result, Err(Error::CommitmentMismatch)),
+            "decode should reject shard from a different commitment"
+        );
+    }
 
     #[test]
     fn test_invalid_shard_rejected() {
