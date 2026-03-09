@@ -9,7 +9,7 @@ use commonware_runtime::{
 };
 use commonware_storage::mmr::{
     journaled::{Config, Mmr as JournaledMmr},
-    Position, StandardHasher,
+    Location, StandardHasher,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
@@ -51,8 +51,8 @@ enum MmrOperation {
     Add { data: [u8; DATA_SIZE] },
     /// Sync the MMR to storage.
     Sync,
-    /// Prune nodes up to a position.
-    PruneToPos { pos: u64 },
+    /// Prune leaves up to a location.
+    PruneToLoc { loc: u64 },
     /// Prune all nodes.
     PruneAll,
 }
@@ -156,19 +156,19 @@ async fn run_operations(
                 }
             }
 
-            MmrOperation::PruneToPos { pos } => {
-                let size = mmr.size().as_u64();
-                let current_pruned = mmr.bounds().start.as_u64();
-                let safe_pos = (*pos).min(size);
+            MmrOperation::PruneToLoc { loc } => {
+                let leaves = *mmr.leaves();
+                let current_pruned = *mmr.bounds().start;
+                let safe_loc = (*loc).min(leaves);
 
-                if safe_pos <= current_pruned {
+                if safe_loc <= current_pruned {
                     // No-op: already pruned past this point
                     false
                 } else {
-                    match mmr.prune_to_pos(Position::new(safe_pos)).await {
+                    match mmr.prune(Location::new(safe_loc)).await {
                         Err(_) => {
                             // Partial prune possible
-                            max_pruned = max_pruned.max(safe_pos);
+                            max_pruned = max_pruned.max(safe_loc);
                             true
                         }
                         Ok(_) => {
@@ -183,17 +183,17 @@ async fn run_operations(
             }
 
             MmrOperation::PruneAll => {
-                let size = mmr.size().as_u64();
+                let leaves = mmr.leaves().as_u64();
                 let current_pruned = mmr.bounds().start.as_u64();
 
-                if size == 0 || current_pruned >= size {
+                if leaves == 0 || current_pruned >= leaves {
                     // No-op: nothing to prune
                     false
                 } else {
                     match mmr.prune_all().await {
                         Err(_) => {
                             // Partial prune possible
-                            max_pruned = max_pruned.max(size);
+                            max_pruned = max_pruned.max(leaves);
                             true
                         }
                         Ok(_) => {

@@ -356,8 +356,8 @@ impl<D: Digest, G: Readable<D>, S: StorageTrait<D>> StorageTrait<D> for Storage<
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Position,
-        StandardHasher,
+        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Location,
+        Position, StandardHasher,
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
@@ -833,8 +833,8 @@ mod tests {
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
         let pinned_digest = Sha256::fill(0xAA);
-        let grafted_pruned_to_pos = Position::try_from(Location::new(4)).unwrap();
-        assert_eq!(*grafted_pruned_to_pos, 7);
+        let grafted_pruned_to = Location::new(4);
+        assert_eq!(*Position::try_from(grafted_pruned_to).unwrap(), 7);
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
@@ -842,7 +842,7 @@ mod tests {
         let mut grafted = Mmr::from_components(
             &mut grafted_hasher,
             Vec::new(),
-            grafted_pruned_to_pos,
+            grafted_pruned_to,
             vec![pinned_digest],
         )
         .unwrap();

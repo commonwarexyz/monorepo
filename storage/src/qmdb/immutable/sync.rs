@@ -6,7 +6,7 @@ use crate::{
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Position, StandardHasher,
+        Location, StandardHasher,
     },
     qmdb::{
         any::VariableValue,
@@ -74,7 +74,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     page_cache: db_config.page_cache.clone(),
                 },
-                range: Position::try_from(range.start)?..Position::try_from(range.end)?,
+                range,
                 pinned_nodes,
             },
             &mut hasher,

@@ -423,8 +423,7 @@ pub(crate) mod test {
             // retained op to tip.
             let max_ops = NZU64!(4);
             let end_loc = db.size().await;
-            let start_pos = db.log.mmr.bounds().start;
-            let start_loc = Location::try_from(start_pos).unwrap();
+            let start_loc = db.log.mmr.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
             let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
