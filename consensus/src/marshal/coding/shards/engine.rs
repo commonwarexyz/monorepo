@@ -1113,12 +1113,7 @@ where
         // for both check and storage.
         self.common.received_shards.insert(index, shard.data);
         let data = self.common.received_shards.get(&index).unwrap();
-        let Ok(checked) = C::check(
-            &commitment.config(),
-            &commitment.root(),
-            index,
-            data.clone(),
-        ) else {
+        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data) else {
             self.common.received_shards.remove(&index);
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
@@ -1157,7 +1152,7 @@ where
                     &commitment.config(),
                     &commitment.root(),
                     shard.index,
-                    shard.data,
+                    &shard.data,
                 );
                 (peer, checked.ok())
             });

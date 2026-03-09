@@ -87,14 +87,14 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _config: &Config,
         commitment: &Self::Commitment,
         _index: u16,
-        shard: Self::Shard,
+        shard: &Self::Shard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let shard_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &shard_commitment != commitment {
             return Err(Error::BadData);
         }
         Ok(CheckedShard {
-            data: shard.0,
+            data: shard.0.clone(),
             commitment: *commitment,
         })
     }
@@ -136,8 +136,7 @@ mod tests {
         let (commitment_b, shards_b) =
             NoCoding::<Sha256>::encode(&config, &b"bravo"[..], &STRATEGY).unwrap();
 
-        let checked_b =
-            NoCoding::<Sha256>::check(&config, &commitment_b, 0, shards_b[0].clone()).unwrap();
+        let checked_b = NoCoding::<Sha256>::check(&config, &commitment_b, 0, &shards_b[0]).unwrap();
 
         let result = NoCoding::<Sha256>::decode(&config, &commitment_a, &[checked_b], &STRATEGY);
         assert!(
@@ -157,7 +156,7 @@ mod tests {
         let mut shard = shards.pop().expect("missing shard");
         shard.0[0] ^= 0x01;
 
-        let result = NoCoding::<Sha256>::check(&config, &commitment, 0, shard);
+        let result = NoCoding::<Sha256>::check(&config, &commitment, 0, &shard);
         assert!(matches!(result, Err(Error::BadData)));
     }
 }

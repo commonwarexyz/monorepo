@@ -80,7 +80,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let checked_shards = shards
         .into_iter()
         .take(to_use as usize)
-        .map(|(i, shard)| S::check(&config, &commitment, i, shard).unwrap())
+        .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
         .collect::<Vec<_>>();
 
     let decoded = S::decode(&config, &commitment, &checked_shards, &STRATEGY).unwrap();

@@ -662,7 +662,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         config: &Config,
         commitment: &Self::Commitment,
         index: u16,
-        shard: Self::Shard,
+        shard: &Self::Shard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let checking_data = CheckingData::reckon(
             config,
@@ -671,7 +671,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             shard.root,
             shard.checksum.as_ref(),
         )?;
-        checking_data.check::<H>(*commitment, index, &shard)
+        checking_data.check::<H>(*commitment, index, shard)
     }
 
     fn decode(
@@ -768,8 +768,7 @@ mod tests {
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
-        let checked_shard0 =
-            Zoda::<Sha256>::check(&config, &commitment, 0, shards[0].clone()).unwrap();
+        let checked_shard0 = Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0]).unwrap();
         let duplicate = checked_shard0.clone();
         let shards = vec![checked_shard0, duplicate];
         let result = Zoda::<Sha256>::decode(&config, &commitment, &shards, &STRATEGY);
@@ -793,10 +792,8 @@ mod tests {
         let (commitment_b, shards_b) =
             Zoda::<Sha256>::encode(&config, &vec![0x22; 256][..], &STRATEGY).unwrap();
 
-        let checked_a =
-            Zoda::<Sha256>::check(&config, &commitment_a, 0, shards_a[0].clone()).unwrap();
-        let checked_b =
-            Zoda::<Sha256>::check(&config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+        let checked_a = Zoda::<Sha256>::check(&config, &commitment_a, 0, &shards_a[0]).unwrap();
+        let checked_b = Zoda::<Sha256>::check(&config, &commitment_b, 1, &shards_b[1]).unwrap();
 
         let result =
             Zoda::<Sha256>::decode(&config, &commitment_a, &[checked_a, checked_b], &STRATEGY);
@@ -822,10 +819,8 @@ mod tests {
         )
         .unwrap();
 
-        let checked_a =
-            Zoda::<Sha256>::check(&config, &commitment_a, 0, shards_a[0].clone()).unwrap();
-        let checked_b =
-            Zoda::<Sha256>::check(&config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+        let checked_a = Zoda::<Sha256>::check(&config, &commitment_a, 0, &shards_a[0]).unwrap();
+        let checked_b = Zoda::<Sha256>::check(&config, &commitment_b, 1, &shards_b[1]).unwrap();
 
         let result =
             Zoda::<Sha256>::decode(&config, &commitment_a, &[checked_a, checked_b], &STRATEGY);
@@ -899,14 +894,14 @@ mod tests {
         }
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, shards[b_i].clone()),
+            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, &shards[b_i]),
             Err(Error::InvalidShard)
         ));
 
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, shards[a_i].clone()),
+            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, &shards[a_i]),
             Err(Error::InvalidShard)
         ));
     }

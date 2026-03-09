@@ -113,7 +113,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///
     /// // Each participant checks their shard against the commitment.
     /// let checked_shards: Vec<_> = shards
-    ///         .into_iter()
+    ///         .iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
     ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
@@ -181,7 +181,7 @@ commonware_macros::stability_scope!(ALPHA {
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
-            shard: Self::Shard,
+            shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -245,7 +245,7 @@ mod test {
             if !selected.contains(&(i as u16)) {
                 continue;
             }
-            let checked = S::check(config, &commitment, i as u16, shard.clone()).unwrap();
+            let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
             checked_shards.push(checked);
         }
 

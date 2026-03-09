@@ -596,7 +596,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         config: &Config,
         commitment: &Self::Commitment,
         index: u16,
-        shard: Self::Shard,
+        shard: &Self::Shard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
         if index >= total {
@@ -828,8 +828,7 @@ mod tests {
 
         // Previously this passed because check() ignored config and only verified
         // against commitment root. It must now fail immediately.
-        let shard = shards[0].clone();
-        let check_result = RS::check(&config_expected, &commitment, 0, shard);
+        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 
