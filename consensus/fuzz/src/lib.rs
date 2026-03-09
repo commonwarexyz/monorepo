@@ -542,15 +542,13 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
-            // Keep resolver traffic opaque under fuzzing. The disrupter intentionally sends
-            // malformed bytes on this channel, so the twin harness should not try to parse or
-            // normalize those frames before the runtime network handles them.
             let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(|_, _, _| None);
+                resolver_sender.split_with(twins::blackhole_resolver_forwarder);
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
-                    SplitTarget::None
-                });
+                .split_with(
+                    context.with_label(&format!("resolver_split_{idx}")),
+                    twins::blackhole_resolver_router,
+                );
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");

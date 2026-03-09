@@ -5756,18 +5756,6 @@ mod tests {
                         scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let resolver_splitter = twins::ResolverSplitter::new(
-                    participants.as_ref().to_vec(),
-                    {
-                        let scenario = scenario.clone();
-                        move |view, participants| scenario.partitions(view, participants)
-                    },
-                    {
-                        let scenario = scenario.clone();
-                        move |view, sender, participants| scenario.route(view, sender, participants)
-                    },
-                );
-
                 let (vote_sender_primary, vote_sender_secondary) =
                     vote_sender.split_with(make_vote_forwarder());
                 let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
@@ -5782,14 +5770,13 @@ mod tests {
                         make_certificate_router(),
                     );
 
-                let (
-                    (resolver_sender_primary, resolver_receiver_primary),
-                    (resolver_sender_secondary, resolver_receiver_secondary),
-                ) = resolver_splitter.split(
-                    context.with_label(&format!("resolver_split_{idx}")),
-                    resolver_sender,
-                    resolver_receiver,
-                );
+                let (resolver_sender_primary, resolver_sender_secondary) =
+                    resolver_sender.split_with(twins::blackhole_resolver_forwarder);
+                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                    .split_with(
+                        context.with_label(&format!("resolver_split_{idx}")),
+                        twins::blackhole_resolver_router,
+                    );
 
                 for (twin_label, pending, recovered, resolver) in [
                     (
