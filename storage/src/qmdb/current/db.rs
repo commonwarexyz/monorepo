@@ -21,13 +21,11 @@ use crate::{
         any::{
             self,
             operation::{update::Update, Operation},
-            ValueEncoding,
         },
         current::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
-        operation::Key,
         store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
@@ -87,16 +85,14 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<E, K, V, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
+impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -110,7 +106,7 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         self.any.get_metadata().await
     }
 
@@ -120,7 +116,7 @@ where
         hasher: &mut H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<K, V, U>],
+        ops: &[Operation<U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -129,16 +125,14 @@ where
 }
 
 // Functionality requiring non-mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
     /// For positions at or above the grafting height, returns grafted MMR node.
@@ -175,8 +169,6 @@ where
     ) -> super::batch::UnmerkleizedBatch<
         '_,
         E,
-        K,
-        V,
         C,
         I,
         H,
@@ -222,7 +214,7 @@ where
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
@@ -239,16 +231,14 @@ where
 }
 
 // Functionality requiring mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
@@ -260,7 +250,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.any
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -320,16 +310,14 @@ where
 }
 
 // Functionality requiring mutable + persistable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
@@ -350,16 +338,14 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V> + 'static,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update + 'static,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Apply a changeset to the database.
     ///
@@ -371,7 +357,7 @@ where
     /// Returns the range of locations written.
     pub async fn apply_batch(
         &mut self,
-        batch: super::batch::Changeset<K, H::Digest, Operation<K, V, U>, N>,
+        batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
     ) -> Result<Range<Location>, Error> {
         // 1. Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
@@ -412,16 +398,14 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     type Error = Error;
 
@@ -442,19 +426,17 @@ where
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, U>;
+    type Operation = Operation<U>;
 
     fn root(&self) -> H::Digest {
         self.root()
@@ -472,38 +454,34 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> LogStore for Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> LogStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
-    type Value = V::Value;
+    type Value = U::Value;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         self.any.bounds().await
     }
 
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         self.get_metadata().await
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N>
+impl<E, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

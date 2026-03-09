@@ -279,22 +279,20 @@ impl<D: Digest, R: Readable<D>, S: MmrStorage<D>> MmrStorage<D>
 /// A speculative batch of mutations whose root digest has not yet been computed,
 /// in contrast to [MerkleizedBatch].
 #[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, const N: usize>
+pub struct UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
-    inner: any::batch::UnmerkleizedBatch<'a, E, K, V, C, I, H, U, P>,
+    inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
 
     /// The committed current-layer DB (for bitmap and grafted MMR access).
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
@@ -315,22 +313,20 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [UnmerkleizedBatch].
 #[allow(clippy::type_complexity)]
-pub struct MerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, const N: usize>
+pub struct MerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
     /// The inner any-layer merkleized batch.
-    inner: any::batch::MerkleizedBatch<'a, E, K, V, C, I, H, U, P>,
+    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
 
     /// The committed current-layer DB (for bitmap and grafted MMR access).
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
@@ -369,23 +365,20 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     pub(super) canonical_root: D,
 }
 
-impl<'a, E, K, V, C, I, H, U, P, G, B, const N: usize>
-    UnmerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, N>
+impl<'a, E, C, I, H, U, P, G, B, const N: usize> UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
     pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<'a, E, K, V, C, I, H, U, P>,
+        inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
         current_db: &'a super::db::Db<E, C, I, H, U, N>,
         base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
         base_bitmap_clears: Vec<Arc<Vec<Location>>>,
@@ -406,26 +399,26 @@ where
     ///
     /// If the same key is written multiple times within a batch, the last
     /// value wins.
-    pub fn write(&mut self, key: K, value: Option<V::Value>) {
+    pub fn write(&mut self, key: U::Key, value: Option<U::Value>) {
         self.inner.write(key, value);
     }
 }
 
 // Unordered get + merkleize.
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    UnmerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P, G, B, N>
+    UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V, update::Unordered<K, V>>>,
+    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V, update::Unordered<K, V>>: Codec,
+    Operation<update::Unordered<K, V>>: Codec,
     V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
-        + BatchChain<Operation<K, V, update::Unordered<K, V>>>,
+        + BatchChain<Operation<update::Unordered<K, V>>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -438,8 +431,7 @@ where
     pub async fn merkleize(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P, G, B, N>, Error>
-    {
+    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>, Error> {
         let Self {
             inner,
             current_db,
@@ -464,19 +456,19 @@ where
 
 // Ordered get + merkleize.
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    UnmerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P, G, B, N>
+    UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V, update::Ordered<K, V>>>,
+    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V, update::Ordered<K, V>>: Codec,
+    Operation<update::Ordered<K, V>>: Codec,
     V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
-        + BatchChain<Operation<K, V, update::Ordered<K, V>>>,
+        + BatchChain<Operation<update::Ordered<K, V>>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -489,8 +481,7 @@ where
     pub async fn merkleize(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P, G, B, N>, Error>
-    {
+    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>, Error> {
         let Self {
             inner,
             current_db,
@@ -515,17 +506,15 @@ where
 
 /// Push one bitmap bit per operation in `segment`. An Update is active only if
 /// the merged diff shows it as the final location for its key.
-fn push_operation_bits<K, V, U, B, const N: usize>(
+fn push_operation_bits<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    segment: &[Operation<K, V, U>],
+    segment: &[Operation<U>],
     segment_base: u64,
-    diff: &BTreeMap<K, DiffEntry<V::Value>>,
+    diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
 ) where
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V>,
+    U: update::Update,
     B: BitmapRead<N>,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     for (i, op) in segment.iter().enumerate() {
         let op_loc = Location::new(segment_base + i as u64);
@@ -565,17 +554,15 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
 /// Clear bits for ancestor-segment operations superseded by a later segment.
 /// Only relevant for chained batches (chain length > 1).
 #[allow(clippy::type_complexity)]
-fn clear_ancestor_superseded<K, V, U, B, const N: usize>(
+fn clear_ancestor_superseded<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    chain: &[std::sync::Arc<Vec<Operation<K, V, U>>>],
-    diff: &BTreeMap<K, DiffEntry<V::Value>>,
+    chain: &[std::sync::Arc<Vec<Operation<U>>>],
+    diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
     db_base: u64,
 ) where
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V>,
+    U: update::Update,
     B: BitmapRead<N>,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     let mut seg_base = db_base;
     for ancestor_seg in &chain[..chain.len() - 1] {
@@ -601,24 +588,22 @@ fn clear_ancestor_superseded<K, V, U, B, const N: usize>(
 /// `BitmapDiff` that live on the returned `MerkleizedBatch`. The ancestor
 /// chain's accumulated bitmap pushes/clears are stored alongside the diff
 /// so that `finalize()` can concatenate them without recomputation.
-async fn compute_current_layer<'a, E, K, V, U, C, I, H, P, G, B, const N: usize>(
-    inner: any::batch::MerkleizedBatch<'a, E, K, V, C, I, H, U, P>,
+async fn compute_current_layer<'a, E, U, C, I, H, P, G, B, const N: usize>(
+    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
     grafted_parent: &'a G,
     bitmap_parent: &'a B,
-) -> Result<MerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, N>, Error>
+) -> Result<MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -706,18 +691,15 @@ where
     })
 }
 
-impl<'a, E, K, V, C, I, H, U, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, N>
+impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -738,13 +720,11 @@ where
     ) -> UnmerkleizedBatch<
         '_,
         E,
-        K,
-        V,
         C,
         I,
         H,
         U,
-        authenticated::MerkleizedBatch<'a, H, P, Operation<K, V, U>>,
+        authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
         mmr::MerkleizedBatch<'a, H::Digest, G>,
         BitmapDiff<'a, B, N>,
         N,
@@ -768,19 +748,19 @@ where
 
 // Unordered get.
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P, G, B, N>
+    MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Contiguous<Item = Operation<K, V, update::Unordered<K, V>>>,
+    C: Contiguous<Item = Operation<update::Unordered<K, V>>>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V, update::Unordered<K, V>>: Codec,
+    Operation<update::Unordered<K, V>>: Codec,
     V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
-        + BatchChain<Operation<K, V, update::Unordered<K, V>>>,
+        + BatchChain<Operation<update::Unordered<K, V>>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -792,19 +772,19 @@ where
 
 // Ordered get.
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P, G, B, N>
+    MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Contiguous<Item = Operation<K, V, update::Ordered<K, V>>>,
+    C: Contiguous<Item = Operation<update::Ordered<K, V>>>,
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
-    Operation<K, V, update::Ordered<K, V>>: Codec,
+    Operation<update::Ordered<K, V>>: Codec,
     V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
-        + BatchChain<Operation<K, V, update::Ordered<K, V>>>,
+        + BatchChain<Operation<update::Ordered<K, V>>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
@@ -815,23 +795,20 @@ where
 }
 
 // Finalize (requires Mutable journal for apply_batch).
-impl<'a, E, K, V, C, I, H, U, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, N>
+impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: update::Update<K, V> + Send + Sync + 'static,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: update::Update + Send + Sync + 'static,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+    Operation<U>: Codec,
+    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
     G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
     B: BitmapRead<N>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<K, H::Digest, Operation<K, V, U>, N> {
+    pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>, N> {
         // Flatten the chain of Arc segments + this level's diff into flat Vecs.
         let total_pushes: usize = self
             .base_bitmap_pushes
@@ -884,19 +861,19 @@ mod trait_impls {
     type CurrentDb<E, C, I, H, U, const N: usize> = crate::qmdb::current::db::Db<E, C, I, H, U, N>;
 
     impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P, G, B, N>
+        for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
     where
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<K, V, update::Unordered<K, V>>>,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
-        Operation<K, V, update::Unordered<K, V>>: Codec,
+        Operation<update::Unordered<K, V>>: Codec,
         V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
-            + BatchChain<Operation<K, V, update::Unordered<K, V>>>,
+            + BatchChain<Operation<update::Unordered<K, V>>>,
         G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
         B: BitmapRead<N>,
     {
@@ -904,7 +881,7 @@ mod trait_impls {
         type V = V::Value;
         type Metadata = V::Value;
         type Merkleized =
-            super::MerkleizedBatch<'a, E, K, V, C, I, H, update::Unordered<K, V>, P, G, B, N>;
+            super::MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>;
 
         fn write(&mut self, key: K, value: Option<V::Value>) {
             UnmerkleizedBatch::write(self, key, value);
@@ -919,27 +896,26 @@ mod trait_impls {
     }
 
     impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P, G, B, N>
+        for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
     where
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<K, V, update::Ordered<K, V>>>,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
-        Operation<K, V, update::Ordered<K, V>>: Codec,
+        Operation<update::Ordered<K, V>>: Codec,
         V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
-            + BatchChain<Operation<K, V, update::Ordered<K, V>>>,
+            + BatchChain<Operation<update::Ordered<K, V>>>,
         G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
         B: BitmapRead<N>,
     {
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized =
-            super::MerkleizedBatch<'a, E, K, V, C, I, H, update::Ordered<K, V>, P, G, B, N>;
+        type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>;
 
         fn write(&mut self, key: K, value: Option<V::Value>) {
             UnmerkleizedBatch::write(self, key, value);
@@ -953,23 +929,21 @@ mod trait_impls {
         }
     }
 
-    impl<'a, E, K, V, C, I, H, U, P, G, B, const N: usize> MerkleizedBatchTrait
-        for super::MerkleizedBatch<'a, E, K, V, C, I, H, U, P, G, B, N>
+    impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatchTrait
+        for super::MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
     where
         E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        U: update::Update<K, V> + Send + Sync + 'static,
-        C: Mutable<Item = Operation<K, V, U>>,
+        U: update::Update + Send + Sync + 'static,
+        C: Mutable<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        Operation<K, V, U>: Codec,
-        P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V, U>>,
+        Operation<U>: Codec,
+        P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
         G: Readable<H::Digest> + BatchChainInfo<H::Digest>,
         B: BitmapRead<N>,
     {
         type Digest = H::Digest;
-        type Changeset = Changeset<K, H::Digest, Operation<K, V, U>, N>;
+        type Changeset = Changeset<U::Key, H::Digest, Operation<U>, N>;
 
         fn root(&self) -> H::Digest {
             self.root()
@@ -986,22 +960,20 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<K, V, update::Unordered<K, V>>>
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
-        Operation<K, V, update::Unordered<K, V>>: Codec,
+        Operation<update::Unordered<K, V>>: Codec,
         V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<K, H::Digest, Operation<K, V, update::Unordered<K, V>>, N>;
+        type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>, N>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
             E,
-            K,
-            V,
             C,
             I,
             H,
@@ -1032,22 +1004,20 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<K, V, update::Ordered<K, V>>>
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
-        Operation<K, V, update::Ordered<K, V>>: Codec,
+        Operation<update::Ordered<K, V>>: Codec,
         V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<K, H::Digest, Operation<K, V, update::Ordered<K, V>>, N>;
+        type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>, N>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
             E,
-            K,
-            V,
             C,
             I,
             H,
@@ -1227,7 +1197,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = FixedEncoding<u64>;
         type U = update::Unordered<K, V>;
-        type Op = Operation<K, V, U>;
+        type Op = Operation<U>;
 
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let key2 = FixedBytes::from([2, 0, 0, 0]);
@@ -1262,7 +1232,7 @@ mod tests {
 
         let base = Bm::new();
         let mut bitmap = BitmapDiff::<Bm, N>::new(&base, 0);
-        push_operation_bits::<K, V, U, Bm, N>(&mut bitmap, &segment, 0, &diff);
+        push_operation_bits::<U, Bm, N>(&mut bitmap, &segment, 0, &diff);
 
         // Expected: [true(key1 active), false(key2 superseded), false(delete), true(commit)]
         assert_eq!(bitmap.pushed_bits(), &[true, false, false, true]);

@@ -5,7 +5,8 @@ use crate::{
         operation::{Committable, Key},
     },
 };
-use commonware_codec::{Codec, Encode as _};
+use commonware_codec::{Codec, Encode as _, Error as CodecError, Read, Write};
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::hex;
 use std::fmt;
 
@@ -14,25 +15,38 @@ pub(crate) mod update;
 pub(crate) mod variable;
 pub(crate) use update::Update;
 
-const DELETE_CONTEXT: u8 = 0xD1;
-const UPDATE_CONTEXT: u8 = 0xD2;
-const COMMIT_CONTEXT: u8 = 0xD3;
+pub(crate) const DELETE_CONTEXT: u8 = 0xD1;
+pub(crate) const UPDATE_CONTEXT: u8 = 0xD2;
+pub(crate) const COMMIT_CONTEXT: u8 = 0xD3;
 
-pub type Ordered<K, V> = Operation<K, V, update::Ordered<K, V>>;
-pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
+pub type Ordered<K, V> = Operation<update::Ordered<K, V>>;
+pub type Unordered<K, V> = Operation<update::Unordered<K, V>>;
+
+/// Delegates Operation-level codec (Write, Read) to the value encoding.
+///
+/// Fixed and variable encodings have different wire formats. Fixed pads to a uniform size,
+/// variable does not. A single blanket `impl Write for Operation<S>` dispatches here, while the
+/// two impls of this trait (on FixedEncoding and VariableEncoding) live on different Self types
+/// and therefore do not overlap.
+pub trait OperationCodec<S: Update<ValueEncoding = Self>>: ValueEncoding + Sized {
+    type ReadCfg: Clone + Send + Sync + 'static;
+
+    fn write_operation(op: &Operation<S>, buf: &mut impl BufMut);
+    fn read_operation(buf: &mut impl Buf, cfg: &Self::ReadCfg) -> Result<Operation<S>, CodecError>;
+}
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Operation<K: Key, V: ValueEncoding, S: Update<K, V>> {
-    Delete(K),
+pub enum Operation<S: Update> {
+    Delete(S::Key),
     Update(S),
-    CommitFloor(Option<V::Value>, Location),
+    CommitFloor(Option<S::Value>, Location),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Key, V: ValueEncoding, S: Update<K, V>> arbitrary::Arbitrary<'_> for Operation<K, V, S>
+impl<S: Update> arbitrary::Arbitrary<'_> for Operation<S>
 where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V::Value: for<'a> arbitrary::Arbitrary<'a>,
+    S::Key: for<'a> arbitrary::Arbitrary<'a>,
+    S::Value: for<'a> arbitrary::Arbitrary<'a>,
     S: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -46,14 +60,11 @@ where
     }
 }
 
-impl<K, V, S> crate::qmdb::operation::Operation for Operation<K, V, S>
+impl<S: Update> crate::qmdb::operation::Operation for Operation<S>
 where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
+    S::Value: Codec,
 {
-    type Key = K;
+    type Key = S::Key;
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
@@ -79,19 +90,38 @@ where
     }
 }
 
-impl<K, V, S> Committable for Operation<K, V, S>
+impl<S: Update> Committable for Operation<S>
 where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-    S: Update<K, V>,
+    S::Value: Codec,
 {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, update::Ordered<K, V>>
+// Blanket Write via delegation.
+impl<S: Update> Write for Operation<S>
+where
+    S::ValueEncoding: OperationCodec<S>,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        S::ValueEncoding::write_operation(self, buf)
+    }
+}
+
+// Blanket Read via delegation.
+impl<S: Update> Read for Operation<S>
+where
+    S::ValueEncoding: OperationCodec<S>,
+{
+    type Cfg = <S::ValueEncoding as OperationCodec<S>>::ReadCfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        S::ValueEncoding::read_operation(buf, cfg)
+    }
+}
+
+impl<K, V> fmt::Display for Operation<update::Ordered<K, V>>
 where
     K: Key,
     V: ValueEncoding,
@@ -116,7 +146,7 @@ where
     }
 }
 
-impl<K, V> fmt::Display for Operation<K, V, update::Unordered<K, V>>
+impl<K, V> fmt::Display for Operation<update::Unordered<K, V>>
 where
     K: Key,
     V: ValueEncoding,

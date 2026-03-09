@@ -1,69 +1,71 @@
 use crate::{
     mmr::Location,
     qmdb::any::{
-        operation::{Operation, Update, COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT},
+        operation::{
+            update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
+            UPDATE_CONTEXT,
+        },
         value::FixedEncoding,
         FixedValue,
     },
 };
 use commonware_codec::{
     util::{at_least, ensure_zeros},
-    Codec, CodecFixed, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
 };
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
-impl<K, V, S> Operation<K, FixedEncoding<V>, S>
-where
-    K: Array,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize,
-{
-    const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
-    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+/// `max(a, b)` in a const context.
+const fn const_max(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
-impl<K, V, S> FixedSize for Operation<K, FixedEncoding<V>, S>
-where
-    K: Array,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize,
-{
-    // Self::DELETE_OP_SIZE
-    const SIZE: usize = {
-        let size = if Self::UPDATE_OP_SIZE > Self::COMMIT_OP_SIZE {
-            Self::UPDATE_OP_SIZE
-        } else {
-            Self::COMMIT_OP_SIZE
-        };
-        if size > Self::DELETE_OP_SIZE {
-            size
-        } else {
-            Self::DELETE_OP_SIZE
-        }
-    };
+const fn update_op_size<S: FixedSize>() -> usize {
+    1 + S::SIZE
 }
 
-impl<K, V, S> Write for Operation<K, FixedEncoding<V>, S>
+const fn commit_op_size<V: FixedSize>() -> usize {
+    1 + 1 + V::SIZE + u64::SIZE
+}
+
+const fn delete_op_size<K: Array>() -> usize {
+    1 + K::SIZE
+}
+
+const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
+    const_max(
+        update_op_size::<S>(),
+        const_max(commit_op_size::<V>(), delete_op_size::<K>()),
+    )
+}
+
+impl<V, S> OperationCodec<S> for FixedEncoding<V>
 where
-    K: Array + Codec,
+    S::Key: Array + Codec,
     V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + CodecFixed<Cfg = ()>,
+    S: Update<Value = V, ValueEncoding = Self> + CodecFixed<Cfg = ()>,
 {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Delete(k) => {
+    type ReadCfg = ();
+
+    fn write_operation(op: &Operation<S>, buf: &mut impl BufMut) {
+        let total = total_op_size::<S::Key, V, S>();
+        match op {
+            Operation::Delete(k) => {
                 DELETE_CONTEXT.write(buf);
                 k.write(buf);
-                buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
+                buf.put_bytes(0, total - delete_op_size::<S::Key>());
             }
-            Self::Update(p) => {
+            Operation::Update(p) => {
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
-                buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
+                buf.put_bytes(0, total - update_op_size::<S>());
             }
-            Self::CommitFloor(metadata, floor_loc) => {
+            Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
@@ -72,33 +74,25 @@ where
                     buf.put_bytes(0, V::SIZE + 1);
                 }
                 buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
+                buf.put_bytes(0, total - commit_op_size::<V>());
             }
         }
     }
-}
 
-impl<K, V, S> Read for Operation<K, FixedEncoding<V>, S>
-where
-    K: Array + Codec,
-    V: FixedValue,
-    S: Update<K, FixedEncoding<V>> + FixedSize + Read<Cfg = ()>,
-{
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        at_least(buf, Self::SIZE)?;
+    fn read_operation(buf: &mut impl Buf, cfg: &Self::ReadCfg) -> Result<Operation<S>, CodecError> {
+        let total = total_op_size::<S::Key, V, S>();
+        at_least(buf, total)?;
 
         match u8::read(buf)? {
             DELETE_CONTEXT => {
-                let key = K::read(buf)?;
-                ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
-                Ok(Self::Delete(key))
+                let key = S::Key::read(buf)?;
+                ensure_zeros(buf, total - delete_op_size::<S::Key>())?;
+                Ok(Operation::Delete(key))
             }
             UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
-                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-                Ok(Self::Update(payload))
+                ensure_zeros(buf, total - update_op_size::<S>())?;
+                Ok(Operation::Update(payload))
             }
             COMMIT_CONTEXT => {
                 let is_some = bool::read(buf)?;
@@ -115,10 +109,30 @@ where
                         "commit floor location overflow",
                     ));
                 }
-                ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
+                ensure_zeros(buf, total - commit_op_size::<V>())?;
+                Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
+}
+
+// FixedSize for ordered fixed operations.
+impl<K, V> FixedSize for Operation<update::Ordered<K, FixedEncoding<V>>>
+where
+    K: Array,
+    V: FixedValue,
+    update::Ordered<K, FixedEncoding<V>>: FixedSize,
+{
+    const SIZE: usize = total_op_size::<K, V, update::Ordered<K, FixedEncoding<V>>>();
+}
+
+// FixedSize for unordered fixed operations.
+impl<K, V> FixedSize for Operation<update::Unordered<K, FixedEncoding<V>>>
+where
+    K: Array,
+    V: FixedValue,
+    update::Unordered<K, FixedEncoding<V>>: FixedSize,
+{
+    const SIZE: usize = total_op_size::<K, V, update::Unordered<K, FixedEncoding<V>>>();
 }

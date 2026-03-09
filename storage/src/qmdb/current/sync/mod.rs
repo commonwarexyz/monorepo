@@ -47,8 +47,8 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedConfig as AnyFixedConfig, FixedValue, ValueEncoding,
-            VariableConfig as AnyVariableConfig, VariableValue,
+            FixedConfig as AnyFixedConfig, FixedValue, VariableConfig as AnyVariableConfig,
+            VariableValue,
         },
         current::{
             db, grafting,
@@ -125,7 +125,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
 /// * Builds the grafted MMR from the bitmap and ops MMR.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<E, K, V, U, I, H, J, const N: usize>(
+async fn build_db<E, U, I, H, J, const N: usize>(
     context: E,
     mmr_config: MmrConfig,
     log: J,
@@ -138,13 +138,11 @@ async fn build_db<E, K, V, U, I, H, J, const N: usize>(
 ) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync + 'static,
+    U: Update + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
-    J: Mutable<Item = Operation<K, V, U>> + Persistable<Error = crate::journal::Error>,
-    Operation<K, V, U>: Codec + Committable + CodecShared,
+    J: Mutable<Item = Operation<U>> + Persistable<Error = crate::journal::Error>,
+    Operation<U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
     let mut hasher = StandardHasher::<H>::new();
@@ -293,7 +291,7 @@ where
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, K, _, UnorderedFixedUpdate<K, V>, _, H, _, N>(
+        build_db::<_, UnorderedFixedUpdate<K, V>, _, H, _, N>(
             context,
             mmr_config,
             log,
@@ -342,7 +340,7 @@ where
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, K, _, UnorderedVariableUpdate<K, V>, _, H, _, N>(
+        build_db::<_, UnorderedVariableUpdate<K, V>, _, H, _, N>(
             context,
             mmr_config,
             log,
@@ -390,7 +388,7 @@ where
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, K, _, OrderedFixedUpdate<K, V>, _, H, _, N>(
+        build_db::<_, OrderedFixedUpdate<K, V>, _, H, _, N>(
             context,
             mmr_config,
             log,
@@ -439,7 +437,7 @@ where
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, K, _, OrderedVariableUpdate<K, V>, _, H, _, N>(
+        build_db::<_, OrderedVariableUpdate<K, V>, _, H, _, N>(
             context,
             mmr_config,
             log,

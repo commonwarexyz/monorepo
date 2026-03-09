@@ -47,7 +47,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
-        operation::{Committable, Key},
+        operation::Committable,
         Error,
     },
     translator::Translator,
@@ -56,7 +56,6 @@ use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
@@ -146,24 +145,22 @@ pub struct VariableConfig<T: Translator, C> {
 }
 
 /// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
     context: E,
     cfg: FixedConfig<T>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: CodecFixedShared + Committable,
+    Operation<U>: CodecFixedShared + Committable,
 {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
@@ -201,24 +198,22 @@ where
 }
 
 /// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
     context: E,
-    cfg: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: Codec + Committable,
+    Operation<U>: Codec + Committable,
 {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
