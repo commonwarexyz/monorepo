@@ -449,10 +449,6 @@ fn index_to_round_scenarios(
         .collect()
 }
 
-fn arrangement_count(base: u128, rounds: usize) -> Option<u128> {
-    checked_pow(base, rounds)
-}
-
 fn combination_count(n: usize, k: usize) -> Option<u128> {
     if k > n {
         return Some(0);
@@ -531,7 +527,7 @@ fn generate_scenarios(
 ) -> Vec<Scenario> {
     let mut rng = test_rng_seeded(seed);
     let base = round_scenario_count(n, max_partitions);
-    if let Some(total) = arrangement_count(base, rounds) {
+    if let Some(total) = checked_pow(base, rounds) {
         if total <= max_scenarios as u128 {
             return (0..total)
                 .map(|idx| Scenario {
@@ -613,6 +609,15 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        simplex::{
+            elector::{Config as ElectorConfig, RoundRobin},
+            scheme::ed25519,
+        },
+        types::Epoch,
+    };
+    use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
+    use commonware_utils::ordered::Set;
 
     #[test]
     fn cases_cover_all_compromised_nodes_for_n5_f1() {
@@ -812,16 +817,6 @@ mod tests {
 
     #[test]
     fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
-        use crate::{
-            simplex::{
-                elector::{Config as ElectorConfig, RoundRobin},
-                scheme::ed25519,
-            },
-            types::Epoch,
-        };
-        use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-        use commonware_utils::ordered::Set;
-
         let framework = Framework {
             participants: 5,
             faults: 1,
