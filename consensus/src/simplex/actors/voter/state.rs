@@ -295,11 +295,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         if timeout && !is_retry {
             // Track that we nullified in this term (for the safety rule).
-            if self.term_length > 1 {
-                let current = self.nullified_in_term.unwrap_or(View::zero());
-                if view > current {
-                    self.nullified_in_term = Some(view);
-                }
+            let current = self.nullified_in_term.unwrap_or(View::zero());
+            if view > current {
+                self.nullified_in_term = Some(view);
             }
 
             let round = self.create_round(view);
@@ -442,22 +440,23 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Construct a finalize vote if the round provides a candidate.
     ///
-    /// When `term_length > 1`, the term safety rule applies: do not
-    /// finalize any block in a term if we voted to nullify a previous
-    /// view in the same term and have not yet seen a finalization
-    /// certificate at or above the nullified view.
+    /// The term safety rule applies: do not finalize any block in a term
+    /// if we voted to nullify a view in the same term and have not yet
+    /// seen a finalization certificate at or above the nullified view.
+    ///
+    /// When `term_length` is 1 every view is its own term, so this is
+    /// equivalent to the per-view rule already enforced by
+    /// [`Round::construct_finalize`] (which checks `broadcast_nullify`).
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
-        // Enforce term safety rule: if we nullified an earlier view in
-        // this term without a subsequent finalization at or above that
-        // view, refuse to finalize.
+        // Enforce term safety rule: if we nullified a view in this term
+        // without a subsequent finalization at or above that view, refuse
+        // to finalize.
         if let Some(nullified_view) = self.nullified_in_term {
-            if self.term_length > 1
-                && view.term_start(self.term_length) == nullified_view.term_start(self.term_length)
-            {
+            if view.term_start(self.term_length) == nullified_view.term_start(self.term_length) {
                 debug!(
                     %view,
                     %nullified_view,
-                    "refusing to finalize: nullified earlier in same term"
+                    "refusing to finalize: nullified in same term"
                 );
                 return None;
             }
@@ -2672,43 +2671,6 @@ mod tests {
             assert!(
                 state.construct_finalize(View::new(2)).is_some(),
                 "should allow finalize after finalization cert cleared safety lock"
-            );
-        });
-    }
-
-    #[test]
-    fn term_safety_not_applied_with_term_length_one() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: 1,
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            let view = state.current_view();
-            assert_eq!(view, View::new(1));
-
-            // Emit a timeout nullify for view 1.
-            let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("timeout nullify should exist");
-            assert!(!was_retry);
-
-            // With term_length=1, the term-level nullified_in_term should NOT be set.
-            // The per-view broadcast_nullify flag in Round handles the single-view case.
-            assert!(
-                state.nullified_in_term.is_none(),
-                "term_length=1 should not track nullified_in_term"
             );
         });
     }
