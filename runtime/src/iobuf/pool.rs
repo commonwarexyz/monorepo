@@ -288,12 +288,8 @@ struct SizeClassLabel {
 
 /// Metrics for the buffer pool.
 struct PoolMetrics {
-    /// Number of buffers currently allocated (out of pool).
-    allocated: Family<SizeClassLabel, Gauge>,
-    /// Number of buffers available in the pool.
-    available: Family<SizeClassLabel, Gauge>,
-    /// Total number of successful allocations.
-    allocations_total: Family<SizeClassLabel, Counter>,
+    /// Number of tracked buffers currently created for the size class.
+    created: Family<SizeClassLabel, Gauge>,
     /// Total number of failed allocations (pool exhausted).
     exhausted_total: Family<SizeClassLabel, Counter>,
     /// Total number of oversized allocation requests.
@@ -303,27 +299,15 @@ struct PoolMetrics {
 impl PoolMetrics {
     fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
-            allocated: Family::default(),
-            available: Family::default(),
-            allocations_total: Family::default(),
+            created: Family::default(),
             exhausted_total: Family::default(),
             oversized_total: Counter::default(),
         };
 
         registry.register(
-            "buffer_pool_allocated",
-            "Number of buffers currently allocated from the pool",
-            metrics.allocated.clone(),
-        );
-        registry.register(
-            "buffer_pool_available",
-            "Number of buffers available in the pool",
-            metrics.available.clone(),
-        );
-        registry.register(
-            "buffer_pool_allocations_total",
-            "Total number of successful buffer allocations",
-            metrics.allocations_total.clone(),
+            "buffer_pool_created",
+            "Number of tracked buffers currently created for the pool",
+            metrics.created.clone(),
         );
         registry.register(
             "buffer_pool_exhausted_total",
@@ -433,8 +417,6 @@ struct SizeClass {
     freelist: ArrayQueue<AlignedBuffer>,
     /// Number of tracked buffers currently in existence for this class.
     created: AtomicUsize,
-    /// Number of buffers currently allocated (out of pool).
-    allocated: AtomicUsize,
 }
 
 impl SizeClass {
@@ -453,7 +435,6 @@ impl SizeClass {
             max,
             freelist,
             created: AtomicUsize::new(created),
-            allocated: AtomicUsize::new(0),
         }
     }
 }
@@ -484,10 +465,6 @@ impl BufferPoolInner {
 
         // Reuse an existing tracked buffer before attempting to grow the class.
         if let Some(buffer) = class.freelist.pop() {
-            class.allocated.fetch_add(1, Ordering::Relaxed);
-            self.metrics.allocations_total.get_or_create(&label).inc();
-            self.metrics.allocated.get_or_create(&label).inc();
-            self.metrics.available.get_or_create(&label).dec();
             return Some(Allocation {
                 buffer,
                 is_new: false,
@@ -509,9 +486,7 @@ impl BufferPoolInner {
         }
 
         // Create a new buffer after successfully reserving capacity.
-        class.allocated.fetch_add(1, Ordering::Relaxed);
-        self.metrics.allocations_total.get_or_create(&label).inc();
-        self.metrics.allocated.get_or_create(&label).inc();
+        self.metrics.created.get_or_create(&label).inc();
         let buffer = if zero_on_new {
             AlignedBuffer::new_zeroed(class.size, class.alignment)
         } else {
@@ -528,22 +503,9 @@ impl BufferPoolInner {
         // Find the class for this buffer size
         if let Some(class_index) = self.config.class_index(buffer.capacity()) {
             let class = &self.classes[class_index];
-            let label = SizeClassLabel {
-                size_class: class.size as u64,
-            };
-
-            class.allocated.fetch_sub(1, Ordering::Relaxed);
-            self.metrics.allocated.get_or_create(&label).dec();
 
             // Try to return to freelist
-            match class.freelist.push(buffer) {
-                Ok(()) => {
-                    self.metrics.available.get_or_create(&label).inc();
-                }
-                Err(_buffer) => {
-                    // Freelist full, buffer is dropped and deallocated
-                }
-            }
+            let _ = class.freelist.push(buffer);
         }
         // Buffer doesn't match any class (or freelist full) - it's dropped and deallocated
     }
@@ -598,14 +560,14 @@ impl BufferPool {
             classes.push(class);
         }
 
-        // Update available metrics after prefill
+        // Update created metrics after prefill
         if config.prefill {
             for class in &classes {
                 let label = SizeClassLabel {
                     size_class: class.size as u64,
                 };
-                let available = class.freelist.len() as i64;
-                metrics.available.get_or_create(&label).set(available);
+                let created = class.freelist.len() as i64;
+                metrics.created.get_or_create(&label).set(created);
             }
         }
 
@@ -1688,29 +1650,29 @@ mod tests {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
-
-        // Fill freelist with a returned tracked buffer.
-        let tracked = pool.try_alloc(page).expect("tracked allocation");
-        drop(tracked);
-
-        // Simulate one outstanding allocation, then return an extra same-class
-        // buffer while freelist is already full to hit the Err(push) branch.
         let class_index = pool
             .inner
             .config
             .class_index(page)
             .expect("class exists for page-sized buffer");
-        pool.inner.classes[class_index]
-            .allocated
-            .store(1, Ordering::Relaxed);
-        pool.inner
-            .return_buffer(AlignedBuffer::new(page, page_size()));
+
+        // Fill freelist with a returned tracked buffer.
+        let tracked = pool.try_alloc(page).expect("tracked allocation");
+        assert_eq!(pool.inner.classes[class_index].freelist.len(), 0);
         assert_eq!(
             pool.inner.classes[class_index]
-                .allocated
+                .created
                 .load(Ordering::Relaxed),
-            0
+            1
         );
+        drop(tracked);
+        assert_eq!(pool.inner.classes[class_index].freelist.len(), 1);
+
+        // Simulate one outstanding allocation, then return an extra same-class
+        // buffer while freelist is already full to hit the Err(push) branch.
+        pool.inner
+            .return_buffer(AlignedBuffer::new(page, page_size()));
+        assert_eq!(pool.inner.classes[class_index].freelist.len(), 1);
     }
 
     #[test]
@@ -1754,21 +1716,17 @@ mod tests {
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
     }
 
-    /// Helper to get the number of allocated buffers for a size class.
+    /// Helper to get the number of checked-out tracked buffers for a size class.
     fn get_allocated(pool: &BufferPool, size: usize) -> usize {
         let class_index = pool.inner.config.class_index(size).unwrap();
-        pool.inner.classes[class_index]
-            .allocated
-            .load(Ordering::Relaxed)
+        let class = &pool.inner.classes[class_index];
+        class.created.load(Ordering::Relaxed) - class.freelist.len()
     }
 
     /// Helper to get the number of available buffers in freelist for a size class.
     fn get_available(pool: &BufferPool, size: usize) -> i64 {
         let class_index = pool.inner.config.class_index(size).unwrap();
-        let label = SizeClassLabel {
-            size_class: pool.inner.classes[class_index].size as u64,
-        };
-        pool.inner.metrics.available.get_or_create(&label).get()
+        pool.inner.classes[class_index].freelist.len() as i64
     }
 
     #[test]
@@ -2040,12 +1998,9 @@ mod tests {
         }
 
         // All buffers should be returned
-        let class_index = pool.inner.config.class_index(page).unwrap();
-        let allocated = pool.inner.classes[class_index]
-            .allocated
-            .load(Ordering::Relaxed);
         assert_eq!(
-            allocated, 0,
+            get_allocated(&pool, page),
+            0,
             "all buffers should be returned after multithreaded test"
         );
     }
