@@ -100,11 +100,12 @@ where
                 Operation::CommitFloor(metadata, _) => {
                     let finalized = batch.merkleize(metadata).await?.finalize();
                     self.apply_batch(finalized).await?;
+                    self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        self.commit().await
+        Ok(())
     }
 
     fn root(&self) -> Key {

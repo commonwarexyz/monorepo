@@ -103,11 +103,12 @@ where
                 Operation::Commit(metadata) => {
                     let finalized = batch.merkleize(metadata).finalize();
                     self.apply_batch(finalized).await?;
+                    self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        self.commit().await
+        Ok(())
     }
 
     fn root(&self) -> Key {
