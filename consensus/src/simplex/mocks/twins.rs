@@ -73,7 +73,7 @@ impl Scenario {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
             let sender_idx = participants.iter().position(|participant| participant == sender);
-            debug_assert!(
+            assert!(
                 sender_idx.is_some(),
                 "sender missing from runtime participant list"
             );
@@ -756,7 +756,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "sender missing from runtime participant list")]
     fn route_panics_when_sender_is_missing_from_participants() {
         let scenario = Scenario {
