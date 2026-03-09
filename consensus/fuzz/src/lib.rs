@@ -525,12 +525,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let resolver_splitter = twins::ResolverSplitter::new(
-                participants.as_ref().to_vec(),
-                twins::view_partitions,
-                twins::view_route,
-            );
-
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -548,14 +542,15 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
-            let (
-                (resolver_sender_primary, resolver_receiver_primary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
-            ) = resolver_splitter.split(
-                context.with_label(&format!("resolver_split_{idx}")),
-                resolver_sender,
-                resolver_receiver,
-            );
+            // Keep resolver traffic opaque under fuzzing. The disrupter intentionally sends
+            // malformed bytes on this channel, so the twin harness should not try to parse or
+            // normalize those frames before the runtime network handles them.
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                resolver_sender.split_with(|_, _, _| None);
+            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
+                    SplitTarget::None
+                });
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
