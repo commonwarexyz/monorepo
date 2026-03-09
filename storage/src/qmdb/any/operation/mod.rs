@@ -24,10 +24,10 @@ pub type Unordered<K, V> = Operation<update::Unordered<K, V>>;
 
 /// Delegates Operation-level codec (Write, Read) to the value encoding.
 ///
-/// Fixed and variable encodings have fundamentally different wire formats (fixed pads to a
-/// uniform size, variable does not). A single blanket `impl Write for Operation<S>` dispatches
-/// here, while the two impls of this trait (on [FixedEncoding] and [VariableEncoding]) live on
-/// different Self types and therefore do not overlap.
+/// Fixed and variable encodings have different wire formats. Fixed pads to a uniform size,
+/// variable does not. A single blanket `impl Write for Operation<S>` dispatches here, while the
+/// two impls of this trait (on FixedEncoding and VariableEncoding) live on different Self types
+/// and therefore do not overlap.
 pub trait OperationCodec<S: Update<ValueEncoding = Self>>: ValueEncoding + Sized {
     type ReadCfg: Clone + Send + Sync + 'static;
 
