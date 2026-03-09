@@ -15,15 +15,12 @@ use commonware_codec::{Encode, Read};
 use commonware_cryptography::{certificate::Scheme, PublicKey};
 use commonware_p2p::{
     simulated::{Error as NetworkError, SplitOrigin, SplitTarget},
-    CheckedSender as P2pCheckedSender, LimitedSender as P2pLimitedSender,
-    Receiver as P2pReceiver,
+    CheckedSender as P2pCheckedSender, LimitedSender as P2pLimitedSender, Receiver as P2pReceiver,
     Recipients,
 };
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{IoBuf, IoBufs, Spawner};
-use commonware_utils::{
-    channel::mpsc, ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded,
-};
+use commonware_utils::{channel::mpsc, ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -154,7 +151,10 @@ impl<C> Elector<C> {
             .rounds()
             .iter()
             .map(|round| {
-                assert!(round.leader() < participants, "scenario leader out of bounds");
+                assert!(
+                    round.leader() < participants,
+                    "scenario leader out of bounds"
+                );
                 Participant::new(round.leader() as u32)
             })
             .collect();
@@ -296,7 +296,11 @@ where
         )
     }
 
-    fn receivers<E, NetR>(&self, context: E, mut receiver: NetR) -> (ResolverReceiver<P>, ResolverReceiver<P>)
+    fn receivers<E, NetR>(
+        &self,
+        context: E,
+        mut receiver: NetR,
+    ) -> (ResolverReceiver<P>, ResolverReceiver<P>)
     where
         E: Spawner,
         NetR: P2pReceiver<PublicKey = P> + Send + 'static,
@@ -460,7 +464,8 @@ where
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let message = message.into().coalesce();
-        let parsed = decode_resolver(&message).expect("resolver sender should send valid wire messages");
+        let parsed =
+            decode_resolver(&message).expect("resolver sender should send valid wire messages");
         let local_id = parsed.id;
         match parsed.payload {
             ResolverPayload::Request(key) => {
@@ -489,8 +494,10 @@ where
                     .await?;
                 let mut requests = self.requests.lock();
                 for recipient in &sent {
-                    let previous =
-                        requests.insert((recipient.as_ref().to_vec(), wire_id), (self.origin, local_id));
+                    let previous = requests.insert(
+                        (recipient.as_ref().to_vec(), wire_id),
+                        (self.origin, local_id),
+                    );
                     debug_assert!(previous.is_none(), "resolver request id collision");
                 }
                 Ok(sent)
@@ -517,7 +524,10 @@ impl<P: PublicKey> P2pReceiver for ResolverReceiver<P> {
     type PublicKey = P;
 
     async fn recv(&mut self) -> Result<(P, IoBuf), Self::Error> {
-        self.receiver.recv().await.ok_or(NetworkError::NetworkClosed)
+        self.receiver
+            .recv()
+            .await
+            .ok_or(NetworkError::NetworkClosed)
     }
 }
 
@@ -1180,7 +1190,13 @@ mod tests {
 
     #[test]
     fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
-        use crate::{simplex::{elector::{Config as ElectorConfig, RoundRobin}, scheme::ed25519}, types::Epoch};
+        use crate::{
+            simplex::{
+                elector::{Config as ElectorConfig, RoundRobin},
+                scheme::ed25519,
+            },
+            types::Epoch,
+        };
         use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
         use commonware_utils::ordered::Set;
 
@@ -1272,7 +1288,10 @@ mod tests {
                 .add_link(twin.clone(), peer.clone(), link.clone())
                 .await
                 .unwrap();
-            oracle.add_link(peer.clone(), twin.clone(), link).await.unwrap();
+            oracle
+                .add_link(peer.clone(), twin.clone(), link)
+                .await
+                .unwrap();
 
             let splitter = ResolverSplitter::new(
                 vec![peer.clone()],
@@ -1411,7 +1430,10 @@ mod tests {
                 .add_link(twin.clone(), peer.clone(), link.clone())
                 .await
                 .unwrap();
-            oracle.add_link(peer.clone(), twin.clone(), link).await.unwrap();
+            oracle
+                .add_link(peer.clone(), twin.clone(), link)
+                .await
+                .unwrap();
 
             let splitter = ResolverSplitter::new(
                 vec![peer.clone()],
@@ -1424,12 +1446,14 @@ mod tests {
                     }
                 },
             );
-            let ((mut primary_sender, mut primary_recv), (mut secondary_sender, mut secondary_recv)) =
-                splitter.split(
-                    context.with_label("resolver_split"),
-                    resolver_sender,
-                    resolver_receiver,
-                );
+            let (
+                (mut primary_sender, mut primary_recv),
+                (mut secondary_sender, mut secondary_recv),
+            ) = splitter.split(
+                context.with_label("resolver_split"),
+                resolver_sender,
+                resolver_receiver,
+            );
 
             primary_sender
                 .check(Recipients::One(peer.clone()))
@@ -1460,7 +1484,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            let first = ResolverMessage::<U64>::decode(peer_receiver.recv().await.unwrap().1).unwrap();
+            let first =
+                ResolverMessage::<U64>::decode(peer_receiver.recv().await.unwrap().1).unwrap();
             let second =
                 ResolverMessage::<U64>::decode(peer_receiver.recv().await.unwrap().1).unwrap();
             let ids: HashSet<_> = [first.id, second.id].into_iter().collect();
@@ -1571,12 +1596,14 @@ mod tests {
                 view_partitions,
                 view_route,
             );
-            let ((mut primary_sender, mut primary_recv), (mut secondary_sender, mut secondary_recv)) =
-                resolver_splitter.split(
-                    context.with_label("resolver_split"),
-                    resolver_sender,
-                    resolver_receiver,
-                );
+            let (
+                (mut primary_sender, mut primary_recv),
+                (mut secondary_sender, mut secondary_recv),
+            ) = resolver_splitter.split(
+                context.with_label("resolver_split"),
+                resolver_sender,
+                resolver_receiver,
+            );
 
             let link = Link {
                 latency: Duration::from_millis(0),
