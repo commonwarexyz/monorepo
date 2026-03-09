@@ -424,9 +424,7 @@ mod tests {
         Manager as _, Receiver as _, Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::p2p::mocks::{
-        Message as ResolverMessage, Payload as ResolverPayload,
-    };
+    use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
@@ -5768,8 +5766,7 @@ mod tests {
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-            let elector =
-                TwinsElector::new(L::default(), &scenario, campaign.n as usize);
+            let elector = TwinsElector::new(L::default(), &scenario, campaign.n as usize);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -6147,7 +6144,11 @@ mod tests {
         );
         let participants = Set::try_from(participants).expect("participants should be unique");
         let twins = <TwinsElector<RoundRobin<Sha256>> as Elector<ed25519::Scheme>>::build(
-            TwinsElector::new(RoundRobin::<Sha256>::default(), &case.scenario, framework.participants),
+            TwinsElector::new(
+                RoundRobin::<Sha256>::default(),
+                &case.scenario,
+                framework.participants,
+            ),
             &participants,
         );
         let fallback = <RoundRobin<Sha256> as Elector<ed25519::Scheme>>::build(
@@ -6240,7 +6241,10 @@ mod tests {
                 .add_link(peer_b.clone(), twin.clone(), link.clone())
                 .await
                 .unwrap();
-            oracle.add_link(twin.clone(), peer_b.clone(), link).await.unwrap();
+            oracle
+                .add_link(twin.clone(), peer_b.clone(), link)
+                .await
+                .unwrap();
 
             peer_a_sender
                 .send(

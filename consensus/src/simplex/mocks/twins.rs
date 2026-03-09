@@ -71,7 +71,9 @@ impl Scenario {
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
-            let sender_idx = participants.iter().position(|participant| participant == sender);
+            let sender_idx = participants
+                .iter()
+                .position(|participant| participant == sender);
             assert!(
                 sender_idx.is_some(),
                 "sender missing from runtime participant list"
@@ -150,8 +152,11 @@ where
     /// Create a split sender forwarder for resolver traffic.
     pub fn forwarder(
         &self,
-    ) -> impl Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>> + Clone + Send + Sync + 'static
-    {
+    ) -> impl Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
+           + Clone
+           + Send
+           + Sync
+           + 'static {
         let splitter = self.clone();
         move |origin, recipients, message| splitter.forward(origin, recipients, message)
     }
@@ -738,9 +743,9 @@ mod tests {
     #[test]
     fn round_scenarios_include_full_broadcast() {
         let full = (1u64 << 5) - 1;
-        assert!(round_scenarios(5, 3).into_iter().any(|round| {
-            round.primary_mask == full && round.secondary_mask == full
-        }));
+        assert!(round_scenarios(5, 3)
+            .into_iter()
+            .any(|round| { round.primary_mask == full && round.secondary_mask == full }));
     }
 
     #[test]
@@ -776,11 +781,7 @@ mod tests {
         ];
         let primary = participants[0].clone();
         let secondary = participants[1].clone();
-        let splitter = ResolverSplitter::new(
-            participants.clone(),
-            view_partitions,
-            view_route,
-        );
+        let splitter = ResolverSplitter::new(participants.clone(), view_partitions, view_route);
         let forwarder = splitter.forwarder();
         let router = splitter.router();
 
