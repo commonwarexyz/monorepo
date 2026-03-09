@@ -688,11 +688,12 @@ where
         progressed
     }
 
-    /// Cache a block and notify block subscribers waiting on it.
+    /// Cache a block and notify all subscribers waiting on it.
     fn cache_block(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         self.reconstructed_blocks
             .insert(commitment, Arc::clone(&block));
+        self.notify_shard_subscribers(commitment);
         self.notify_block_subscribers(block);
     }
 
@@ -4333,6 +4334,68 @@ mod tests {
                     blocked.is_empty(),
                     "no peer should be blocked in withholding leader test"
                 );
+            },
+        );
+    }
+
+    /// When the leader withholds its shard from a participant,
+    /// that participant can still reconstruct the block from gossipped shards.
+    /// The shard subscription must resolve once the block is reconstructed,
+    /// even though the leader's own shard was never directly received.
+    #[test_traced]
+    fn test_shard_subscription_resolves_after_reconstruction_without_leader_shard() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                let leader = peers[0].public_key.clone();
+                let victim = peers[1].public_key.clone();
+
+                // Remove the link from leader to victim so the leader's shard
+                // never reaches the victim directly.
+                oracle
+                    .remove_link(leader.clone(), victim.clone())
+                    .await
+                    .expect("remove_link should succeed");
+
+                // Subscribe to the shard and block BEFORE any broadcasting.
+                let shard_sub = peers[1].mailbox.subscribe_shard(commitment).await;
+                let block_sub = peers[1].mailbox.subscribe(commitment).await;
+
+                // Leader broadcasts.
+                peers[0].mailbox.proposed(round, coded_block.clone()).await;
+
+                // All non-leader peers discover the leader.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox
+                        .discovered(commitment, leader.clone(), round)
+                        .await;
+                }
+
+                // Wait for gossip to propagate.
+                context.sleep(config.link.latency * 4).await;
+
+                // Block subscription should resolve (victim reconstructs from
+                // gossipped shards).
+                let reconstructed = block_sub.await.expect("block subscription should resolve");
+                assert_eq!(reconstructed.commitment(), commitment);
+
+                // Shard subscription must also resolve, even though the leader
+                // never sent the victim its own shard directly.
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("shard subscription did not resolve after reconstruction");
+                    },
+                };
             },
         );
     }
