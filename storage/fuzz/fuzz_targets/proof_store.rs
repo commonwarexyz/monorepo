@@ -4,10 +4,12 @@ use arbitrary::Arbitrary;
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::mmr::{
-    verification::ProofStore, Location, Proof, StandardHasher as Standard,
+    verification::ProofStore, Location, Position, Proof, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
+
+const MAX_ITEMS: usize = 256;
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -15,30 +17,41 @@ struct FuzzInput {
     elements: Vec<Vec<u8>>,
     start_loc: Location,
     root: Digest,
+    peaks: Vec<(Position, Digest)>,
     range: Range<Location>,
     locations: Vec<Location>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_digests = u.int_in_range(0..=MAX_ITEMS)?;
+        let num_elements = u.int_in_range(0..=MAX_ITEMS)?;
+        let num_peaks = u.int_in_range(0..=MAX_ITEMS)?;
+        let num_locations = u.int_in_range(0..=MAX_ITEMS)?;
         Ok(FuzzInput {
             proof: Proof {
                 leaves: Location::from(u.arbitrary::<u64>()?),
-                digests: u
-                    .arbitrary::<Vec<[u8; 32]>>()?
-                    .into_iter()
-                    .map(Digest::from)
-                    .collect(),
+                digests: (0..num_digests)
+                    .map(|_| Ok(Digest::from(u.arbitrary::<[u8; 32]>()?)))
+                    .collect::<arbitrary::Result<Vec<_>>>()?,
             },
-            elements: u.arbitrary::<Vec<Vec<u8>>>()?,
+            elements: (0..num_elements)
+                .map(|_| u.arbitrary::<Vec<u8>>())
+                .collect::<arbitrary::Result<Vec<_>>>()?,
             start_loc: Location::from(u.arbitrary::<u64>()?),
             root: Digest::from(u.arbitrary::<[u8; 32]>()?),
+            peaks: (0..num_peaks)
+                .map(|_| {
+                    Ok((
+                        Position::new(u.arbitrary::<u64>()?),
+                        Digest::from(u.arbitrary::<[u8; 32]>()?),
+                    ))
+                })
+                .collect::<arbitrary::Result<Vec<_>>>()?,
             range: Location::from(u.arbitrary::<u64>()?)..Location::from(u.arbitrary::<u64>()?),
-            locations: u
-                .arbitrary::<Vec<u64>>()?
-                .into_iter()
-                .map(Location::from)
-                .collect(),
+            locations: (0..num_locations)
+                .map(|_| Ok(Location::from(u.arbitrary::<u64>()?)))
+                .collect::<arbitrary::Result<Vec<_>>>()?,
         })
     }
 }
@@ -51,7 +64,7 @@ async fn fuzz(input: FuzzInput) {
         &input.elements,
         input.start_loc,
         &input.root,
-        &[],
+        &input.peaks,
     ) else {
         return;
     };
