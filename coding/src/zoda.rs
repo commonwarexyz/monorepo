@@ -396,13 +396,12 @@ where
 /// A ZODA shard that has been checked for integrity already.
 #[derive(Clone)]
 pub struct CheckedShard {
+    /// The shard index within the encoded data.
+    index: usize,
+    /// The checked shard data.
     shard: Matrix<F>,
-    /// The shuffled row indices for this shard within the encoded data.
-    shuffled_indices: Vec<u32>,
     /// The commitment this shard was checked against.
     commitment: Summary,
-    /// Topology information needed for decoding.
-    topology: Topology,
 }
 
 /// Take indices up to `total`, and shuffle them.
@@ -432,9 +431,13 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     )
 }
 
-/// Internal checking state derived from a shard's metadata and commitment.
+/// Precomputed checking state derived from a shard's metadata and commitment.
+///
+/// Computing this is expensive (Reed-Solomon encoding of the checksum, etc.),
+/// so it can be reused across multiple calls to [`Scheme::check`].
 #[derive(Clone)]
-struct CheckingData<D: Digest> {
+pub struct CheckingData<D: Digest> {
+    commitment: Summary,
     topology: Topology,
     root: D,
     checking_matrix: Matrix<F>,
@@ -487,6 +490,7 @@ impl<D: Digest> CheckingData<D> {
         let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
 
         Ok(Self {
+            commitment: expected_commitment,
             topology,
             root,
             checking_matrix,
@@ -537,10 +541,9 @@ impl<D: Digest> CheckingData<D> {
             }
         }
         Ok(CheckedShard {
+            index: shard_idx,
             shard: shard.rows.clone(),
-            shuffled_indices: these_shuffled_indices.to_vec(),
             commitment,
-            topology: self.topology,
         })
     }
 }
@@ -578,6 +581,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
     type Shard = Shard<H::Digest>;
     type CheckedShard = CheckedShard;
+    type CheckingData = CheckingData<H::Digest>;
     type Error = Error;
 
     fn encode(
@@ -663,32 +667,41 @@ impl<H: Hasher> Scheme for Zoda<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
-    ) -> Result<Self::CheckedShard, Self::Error> {
-        let checking_data = CheckingData::reckon(
-            config,
-            commitment,
-            shard.data_bytes,
-            shard.root,
-            shard.checksum.as_ref(),
-        )?;
-        checking_data.check::<H>(*commitment, index, shard)
+        checking_data: Option<Self::CheckingData>,
+    ) -> Result<(Self::CheckedShard, Self::CheckingData), Self::Error> {
+        let checking_data = match checking_data {
+            Some(cd) => cd,
+            None => CheckingData::reckon(
+                config,
+                commitment,
+                shard.data_bytes,
+                shard.root,
+                shard.checksum.as_ref(),
+            )?,
+        };
+        let checked = checking_data.check::<H>(*commitment, index, shard)?;
+        Ok((checked, checking_data))
     }
 
     fn decode(
         _config: &Config,
         commitment: &Self::Commitment,
+        checking_data: &Self::CheckingData,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        let first = shards.first().ok_or(Error::InsufficientShards(0, 1))?;
+        if checking_data.commitment != *commitment {
+            return Err(Error::InconsistentCheckedShard);
+        }
         let Topology {
             encoded_rows,
             data_cols,
             data_rows,
             data_bytes,
             min_shards,
+            samples,
             ..
-        } = first.topology;
+        } = checking_data.topology;
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
@@ -697,7 +710,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
         }
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
-            for (&i, row) in shard.shuffled_indices.iter().zip(shard.shard.iter()) {
+            let indices =
+                &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
+            for (&i, row) in indices.iter().zip(shard.shard.iter()) {
                 evaluation.fill_row(u64::from(i) as usize, row);
             }
         }
@@ -766,10 +781,11 @@ mod tests {
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
-        let checked_shard0 = Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0]).unwrap();
+        let (checked_shard0, cd) =
+            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
         let duplicate = checked_shard0.clone();
         let shards = vec![checked_shard0, duplicate];
-        let result = Zoda::<Sha256>::decode(&config, &commitment, &shards, &STRATEGY);
+        let result = Zoda::<Sha256>::decode(&config, &commitment, &cd, &shards, &STRATEGY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);
@@ -842,14 +858,14 @@ mod tests {
         }
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, &shards[b_i]),
+            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, &shards[b_i], None),
             Err(Error::InvalidShard)
         ));
 
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, &shards[a_i]),
+            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, &shards[a_i], None),
             Err(Error::InvalidShard)
         ));
     }

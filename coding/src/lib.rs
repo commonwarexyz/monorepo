@@ -112,20 +112,30 @@ commonware_macros::stability_scope!(ALPHA {
     ///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     ///
     /// // Each participant checks their shard against the commitment.
+    /// let mut checking_data = None;
     /// let checked_shards: Vec<_> = shards
     ///         .iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
+    ///             let (checked, cd) = RS::check(
+    ///                 &config, &commitment, i as u16, shard, checking_data.take(),
+    ///             ).unwrap();
+    ///             checking_data = Some(cd);
+    ///             checked
     ///         })
     ///         .collect();
     ///
     /// // Decode from any minimum_shards-sized subset.
-    /// let data2 = RS::decode(&config, &commitment, &checked_shards[..2], &STRATEGY).unwrap();
+    /// let checking_data = checking_data.unwrap();
+    /// let data2 = RS::decode(
+    ///     &config, &commitment, &checking_data, &checked_shards[..2], &STRATEGY,
+    /// ).unwrap();
     /// assert_eq!(&data[..], &data2[..]);
     ///
     /// // Decoding works with different shards, with a guarantee to get the same result.
-    /// let data3 = RS::decode(&config, &commitment, &checked_shards[1..], &STRATEGY).unwrap();
+    /// let data3 = RS::decode(
+    ///     &config, &commitment, &checking_data, &checked_shards[1..], &STRATEGY,
+    /// ).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
     ///
@@ -159,6 +169,12 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This allows excluding invalid shards from the function signature of [Self::decode].
         type CheckedShard: Clone + Send + Sync;
+        /// Precomputed state derived from a commitment that can be reused across
+        /// multiple calls to [Self::check] and [Self::decode].
+        ///
+        /// For schemes where checking is expensive, passing previously
+        /// computed checking data avoids redundant work.
+        type CheckingData: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
@@ -173,16 +189,21 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-        /// Check the integrity of a shard, producing a checked shard.
+        /// Check the integrity of a shard, producing a checked shard and checking data.
         ///
         /// This takes in an index, to make sure that the shard you're checking
         /// is associated with the participant you expect it to be.
+        ///
+        /// If `checking_data` is `Some`, it is reused to avoid redundant computation.
+        /// Otherwise, it is derived from the commitment and shard metadata. The
+        /// returned checking data can be passed into subsequent calls.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
-        ) -> Result<Self::CheckedShard, Self::Error>;
+            checking_data: Option<Self::CheckingData>,
+        ) -> Result<(Self::CheckedShard, Self::CheckingData), Self::Error>;
 
         /// Decode the data from shards received from other participants.
         ///
@@ -205,6 +226,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn decode(
             config: &Config,
             commitment: &Self::Commitment,
+            checking_data: &Self::CheckingData,
             shards: &[Self::CheckedShard],
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
@@ -249,11 +271,14 @@ mod test {
 
         // Collect selected shards for decoding.
         let mut checked_shards = Vec::new();
+        let mut checking_data = None;
         for (i, shard) in shards.into_iter().enumerate() {
             if !selected.contains(&(i as u16)) {
                 continue;
             }
-            let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
+            let (checked, cd) =
+                S::check(config, &commitment, i as u16, &shard, checking_data.take()).unwrap();
+            checking_data = Some(cd);
             checked_shards.push(checked);
         }
 
@@ -261,7 +286,15 @@ mod test {
         checked_shards.reverse();
 
         // Decode from the selected shards and verify data integrity.
-        let decoded = S::decode(config, &commitment, &checked_shards, &Sequential).unwrap();
+        let checking_data = checking_data.unwrap();
+        let decoded = S::decode(
+            config,
+            &commitment,
+            &checking_data,
+            &checked_shards,
+            &Sequential,
+        )
+        .unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -298,10 +331,16 @@ mod test {
         let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
         let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
 
-        let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
-        let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+        let (checked_a, cd_a) = S::check(config, &commitment_a, 0, &shards_a[0], None).unwrap();
+        let (checked_b, _) = S::check(config, &commitment_b, 1, &shards_b[1], None).unwrap();
 
-        let result = S::decode(config, &commitment_a, &[checked_a, checked_b], &Sequential);
+        let result = S::decode(
+            config,
+            &commitment_a,
+            &cd_a,
+            &[checked_a, checked_b],
+            &Sequential,
+        );
         assert!(
             result.is_err(),
             "decode must reject shards checked against different commitments"
