@@ -46,7 +46,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::validation::LastBuilt,
-        core::Mailbox,
+        core::{ConsensusEngine, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -92,24 +92,25 @@ use tracing::{debug, warn};
 /// [`crate::CertifiableBlock`]. It is designed for applications that cannot
 /// recover consensus context directly from block payloads.
 #[derive(Clone)]
-pub struct Inline<E, S, A, B, ES>
+pub struct Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     context: E,
     application: A,
-    marshal: Mailbox<S, Standard<B>>,
+    marshal: Mailbox<Standard<B, C>>,
     epocher: ES,
     last_built: LastBuilt<B>,
 
     build_duration: Timed<E>,
 }
 
-impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, C> Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -121,12 +122,13 @@ where
     >,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     /// Creates a new inline-verification wrapper.
     ///
     /// Registers a `build_duration` histogram for proposal latency and initializes
     /// the shared "last built block" cache used by [`Relay::broadcast`].
-    pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
+    pub fn new(context: E, application: A, marshal: Mailbox<Standard<B, C>>, epocher: ES) -> Self {
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "build_duration",
@@ -146,7 +148,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, C> Automaton for Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -158,6 +160,7 @@ where
     >,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
@@ -398,7 +401,7 @@ where
 ///
 /// Verification is completed during [`Automaton::verify`], so certify does not
 /// need additional wrapper-managed checks.
-impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, C> CertifiableAutomaton for Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -410,16 +413,18 @@ where
     >,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
 }
 
-impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, C> Relay for Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     type Digest = B::Digest;
 
@@ -442,7 +447,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
+impl<E, S, A, B, ES, C> Reporter for Inline<E, S, A, B, ES, C>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -450,6 +455,7 @@ where
         + Reporter<Activity = Update<B>>,
     B: Block + Clone,
     ES: Epocher,
+    C: ConsensusEngine<Scheme = S, Commitment = B::Digest>,
 {
     type Activity = A::Activity;
 
@@ -463,8 +469,8 @@ where
 mod tests {
     use super::Inline;
     use crate::{
-        simplex::types::Context, Automaton, Block, CertifiableAutomaton, Relay,
-        VerifyingApplication,
+        marshal::core::SimplexConsensus, simplex, simplex::types::Context, Automaton, Block,
+        CertifiableAutomaton, Relay, VerifyingApplication,
     };
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
@@ -475,7 +481,7 @@ mod tests {
     fn assert_non_certifiable_block_supported<E, S, A, B, ES>()
     where
         E: Rng + Spawner + Metrics + Clock,
-        S: Scheme,
+        S: Scheme + simplex::scheme::Scheme<B::Digest>,
         A: VerifyingApplication<
             E,
             Block = B,
@@ -489,8 +495,8 @@ mod tests {
         fn assert_certifiable<T: CertifiableAutomaton>() {}
         fn assert_relay<T: Relay>() {}
 
-        assert_automaton::<Inline<E, S, A, B, ES>>();
-        assert_certifiable::<Inline<E, S, A, B, ES>>();
-        assert_relay::<Inline<E, S, A, B, ES>>();
+        assert_automaton::<Inline<E, S, A, B, ES, SimplexConsensus<S, B::Digest>>>();
+        assert_certifiable::<Inline<E, S, A, B, ES, SimplexConsensus<S, B::Digest>>>();
+        assert_relay::<Inline<E, S, A, B, ES, SimplexConsensus<S, B::Digest>>>();
     }
 }

@@ -142,7 +142,7 @@ where
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
     pub marshal:
-        core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
+        core::Mailbox<Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey, Z::Scheme>>,
     /// Mailbox for communicating with the shards engine.
     pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
@@ -173,7 +173,7 @@ where
 {
     context: E,
     application: A,
-    marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    marshal: core::Mailbox<Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey, Z::Scheme>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
@@ -997,12 +997,12 @@ async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
+    marshal: &mut core::Mailbox<Coding<B, C, H, S::PublicKey, S>>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 ) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: CertificateScheme,
+    S: CertificateScheme + Scheme<Commitment>,
     A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,

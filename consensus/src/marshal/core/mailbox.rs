@@ -1,10 +1,9 @@
-use super::Variant;
+use super::{ConsensusCertificate, ConsensusEngine, Variant};
 use crate::{
     marshal::{
         ancestry::{AncestorStream, BlockProvider},
         Identifier,
     },
-    simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
     Reporter,
 };
@@ -18,7 +17,7 @@ use commonware_utils::{
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<S: Scheme, V: Variant> {
+pub(crate) enum Message<V: Variant> {
     /// A request to retrieve the `(height, digest)` of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
     GetInfo {
@@ -43,7 +42,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The height of the finalization to retrieve.
         height: Height,
         /// A channel to send the retrieved finalization.
-        response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
+        response: oneshot::Sender<Option<<V::Consensus as ConsensusEngine>::Finalization>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -63,7 +62,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The height of the finalization to fetch.
         height: Height,
         /// Target peers to fetch from. Added to any existing targets for this height.
-        targets: NonEmptyVec<S::PublicKey>,
+        targets: NonEmptyVec<<<V::Consensus as ConsensusEngine>::Scheme as Scheme>::PublicKey>,
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
@@ -124,24 +123,24 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<S, V::Commitment>,
+        notarization: <V::Consensus as ConsensusEngine>::Notarization,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<S, V::Commitment>,
+        finalization: <V::Consensus as ConsensusEngine>::Finalization,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::Actor).
 #[derive(Clone)]
-pub struct Mailbox<S: Scheme, V: Variant> {
-    sender: mpsc::Sender<Message<S, V>>,
+pub struct Mailbox<V: Variant> {
+    sender: mpsc::Sender<Message<V>>,
 }
 
-impl<S: Scheme, V: Variant> Mailbox<S, V> {
+impl<V: Variant> Mailbox<V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: mpsc::Sender<Message<S, V>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<V>>) -> Self {
         Self { sender }
     }
 
@@ -176,9 +175,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .flatten()
     }
 
-    /// A best-effort attempt to retrieve a given [Finalization] from local
-    /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
+    /// A best-effort attempt to retrieve a given finalization from local
+    /// storage. It is not an indication to go fetch the finalization from the network.
+    pub async fn get_finalization(
+        &self,
+        height: Height,
+    ) -> Option<<V::Consensus as ConsensusEngine>::Finalization> {
         self.sender
             .request(|response| Message::GetFinalization { height, response })
             .await
@@ -204,7 +206,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The height must be covered by both the epocher and the provider. If the
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
-    pub async fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    pub async fn hint_finalized(
+        &self,
+        height: Height,
+        targets: NonEmptyVec<<<V::Consensus as ConsensusEngine>::Scheme as Scheme>::PublicKey>,
+    ) {
         self.sender
             .send_lossy(Message::HintFinalized { height, targets })
             .await;
@@ -311,7 +317,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
+impl<V: Variant> BlockProvider for Mailbox<V> {
     type Block = V::ApplicationBlock;
 
     async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
@@ -320,17 +326,18 @@ impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
-    type Activity = Activity<S, V::Commitment>;
+impl<V: Variant> Reporter for Mailbox<V> {
+    type Activity = <V::Consensus as ConsensusEngine>::Activity;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let message = match activity {
-            Activity::Notarization(notarization) => Message::Notarization { notarization },
-            Activity::Finalization(finalization) => Message::Finalization { finalization },
-            _ => {
-                // Ignore other activity types
-                return;
+        let message = match V::Consensus::into_certificate(activity) {
+            Some(ConsensusCertificate::Notarization(notarization)) => {
+                Message::Notarization { notarization }
             }
+            Some(ConsensusCertificate::Finalization(finalization)) => {
+                Message::Finalization { finalization }
+            }
+            None => return,
         };
         self.sender.send_lossy(message).await;
     }
