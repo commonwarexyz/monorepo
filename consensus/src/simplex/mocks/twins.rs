@@ -22,7 +22,7 @@ use commonware_runtime::IoBuf;
 use commonware_utils::{ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -197,14 +197,15 @@ where
 /// Stateful resolver splitter for twin routing.
 ///
 /// Resolver requests are view-scoped, but responses only carry a request id.
-/// This splitter remembers which twin half issued each outbound request so that
-/// inbound responses and errors can be routed back to that same half.
+/// This splitter remembers which twin half issued each outbound request to each
+/// peer so that inbound responses and errors can be routed back to that same
+/// half even when ids are reused concurrently.
 #[derive(Clone)]
 pub struct ResolverSplitter<P, Partitions, Route> {
     participants: Arc<[P]>,
     partitions: Partitions,
     route: Route,
-    requests: Arc<Mutex<HashMap<u64, SplitTarget>>>,
+    requests: Arc<Mutex<HashMap<(Vec<u8>, u64), VecDeque<SplitTarget>>>>,
 }
 
 impl<P, Partitions, Route> ResolverSplitter<P, Partitions, Route>
@@ -264,7 +265,13 @@ where
                         SplitTarget::Secondary,
                     ),
                 };
-                self.requests.lock().insert(id, target);
+                let mut requests = self.requests.lock();
+                for recipient in recipients_to_vec(&filtered) {
+                    requests
+                        .entry((recipient.as_ref().to_vec(), id))
+                        .or_default()
+                        .push_back(target);
+                }
                 Some(filtered)
             }
             ResolverPayload::Response(_) | ResolverPayload::Error => Some(recipients.clone()),
@@ -281,11 +288,18 @@ where
                 let view = View::new(u64::from(key));
                 (self.route)(view, sender, self.participants.as_ref())
             }
-            ResolverPayload::Response(_) | ResolverPayload::Error => self
-                .requests
-                .lock()
-                .remove(&message.id)
-                .unwrap_or(SplitTarget::None),
+            ResolverPayload::Response(_) | ResolverPayload::Error => {
+                let key = (sender.as_ref().to_vec(), message.id);
+                let mut requests = self.requests.lock();
+                let Some(targets) = requests.get_mut(&key) else {
+                    return SplitTarget::None;
+                };
+                let target = targets.pop_front().unwrap_or(SplitTarget::None);
+                if targets.is_empty() {
+                    requests.remove(&key);
+                }
+                target
+            }
         }
     }
 }
@@ -313,6 +327,14 @@ fn filter_recipients<P: PublicKey + Clone + PartialEq>(
         [] => None,
         [recipient] => Some(Recipients::One(recipient.clone())),
         _ => Some(Recipients::Some(filtered)),
+    }
+}
+
+fn recipients_to_vec<P: PublicKey + Clone>(recipients: &Recipients<P>) -> Vec<P> {
+    match recipients {
+        Recipients::All => panic!("unbounded recipient set cannot be recorded"),
+        Recipients::Some(recipients) => recipients.clone(),
+        Recipients::One(recipient) => vec![recipient.clone()],
     }
 }
 
@@ -412,7 +434,15 @@ fn masks_to_partitions<P: Clone>(
     (primary, secondary)
 }
 
-fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
+fn checked_pow(base: u128, exp: usize) -> Option<u128> {
+    let mut total = 1u128;
+    for _ in 0..exp {
+        total = total.checked_mul(base)?;
+    }
+    Some(total)
+}
+
+fn round_scenario_count(n: usize, max_partitions: usize) -> u128 {
     assert!(n > 1, "n must be > 1");
     assert!(
         n < u64::BITS as usize,
@@ -424,66 +454,131 @@ fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
         "max_partitions must be less than or equal to n"
     );
 
-    fn generate(
-        idx: usize,
-        n: usize,
-        used: usize,
-        max_partitions: usize,
-        current: &mut [usize],
-        out: &mut BTreeSet<RoundScenario>,
-    ) {
-        if idx == n {
-            let mut masks = vec![0u64; used];
-            for (participant_idx, partition_idx) in current.iter().copied().enumerate() {
-                masks[partition_idx] |= 1u64 << participant_idx;
-            }
-            for (leader, primary_idx) in current.iter().copied().enumerate() {
-                for secondary_idx in 0..used {
-                    out.insert(RoundScenario {
-                        leader,
-                        primary_mask: masks[primary_idx],
-                        secondary_mask: masks[secondary_idx],
-                    });
+    // Round scenarios only observe the leader's partition, the secondary
+    // partition, and whether any participants remain outside those groups.
+    let effective_partitions = max_partitions.min(3);
+    let per_leader = if effective_partitions == 2 {
+        (1u128 << n) - 1
+    } else {
+        checked_pow(3, n - 1).expect("round scenario count overflow")
+    };
+    (n as u128)
+        .checked_mul(per_leader)
+        .expect("round scenario count overflow")
+}
+
+fn round_scenario(n: usize, max_partitions: usize, idx: u128) -> RoundScenario {
+    let total = round_scenario_count(n, max_partitions);
+    assert!(idx < total, "round scenario index out of bounds");
+
+    let effective_partitions = max_partitions.min(3);
+    let per_leader = if effective_partitions == 2 {
+        (1u128 << n) - 1
+    } else {
+        checked_pow(3, n - 1).expect("round scenario count overflow")
+    };
+
+    let leader = usize::try_from(idx / per_leader).expect("leader index should fit in usize");
+    let mut local = idx % per_leader;
+    let leader_bit = 1u64 << leader;
+    let mut primary_mask = leader_bit;
+
+    if effective_partitions == 2 {
+        let same_partition = 1u128 << (n - 1);
+        if local < same_partition {
+            for participant in 0..n {
+                if participant == leader {
+                    continue;
                 }
+                if (local & 1) == 0 {
+                    primary_mask |= 1u64 << participant;
+                }
+                local >>= 1;
             }
-            return;
+            return RoundScenario {
+                leader,
+                primary_mask,
+                secondary_mask: primary_mask,
+            };
         }
-        for partition in 0..used {
-            current[idx] = partition;
-            generate(idx + 1, n, used, max_partitions, current, out);
+
+        let mut assignment = (local - same_partition) + 1;
+        let mut secondary_mask = 0u64;
+        for participant in 0..n {
+            if participant == leader {
+                continue;
+            }
+            if (assignment & 1) == 0 {
+                primary_mask |= 1u64 << participant;
+            } else {
+                secondary_mask |= 1u64 << participant;
+            }
+            assignment >>= 1;
         }
-        if used < max_partitions {
-            current[idx] = used;
-            generate(idx + 1, n, used + 1, max_partitions, current, out);
-        }
+        return RoundScenario {
+            leader,
+            primary_mask,
+            secondary_mask,
+        };
     }
 
-    let mut out = BTreeSet::new();
-    let mut current = vec![0usize; n];
-    generate(1, n, 1, max_partitions, &mut current, &mut out);
-    out.into_iter().collect()
+    let mut secondary_mask = 0u64;
+    let mut saw_secondary = false;
+    for participant in 0..n {
+        if participant == leader {
+            continue;
+        }
+        match local % 3 {
+            0 => primary_mask |= 1u64 << participant,
+            1 => {
+                saw_secondary = true;
+                secondary_mask |= 1u64 << participant;
+            }
+            2 => {}
+            _ => unreachable!("ternary digit must be in range"),
+        }
+        local /= 3;
+    }
+    RoundScenario {
+        leader,
+        primary_mask,
+        secondary_mask: if saw_secondary {
+            secondary_mask
+        } else {
+            primary_mask
+        },
+    }
+}
+
+#[cfg(test)]
+fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
+    let total = round_scenario_count(n, max_partitions);
+    let total = usize::try_from(total).expect("too many round scenarios to materialize");
+    (0..total)
+        .map(|idx| round_scenario(n, max_partitions, idx as u128))
+        .collect()
 }
 
 fn index_to_round_scenarios(
-    mut idx: usize,
-    base: usize,
+    mut idx: u128,
+    base: u128,
     rounds: usize,
-    options: &[RoundScenario],
+    n: usize,
+    max_partitions: usize,
 ) -> Vec<RoundScenario> {
-    let mut digits = vec![0usize; rounds];
+    let mut digits = vec![0u128; rounds];
     for digit in digits.iter_mut().rev() {
         *digit = idx % base;
         idx /= base;
     }
-    digits.into_iter().map(|digit| options[digit]).collect()
+    digits
+        .into_iter()
+        .map(|digit| round_scenario(n, max_partitions, digit))
+        .collect()
 }
 
-fn arrangement_count(base: usize, rounds: usize) -> Option<usize> {
-    let mut total = 1usize;
-    for _ in 0..rounds {
-        total = total.checked_mul(base)?;
-    }
-    Some(total)
+fn arrangement_count(base: u128, rounds: usize) -> Option<u128> {
+    checked_pow(base, rounds)
 }
 
 fn combination_count(n: usize, k: usize) -> Option<u128> {
@@ -562,33 +657,24 @@ fn generate_scenarios(
     max_partitions: usize,
     max_scenarios: usize,
 ) -> Vec<Scenario> {
-    let options = round_scenarios(n, max_partitions);
-    if options.is_empty() {
-        return Vec::new();
-    }
-
     let mut rng = test_rng_seeded(seed);
-    let base = options.len();
+    let base = round_scenario_count(n, max_partitions);
     if let Some(total) = arrangement_count(base, rounds) {
-        if total <= max_scenarios {
+        if total <= max_scenarios as u128 {
             return (0..total)
                 .map(|idx| Scenario {
-                    rounds: index_to_round_scenarios(idx, base, rounds, &options),
+                    rounds: index_to_round_scenarios(idx, base, rounds, n, max_partitions),
                 })
                 .collect();
         }
 
-        // Deterministically prune by sampling unique arrangement indices instead
-        // of taking a lexicographic prefix.
+        // Deterministically sample unique arrangement indices instead of taking
+        // a lexicographic prefix, while keeping generation bounded by
+        // `max_scenarios`.
         return sample_unique_indices(&mut rng, total as u128, max_scenarios)
             .into_iter()
             .map(|idx| Scenario {
-                rounds: index_to_round_scenarios(
-                    usize::try_from(idx).expect("arrangement index should fit in usize"),
-                    base,
-                    rounds,
-                    &options,
-                ),
+                rounds: index_to_round_scenarios(idx, base, rounds, n, max_partitions),
             })
             .collect();
     }
@@ -601,10 +687,13 @@ fn generate_scenarios(
     let mut attempts = 0usize;
     while scenarios.len() < max_scenarios && attempts < max_attempts {
         attempts += 1;
-        let digits: Vec<usize> = (0..rounds).map(|_| rng.gen_range(0..base)).collect();
+        let digits: Vec<u128> = (0..rounds).map(|_| rng.gen_range(0..base)).collect();
         if seen.insert(digits.clone()) {
             scenarios.push(Scenario {
-                rounds: digits.into_iter().map(|digit| options[digit]).collect(),
+                rounds: digits
+                    .into_iter()
+                    .map(|digit| round_scenario(n, max_partitions, digit))
+                    .collect(),
             });
         }
     }
@@ -832,6 +921,11 @@ mod tests {
     }
 
     #[test]
+    fn round_scenarios_saturate_after_three_partitions() {
+        assert_eq!(round_scenarios(6, 3), round_scenarios(6, 6));
+    }
+
+    #[test]
     #[should_panic(expected = "sender missing from runtime participant list")]
     fn route_panics_when_sender_is_missing_from_participants() {
         let scenario = Scenario {
@@ -943,7 +1037,7 @@ mod tests {
             .encode(),
         );
         assert_eq!(
-            router(&(secondary.clone(), response)),
+            router(&(primary.clone(), response)),
             SplitTarget::Primary,
             "response should return to the originating half"
         );
@@ -956,6 +1050,67 @@ mod tests {
             .encode(),
         );
         assert_eq!(router(&(secondary, unknown)), SplitTarget::None);
+    }
+
+    #[test]
+    fn resolver_splitter_distinguishes_reused_ids_per_peer_and_sender_half() {
+        use commonware_cryptography::{ed25519::PrivateKey, Signer};
+
+        let participants = vec![
+            PrivateKey::from_seed(20).public_key(),
+            PrivateKey::from_seed(21).public_key(),
+        ];
+        let shared = participants[0].clone();
+        let splitter = ResolverSplitter::new(
+            participants.clone(),
+            |_view, participants| {
+                let shared = participants[0].clone();
+                (vec![shared.clone()], vec![shared])
+            },
+            |_view, sender, participants| {
+                if sender == &participants[0] {
+                    SplitTarget::Both
+                } else {
+                    SplitTarget::None
+                }
+            },
+        );
+        let forwarder = splitter.forwarder();
+        let router = splitter.router();
+
+        let outbound = |id| {
+            IoBuf::from(
+                ResolverMessage {
+                    id,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+                .encode(),
+            )
+        };
+
+        let primary_forwarded =
+            forwarder(SplitOrigin::Primary, &Recipients::One(shared.clone()), &outbound(0))
+                .expect("primary request should be forwarded");
+        assert!(matches!(primary_forwarded, Recipients::One(_)));
+
+        let secondary_forwarded =
+            forwarder(SplitOrigin::Secondary, &Recipients::One(shared.clone()), &outbound(0))
+                .expect("secondary request should be forwarded");
+        assert!(matches!(secondary_forwarded, Recipients::One(_)));
+
+        let response = || {
+            IoBuf::from(
+                ResolverMessage::<U64> {
+                    id: 0,
+                    payload: ResolverPayload::Response(Default::default()),
+                }
+                .encode(),
+            )
+        };
+
+        assert_eq!(router(&(shared.clone(), response())), SplitTarget::Primary);
+        assert_eq!(router(&(shared.clone(), response())), SplitTarget::Secondary);
+        assert_eq!(router(&(shared, response())), SplitTarget::None);
     }
 
     #[test]
