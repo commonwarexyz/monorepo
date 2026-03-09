@@ -1388,10 +1388,7 @@ where
                 .common
                 .received_shards
                 .insert(indexed.index, indexed.data.clone());
-            state
-                .common
-                .contributed
-                .set(u64::from(indexed.index), true);
+            state.common.contributed.set(u64::from(indexed.index), true);
             state.pending_shards.insert(sender, indexed);
             true
         };
