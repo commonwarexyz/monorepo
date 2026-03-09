@@ -594,11 +594,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
     /// requiring it sync the MMR to write any potential unsynced updates.
+    ///
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let pos = Position::try_from(loc)?;
         {
             let inner = self.inner.get_mut();
-            assert!(loc <= inner.mem_mmr.leaves());
+            if loc > inner.mem_mmr.leaves() {
+                return Err(Error::LeafOutOfBounds(loc));
+            }
             if pos <= inner.pruned_to_pos {
                 return Ok(());
             }
@@ -1048,6 +1053,35 @@ mod tests {
                 &mut hasher,
                 &[] as &[(Digest, Location)],
                 &root
+            ));
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_prune_out_of_bounds_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(
+                context.with_label("oob_prune"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                batch.add(&mut hasher, &test_digest(0));
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+
+            assert!(matches!(
+                mmr.prune(Location::new(2)).await,
+                Err(Error::LeafOutOfBounds(loc)) if loc == Location::new(2)
             ));
 
             mmr.destroy().await.unwrap();
