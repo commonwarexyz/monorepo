@@ -679,6 +679,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 shard.checksum.as_ref(),
             )?,
         };
+        if checking_data.commitment != *commitment {
+            return Err(Error::InvalidShard);
+        }
         let checked = checking_data.check::<H>(*commitment, index, shard)?;
         Ok((checked, checking_data))
     }
