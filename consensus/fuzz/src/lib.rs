@@ -503,12 +503,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     }
                 }
             };
-            let make_resolver_forwarder = || {
-                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
-                    Some(recipients.clone())
-                }
-            };
-
             let make_vote_router = || {
                 let participants = participants.clone();
                 move |(sender, message): &(_, IoBuf)| {
@@ -531,7 +525,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
+            let resolver_splitter = twins::ResolverSplitter::new(
+                participants.as_ref().to_vec(),
+                twins::view_partitions,
+                twins::view_route,
+            );
 
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
@@ -551,11 +549,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     make_certificate_router(),
                 );
             let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(make_resolver_forwarder());
+                resolver_sender.split_with(resolver_splitter.clone().forwarder());
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
                 .split_with(
                     context.with_label(&format!("resolver_split_{idx}")),
-                    make_resolver_router(),
+                    resolver_splitter.router(),
                 );
 
             // Primary: legitimate engine

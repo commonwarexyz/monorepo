@@ -8,14 +8,26 @@
 //! 4. Execute each scenario across compromised-node assignments.
 
 use crate::types::View;
-use commonware_p2p::simulated::SplitTarget;
+use commonware_cryptography::PublicKey;
+use commonware_p2p::{
+    simulated::{SplitOrigin, SplitTarget},
+    Recipients,
+};
+use commonware_resolver::p2p::mocks::Envelope as ResolverEnvelope;
+use commonware_runtime::IoBuf;
+use commonware_utils::{sequence::U64, sync::Mutex};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RoundScenario {
+    // Participant index chosen to lead this round.
     leader: usize,
+    // Bitmasks selecting which participant indices each twin half can reach.
     primary_mask: u64,
     secondary_mask: u64,
 }
@@ -43,6 +55,8 @@ impl Scenario {
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
+    /// The harness uses this to build outbound recipient lists for split twin
+    /// senders.
     pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
@@ -54,16 +68,27 @@ impl Scenario {
     /// Routes a message from sender to the correct twin half at a given view.
     ///
     /// Unlike [`partitions`](Self::partitions), this avoids allocating temporary
-    /// Vecs by comparing bitmasks directly.
+    /// Vecs by comparing bitmasks directly for inbound twin traffic.
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
-            return route_with_masks(
-                sender,
-                round.primary_mask,
-                round.secondary_mask,
-                participants,
+            let sender_idx = participants.iter().position(|participant| participant == sender);
+            debug_assert!(
+                sender_idx.is_some(),
+                "sender missing from runtime participant list"
             );
+            let Some(sender_idx) = sender_idx else {
+                return SplitTarget::None;
+            };
+            let bit = 1u64 << sender_idx;
+            let in_primary = (round.primary_mask & bit) != 0;
+            let in_secondary = (round.secondary_mask & bit) != 0;
+            return match (in_primary, in_secondary) {
+                (true, true) => SplitTarget::Both,
+                (true, false) => SplitTarget::Primary,
+                (false, true) => SplitTarget::Secondary,
+                (false, false) => SplitTarget::None,
+            };
         }
         // After attack rounds, both halves see everyone.
         SplitTarget::Both
@@ -81,37 +106,139 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
     }
 }
 
-fn route_with_masks<P: PartialEq>(
-    sender: &P,
-    primary_mask: u64,
-    secondary_mask: u64,
-    participants: &[P],
-) -> SplitTarget {
-    let Some(sender_idx) = participants.iter().position(|p| p == sender) else {
-        return SplitTarget::None;
-    };
-    let bit = 1u64 << sender_idx;
-    let in_primary = (primary_mask & bit) != 0;
-    let in_secondary = (secondary_mask & bit) != 0;
-    match (in_primary, in_secondary) {
-        (true, true) => SplitTarget::Both,
-        (true, false) => SplitTarget::Primary,
-        (false, true) => SplitTarget::Secondary,
-        (false, false) => SplitTarget::None,
-    }
-}
-
-/// Splits participants by `view % n` to mirror the legacy twins `View` strategy.
+/// Splits participants by `view % n` for the view-based twins harness used in
+/// fuzzing.
 pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
     let split = (view.get() as usize) % participants.len();
     let (primary, secondary) = participants.split_at(split);
     (primary.to_vec(), secondary.to_vec())
 }
 
-/// Routes a sender using the legacy twins `View` strategy.
+/// Routes a sender using the view-based twins harness used in fuzzing.
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
     route_with_groups(sender, &primary, &secondary)
+}
+
+/// Stateful resolver splitter for twins harnesses.
+///
+/// Resolver requests are view-scoped, but responses only carry a request id.
+/// This splitter remembers which twin half issued each outbound request so that
+/// inbound responses and errors can be routed back to that same half.
+#[derive(Clone)]
+pub struct ResolverSplitter<P, Partitions, Route> {
+    participants: Arc<[P]>,
+    partitions: Partitions,
+    route: Route,
+    requests: Arc<Mutex<HashMap<u64, SplitTarget>>>,
+}
+
+impl<P, Partitions, Route> ResolverSplitter<P, Partitions, Route>
+where
+    P: PublicKey + Clone + PartialEq + Send + Sync + 'static,
+    Partitions: Fn(View, &[P]) -> (Vec<P>, Vec<P>) + Clone + Send + Sync + 'static,
+    Route: Fn(View, &P, &[P]) -> SplitTarget + Clone + Send + Sync + 'static,
+{
+    /// Create a resolver splitter over a fixed participant set.
+    pub fn new(participants: impl Into<Vec<P>>, partitions: Partitions, route: Route) -> Self {
+        Self {
+            participants: participants.into().into(),
+            partitions,
+            route,
+            requests: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Create a split sender forwarder for resolver traffic.
+    pub fn forwarder(
+        &self,
+    ) -> impl Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>> + Clone + Send + Sync + 'static
+    {
+        let splitter = self.clone();
+        move |origin, recipients, message| splitter.forward(origin, recipients, message)
+    }
+
+    /// Create a split receiver router for resolver traffic.
+    pub fn router(&self) -> impl Fn(&(P, IoBuf)) -> SplitTarget + Send + Sync + 'static {
+        let splitter = self.clone();
+        move |(sender, message)| splitter.route_message(sender, message)
+    }
+
+    fn forward(
+        &self,
+        origin: SplitOrigin,
+        recipients: &Recipients<P>,
+        message: &IoBuf,
+    ) -> Option<Recipients<P>> {
+        let mut buf = message.as_ref();
+        let envelope = ResolverEnvelope::<U64>::decode(&mut buf).ok()?;
+        match envelope {
+            ResolverEnvelope::Request { id, key } => {
+                let view = View::new(u64::from(key));
+                let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
+                let filtered = match origin {
+                    SplitOrigin::Primary => filter_recipients(recipients, &primary),
+                    SplitOrigin::Secondary => filter_recipients(recipients, &secondary),
+                }?;
+                self.requests.lock().insert(id, split_target(origin));
+                Some(filtered)
+            }
+            ResolverEnvelope::Response { .. } | ResolverEnvelope::Error { .. } => {
+                Some(recipients.clone())
+            }
+        }
+    }
+
+    fn route_message(&self, sender: &P, message: &IoBuf) -> SplitTarget {
+        let mut buf = message.as_ref();
+        let Ok(envelope) = ResolverEnvelope::<U64>::decode(&mut buf) else {
+            return SplitTarget::None;
+        };
+        match envelope {
+            ResolverEnvelope::Request { key, .. } => {
+                let view = View::new(u64::from(key));
+                (self.route)(view, sender, self.participants.as_ref())
+            }
+            ResolverEnvelope::Response { id, .. } | ResolverEnvelope::Error { id } => self
+                .requests
+                .lock()
+                .remove(&id)
+                .unwrap_or(SplitTarget::None),
+        }
+    }
+}
+
+fn split_target(origin: SplitOrigin) -> SplitTarget {
+    match origin {
+        SplitOrigin::Primary => SplitTarget::Primary,
+        SplitOrigin::Secondary => SplitTarget::Secondary,
+    }
+}
+
+fn filter_recipients<P: PublicKey + Clone + PartialEq>(
+    recipients: &Recipients<P>,
+    allowed: &[P],
+) -> Option<Recipients<P>> {
+    let filtered = match recipients {
+        Recipients::All => allowed.to_vec(),
+        Recipients::Some(recipients) => recipients
+            .iter()
+            .filter(|recipient| allowed.contains(recipient))
+            .cloned()
+            .collect(),
+        Recipients::One(recipient) => {
+            if allowed.contains(recipient) {
+                vec![recipient.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+    };
+    match filtered.as_slice() {
+        [] => None,
+        [recipient] => Some(Recipients::One(recipient.clone())),
+        _ => Some(Recipients::Some(filtered)),
+    }
 }
 
 /// Framework configuration for generating Twins cases.
@@ -210,7 +337,7 @@ fn masks_to_partitions<P: Clone>(
     (primary, secondary)
 }
 
-fn partition_scenarios(n: usize, max_partitions: usize) -> Vec<Vec<usize>> {
+fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
     assert!(n > 1, "n must be > 1");
     assert!(
         n < u64::BITS as usize,
@@ -228,11 +355,21 @@ fn partition_scenarios(n: usize, max_partitions: usize) -> Vec<Vec<usize>> {
         used: usize,
         max_partitions: usize,
         current: &mut [usize],
-        out: &mut Vec<Vec<usize>>,
+        out: &mut BTreeSet<RoundScenario>,
     ) {
         if idx == n {
-            if used > 1 {
-                out.push(current.to_vec());
+            let mut masks = vec![0u64; used];
+            for (participant_idx, partition_idx) in current.iter().copied().enumerate() {
+                masks[partition_idx] |= 1u64 << participant_idx;
+            }
+            for (leader, primary_idx) in current.iter().copied().enumerate() {
+                for secondary_idx in 0..used {
+                    out.insert(RoundScenario {
+                        leader,
+                        primary_mask: masks[primary_idx],
+                        secondary_mask: masks[secondary_idx],
+                    });
+                }
             }
             return;
         }
@@ -246,44 +383,10 @@ fn partition_scenarios(n: usize, max_partitions: usize) -> Vec<Vec<usize>> {
         }
     }
 
-    let mut out = Vec::new();
+    let mut out = BTreeSet::new();
     let mut current = vec![0usize; n];
     generate(1, n, 1, max_partitions, &mut current, &mut out);
-    out
-}
-
-fn round_scenarios(n: usize, max_partitions: usize, cap: Option<usize>) -> Vec<RoundScenario> {
-    let partitions = partition_scenarios(n, max_partitions);
-    let mut scenarios = BTreeSet::new();
-
-    for partition in partitions.iter() {
-        let partition_count = partition.iter().copied().max().unwrap_or(0) + 1;
-        let mut masks = vec![0u64; partition_count];
-        for (participant_idx, partition_idx) in partition.iter().copied().enumerate() {
-            masks[partition_idx] |= 1u64 << participant_idx;
-        }
-
-        for (leader, primary_idx) in partition.iter().copied().enumerate() {
-            for secondary_idx in 0..partition_count {
-                scenarios.insert(RoundScenario {
-                    leader,
-                    primary_mask: masks[primary_idx],
-                    secondary_mask: masks[secondary_idx],
-                });
-                // Stop materializing round options once we have enough distinct
-                // options for sampling to work.  The caller only needs at most
-                // `cap` round options when it will sample from the product space
-                // anyway, so continuing beyond this point wastes memory.
-                if let Some(cap) = cap {
-                    if scenarios.len() >= cap {
-                        return scenarios.into_iter().collect();
-                    }
-                }
-            }
-        }
-    }
-
-    scenarios.into_iter().collect()
+    out.into_iter().collect()
 }
 
 fn index_to_round_scenarios(
@@ -384,12 +487,7 @@ fn generate_scenarios(
     max_partitions: usize,
     max_scenarios: usize,
 ) -> Vec<Scenario> {
-    // Pass `max_scenarios` as a cap so that `round_scenarios` stops
-    // materializing partitions once it has collected enough distinct round
-    // options for the sampling path.  Without this, the partition
-    // enumeration can blow up memory for moderate `n`/`max_partitions`
-    // even when `max_scenarios` is small.
-    let options = round_scenarios(n, max_partitions, Some(max_scenarios));
+    let options = round_scenarios(n, max_partitions);
     if options.is_empty() {
         return Vec::new();
     }
@@ -595,17 +693,18 @@ mod tests {
 
     #[test]
     fn round_scenarios_expand_with_additional_partition_counts() {
-        let two_way = round_scenarios(5, 2, None);
-        let up_to_three_way = round_scenarios(5, 3, None);
+        let two_way = round_scenarios(5, 2);
+        let up_to_three_way = round_scenarios(5, 3);
         assert!(up_to_three_way.len() > two_way.len());
     }
 
     #[test]
     fn generated_scenarios_cover_full_permutation_space_when_unbounded() {
-        // n=3 with up to two-way partitions has 18 round options.
-        // Over 2 rounds, full permutation count is 18^2 = 324.
+        // n=3 with up to two-way partitions now includes full broadcast, so
+        // there are 21 round options. Over 2 rounds, the full arrangement
+        // count is 21^2 = 441.
         let scenarios = generate_scenarios(0, 3, 2, 2, 1000);
-        assert_eq!(scenarios.len(), 324);
+        assert_eq!(scenarios.len(), 441);
     }
 
     #[test]
@@ -637,6 +736,99 @@ mod tests {
             scenario.route(View::new(1), &2, &participants),
             SplitTarget::None
         );
+    }
+
+    #[test]
+    fn round_scenarios_include_full_broadcast() {
+        let full = (1u64 << 5) - 1;
+        assert!(round_scenarios(5, 3).into_iter().any(|round| {
+            round.primary_mask == full && round.secondary_mask == full
+        }));
+    }
+
+    #[test]
+    fn round_scenarios_cover_all_leaders() {
+        let leaders: HashSet<_> = round_scenarios(10, 3)
+            .into_iter()
+            .map(|round| round.leader())
+            .collect();
+        assert_eq!(leaders, (0..10).collect());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "sender missing from runtime participant list")]
+    fn route_panics_when_sender_is_missing_from_participants() {
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 0,
+                primary_mask: 0b0001,
+                secondary_mask: 0b0010,
+            }],
+        };
+        let participants: Vec<u32> = (0..4).collect();
+        let _ = scenario.route(View::new(1), &99, &participants);
+    }
+
+    #[test]
+    fn resolver_splitter_routes_requests_and_responses_statefully() {
+        use commonware_cryptography::{ed25519::PrivateKey, Signer};
+
+        let participants = vec![
+            PrivateKey::from_seed(10).public_key(),
+            PrivateKey::from_seed(11).public_key(),
+        ];
+        let primary = participants[0].clone();
+        let secondary = participants[1].clone();
+        let splitter = ResolverSplitter::new(
+            participants.clone(),
+            view_partitions,
+            view_route,
+        );
+        let forwarder = splitter.forwarder();
+        let router = splitter.router();
+
+        let outbound = IoBuf::from(
+            ResolverEnvelope::Request {
+                id: 7,
+                key: U64::from(1u64),
+            }
+            .encode(),
+        );
+        let forwarded = forwarder(SplitOrigin::Primary, &Recipients::All, &outbound).unwrap();
+        match forwarded {
+            Recipients::One(recipient) => assert_eq!(recipient, primary),
+            _ => panic!("expected a single primary recipient"),
+        }
+
+        let inbound_request = IoBuf::from(
+            ResolverEnvelope::Request {
+                id: 8,
+                key: U64::from(1u64),
+            }
+            .encode(),
+        );
+        assert_eq!(
+            router(&(primary.clone(), inbound_request)),
+            SplitTarget::Primary,
+            "request view should still route by partition"
+        );
+
+        let response = IoBuf::from(
+            ResolverEnvelope::<U64>::Response {
+                id: 7,
+                data: Default::default(),
+            }
+            .encode(),
+        );
+        assert_eq!(
+            router(&(secondary.clone(), response)),
+            SplitTarget::Primary,
+            "response should return to the originating half"
+        );
+
+        let unknown = IoBuf::from(ResolverEnvelope::<U64>::Error { id: 999 }.encode());
+        assert_eq!(router(&(secondary, unknown)), SplitTarget::None);
     }
 
     #[test]

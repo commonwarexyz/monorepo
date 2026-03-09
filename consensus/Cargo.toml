@@ -59,7 +59,7 @@ development = ["commonware-consensus"]
 bench = false
 
 [features]
-mocks = [ "commonware-cryptography/mocks" ]
+mocks = [ "commonware-cryptography/mocks", "commonware-resolver/mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-coding/arbitrary",

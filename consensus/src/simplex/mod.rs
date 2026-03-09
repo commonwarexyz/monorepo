@@ -420,15 +420,18 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
-        Recipients, Sender as _,
+        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
+        Manager as _, Receiver as _, Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
+    use commonware_resolver::p2p::mocks::Envelope as ResolverEnvelope;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{
+        ordered::Set, sequence::U64, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16,
+    };
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
@@ -5654,7 +5657,6 @@ mod tests {
     struct TwinsElector<C> {
         fallback: C,
         round_leaders: Arc<[Participant]>,
-        honest_leaders: Arc<[Participant]>,
     }
 
     impl<C: Default> Default for TwinsElector<C> {
@@ -5662,19 +5664,12 @@ mod tests {
             Self {
                 fallback: C::default(),
                 round_leaders: Arc::from(Vec::new()),
-                honest_leaders: Arc::from(Vec::new()),
             }
         }
     }
 
     impl<C> TwinsElector<C> {
-        fn new(
-            fallback: C,
-            scenario: &twins::Scenario,
-            compromised: &[usize],
-            participants: usize,
-        ) -> Self {
-            let compromised: HashSet<_> = compromised.iter().copied().collect();
+        fn new(fallback: C, scenario: &twins::Scenario, participants: usize) -> Self {
             let round_leaders: Vec<_> = scenario
                 .rounds()
                 .iter()
@@ -5686,18 +5681,9 @@ mod tests {
                     Participant::new(round.leader() as u32)
                 })
                 .collect();
-            let honest_leaders: Vec<_> = (0..participants)
-                .filter(|idx| !compromised.contains(idx))
-                .map(|idx| Participant::new(idx as u32))
-                .collect();
-            assert!(
-                !honest_leaders.is_empty(),
-                "twins campaign requires at least one honest participant"
-            );
             Self {
                 fallback,
                 round_leaders: Arc::from(round_leaders),
-                honest_leaders: Arc::from(honest_leaders),
             }
         }
     }
@@ -5706,7 +5692,6 @@ mod tests {
     struct TwinsElectorState<E> {
         fallback: E,
         round_leaders: Arc<[Participant]>,
-        honest_leaders: Arc<[Participant]>,
     }
 
     impl<S, C> Elector<S> for TwinsElector<C>
@@ -5720,7 +5705,6 @@ mod tests {
             TwinsElectorState {
                 fallback: self.fallback.build(participants),
                 round_leaders: self.round_leaders,
-                honest_leaders: self.honest_leaders,
             }
         }
     }
@@ -5735,18 +5719,7 @@ mod tests {
             if let Some(&leader) = self.round_leaders.get(idx) {
                 return leader;
             }
-            if self.honest_leaders.is_empty() {
-                return self.fallback.elect(round, certificate);
-            }
-            // Suffix rounds intentionally bypass `fallback` and rotate
-            // through honest leaders deterministically.  The adversarial
-            // prefix may have left `fallback` in an arbitrary state
-            // (e.g. with twin-controlled leaders next in line), so we
-            // ensure liveness by restricting suffix leadership to honest
-            // participants only.
-            let honest_idx = (round.epoch().get().wrapping_add(round.view().get())) as usize
-                % self.honest_leaders.len();
-            self.honest_leaders[honest_idx]
+            self.fallback.elect(round, certificate)
         }
     }
 
@@ -5794,7 +5767,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             let elector =
-                TwinsElector::new(L::default(), &scenario, &twin_indices, campaign.n as usize);
+                TwinsElector::new(L::default(), &scenario, campaign.n as usize);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -5839,9 +5812,6 @@ mod tests {
                         }
                     }
                 };
-                let drop_resolver_forwarder =
-                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
-
                 let make_vote_router = || {
                     let participants = participants.clone();
                     let scenario = scenario.clone();
@@ -5860,7 +5830,17 @@ mod tests {
                         scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let drop_resolver_router = || move |(_, _): &(_, _)| SplitTarget::None;
+                let resolver_splitter = twins::ResolverSplitter::new(
+                    participants.as_ref().to_vec(),
+                    {
+                        let scenario = scenario.clone();
+                        move |view, participants| scenario.partitions(view, participants)
+                    },
+                    {
+                        let scenario = scenario.clone();
+                        move |view, sender, participants| scenario.route(view, sender, participants)
+                    },
+                );
 
                 let (vote_sender_primary, vote_sender_secondary) =
                     vote_sender.split_with(make_vote_forwarder());
@@ -5877,11 +5857,11 @@ mod tests {
                     );
 
                 let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(drop_resolver_forwarder());
+                    resolver_sender.split_with(resolver_splitter.clone().forwarder());
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
                     .split_with(
                         context.with_label(&format!("resolver_split_{idx}")),
-                        drop_resolver_router(),
+                        resolver_splitter.router(),
                     );
 
                 for (twin_label, pending, recovered, resolver) in [
@@ -6021,9 +6001,10 @@ mod tests {
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
-            // Wait for progress (liveness check) on honest replicas only.
+            // Wait for progress (liveness check) across honest replicas and
+            // both halves of each twin, so twin-only stalls remain visible.
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut().skip(honest_start) {
+            for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < campaign.required_containers {
@@ -6143,7 +6124,7 @@ mod tests {
     }
 
     #[test]
-    fn twins_elector_uses_scenario_leaders_then_honest_suffix() {
+    fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
         let framework = twins::Framework {
             participants: 5,
             faults: 1,
@@ -6156,46 +6137,247 @@ mod tests {
             .into_iter()
             .next()
             .expect("expected at least one generated twins case");
-        let cfg = TwinsElector::new(
-            RoundRobin::<Sha256>::default(),
-            &case.scenario,
-            &case.compromised,
-            framework.participants,
-        );
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(
             &mut rng,
-            b"twins_elector_script",
+            b"twins_elector_fallback",
             framework.participants as u32,
         );
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let elector = <TwinsElector<RoundRobin<Sha256>> as Elector<ed25519::Scheme>>::build(
-            cfg,
+        let twins = <TwinsElector<RoundRobin<Sha256>> as Elector<ed25519::Scheme>>::build(
+            TwinsElector::new(RoundRobin::<Sha256>::default(), &case.scenario, framework.participants),
+            &participants,
+        );
+        let fallback = <RoundRobin<Sha256> as Elector<ed25519::Scheme>>::build(
+            RoundRobin::<Sha256>::default(),
             &participants,
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
             let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
             assert_eq!(
-                elector.elect(round, None),
+                twins.elect(round, None),
                 Participant::new(round_scenario.leader() as u32),
                 "unexpected leader in scripted attack round"
             );
         }
 
-        let compromised: HashSet<_> = case
-            .compromised
-            .iter()
-            .map(|idx| Participant::new(*idx as u32))
-            .collect();
-        for view in 4..=20 {
-            let round = Round::new(Epoch::new(0), View::new(view));
-            let leader = elector.elect(round, None);
-            assert!(
-                !compromised.contains(&leader),
-                "synchronous suffix should avoid compromised leaders"
-            );
+        for view in (framework.rounds as u64 + 1)..=20 {
+            let round = Round::new(Epoch::new(333), View::new(view));
+            assert_eq!(twins.elect(round, None), fallback.elect(round, None));
         }
+    }
+
+    #[test]
+    fn twins_resolver_routes_requests_and_responses_statefully() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            network.start();
+
+            let twin = PrivateKey::from_seed(30).public_key();
+            let peer_a = PrivateKey::from_seed(31).public_key();
+            let peer_b = PrivateKey::from_seed(32).public_key();
+            let mut manager = oracle.manager();
+            manager
+                .track(
+                    0,
+                    [twin.clone(), peer_a.clone(), peer_b.clone()]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+
+            let (mut peer_a_sender, mut peer_a_recv) = oracle
+                .control(peer_a.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut peer_b_sender, mut peer_b_recv) = oracle
+                .control(peer_b.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (resolver_sender, resolver_receiver) = oracle
+                .control(twin.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let resolver_splitter = twins::ResolverSplitter::new(
+                vec![peer_a.clone(), peer_b.clone()],
+                twins::view_partitions,
+                twins::view_route,
+            );
+            let (mut primary_sender, mut secondary_sender) =
+                resolver_sender.split_with(resolver_splitter.clone().forwarder());
+            let (mut primary_recv, mut secondary_recv) = resolver_receiver.split_with(
+                context.with_label("resolver_split"),
+                resolver_splitter.router(),
+            );
+
+            let link = Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(peer_a.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), peer_a.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(peer_b.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle.add_link(twin.clone(), peer_b.clone(), link).await.unwrap();
+
+            peer_a_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverEnvelope::Request {
+                        id: 5,
+                        key: U64::from(1u64),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_a);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Request {
+                    id: 5,
+                    key: U64::from(1u64),
+                }
+            );
+
+            peer_b_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverEnvelope::Request {
+                        id: 6,
+                        key: U64::from(1u64),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_b);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Request {
+                    id: 6,
+                    key: U64::from(1u64),
+                }
+            );
+
+            primary_sender
+                .send(
+                    Recipients::All,
+                    ResolverEnvelope::Request {
+                        id: 7,
+                        key: U64::from(1u64),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = peer_a_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Request {
+                    id: 7,
+                    key: U64::from(1u64),
+                }
+            );
+
+            secondary_sender
+                .send(
+                    Recipients::All,
+                    ResolverEnvelope::Request {
+                        id: 8,
+                        key: U64::from(1u64),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = peer_b_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Request {
+                    id: 8,
+                    key: U64::from(1u64),
+                }
+            );
+
+            peer_a_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverEnvelope::<U64>::Response {
+                        id: 7,
+                        data: b"response_a".as_slice().into(),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_a);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Response {
+                    id: 7,
+                    data: b"response_a".as_slice().into(),
+                }
+            );
+
+            peer_b_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverEnvelope::<U64>::Response {
+                        id: 8,
+                        data: b"response_b".as_slice().into(),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_b);
+            let envelope = ResolverEnvelope::<U64>::decode(&mut payload.as_ref()).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverEnvelope::Response {
+                    id: 8,
+                    data: b"response_b".as_slice().into(),
+                }
+            );
+        });
     }
 
     #[test_group("slow")]
