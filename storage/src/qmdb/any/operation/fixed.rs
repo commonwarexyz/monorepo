@@ -48,7 +48,7 @@ impl<V, S> OperationCodec<S> for FixedEncoding<V>
 where
     S::Key: Array + Codec,
     V: FixedValue,
-    S: Update<Value = V, ValueEncoding = FixedEncoding<V>> + CodecFixed<Cfg = ()>,
+    S: Update<Value = V, ValueEncoding = Self> + CodecFixed<Cfg = ()>,
 {
     type ReadCfg = ();
 

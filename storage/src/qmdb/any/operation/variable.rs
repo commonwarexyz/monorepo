@@ -19,7 +19,7 @@ impl<V, S> OperationCodec<S> for VariableEncoding<V>
 where
     S::Key: Write + Read,
     V: VariableValue,
-    S: Update<Value = V, ValueEncoding = VariableEncoding<V>>
+    S: Update<Value = V, ValueEncoding = Self>
         + Write
         + Read<Cfg = (<S::Key as Read>::Cfg, <V as Read>::Cfg)>,
 {
