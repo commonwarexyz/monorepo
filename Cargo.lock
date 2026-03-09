@@ -1422,7 +1422,6 @@ name = "commonware-macros"
 version = "2026.3.0"
 dependencies = [
  "commonware-macros-impl",
- "commonware-utils",
  "futures",
  "futures-timer",
  "tokio",
