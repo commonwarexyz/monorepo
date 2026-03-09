@@ -415,7 +415,7 @@
 //!
 //! 1. On receiving `nullify(v)` from replica `r'`:
 //!    1. If `!record_message(r, r', nullify(v))`, return.
-//!    2. If `r' == leader(v)`:
+//!    2. If `r' == leader(v)` and `!r.round[v].broadcast_notarize`:
 //!       3. Set `r.round[v].t_l = 0`.
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
