@@ -133,7 +133,7 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_min_size(NZUsize!(size))
         .with_max_size(NZUsize!(size))
-        .with_max_per_class(NZUsize!(threads))
+        .with_max_per_class(NZUsize!(threads * 4))
         .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()
