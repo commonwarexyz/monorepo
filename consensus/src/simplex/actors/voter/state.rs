@@ -243,9 +243,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// so that all views within the same term get the same leader.
     fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
         let election_view = view.term_start(self.term_length);
+
+        // Use the certificate from the view preceding the term start for stable leader election.
+        // This ensures all views within the same term use the same randomness source.
+        let election_cert = if election_view == view {
+            // Starting a new term: use the certificate from the previous view (caller-provided)
+            certificate
+        } else if let Some(prev_view) = election_view.previous() {
+            // Within a term: look up the certificate from before the term started
+            self.views.get(&prev_view).and_then(|round| {
+                round
+                    .finalization()
+                    .map(|f| &f.certificate)
+                    .or_else(|| round.nullification().map(|n| &n.certificate))
+            })
+        } else {
+            // First term (election_view == View(1)): no previous certificate exists
+            None
+        };
+
         let leader = self
             .elector
-            .elect(Rnd::new(self.epoch, election_view), certificate);
+            .elect(Rnd::new(self.epoch, election_view), election_cert);
         let round = self.create_round(view);
         if round.leader().is_some() {
             return;
