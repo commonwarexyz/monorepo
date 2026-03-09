@@ -24,7 +24,7 @@ pub struct Config<
     B: Blocker,
     D: Digest,
     A: CertifiableAutomaton,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub scheme: S,

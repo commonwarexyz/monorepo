@@ -353,6 +353,25 @@ impl<
         self.pending_votes.has_nullify(signer)
     }
 
+    /// Returns participant indices that did not vote for `proposal`.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Votes for a conflicting proposal are treated as missing because those
+    /// peers still need the winning block forwarded.
+    pub fn missing_notarize_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
+        (0..self.participants.len())
+            .map(Participant::from_usize)
+            .filter(|&p| {
+                self.pending_votes
+                    .notarize(p)
+                    .is_none_or(|vote| &vote.proposal != proposal)
+            })
+            .collect()
+    }
+
     /// Returns true if the leader was active in this round.
     ///
     /// We use pending votes to determine activeness because we only verify the first

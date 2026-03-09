@@ -12,6 +12,19 @@ use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
+/// Controls whether and how the engine proactively forwards blocks to peers
+/// that did not vote in a notarization certificate.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ForwardingPolicy {
+    /// Do nothing when notified of missing voters.
+    #[default]
+    Disabled,
+    /// Forward the block to the elected leader for the next view, if they did not vote.
+    NextLeader,
+    /// Forward the block to all active participants that did not vote.
+    All,
+}
+
 /// Configuration for the consensus engine.
 pub struct Config<
     S: Scheme,
@@ -110,6 +123,10 @@ pub struct Config<
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
+
+    /// Policy for proactively forwarding blocks to peers that did not vote
+    /// in a notarization certificate.
+    pub forwarding: ForwardingPolicy,
 }
 
 impl<

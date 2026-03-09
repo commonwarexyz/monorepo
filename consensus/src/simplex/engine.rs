@@ -23,7 +23,7 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey>,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
@@ -32,7 +32,7 @@ pub struct Engine<
     voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F, T>,
+    batcher: batcher::Actor<E, S, B, D, F, R, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
     resolver: resolver::Actor<E, S, B, D, T>,
@@ -46,7 +46,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey>,
         F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
     > Engine<E, S, L, B, D, A, R, F, T>
@@ -63,11 +63,13 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                relay: cfg.relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                forwarding: cfg.forwarding,
             },
         );
 

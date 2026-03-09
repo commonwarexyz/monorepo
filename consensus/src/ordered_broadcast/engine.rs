@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta},
-    Automaton, Monitor, Relay, Reporter,
+    Automaton, Dissemination, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -69,7 +69,7 @@ pub struct Engine<
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = C::PublicKey>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     T: Strategy,
@@ -207,7 +207,7 @@ impl<
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = C::PublicKey>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         T: Strategy,
@@ -852,7 +852,9 @@ impl<
         let validators = scheme.participants();
 
         // Tell the relay to broadcast the full data
-        self.relay.broadcast(node.chunk.payload).await;
+        self.relay
+            .broadcast(node.chunk.payload, Dissemination::Propose)
+            .await;
 
         // Send the node to all validators
         node_sender

@@ -90,8 +90,13 @@ impl<D: Digest> CAu for Mailbox<D> {
 
 impl<D: Digest> Re for Mailbox<D> {
     type Digest = D;
+    type PublicKey = PublicKey;
 
-    async fn broadcast(&mut self, _: Self::Digest) {
+    async fn broadcast(
+        &mut self,
+        _: Self::Digest,
+        _: commonware_consensus::Dissemination<PublicKey>,
+    ) {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd

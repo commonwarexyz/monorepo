@@ -65,7 +65,9 @@ impl<P: PublicKey> A for Automaton<P> {
 
 impl<P: PublicKey> R for Automaton<P> {
     type Digest = sha256::Digest;
-    async fn broadcast(&mut self, payload: Self::Digest) {
+    type PublicKey = P;
+
+    async fn broadcast(&mut self, payload: Self::Digest, _dissemination: crate::Dissemination<P>) {
         trace!(?payload, "broadcast");
     }
 }

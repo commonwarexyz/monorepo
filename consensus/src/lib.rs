@@ -64,7 +64,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
-    use commonware_cryptography::Digest;
+    use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
@@ -175,6 +175,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
+    /// Describes how a payload should be disseminated to the network.
+    pub enum Dissemination<P: PublicKey> {
+        /// Initial broadcast of a newly proposed block to all participants.
+        Propose,
+        /// Forward a block to a specific set of peers.
+        Forward {
+            /// The round in which the forwarded block was proposed.
+            round: Round,
+            /// The peers to forward the block to.
+            peers: Vec<P>,
+        },
+    }
+
     /// Relay is the interface responsible for broadcasting payloads to the network.
     ///
     /// The consensus engine is only aware of a payload's digest, not its contents. It is up
@@ -183,12 +196,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
-        /// it isn't dropped).
-        ///
-        /// Other participants may not begin voting on a proposal until they have the full contents,
-        /// so timely delivery often yields better performance.
-        fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+        /// Identity key of a network participant.
+        type PublicKey: PublicKey;
+
+        /// Broadcast a payload to the given recipients.
+        fn broadcast(
+            &mut self,
+            payload: Self::Digest,
+            dissemination: Dissemination<Self::PublicKey>,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.

@@ -15,7 +15,7 @@ use crate::{
         },
     },
     types::{Round as Rnd, View},
-    CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
+    CertifiableAutomaton, Dissemination, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -127,7 +127,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
 {
@@ -927,7 +927,7 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal
-                self.relay.broadcast(proposed).await;
+                self.relay.broadcast(proposed, Dissemination::Propose).await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter

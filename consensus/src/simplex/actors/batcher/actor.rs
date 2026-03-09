@@ -2,13 +2,14 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     simplex::{
         actors::voter,
+        config::ForwardingPolicy,
         interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
-        types::{Activity, Certificate, Vote},
+        types::{Activity, Certificate, Proposal, Vote},
     },
     types::{Epoch, Participant, View, ViewDelta},
-    Epochable, Reporter, Viewable,
+    Dissemination, Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -41,25 +42,29 @@ struct Current {
     timed_out: bool,
 }
 
-pub struct Actor<
+pub struct Actor<E, S, B, D, Re, Rl, T>
+where
     E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    R: Reporter<Activity = Activity<S, D>>,
+    Re: Reporter<Activity = Activity<S, D>>,
+    Rl: Relay,
     T: Strategy,
-> {
+{
     context: ContextCell<E>,
 
     participants: Set<S::PublicKey>,
     scheme: S,
 
     blocker: B,
-    reporter: R,
+    reporter: Re,
+    relay: Rl,
     strategy: T,
 
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
+    forwarding: ForwardingPolicy,
     epoch: Epoch,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -73,16 +78,17 @@ pub struct Actor<
     recover_latency: histogram::Timed<E>,
 }
 
-impl<
-        E: Spawner + Metrics + Clock + CryptoRngCore,
-        S: Scheme<D>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Actor<E, S, B, D, R, T>
+impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
+where
+    E: Spawner + Metrics + Clock + CryptoRngCore,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    Re: Reporter<Activity = Activity<S, D>>,
+    Rl: Relay<Digest = D, PublicKey = S::PublicKey>,
+    T: Strategy,
 {
-    pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -137,10 +143,12 @@ impl<
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                relay: cfg.relay,
                 strategy: cfg.strategy,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
 
                 mailbox_receiver: receiver,
@@ -157,7 +165,7 @@ impl<
         )
     }
 
-    fn new_round(&self) -> Round<S, B, D, R> {
+    fn new_round(&self) -> Round<S, B, D, Re> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
@@ -166,9 +174,36 @@ impl<
         )
     }
 
+    /// Applies [`ForwardingPolicy`] to determine which peers should receive a
+    /// targeted block forward. `leader` is the elected leader for the next
+    /// view and `missing` contains all active participants that did not vote.
+    ///
+    /// Returns `None` when forwarding is disabled or no peers need the block.
+    fn forwarding_peers(
+        &self,
+        leader: Participant,
+        missing: &[Participant],
+    ) -> Option<Vec<S::PublicKey>> {
+        match self.forwarding {
+            ForwardingPolicy::Disabled => None,
+            ForwardingPolicy::NextLeader => missing
+                .contains(&leader)
+                .then(|| self.participants.key(leader).cloned())
+                .flatten()
+                .map(|pk| vec![pk]),
+            ForwardingPolicy::All => {
+                let peers: Vec<_> = missing
+                    .iter()
+                    .filter_map(|&p| self.participants.key(p).cloned())
+                    .collect();
+                (!peers.is_empty()).then_some(peers)
+            }
+        }
+    }
+
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
-    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
+    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, Re>>) -> bool {
         if current.timed_out {
             return false;
         }
@@ -211,6 +246,7 @@ impl<
         };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
+        let mut pending_forwards: BTreeMap<View, (Proposal<D>, Vec<Participant>)> = BTreeMap::new();
         select_loop! {
             self.context,
             on_start => {
@@ -273,6 +309,22 @@ impl<
                         current.timed_out = true;
                     }
                     response.send_lossy(timeout_reason);
+
+                    // Emit any pending forwards for this view now that we
+                    // know the leader from the voter.
+                    if let Some((proposal, missing)) = pending_forwards.remove(&new_current) {
+                        if let Some(peers) = self.forwarding_peers(leader, &missing) {
+                            self.relay
+                                .broadcast(
+                                    proposal.payload,
+                                    Dissemination::Forward {
+                                        round: proposal.round,
+                                        peers,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
 
                     // Setting leader may enable batch verification
                     updated_view = current.view;
@@ -532,11 +584,17 @@ impl<
                 }
 
                 // Try to construct and forward certificates
+                let mut forward_candidates = None;
                 if let Some(notarization) = self
                     .recover_latency
                     .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
                 {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
+
+                    // Collect candidates while we still hold `round`.
+                    let candidates = round.missing_notarize_voters(&notarization.proposal);
+                    forward_candidates = Some((notarization.proposal.clone(), candidates));
+
                     voter
                         .recovered(Certificate::Notarization(notarization))
                         .await;
@@ -560,11 +618,57 @@ impl<
                         .await;
                 }
 
+                // Filter candidates and emit or defer forwarding.
+                if let Some((proposal, candidates)) = forward_candidates {
+                    let skip_timeout = self.skip_timeout.get() as usize;
+                    let missing: Vec<_> = candidates
+                        .into_iter()
+                        .filter(|&p| {
+                            work.iter()
+                                .rev()
+                                .take(skip_timeout)
+                                .any(|(_, r)| r.is_active(p))
+                        })
+                        .collect();
+                    let next_view = updated_view.next();
+                    if next_view == current.view {
+                        // The voter already sent an Update for this view,
+                        // so we know the leader. Emit immediately.
+                        if let Some(leader) = current.leader {
+                            if let Some(peers) = self.forwarding_peers(leader, &missing) {
+                                self.relay
+                                    .broadcast(
+                                        proposal.payload,
+                                        Dissemination::Forward {
+                                            round: proposal.round,
+                                            peers,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else if next_view > current.view {
+                        // Defer until the voter sends an Update with the
+                        // next leader.
+                        pending_forwards.insert(next_view, (proposal, missing));
+                    }
+                    // If next_view < current.view, we've moved past; drop.
+                }
+
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
                     !interesting(self.activity_timeout, finalized, current.view, view, false)
                 }) {
                     work.pop_first();
+                }
+
+                // Prune stale pending forward entries for views we've
+                // already processed (or skipped past).
+                while pending_forwards
+                    .first_key_value()
+                    .is_some_and(|(&v, _)| v <= current.view)
+                {
+                    pending_forwards.pop_first();
                 }
             },
         }

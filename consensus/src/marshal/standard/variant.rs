@@ -53,6 +53,7 @@ where
     B: Block,
     K: PublicKey,
 {
+    type PublicKey = K;
     type CachedBlock = B;
 
     async fn find_by_digest(&self, digest: B::Digest) -> Option<Self::CachedBlock> {
@@ -80,7 +81,7 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn proposed(&self, _round: Round, block: B) {
-        let _peers = Broadcaster::broadcast(self, Recipients::All, block).await;
+    async fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
+        let _peers = Broadcaster::broadcast(self, recipients, block).await;
     }
 }
