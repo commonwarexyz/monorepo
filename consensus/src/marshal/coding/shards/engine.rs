@@ -1366,37 +1366,34 @@ where
             return false;
         }
 
-        let progressed = if is_from_leader && !self.common().own_shard_verified {
+        // Once batch validation has passed, no new shards are accepted.
+        let Self::AwaitingQuorum(state) = self else {
+            return false;
+        };
+
+        let progressed = if is_from_leader && !state.common.own_shard_verified {
             // Leader's shard for our index: verify immediately.
-            match self {
-                Self::AwaitingQuorum(state) => {
-                    state
-                        .verify_own_shard(
-                            sender,
-                            commitment,
-                            indexed,
-                            ctx.scheme.me().is_some(),
-                            blocker,
-                        )
-                        .await
-                }
-                Self::Ready(_) => false,
-            }
+            state
+                .verify_own_shard(
+                    sender,
+                    commitment,
+                    indexed,
+                    ctx.scheme.me().is_some(),
+                    blocker,
+                )
+                .await
         } else {
             // Buffer for batch validation.
-            self.common_mut()
+            state
+                .common
                 .received_shards
                 .insert(indexed.index, indexed.data.clone());
-            self.common_mut()
+            state
+                .common
                 .contributed
                 .set(u64::from(indexed.index), true);
-            match self {
-                Self::AwaitingQuorum(state) => {
-                    state.pending_shards.insert(sender, indexed);
-                    true
-                }
-                Self::Ready(_) => false,
-            }
+            state.pending_shards.insert(sender, indexed);
+            true
         };
 
         if progressed {
