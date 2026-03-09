@@ -11,18 +11,25 @@ use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
     types::{Participant, Round, View},
 };
-use commonware_codec::Read;
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::{certificate::Scheme, PublicKey};
 use commonware_p2p::{
-    simulated::{SplitOrigin, SplitTarget},
+    simulated::{Error as NetworkError, SplitOrigin, SplitTarget},
+    CheckedSender as P2pCheckedSender, LimitedSender as P2pLimitedSender,
+    Receiver as P2pReceiver,
     Recipients,
 };
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
-use commonware_runtime::IoBuf;
-use commonware_utils::{ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded};
+use commonware_runtime::{IoBuf, IoBufs, Spawner};
+use commonware_utils::{
+    channel::mpsc, ordered::Set, sequence::U64, sync::Mutex, test_rng_seeded,
+};
 use rand::{rngs::StdRng, Rng};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
+    error::Error as StdError,
+    fmt,
+    marker::PhantomData,
     sync::Arc,
 };
 
@@ -197,15 +204,16 @@ where
 /// Stateful resolver splitter for twin routing.
 ///
 /// Resolver requests are view-scoped, but responses only carry a request id.
-/// This splitter remembers which twin half issued each outbound request to each
-/// peer so that inbound responses and errors can be routed back to that same
-/// half even when ids are reused concurrently.
+/// This splitter rewrites outbound request ids into disjoint per-half wire
+/// namespaces and remembers which twin half issued each request to each peer.
+/// Inbound responses and errors are rewritten back before delivery so reused
+/// local ids remain unambiguous even when both halves talk to the same peer.
 #[derive(Clone)]
 pub struct ResolverSplitter<P, Partitions, Route> {
     participants: Arc<[P]>,
     partitions: Partitions,
     route: Route,
-    requests: Arc<Mutex<HashMap<(Vec<u8>, u64), VecDeque<SplitTarget>>>>,
+    requests: Arc<Mutex<HashMap<(Vec<u8>, u64), (SplitOrigin, u64)>>>,
 }
 
 impl<P, Partitions, Route> ResolverSplitter<P, Partitions, Route>
@@ -224,117 +232,348 @@ where
         }
     }
 
-    /// Create a split sender forwarder for resolver traffic.
-    pub fn forwarder(
+    /// Split resolver networking into primary and secondary twin halves.
+    pub fn split<E, NetS, NetR, SendError>(
         &self,
-    ) -> impl Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
-           + Clone
-           + Send
-           + Sync
-           + 'static {
-        let splitter = self.clone();
-        move |origin, recipients, message| splitter.forward(origin, recipients, message)
+        context: E,
+        sender: NetS,
+        receiver: NetR,
+    ) -> (
+        (
+            ResolverSender<NetS, P, Partitions, SendError>,
+            ResolverReceiver<P>,
+        ),
+        (
+            ResolverSender<NetS, P, Partitions, SendError>,
+            ResolverReceiver<P>,
+        ),
+    )
+    where
+        E: Spawner,
+        NetS: P2pLimitedSender<PublicKey = P> + Clone + Send + Sync + 'static,
+        for<'a> NetS::Checked<'a>: P2pCheckedSender<PublicKey = P, Error = SendError> + Send,
+        SendError: StdError + Send + Sync + 'static,
+        NetR: P2pReceiver<PublicKey = P> + Send + 'static,
+        NetR::Error: StdError + Send + Sync + 'static,
+    {
+        let (primary_sender, secondary_sender) = self.senders(sender);
+        let (primary_receiver, secondary_receiver) = self.receivers(context, receiver);
+        (
+            (primary_sender, primary_receiver),
+            (secondary_sender, secondary_receiver),
+        )
     }
 
-    /// Create a split receiver router for resolver traffic.
-    pub fn router(&self) -> impl Fn(&(P, IoBuf)) -> SplitTarget + Send + Sync + 'static {
-        let splitter = self.clone();
-        move |(sender, message)| splitter.route_message(sender, message)
+    fn senders<NetS, SendError>(
+        &self,
+        sender: NetS,
+    ) -> (
+        ResolverSender<NetS, P, Partitions, SendError>,
+        ResolverSender<NetS, P, Partitions, SendError>,
+    )
+    where
+        NetS: P2pLimitedSender<PublicKey = P> + Clone + Send + Sync + 'static,
+        for<'a> NetS::Checked<'a>: P2pCheckedSender<PublicKey = P, Error = SendError> + Send,
+        SendError: StdError + Send + Sync + 'static,
+    {
+        (
+            ResolverSender {
+                origin: SplitOrigin::Primary,
+                inner: sender.clone(),
+                participants: self.participants.clone(),
+                partitions: self.partitions.clone(),
+                requests: self.requests.clone(),
+                _error: PhantomData,
+            },
+            ResolverSender {
+                origin: SplitOrigin::Secondary,
+                inner: sender,
+                participants: self.participants.clone(),
+                partitions: self.partitions.clone(),
+                requests: self.requests.clone(),
+                _error: PhantomData,
+            },
+        )
     }
 
-    fn forward(
-        &self,
-        origin: SplitOrigin,
-        recipients: &Recipients<P>,
-        message: &IoBuf,
-    ) -> Option<Recipients<P>> {
-        let mut buf = message.as_ref();
-        let message = ResolverMessage::<U64>::read_cfg(&mut buf, &()).ok()?;
-        match message.payload {
-            ResolverPayload::Request(key) => {
-                let id = message.id;
-                let view = View::new(u64::from(key));
-                let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
-                let (filtered, target) = match origin {
-                    SplitOrigin::Primary => (
-                        filter_recipients(recipients, &primary)?,
-                        SplitTarget::Primary,
-                    ),
-                    SplitOrigin::Secondary => (
-                        filter_recipients(recipients, &secondary)?,
-                        SplitTarget::Secondary,
-                    ),
+    fn receivers<E, NetR>(&self, context: E, mut receiver: NetR) -> (ResolverReceiver<P>, ResolverReceiver<P>)
+    where
+        E: Spawner,
+        NetR: P2pReceiver<PublicKey = P> + Send + 'static,
+        NetR::Error: StdError + Send + Sync + 'static,
+    {
+        let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+        let (secondary_tx, secondary_rx) = mpsc::unbounded_channel();
+        let participants = self.participants.clone();
+        let route = self.route.clone();
+        let requests = self.requests.clone();
+
+        context.spawn(move |_| async move {
+            loop {
+                let Ok((sender, message)) = receiver.recv().await else {
+                    break;
                 };
-                let mut requests = self.requests.lock();
-                for recipient in recipients_to_vec(&filtered) {
-                    requests
-                        .entry((recipient.as_ref().to_vec(), id))
-                        .or_default()
-                        .push_back(target);
+                let Some(parsed) = decode_resolver(&message) else {
+                    continue;
+                };
+                match parsed.payload {
+                    ResolverPayload::Request(key) => {
+                        let view = View::new(u64::from(key));
+                        let target = route(view, &sender, participants.as_ref());
+                        route_inbound(target, (sender, message), &primary_tx, &secondary_tx);
+                    }
+                    ResolverPayload::Response(data) => {
+                        let key = (sender.as_ref().to_vec(), parsed.id);
+                        let Some((origin, local_id)) = requests.lock().remove(&key) else {
+                            continue;
+                        };
+                        route_inbound(
+                            split_target(origin),
+                            (
+                                sender,
+                                encode_resolver(ResolverMessage {
+                                    id: local_id,
+                                    payload: ResolverPayload::Response(data),
+                                }),
+                            ),
+                            &primary_tx,
+                            &secondary_tx,
+                        );
+                    }
+                    ResolverPayload::Error => {
+                        let key = (sender.as_ref().to_vec(), parsed.id);
+                        let Some((origin, local_id)) = requests.lock().remove(&key) else {
+                            continue;
+                        };
+                        route_inbound(
+                            split_target(origin),
+                            (
+                                sender,
+                                encode_resolver(ResolverMessage::<U64> {
+                                    id: local_id,
+                                    payload: ResolverPayload::Error,
+                                }),
+                            ),
+                            &primary_tx,
+                            &secondary_tx,
+                        );
+                    }
                 }
-                Some(filtered)
+
+                if primary_tx.is_closed() && secondary_tx.is_closed() {
+                    break;
+                }
             }
-            ResolverPayload::Response(_) | ResolverPayload::Error => Some(recipients.clone()),
+        });
+
+        (
+            ResolverReceiver {
+                receiver: primary_rx,
+            },
+            ResolverReceiver {
+                receiver: secondary_rx,
+            },
+        )
+    }
+}
+
+pub struct ResolverSender<NetS, P, Partitions, SendError> {
+    origin: SplitOrigin,
+    inner: NetS,
+    participants: Arc<[P]>,
+    partitions: Partitions,
+    requests: Arc<Mutex<HashMap<(Vec<u8>, u64), (SplitOrigin, u64)>>>,
+    _error: PhantomData<SendError>,
+}
+
+impl<NetS: Clone, P, Partitions: Clone, SendError> Clone
+    for ResolverSender<NetS, P, Partitions, SendError>
+{
+    fn clone(&self) -> Self {
+        Self {
+            origin: self.origin,
+            inner: self.inner.clone(),
+            participants: self.participants.clone(),
+            partitions: self.partitions.clone(),
+            requests: self.requests.clone(),
+            _error: PhantomData,
         }
     }
+}
 
-    fn route_message(&self, sender: &P, message: &IoBuf) -> SplitTarget {
-        let mut buf = message.as_ref();
-        let Ok(message) = ResolverMessage::<U64>::read_cfg(&mut buf, &()) else {
-            return SplitTarget::None;
-        };
-        match message.payload {
+impl<NetS, P, Partitions, SendError> P2pLimitedSender
+    for ResolverSender<NetS, P, Partitions, SendError>
+where
+    NetS: P2pLimitedSender<PublicKey = P> + Clone + Send + Sync + 'static,
+    for<'a> NetS::Checked<'a>: P2pCheckedSender<PublicKey = P, Error = SendError> + Send,
+    P: PublicKey + Clone + PartialEq + Send + Sync + 'static,
+    Partitions: Fn(View, &[P]) -> (Vec<P>, Vec<P>) + Clone + Send + Sync + 'static,
+    SendError: StdError + Send + Sync + 'static,
+{
+    type PublicKey = P;
+    type Checked<'a>
+        = ResolverCheckedSender<NetS::Checked<'a>, P, Partitions, SendError>
+    where
+        Self: 'a;
+
+    async fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, std::time::SystemTime> {
+        let checked = self.inner.check(recipients.clone()).await?;
+        Ok(ResolverCheckedSender {
+            origin: self.origin,
+            checked,
+            recipients,
+            participants: self.participants.clone(),
+            partitions: self.partitions.clone(),
+            requests: self.requests.clone(),
+            _error: PhantomData,
+        })
+    }
+}
+
+pub struct ResolverCheckedSender<Checked, P: PublicKey, Partitions, SendError> {
+    origin: SplitOrigin,
+    checked: Checked,
+    recipients: Recipients<P>,
+    participants: Arc<[P]>,
+    partitions: Partitions,
+    requests: Arc<Mutex<HashMap<(Vec<u8>, u64), (SplitOrigin, u64)>>>,
+    _error: PhantomData<SendError>,
+}
+
+impl<Checked, P, Partitions, SendError> P2pCheckedSender
+    for ResolverCheckedSender<Checked, P, Partitions, SendError>
+where
+    Checked: P2pCheckedSender<PublicKey = P, Error = SendError> + Send,
+    P: PublicKey + Clone + PartialEq + Send + Sync + 'static,
+    Partitions: Fn(View, &[P]) -> (Vec<P>, Vec<P>) + Clone + Send + Sync + 'static,
+    SendError: StdError + Send + Sync + 'static,
+{
+    type PublicKey = P;
+    type Error = SendError;
+
+    async fn send(
+        self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        let message = message.into().coalesce();
+        let parsed = decode_resolver(&message).expect("resolver sender should send valid wire messages");
+        let local_id = parsed.id;
+        match parsed.payload {
             ResolverPayload::Request(key) => {
-                let view = View::new(u64::from(key));
-                (self.route)(view, sender, self.participants.as_ref())
+                let recipient = single_recipient(&self.recipients)
+                    .expect("resolver requests should target one recipient");
+                let view = View::new(u64::from(key.clone()));
+                let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
+                let allowed = match self.origin {
+                    SplitOrigin::Primary => &primary,
+                    SplitOrigin::Secondary => &secondary,
+                };
+                if !allowed.contains(recipient) {
+                    return Ok(Vec::new());
+                }
+
+                let wire_id = wire_request_id(self.origin, local_id);
+                let sent = self
+                    .checked
+                    .send(
+                        encode_resolver(ResolverMessage {
+                            id: wire_id,
+                            payload: ResolverPayload::Request(key),
+                        }),
+                        priority,
+                    )
+                    .await?;
+                let mut requests = self.requests.lock();
+                for recipient in &sent {
+                    let previous =
+                        requests.insert((recipient.as_ref().to_vec(), wire_id), (self.origin, local_id));
+                    debug_assert!(previous.is_none(), "resolver request id collision");
+                }
+                Ok(sent)
             }
             ResolverPayload::Response(_) | ResolverPayload::Error => {
-                let key = (sender.as_ref().to_vec(), message.id);
-                let mut requests = self.requests.lock();
-                let Some(targets) = requests.get_mut(&key) else {
-                    return SplitTarget::None;
-                };
-                let target = targets.pop_front().unwrap_or(SplitTarget::None);
-                if targets.is_empty() {
-                    requests.remove(&key);
-                }
-                target
+                self.checked.send(message, priority).await
             }
         }
     }
 }
 
-fn filter_recipients<P: PublicKey + Clone + PartialEq>(
-    recipients: &Recipients<P>,
-    allowed: &[P],
-) -> Option<Recipients<P>> {
-    let filtered = match recipients {
-        Recipients::All => allowed.to_vec(),
-        Recipients::Some(recipients) => recipients
-            .iter()
-            .filter(|recipient| allowed.contains(recipient))
-            .cloned()
-            .collect(),
-        Recipients::One(recipient) => {
-            if allowed.contains(recipient) {
-                vec![recipient.clone()]
-            } else {
-                Vec::new()
-            }
-        }
-    };
-    match filtered.as_slice() {
-        [] => None,
-        [recipient] => Some(Recipients::One(recipient.clone())),
-        _ => Some(Recipients::Some(filtered)),
+pub struct ResolverReceiver<P: PublicKey> {
+    receiver: mpsc::UnboundedReceiver<(P, IoBuf)>,
+}
+
+impl<P: PublicKey> fmt::Debug for ResolverReceiver<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolverReceiver").finish_non_exhaustive()
     }
 }
 
-fn recipients_to_vec<P: PublicKey + Clone>(recipients: &Recipients<P>) -> Vec<P> {
+impl<P: PublicKey> P2pReceiver for ResolverReceiver<P> {
+    type Error = NetworkError;
+    type PublicKey = P;
+
+    async fn recv(&mut self) -> Result<(P, IoBuf), Self::Error> {
+        self.receiver.recv().await.ok_or(NetworkError::NetworkClosed)
+    }
+}
+
+fn decode_resolver(message: &IoBuf) -> Option<ResolverMessage<U64>> {
+    let mut buf = message.as_ref();
+    ResolverMessage::<U64>::read_cfg(&mut buf, &()).ok()
+}
+
+fn encode_resolver(message: ResolverMessage<U64>) -> IoBuf {
+    IoBuf::from(message.encode())
+}
+
+fn single_recipient<P: PublicKey>(recipients: &Recipients<P>) -> Option<&P> {
     match recipients {
-        Recipients::All => panic!("unbounded recipient set cannot be recorded"),
-        Recipients::Some(recipients) => recipients.clone(),
-        Recipients::One(recipient) => vec![recipient.clone()],
+        Recipients::One(recipient) => Some(recipient),
+        _ => None,
+    }
+}
+
+fn split_target(origin: SplitOrigin) -> SplitTarget {
+    match origin {
+        SplitOrigin::Primary => SplitTarget::Primary,
+        SplitOrigin::Secondary => SplitTarget::Secondary,
+    }
+}
+
+fn wire_request_id(origin: SplitOrigin, local_id: u64) -> u64 {
+    local_id
+        .checked_mul(2)
+        .and_then(|wire_id| {
+            wire_id.checked_add(match origin {
+                SplitOrigin::Primary => 0,
+                SplitOrigin::Secondary => 1,
+            })
+        })
+        .expect("resolver request id overflow")
+}
+
+fn route_inbound<P: PublicKey + Clone>(
+    target: SplitTarget,
+    message: (P, IoBuf),
+    primary_tx: &mpsc::UnboundedSender<(P, IoBuf)>,
+    secondary_tx: &mpsc::UnboundedSender<(P, IoBuf)>,
+) {
+    match target {
+        SplitTarget::None => {}
+        SplitTarget::Primary => {
+            let _ = primary_tx.send(message);
+        }
+        SplitTarget::Secondary => {
+            let _ = secondary_tx.send(message);
+        }
+        SplitTarget::Both => {
+            let _ = primary_tx.send(message.clone());
+            let _ = secondary_tx.send(message);
+        }
     }
 }
 
@@ -741,7 +980,7 @@ fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::Encode;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn cases_cover_all_compromised_nodes_for_n5_f1() {
@@ -992,125 +1231,287 @@ mod tests {
     #[test]
     fn resolver_splitter_routes_requests_and_responses_statefully() {
         use commonware_cryptography::{ed25519::PrivateKey, Signer};
+        use commonware_p2p::{
+            simulated::{Config, Link, Network},
+            LimitedSender as _, Receiver as _, Sender as _,
+        };
+        use commonware_runtime::{deterministic, Metrics, Quota, Runner};
+        use std::{num::NonZeroU32, time::Duration};
 
-        let participants = vec![
-            PrivateKey::from_seed(10).public_key(),
-            PrivateKey::from_seed(11).public_key(),
-        ];
-        let primary = participants[0].clone();
-        let secondary = participants[1].clone();
-        let splitter = ResolverSplitter::new(participants.clone(), view_partitions, view_route);
-        let forwarder = splitter.forwarder();
-        let router = splitter.router();
+        const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-        let outbound = IoBuf::from(
-            ResolverMessage {
-                id: 7,
-                payload: ResolverPayload::Request(U64::from(1u64)),
-            }
-            .encode(),
-        );
-        let forwarded = forwarder(SplitOrigin::Primary, &Recipients::All, &outbound).unwrap();
-        match forwarded {
-            Recipients::One(recipient) => assert_eq!(recipient, primary),
-            _ => panic!("expected a single primary recipient"),
-        }
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: None,
+            };
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            network.start();
 
-        let inbound_request = IoBuf::from(
-            ResolverMessage {
-                id: 8,
-                payload: ResolverPayload::Request(U64::from(1u64)),
-            }
-            .encode(),
-        );
-        assert_eq!(
-            router(&(primary.clone(), inbound_request)),
-            SplitTarget::Primary,
-            "request view should still route by partition"
-        );
+            let twin = PrivateKey::from_seed(10).public_key();
+            let peer = PrivateKey::from_seed(11).public_key();
+            let (resolver_sender, resolver_receiver) = oracle
+                .control(twin.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut peer_sender, mut peer_receiver) = oracle
+                .control(peer.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
 
-        let response = IoBuf::from(
-            ResolverMessage::<U64> {
-                id: 7,
-                payload: ResolverPayload::Response(Default::default()),
-            }
-            .encode(),
-        );
-        assert_eq!(
-            router(&(primary.clone(), response)),
-            SplitTarget::Primary,
-            "response should return to the originating half"
-        );
+            let link = Link {
+                latency: Duration::ZERO,
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(twin.clone(), peer.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle.add_link(peer.clone(), twin.clone(), link).await.unwrap();
 
-        let unknown = IoBuf::from(
-            ResolverMessage::<U64> {
-                id: 999,
-                payload: ResolverPayload::Error,
-            }
-            .encode(),
-        );
-        assert_eq!(router(&(secondary, unknown)), SplitTarget::None);
+            let splitter = ResolverSplitter::new(
+                vec![peer.clone()],
+                |_, participants| (participants.to_vec(), participants.to_vec()),
+                |_, sender, participants| {
+                    if sender == &participants[0] {
+                        SplitTarget::Primary
+                    } else {
+                        SplitTarget::None
+                    }
+                },
+            );
+            let ((mut primary_sender, mut primary_recv), (_, _secondary_recv)) = splitter.split(
+                context.with_label("resolver_split"),
+                resolver_sender,
+                resolver_receiver,
+            );
+
+            let checked = primary_sender
+                .check(Recipients::One(peer.clone()))
+                .await
+                .unwrap();
+            let sent = checked
+                .send(
+                    ResolverMessage {
+                        id: 7,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![peer.clone()]);
+
+            let (sender, payload) = peer_receiver.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 14,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+
+            peer_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage::<U64> {
+                        id: 14,
+                        payload: ResolverPayload::Response(Default::default()),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer.clone());
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 7,
+                    payload: ResolverPayload::Response(Default::default()),
+                }
+            );
+
+            peer_sender
+                .send(
+                    Recipients::One(twin),
+                    ResolverMessage {
+                        id: 8,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 8,
+                    payload: ResolverPayload::Request(U64::from(1u64)),
+                }
+            );
+        });
     }
 
     #[test]
     fn resolver_splitter_distinguishes_reused_ids_per_peer_and_sender_half() {
         use commonware_cryptography::{ed25519::PrivateKey, Signer};
+        use commonware_p2p::{
+            simulated::{Config, Link, Network},
+            LimitedSender as _, Receiver as _, Sender as _,
+        };
+        use commonware_runtime::{deterministic, Metrics, Quota, Runner};
+        use std::{num::NonZeroU32, time::Duration};
 
-        let participants = vec![
-            PrivateKey::from_seed(20).public_key(),
-            PrivateKey::from_seed(21).public_key(),
-        ];
-        let shared = participants[0].clone();
-        let splitter = ResolverSplitter::new(
-            participants.clone(),
-            |_view, participants| {
-                let shared = participants[0].clone();
-                (vec![shared.clone()], vec![shared])
-            },
-            |_view, sender, participants| {
-                if sender == &participants[0] {
-                    SplitTarget::Both
-                } else {
-                    SplitTarget::None
-                }
-            },
-        );
-        let forwarder = splitter.forwarder();
-        let router = splitter.router();
+        const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-        let outbound = |id| {
-            IoBuf::from(
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: None,
+            };
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
+            network.start();
+
+            let twin = PrivateKey::from_seed(20).public_key();
+            let peer = PrivateKey::from_seed(21).public_key();
+            let (resolver_sender, resolver_receiver) = oracle
+                .control(twin.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut peer_sender, mut peer_receiver) = oracle
+                .control(peer.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::ZERO,
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(twin.clone(), peer.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle.add_link(peer.clone(), twin.clone(), link).await.unwrap();
+
+            let splitter = ResolverSplitter::new(
+                vec![peer.clone()],
+                |_, participants| (participants.to_vec(), participants.to_vec()),
+                |_, sender, participants| {
+                    if sender == &participants[0] {
+                        SplitTarget::Both
+                    } else {
+                        SplitTarget::None
+                    }
+                },
+            );
+            let ((mut primary_sender, mut primary_recv), (mut secondary_sender, mut secondary_recv)) =
+                splitter.split(
+                    context.with_label("resolver_split"),
+                    resolver_sender,
+                    resolver_receiver,
+                );
+
+            primary_sender
+                .check(Recipients::One(peer.clone()))
+                .await
+                .unwrap()
+                .send(
+                    ResolverMessage {
+                        id: 0,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            secondary_sender
+                .check(Recipients::One(peer.clone()))
+                .await
+                .unwrap()
+                .send(
+                    ResolverMessage {
+                        id: 0,
+                        payload: ResolverPayload::Request(U64::from(1u64)),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let first = ResolverMessage::<U64>::decode(peer_receiver.recv().await.unwrap().1).unwrap();
+            let second =
+                ResolverMessage::<U64>::decode(peer_receiver.recv().await.unwrap().1).unwrap();
+            let ids: HashSet<_> = [first.id, second.id].into_iter().collect();
+            assert_eq!(ids, HashSet::from([0, 1]));
+
+            peer_sender
+                .send(
+                    Recipients::One(twin.clone()),
+                    ResolverMessage::<U64> {
+                        id: 1,
+                        payload: ResolverPayload::Response(b"secondary".as_slice().into()),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer.clone());
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
                 ResolverMessage {
-                    id,
-                    payload: ResolverPayload::Request(U64::from(1u64)),
-                }
-                .encode(),
-            )
-        };
-
-        let primary_forwarded =
-            forwarder(SplitOrigin::Primary, &Recipients::One(shared.clone()), &outbound(0))
-                .expect("primary request should be forwarded");
-        assert!(matches!(primary_forwarded, Recipients::One(_)));
-
-        let secondary_forwarded =
-            forwarder(SplitOrigin::Secondary, &Recipients::One(shared.clone()), &outbound(0))
-                .expect("secondary request should be forwarded");
-        assert!(matches!(secondary_forwarded, Recipients::One(_)));
-
-        let response = || {
-            IoBuf::from(
-                ResolverMessage::<U64> {
                     id: 0,
-                    payload: ResolverPayload::Response(Default::default()),
+                    payload: ResolverPayload::Response(b"secondary".as_slice().into()),
                 }
-                .encode(),
-            )
-        };
+            );
 
-        assert_eq!(router(&(shared.clone(), response())), SplitTarget::Primary);
-        assert_eq!(router(&(shared.clone(), response())), SplitTarget::Secondary);
-        assert_eq!(router(&(shared, response())), SplitTarget::None);
+            peer_sender
+                .send(
+                    Recipients::One(twin),
+                    ResolverMessage::<U64> {
+                        id: 0,
+                        payload: ResolverPayload::Response(b"primary".as_slice().into()),
+                    }
+                    .encode(),
+                    false,
+                )
+                .await
+                .unwrap();
+            let (sender, payload) = primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer);
+            let envelope = ResolverMessage::<U64>::decode(payload).unwrap();
+            assert_eq!(
+                envelope,
+                ResolverMessage {
+                    id: 0,
+                    payload: ResolverPayload::Response(b"primary".as_slice().into()),
+                }
+            );
+        });
     }
 
     #[test]
@@ -1170,12 +1571,12 @@ mod tests {
                 view_partitions,
                 view_route,
             );
-            let (mut primary_sender, mut secondary_sender) =
-                resolver_sender.split_with(resolver_splitter.clone().forwarder());
-            let (mut primary_recv, mut secondary_recv) = resolver_receiver.split_with(
-                context.with_label("resolver_split"),
-                resolver_splitter.router(),
-            );
+            let ((mut primary_sender, mut primary_recv), (mut secondary_sender, mut secondary_recv)) =
+                resolver_splitter.split(
+                    context.with_label("resolver_split"),
+                    resolver_sender,
+                    resolver_receiver,
+                );
 
             let link = Link {
                 latency: Duration::from_millis(0),
@@ -1247,7 +1648,7 @@ mod tests {
 
             primary_sender
                 .send(
-                    Recipients::All,
+                    Recipients::One(peer_a.clone()),
                     ResolverMessage {
                         id: 7,
                         payload: ResolverPayload::Request(U64::from(1u64)),
@@ -1263,14 +1664,14 @@ mod tests {
             assert_eq!(
                 envelope,
                 ResolverMessage {
-                    id: 7,
+                    id: 14,
                     payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
 
             secondary_sender
                 .send(
-                    Recipients::All,
+                    Recipients::One(peer_b.clone()),
                     ResolverMessage {
                         id: 8,
                         payload: ResolverPayload::Request(U64::from(1u64)),
@@ -1286,7 +1687,7 @@ mod tests {
             assert_eq!(
                 envelope,
                 ResolverMessage {
-                    id: 8,
+                    id: 17,
                     payload: ResolverPayload::Request(U64::from(1u64)),
                 }
             );
@@ -1295,7 +1696,7 @@ mod tests {
                 .send(
                     Recipients::One(twin.clone()),
                     ResolverMessage::<U64> {
-                        id: 7,
+                        id: 14,
                         payload: ResolverPayload::Response(b"response_a".as_slice().into()),
                     }
                     .encode(),
@@ -1318,7 +1719,7 @@ mod tests {
                 .send(
                     Recipients::One(twin.clone()),
                     ResolverMessage::<U64> {
-                        id: 8,
+                        id: 17,
                         payload: ResolverPayload::Response(b"response_b".as_slice().into()),
                     }
                     .encode(),

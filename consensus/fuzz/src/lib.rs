@@ -548,13 +548,14 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(resolver_splitter.clone().forwarder());
-            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(
-                    context.with_label(&format!("resolver_split_{idx}")),
-                    resolver_splitter.router(),
-                );
+            let (
+                (resolver_sender_primary, resolver_receiver_primary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            ) = resolver_splitter.split(
+                context.with_label(&format!("resolver_split_{idx}")),
+                resolver_sender,
+                resolver_receiver,
+            );
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
