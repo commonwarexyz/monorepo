@@ -192,7 +192,7 @@ use crate::{
         any::{
             self,
             operation::{Operation, Update},
-            FixedConfig as AnyFixedConfig, ValueEncoding, VariableConfig as AnyVariableConfig,
+            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
         operation::{Committable, Key},
         Error,
@@ -330,21 +330,20 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
 }
 
 /// Shared initialization logic for fixed-sized value Current [db::Db].
-pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
     context: E,
     config: FixedConfig<T>,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    U: Update + Send + Sync,
+    U::Key: Array,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: CodecFixedShared + Committable,
+    Operation<U>: CodecFixedShared + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -415,21 +414,20 @@ where
 }
 
 /// Shared initialization logic for variable-sized value Current [db::Db].
-pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
     context: E,
-    config: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    config: VariableConfig<T, <Operation<U> as Read>::Cfg>,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V> + Send + Sync,
+    U: Update + Send + Sync,
+    U::Key: Key,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<K, V, U>: Codec + Committable,
+    Operation<U>: Codec + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {

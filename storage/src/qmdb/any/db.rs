@@ -12,9 +12,8 @@ use crate::{
     },
     mmr::{Location, Proof},
     qmdb::{
-        any::ValueEncoding,
         build_snapshot_from_log,
-        operation::{Key, Operation as OperationTrait},
+        operation::Operation as OperationTrait,
         store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
@@ -73,16 +72,14 @@ pub struct Db<
 }
 
 // Shared read-only functionality.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
+impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -96,7 +93,7 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         match self.log.reader().await.read(*self.last_commit_loc).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
@@ -109,16 +106,14 @@ where
 }
 
 // Functionality requiring Mutable journal.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
+impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -142,16 +137,14 @@ where
 }
 
 // Functionality requiring Mutable + Persistable journal.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U>
+impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -219,7 +212,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -230,22 +223,20 @@ where
         &self,
         loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
     }
 }
 
-impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U>
+impl<E, U, C, I, H> Persistable for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     type Error = Error;
 
@@ -263,19 +254,17 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U>
+impl<E, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     type Digest = H::Digest;
-    type Operation = Operation<K, V, U>;
+    type Operation = Operation<U>;
 
     fn root(&self) -> H::Digest {
         self.root()
@@ -286,7 +275,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -294,39 +283,35 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H> LogStore for Db<E, C, I, H, U>
+impl<E, U, C, I, H> LogStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
-    type Value = V::Value;
+    type Value = U::Value;
 
     async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         self.get_metadata().await
     }
 }
 
-impl<E, K, V, U, C, I, H> PrunableStore for Db<E, C, I, H, U>
+impl<E, U, C, I, H> PrunableStore for Db<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
