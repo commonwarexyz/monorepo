@@ -76,24 +76,13 @@ def dependency_kind(dep: dict) -> str:
     return dep["kind"] or "normal"
 
 
-def publishable_packages(metadata: dict) -> dict[Path, dict]:
+def workspace_packages(metadata: dict, *, publishable_only: bool = False) -> dict[Path, dict]:
     workspace_members = set(metadata["workspace_members"])
     packages = {}
     for package in metadata["packages"]:
         if package["id"] not in workspace_members:
             continue
-        if package.get("publish") == []:
-            continue
-        manifest = Path(package["manifest_path"]).resolve()
-        packages[manifest] = package
-    return packages
-
-
-def workspace_packages(metadata: dict) -> dict[Path, dict]:
-    workspace_members = set(metadata["workspace_members"])
-    packages = {}
-    for package in metadata["packages"]:
-        if package["id"] not in workspace_members:
+        if publishable_only and package.get("publish") == []:
             continue
         manifest = Path(package["manifest_path"]).resolve()
         packages[manifest] = package
@@ -105,7 +94,7 @@ def main() -> int:
     publish_order = load_publish_order(root)
     metadata = load_workspace_metadata(root)
     workspace = workspace_packages(metadata)
-    packages = publishable_packages(metadata)
+    packages = workspace_packages(metadata, publishable_only=True)
 
     duplicates = []
     seen = set()
