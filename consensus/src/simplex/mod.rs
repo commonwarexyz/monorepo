@@ -5915,10 +5915,13 @@ mod tests {
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
-            // Wait for progress (liveness check) across honest replicas and
-            // both halves of each twin, so twin-only stalls remain visible.
+            // Wait for progress (liveness check) across honest replicas only.
+            //
+            // Twin halves run with resolver traffic blackholed in this harness, so
+            // a twin can legitimately stall after the adversarial prefix even when
+            // all honest replicas continue finalizing under synchrony.
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(honest_start) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < campaign.required_containers {
