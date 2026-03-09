@@ -126,26 +126,6 @@ mod tests {
     const STRATEGY: Sequential = Sequential;
 
     #[test]
-    fn test_decode_rejects_checked_shard_from_other_commitment() {
-        let config = crate::Config {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(1),
-        };
-        let (commitment_a, _) =
-            NoCoding::<Sha256>::encode(&config, &b"alpha"[..], &STRATEGY).unwrap();
-        let (commitment_b, shards_b) =
-            NoCoding::<Sha256>::encode(&config, &b"bravo"[..], &STRATEGY).unwrap();
-
-        let checked_b = NoCoding::<Sha256>::check(&config, &commitment_b, 0, &shards_b[0]).unwrap();
-
-        let result = NoCoding::<Sha256>::decode(&config, &commitment_a, &[checked_b], &STRATEGY);
-        assert!(
-            matches!(result, Err(Error::CommitmentMismatch)),
-            "decode should reject shard from a different commitment"
-        );
-    }
-
-    #[test]
     fn test_invalid_shard_rejected() {
         let config = crate::Config {
             minimum_shards: NZU16!(1),

@@ -849,28 +849,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_rejects_checked_shard_from_other_commitment() {
-        let config = Config {
-            minimum_shards: NZU16!(2),
-            extra_shards: NZU16!(2),
-        };
-
-        let (commitment_a, shards_a) =
-            RS::encode(&config, &b"alpha payload"[..], &STRATEGY).unwrap();
-        let (commitment_b, shards_b) =
-            RS::encode(&config, &b"bravo payload"[..], &STRATEGY).unwrap();
-
-        let checked_a = RS::check(&config, &commitment_a, 0, &shards_a[0]).unwrap();
-        let checked_b = RS::check(&config, &commitment_b, 1, &shards_b[1]).unwrap();
-
-        let result = RS::decode(&config, &commitment_a, &[checked_a, checked_b], &STRATEGY);
-        assert!(
-            matches!(result, Err(Error::CommitmentMismatch)),
-            "decode should reject shards checked against different commitments"
-        );
-    }
-
-    #[test]
     fn test_manipulated_chunk_detection() {
         let data = b"Data integrity must be maintained";
         let total = 6u16;

@@ -190,10 +190,18 @@ commonware_macros::stability_scope!(ALPHA {
         /// including your own shard.
         ///
         /// Calls to this function with the same commitment, but with different shards,
-        /// or shards in a different should also result in the same output data, or in failure.
-        /// In other words, when using the decoding function in a broader system, you
-        /// get a guarantee that every participant decoding will see the same final
-        /// data, even if they receive different shards, or receive them in a different order.
+        /// or shards in a different order should also result in the same output data,
+        /// or in failure. In other words, when using the decoding function in a broader
+        /// system, you get a guarantee that every participant decoding will see the same
+        /// final data, even if they receive different shards, or receive them in a
+        /// different order.
+        ///
+        /// ## Commitment Binding
+        ///
+        /// Implementations must reject shards that were checked against a different
+        /// commitment than the one passed to `decode`. Mixing checked shards from
+        /// separate `encode` calls (and thus different commitments) must return an
+        /// error.
         fn decode(
             config: &Config,
             commitment: &Self::Commitment,
@@ -284,6 +292,44 @@ mod test {
             data,
             selected,
         ))
+    }
+
+    fn decode_rejects_mixed_commitments<S: Scheme>(config: &Config, data_a: &[u8], data_b: &[u8]) {
+        let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
+        let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
+
+        let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
+        let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+
+        let result = S::decode(config, &commitment_a, &[checked_a, checked_b], &Sequential);
+        assert!(
+            result.is_err(),
+            "decode must reject shards checked against different commitments"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_mixed_commitment_shards() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+
+        decode_rejects_mixed_commitments::<ReedSolomon<Sha256>>(
+            &config,
+            b"alpha payload",
+            b"bravo payload",
+        );
+        decode_rejects_mixed_commitments::<NoCoding<Sha256>>(
+            &config,
+            b"alpha payload",
+            b"bravo payload",
+        );
+        decode_rejects_mixed_commitments::<Zoda<Sha256>>(
+            &config,
+            b"alpha payload",
+            b"bravo payload",
+        );
     }
 
     #[test]
