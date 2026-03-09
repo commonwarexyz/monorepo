@@ -173,11 +173,17 @@ where
             ResolverEnvelope::Request { id, key } => {
                 let view = View::new(u64::from(key));
                 let (primary, secondary) = (self.partitions)(view, self.participants.as_ref());
-                let filtered = match origin {
-                    SplitOrigin::Primary => filter_recipients(recipients, &primary),
-                    SplitOrigin::Secondary => filter_recipients(recipients, &secondary),
+                let (filtered, target) = match origin {
+                    SplitOrigin::Primary => (
+                        filter_recipients(recipients, &primary),
+                        SplitTarget::Primary,
+                    ),
+                    SplitOrigin::Secondary => (
+                        filter_recipients(recipients, &secondary),
+                        SplitTarget::Secondary,
+                    ),
                 }?;
-                self.requests.lock().insert(id, split_target(origin));
+                self.requests.lock().insert(id, target);
                 Some(filtered)
             }
             ResolverEnvelope::Response { .. } | ResolverEnvelope::Error { .. } => {
@@ -202,13 +208,6 @@ where
                 .remove(&id)
                 .unwrap_or(SplitTarget::None),
         }
-    }
-}
-
-fn split_target(origin: SplitOrigin) -> SplitTarget {
-    match origin {
-        SplitOrigin::Primary => SplitTarget::Primary,
-        SplitOrigin::Secondary => SplitTarget::Secondary,
     }
 }
 
