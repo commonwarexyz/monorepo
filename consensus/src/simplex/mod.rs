@@ -5738,6 +5738,12 @@ mod tests {
             if self.honest_leaders.is_empty() {
                 return self.fallback.elect(round, certificate);
             }
+            // Suffix rounds intentionally bypass `fallback` and rotate
+            // through honest leaders deterministically.  The adversarial
+            // prefix may have left `fallback` in an arbitrary state
+            // (e.g. with twin-controlled leaders next in line), so we
+            // ensure liveness by restricting suffix leadership to honest
+            // participants only.
             let honest_idx = (round.epoch().get().wrapping_add(round.view().get())) as usize
                 % self.honest_leaders.len();
             self.honest_leaders[honest_idx]
@@ -5833,7 +5839,7 @@ mod tests {
                         }
                     }
                 };
-                let make_resolver_forwarder =
+                let drop_resolver_forwarder =
                     || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 let make_vote_router = || {
@@ -5854,7 +5860,7 @@ mod tests {
                         scenario.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let make_resolver_router = || move |(_, _): &(_, _)| SplitTarget::None;
+                let drop_resolver_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
                 let (vote_sender_primary, vote_sender_secondary) =
                     vote_sender.split_with(make_vote_forwarder());
@@ -5871,11 +5877,11 @@ mod tests {
                     );
 
                 let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(make_resolver_forwarder());
+                    resolver_sender.split_with(drop_resolver_forwarder());
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
                     .split_with(
                         context.with_label(&format!("resolver_split_{idx}")),
-                        make_resolver_router(),
+                        drop_resolver_router(),
                     );
 
                 for (twin_label, pending, recovered, resolver) in [

@@ -252,7 +252,7 @@ fn partition_scenarios(n: usize, max_partitions: usize) -> Vec<Vec<usize>> {
     out
 }
 
-fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
+fn round_scenarios(n: usize, max_partitions: usize, cap: Option<usize>) -> Vec<RoundScenario> {
     let partitions = partition_scenarios(n, max_partitions);
     let mut scenarios = BTreeSet::new();
 
@@ -270,6 +270,15 @@ fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
                     primary_mask: masks[primary_idx],
                     secondary_mask: masks[secondary_idx],
                 });
+                // Stop materializing round options once we have enough distinct
+                // options for sampling to work.  The caller only needs at most
+                // `cap` round options when it will sample from the product space
+                // anyway, so continuing beyond this point wastes memory.
+                if let Some(cap) = cap {
+                    if scenarios.len() >= cap {
+                        return scenarios.into_iter().collect();
+                    }
+                }
             }
         }
     }
@@ -375,7 +384,12 @@ fn generate_scenarios(
     max_partitions: usize,
     max_scenarios: usize,
 ) -> Vec<Scenario> {
-    let options = round_scenarios(n, max_partitions);
+    // Pass `max_scenarios` as a cap so that `round_scenarios` stops
+    // materializing partitions once it has collected enough distinct round
+    // options for the sampling path.  Without this, the partition
+    // enumeration can blow up memory for moderate `n`/`max_partitions`
+    // even when `max_scenarios` is small.
+    let options = round_scenarios(n, max_partitions, Some(max_scenarios));
     if options.is_empty() {
         return Vec::new();
     }
@@ -581,8 +595,8 @@ mod tests {
 
     #[test]
     fn round_scenarios_expand_with_additional_partition_counts() {
-        let two_way = round_scenarios(5, 2);
-        let up_to_three_way = round_scenarios(5, 3);
+        let two_way = round_scenarios(5, 2, None);
+        let up_to_three_way = round_scenarios(5, 3, None);
         assert!(up_to_three_way.len() > two_way.len());
     }
 
