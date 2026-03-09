@@ -692,10 +692,8 @@ impl<H: Hasher> Scheme for Zoda<H> {
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
-        for shard in shards {
-            if &shard.commitment != commitment {
-                return Err(Error::InconsistentCheckedShard);
-            }
+        if !shards.iter().all(|s| &s.commitment == commitment) {
+            return Err(Error::InconsistentCheckedShard);
         }
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
