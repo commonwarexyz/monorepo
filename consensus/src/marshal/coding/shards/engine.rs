@@ -1159,28 +1159,29 @@ where
             return None;
         }
 
-        // If checking data is not yet cached, verify one shard sequentially
-        // to populate it before the parallel batch.
+        // If checking data is not yet cached, verify shards sequentially
+        // until one succeeds, seeding the cache for the parallel batch.
         //
-        // This is best-effort. If the first shard is invalid, we fall back to computing
-        // the checking data for subsequent shards in the batch.
+        // Without this, a Byzantine peer can force every parallel task to
+        // independently recompute checking data.
         let mut pending = std::mem::take(&mut self.pending_shards);
-        if self.common.checking_data.is_none() {
-            if let Some((peer, shard)) = pending.pop_first() {
-                match C::check(
-                    &commitment.config(),
-                    &commitment.root(),
-                    shard.index,
-                    &shard.data,
-                    None,
-                ) {
-                    Ok((checked, checking_data)) => {
-                        self.common.checking_data = Some(checking_data);
-                        self.common.checked_shards.push(checked);
-                    }
-                    Err(_) => {
-                        commonware_p2p::block!(blocker, peer, "invalid shard received");
-                    }
+        while self.common.checking_data.is_none() {
+            let Some((peer, shard)) = pending.pop_first() else {
+                break;
+            };
+            match C::check(
+                &commitment.config(),
+                &commitment.root(),
+                shard.index,
+                &shard.data,
+                None,
+            ) {
+                Ok((checked, checking_data)) => {
+                    self.common.checking_data = Some(checking_data);
+                    self.common.checked_shards.push(checked);
+                }
+                Err(_) => {
+                    commonware_p2p::block!(blocker, peer, "invalid shard received");
                 }
             }
         }
@@ -1197,7 +1198,7 @@ where
                     &shard.data,
                     checking_data.clone(),
                 );
-                (peer, checked.map(|(c, cd)| (c, cd)).ok())
+                (peer, checked.ok())
             });
 
         for peer in to_block {
