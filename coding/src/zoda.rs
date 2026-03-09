@@ -551,6 +551,8 @@ pub enum Error {
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
     InsufficientUniqueRows(usize, usize),
+    #[error("checked shard has inconsistent topology")]
+    InconsistentCheckedShard,
     #[error("failed to create inclusion proof: {0}")]
     FailedToCreateInclusionProof(BmtError),
 }
@@ -674,8 +676,6 @@ impl<H: Hasher> Scheme for Zoda<H> {
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        // All checked shards carry the same topology (derived from the same
-        // commitment during `check`), so we use the first shard's topology.
         let first = shards.first().ok_or(Error::InsufficientShards(0, 1))?;
         let Topology {
             encoded_rows,
@@ -687,6 +687,11 @@ impl<H: Hasher> Scheme for Zoda<H> {
         } = first.topology;
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
+        }
+        for shard in &shards[1..] {
+            if shard.topology != first.topology {
+                return Err(Error::InconsistentCheckedShard);
+            }
         }
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
@@ -770,6 +775,35 @@ mod tests {
             }
             other => panic!("expected insufficient unique rows error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_rejects_mixed_commitment_shards() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+
+        let (commitment_a, shards_a) =
+            Zoda::<Sha256>::encode(&config, &b"short"[..], &STRATEGY).unwrap();
+        let (commitment_b, shards_b) = Zoda::<Sha256>::encode(
+            &config,
+            &b"this payload is much larger than the first one to change topology"[..],
+            &STRATEGY,
+        )
+        .unwrap();
+
+        let checked_a =
+            Zoda::<Sha256>::check(&config, &commitment_a, 0, shards_a[0].clone()).unwrap();
+        let checked_b =
+            Zoda::<Sha256>::check(&config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+
+        let result =
+            Zoda::<Sha256>::decode(&config, &commitment_a, &[checked_a, checked_b], &STRATEGY);
+        assert!(
+            matches!(result, Err(Error::InconsistentCheckedShard)),
+            "expected InconsistentCheckedShard, got {result:?}"
+        );
     }
 
     #[test]
