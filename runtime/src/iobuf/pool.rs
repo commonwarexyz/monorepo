@@ -422,36 +422,37 @@ impl Drop for AlignedBuffer {
 }
 
 /// Per-size-class state.
-///
-/// The freelist stores `Option<AlignedBuffer>` where:
-/// - `Some(buf)` = a reusable buffer
-/// - `None` = an available slot for creating a new buffer
 struct SizeClass {
     /// The buffer size for this class.
     size: usize,
     /// Buffer alignment.
     alignment: usize,
-    /// Free list storing either reusable buffers or empty slots.
-    freelist: ArrayQueue<Option<AlignedBuffer>>,
+    /// Maximum number of tracked buffers for this class.
+    max: usize,
+    /// Global free list of tracked buffers available for reuse.
+    freelist: ArrayQueue<AlignedBuffer>,
+    /// Number of tracked buffers currently in existence for this class.
+    created: AtomicUsize,
     /// Number of buffers currently allocated (out of pool).
     allocated: AtomicUsize,
 }
 
 impl SizeClass {
-    fn new(size: usize, alignment: usize, max_buffers: usize, prefill: bool) -> Self {
-        let freelist = ArrayQueue::new(max_buffers);
-        for _ in 0..max_buffers {
-            let entry = if prefill {
-                Some(AlignedBuffer::new(size, alignment))
-            } else {
-                None
-            };
-            let _ = freelist.push(entry);
+    fn new(size: usize, alignment: usize, max: usize, prefill: bool) -> Self {
+        let freelist = ArrayQueue::new(max);
+        let mut created = 0;
+        if prefill {
+            for _ in 0..max {
+                let _ = freelist.push(AlignedBuffer::new(size, alignment));
+            }
+            created = max;
         }
         Self {
             size,
             alignment,
+            max,
             freelist,
+            created: AtomicUsize::new(created),
             allocated: AtomicUsize::new(0),
         }
     }
@@ -481,39 +482,45 @@ impl BufferPoolInner {
             size_class: class.size as u64,
         };
 
-        match class.freelist.pop() {
-            Some(Some(buffer)) => {
-                // Reuse existing buffer
-                class.allocated.fetch_add(1, Ordering::Relaxed);
-                self.metrics.allocations_total.get_or_create(&label).inc();
-                self.metrics.allocated.get_or_create(&label).inc();
-                self.metrics.available.get_or_create(&label).dec();
-                Some(Allocation {
-                    buffer,
-                    is_new: false,
-                })
-            }
-            Some(None) => {
-                // Create new buffer (we have a slot)
-                class.allocated.fetch_add(1, Ordering::Relaxed);
-                self.metrics.allocations_total.get_or_create(&label).inc();
-                self.metrics.allocated.get_or_create(&label).inc();
-                let buffer = if zero_on_new {
-                    AlignedBuffer::new_zeroed(class.size, class.alignment)
-                } else {
-                    AlignedBuffer::new(class.size, class.alignment)
-                };
-                Some(Allocation {
-                    buffer,
-                    is_new: true,
-                })
-            }
-            None => {
-                // Pool exhausted (no slots available)
-                self.metrics.exhausted_total.get_or_create(&label).inc();
-                None
-            }
+        // Reuse an existing tracked buffer before attempting to grow the class.
+        if let Some(buffer) = class.freelist.pop() {
+            class.allocated.fetch_add(1, Ordering::Relaxed);
+            self.metrics.allocations_total.get_or_create(&label).inc();
+            self.metrics.allocated.get_or_create(&label).inc();
+            self.metrics.available.get_or_create(&label).dec();
+            return Some(Allocation {
+                buffer,
+                is_new: false,
+            });
         }
+
+        // Reserve one creation slot if the class has not reached its tracked-buffer cap.
+        let reserved =
+            class
+                .created
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
+                    (created < class.max).then_some(created + 1)
+                });
+
+        // Pool exhausted (no slots available)
+        if reserved.is_err() {
+            self.metrics.exhausted_total.get_or_create(&label).inc();
+            return None;
+        }
+
+        // Create a new buffer after successfully reserving capacity.
+        class.allocated.fetch_add(1, Ordering::Relaxed);
+        self.metrics.allocations_total.get_or_create(&label).inc();
+        self.metrics.allocated.get_or_create(&label).inc();
+        let buffer = if zero_on_new {
+            AlignedBuffer::new_zeroed(class.size, class.alignment)
+        } else {
+            AlignedBuffer::new(class.size, class.alignment)
+        };
+        Some(Allocation {
+            buffer,
+            is_new: true,
+        })
     }
 
     /// Return a buffer to the pool.
@@ -529,7 +536,7 @@ impl BufferPoolInner {
             self.metrics.allocated.get_or_create(&label).dec();
 
             // Try to return to freelist
-            match class.freelist.push(Some(buffer)) {
+            match class.freelist.push(buffer) {
                 Ok(()) => {
                     self.metrics.available.get_or_create(&label).inc();
                 }
