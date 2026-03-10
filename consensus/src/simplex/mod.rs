@@ -378,11 +378,16 @@ pub(crate) fn interesting(
         return false;
     }
     if !allow_future {
-        // With term_length > 1, a nullification can skip us to the first
-        // view of the next term, so we accept messages up to next_term_start + 1
-        // (the +1 mirrors the standard current.next() lookahead).
-        let horizon = current.next_term_start(term_length);
-        if pending > horizon {
+        // Bound future acceptance to two windows:
+        // - [current, current + activity_timeout]
+        // - [next_term_start(current), next_term_start(current) + activity_timeout]
+        let current_window_end = current.saturating_add(activity_timeout);
+        let next_term_start = current.next_term_start(term_length);
+        let next_term_window_end = next_term_start.saturating_add(activity_timeout);
+
+        let in_current_window = pending <= current_window_end;
+        let in_next_term_window = pending >= next_term_start && pending <= next_term_window_end;
+        if !in_current_window && !in_next_term_window {
             return false;
         }
     }
@@ -458,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
+        let activity_timeout = ViewDelta::new(2);
 
         // Genesis view is never interesting
         assert!(!interesting(
@@ -483,7 +488,7 @@ mod tests {
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(5), // below min_active (10)
+            View::new(5), // below min_active (18)
             false,
             1
         ));
@@ -493,29 +498,59 @@ mod tests {
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(10), // exactly min_active
+            View::new(18), // exactly min_active
             false,
             1
         ));
 
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false,
-            1
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
+        // Future view in the current future window is interesting.
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
             View::new(27),
+            false,
+            10
+        ));
+
+        // Gap between current and next-term windows is not interesting.
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(29),
+            false,
+            10
+        ));
+
+        // Future view in next-term future window is interesting.
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(32),
+            false,
+            10
+        ));
+
+        // Beyond next-term future window is not interesting when allow_future is false.
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(34),
+            false,
+            10
+        ));
+
+        // Future views beyond bounded windows are interesting when allow_future is true.
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(80),
             true,
-            1
+            10
         ));
 
         // View at current.next() is interesting

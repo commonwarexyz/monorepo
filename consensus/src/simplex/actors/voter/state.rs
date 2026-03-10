@@ -114,6 +114,11 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     /// at or above this view is observed.
     nullified_in_term: Option<View>,
 
+    /// View of the certificate that advanced us into the current view.
+    ///
+    /// `None` only for view 1 (bootstrapped from genesis).
+    entry_certificate_view: Option<View>,
+
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -154,6 +159,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             genesis: None,
             views: BTreeMap::new(),
             nullified_in_term: None,
+            entry_certificate_view: None,
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -168,6 +174,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.genesis = Some(genesis);
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
+        self.entry_certificate_view = None;
     }
 
     /// Returns the epoch managed by this state machine.
@@ -190,14 +197,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         min_active(self.activity_timeout, self.last_finalized)
     }
 
-    /// Returns whether `pending` is still relevant for progress, optionally allowing future views.
-    pub fn is_interesting(&self, pending: View, allow_future: bool) -> bool {
+    /// Returns whether a vote for `pending` is still relevant for progress.
+    pub fn is_interesting_vote(&self, pending: View) -> bool {
         interesting(
             self.activity_timeout,
             self.last_finalized,
             self.view,
             pending,
-            allow_future,
+            false,
+            self.term_length,
+        )
+    }
+
+    /// Returns whether a certificate for `pending` is relevant for progress.
+    pub fn is_interesting_certificate(&self, pending: View) -> bool {
+        interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            pending,
+            true,
             self.term_length,
         )
     }
@@ -377,8 +396,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // When term_length > 1, skip to the start of the next term.
         let next_view = view.next_term_start(self.term_length);
-        self.enter_view(next_view);
-        self.set_leader(next_view, Some(&nullification.certificate));
+        if self.enter_view(next_view) {
+            self.set_leader(next_view, Some(&nullification.certificate));
+        }
+        self.record_transition_certificate(
+            next_view,
+            Certificate::Nullification(nullification.clone()),
+        );
 
         // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
@@ -423,8 +447,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             }
         }
 
-        self.enter_view(view.next());
-        self.set_leader(view.next(), Some(&finalization.certificate));
+        let next = view.next();
+        if self.enter_view(next) {
+            self.set_leader(next, Some(&finalization.certificate));
+        }
+        self.record_transition_certificate(next, Certificate::Finalization(finalization.clone()));
         self.create_round(view).add_finalization(finalization)
     }
 
@@ -693,7 +720,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .expect("notarization must exist for certified view");
 
         if is_success {
-            self.enter_view(view.next());
+            if self.enter_view(view.next()) {
+                self.record_transition_certificate(
+                    view.next(),
+                    Certificate::Notarization(notarization.clone()),
+                );
+            }
         } else {
             self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
@@ -739,6 +771,32 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             None => return false,
         };
         round.nullification().is_some()
+    }
+
+    /// Returns the certificate that advanced us into the current view.
+    pub fn entry_certificate(&self) -> Option<Certificate<S, D>> {
+        let entry_view = self.entry_certificate_view?;
+        self.get_best_certificate(entry_view)
+    }
+
+    fn record_transition_certificate(&mut self, target_view: View, certificate: Certificate<S, D>) {
+        if self.view != target_view {
+            return;
+        }
+        let should_replace = self.entry_certificate().is_none_or(|current| {
+            Self::certificate_priority(&certificate) > Self::certificate_priority(&current)
+        });
+        if should_replace {
+            self.entry_certificate_view = Some(certificate.view());
+        }
+    }
+
+    const fn certificate_priority(certificate: &Certificate<S, D>) -> u8 {
+        match certificate {
+            Certificate::Finalization(_) => 3,
+            Certificate::Nullification(_) => 2,
+            Certificate::Notarization(_) => 1,
+        }
     }
 
     /// Returns true if certification for the view was aborted due to finalization.
