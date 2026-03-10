@@ -28,18 +28,17 @@
 //! Voting begins at view 1, with the first proposal referencing genesis as its parent.
 //!
 //! ### Timer semantics
-//! * `t_x = Armed(d)` means timer `t_x` is active with deadline `d`
-//! * `t_x = Canceled` means timer `t_x` has been explicitly canceled
-//! * `t_x = Unset` means timer `t_x` has never been initialized for this view
-//! * Setting `t_x` to `0` is shorthand for `Armed(now)` (immediate expiry)
-//! * Timer `t_x` fires iff `t_x = Armed(d)` and `now >= d`
+//! * `t_x = Some(d)` means timer `t_x` is armed with deadline `d`
+//! * `t_x = None` means timer `t_x` is canceled
+//! * Setting `t_x` to `0` is shorthand for `t_x = Some(now)` (immediate expiry)
+//! * Timer `t_x` fires iff `t_x = Some(d)` and `now >= d`
 //!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * If `t_l = Unset`, set `t_l = now+2Δ`; if certification is pending, not yet nullified, and `t_a = Unset`, set `t_a = now+3Δ`
-//! * If `t_l` was just initialized, and `r != l` and leader `l` has not been active in the last `lookback` rounds observed by `r`,
+//! * Set timer for leader proposal `t_l = now+2Δ`, retry `t_r = None` and advance (certification) `t_a = now+3Δ`
+//! * If `r != l` and leader `l` has not been active in the last `lookback` rounds observed by `r`,
 //!   set `t_l` and `t_a` to `0` (immediate local timeout).
 //! * If `r == l`, do not fast-timeout solely due to inactivity; still attempt proposal.
 //! * If leader `l`, broadcast `notarize(c,v)`
@@ -47,8 +46,7 @@
 //!     previous view, do nothing (retry on next iteration)
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
-//! * Set `t_l` to `Canceled`
-//!   * Do this before checking parent availability so a later `enter_view(v)` does not re-arm the leader timeout
+//! * Set `t_l` to `None`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
 //!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
 //!     * If the parent is not available (missing certificates), do nothing
@@ -64,14 +62,14 @@
 //! Upon constructing or receiving the first `notarization(c,v)`:
 //! * Broadcast `notarization(c,v)`
 //! * Attempt to certify `c` (see [Certification](#certification))
-//!     * On success: set `t_a` to `Canceled`, broadcast `finalize(c,v)` if have not broadcast `nullify(v)` and enter `v+1`
+//!     * On success: set `t_a` to `None`, broadcast `finalize(c,v)` if have not broadcast `nullify(v)` and enter `v+1`
 //!     * On failure: set `t_l` and `t_a` to `0`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Construct `nullification(v)`
 //!
 //! Upon constructing or receiving the first `nullification(v)`:
-//! * Set `t_l` and `t_a` to `Canceled`
+//! * Set `t_l` and `t_a` to `None`
 //! * If `nullify(v)` and `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)`
 //! * Broadcast `nullification(v)`
 //! * Enter `v+1`
@@ -80,7 +78,7 @@
 //! * Construct `finalization(c, v)`
 //!
 //! Upon constructing or receiving the first `finalization(c, v)`:
-//! * Set `t_l` and `t_a` to `Canceled`
+//! * Set `t_l` and `t_a` to `None`
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //! * Enter `v+1`
@@ -220,29 +218,22 @@
 //!   - `broadcast_nullification`: `bool`, whether `nullification(v)` has been broadcast, initially `false`.
 //!   - `broadcast_finalize`: `bool`, whether `finalize(c, v)` has been broadcast, initially `false`.
 //!   - `broadcast_finalization`: `bool`, whether `finalization(c, v)` has been broadcast, initially `false`.
+//!   - `proposal`: `Option<c>`, the container for this view, initially `None`.
+//!   - `proposal_status`: `None | Verified | Equivocated`, initially `None`.
 //!   - `certified`: `Option<bool>`, where `None` means certification is pending,
 //!     `Some(true)` means certified, and `Some(false)` means rejected.
-//!   - `t_l`: `Timer`, leader proposal timeout, initially `Unset`.
-//!   - `t_a`: `Timer`, advance/certification timeout, initially `Unset`.
-//!   - `t_r`: `Timer`, retry timeout, initially `Unset`.
+//!   - `t_l`: leader proposal timeout.
+//!   - `t_a`: advance/certification timeout.
+//!   - `t_r`: retry timeout.
 //! - `messages` is a map `View -> (Replica -> Set<Message>)` storing received vote messages
 //!   (`notarize`, `nullify`, `finalize`) grouped by view then sender.
 //!
-//! Timer type and semantics:
+//! Timer semantics:
 //!
-//! ```text
-//! enum Timer {
-//!     Unset,     // never initialized for this view
-//!     Armed(d),  // active timer with deadline d
-//!     Canceled,  // explicitly canceled
-//! }
-//! ```
-//!
-//! - `t_x = Armed(d)` means timer `t_x` is active with deadline `d`.
-//! - `t_x = Canceled` means timer `t_x` has been explicitly canceled.
-//! - `t_x = Unset` means timer `t_x` has never been initialized for this view.
-//! - `t_x = 0` is shorthand for `Armed(now)` (immediate expiry).
-//! - Timer `t_x` fires iff `t_x = Armed(d)` and `now >= d`.
+//! - `t_x = Some(d)` means timer `t_x` is armed with deadline `d`.
+//! - `t_x = None` means timer `t_x` is canceled.
+//! - `t_x = 0` is shorthand for immediate expiry (`Some(now)`).
+//! - Timer `t_x` fires iff `t_x = Some(d)` and `now >= d`.
 //!
 //! ## 6. External Functions / Predicates
 //!
@@ -342,24 +333,36 @@
 //!     return false;
 //! }
 //!
+//! // Records container `c` for view `v`. If a different container already exists,
+//! // marks the proposal as equivocated. Returns the equivocating leader if detected.
+//! fn record_proposal(r, v, c) -> Option<leader> {
+//!     if r.round[v].proposal_status == Equivocated {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal == None {
+//!         r.round[v].proposal = Some(c);
+//!         r.round[v].proposal_status = Verified;
+//!         return None;
+//!     }
+//!     if r.round[v].proposal == Some(c) {
+//!         return None;
+//!     }
+//!     r.round[v].proposal = Some(c);
+//!     r.round[v].proposal_status = Equivocated;
+//!     return Some(leader(v));
+//! }
+//!
 //! // Replica `r` enters `next` iff `next` is ahead of the current view.
-//! // Timers are only initialized when the corresponding phase has not
-//! // been resolved by early message delivery.
 //! fn enter_view(r, next) {
 //!     if r.view >= next {
 //!         return;
 //!     }
 //!     r.view = next;
 //!     r.leader = leader(next);
-//!     let leader_timeout_initialized = false;
-//!     if r.round[next].t_l == Unset {
-//!         r.round[next].t_l = now + 2Δ;
-//!         leader_timeout_initialized = true;
-//!     }
-//!     if r.round[next].t_a == Unset and r.round[next].certified == None and !r.round[next].broadcast_nullify {
-//!         r.round[next].t_a = now + 3Δ;
-//!     }
-//!     if leader_timeout_initialized and r != r.leader and r.leader has not been active in the last `lookback` locally tracked rounds {
+//!     r.round[next].t_l = now + 2Δ;
+//!     r.round[next].t_r = None;
+//!     r.round[next].t_a = now + 3Δ;
+//!     if r != r.leader and r.leader has not been active in the last lookback locally tracked rounds {
 //!         r.round[next].t_l = 0;
 //!         r.round[next].t_a = 0;
 //!     }
@@ -393,11 +396,14 @@
 //!
 //! 1. On entering view `v`:
 //!    1. Determine leader `l = leader(v)`.
+//!    1. If `r != l` and `l` has not been active in the last `lookback` locally tracked rounds,
+//!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = select_parent(r, v)`.
-//!       1. If `parent == Err(_)`, return.
+//!       1. If `parent = Err(_)`, return.
 //!       1. Let `c = propose(v, parent)`.
-//!       1. If `c == None`, set `r.round[v].t_l = 0`, and return.
+//!       1. If `c = None`, set `r.round[v].t_l = 0`, and return.
+//!       1. Call `record_proposal(r, v, c)`.
 //!       1. Set `r.round[v].broadcast_notarize = true`.
 //!       1. Broadcast `notarize(c, v)`.
 //!
@@ -406,14 +412,15 @@
 //! 1. On receiving `notarize(c, v)` from replica `r' = leader(v)`:
 //!    1. If `!record_message(r, r', notarize(c, v))`, return.
 //!    1. If `r.round[v].broadcast_notarize` or `r.round[v].broadcast_nullify`, return.
-//!    1. Set `r.round[v].t_l = Canceled`.
+//!    1. Set `r.round[v].t_l = None`.
 //!    1. Let `v_parent` be `c`'s declared parent view.
-//!    1. If `parent_payload(r, v, v_parent) == None`, return.
+//!    1. If `parent_payload(r, v, v_parent) = None`, return.
 //!    1. Verify `c`.
-//!    1. If verification succeeds, set `r.round[v].broadcast_notarize = true` and broadcast `notarize(c, v)`.
+//!    1. If verification succeeds, call `record_proposal(r, v, c)`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
 //!    1. If verification fails, set `r.round[v].t_l = 0`.
 //!
 //! ### 7.3. Notarization Path
+//!
 //! 1. On receiving `notarize(c, v)` from replica `r'`:
 //!    1. If `r' == leader(v)`, return.
 //!    1. If `!record_message(r, r', notarize(c, v))`, return.
@@ -422,16 +429,17 @@
 //!    1. Assemble `notarization(c, v)` (even if `c` itself is not yet verified locally).
 //! 1. On constructing or receiving the first `notarization(c, v)`:
 //!    1. Set `r.round[v].notarization = notarization(c, v)`.
+//!    1. Call `record_proposal(r, v, c)`.
 //!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
 //!    1. Attempt `certify(c)`:
 //!       1. On success:
-//!          1. Set `r.round[v].t_a = Canceled`.
+//!          1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!          1. Set `r.round[v].certified = Some(true)`.
-//!          1. If `!r.round[v].broadcast_nullify`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
+//!          1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize` and `r.round[v].proposal_status != Equivocated`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!          1. Call `enter_view(r, v + 1)`.
 //!       1. On failure:
 //!          1. Set `r.round[v].certified = Some(false)`.
-//!          1. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!          1. If `v == r.view` and `!r.round[v].broadcast_nullify`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!
 //! ### 7.4. Nullification Path
 //!
@@ -443,9 +451,9 @@
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
 //!    1. Set `r.round[v].nullification = nullification(v)`.
-//!    1. Set `r.round[v].t_l = Canceled` and `r.round[v].t_a = Canceled`.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
-//!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
+//!    1. If `r = leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
 //!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
 //!    1. Call `enter_view(r, v + 1)`.
 //!
@@ -457,9 +465,10 @@
 //!    1. Assemble `finalization(c, v)`.
 //! 1. On constructing or receiving the first `finalization(c, v)`:
 //!    1. Set `r.round[v].finalization = finalization(c, v)`.
+//!    1. Call `record_proposal(r, v, c)`.
 //!    1. Set `r.last_finalized = v`.
-//!    1. Set `r.round[v].t_l = Canceled` and `r.round[v].t_a = Canceled`.
-//!    1. Mark `c` finalized and recursively finalize ancestors.
+//!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!    1. Mark `c` finalized (views `<= last_finalized` are implicitly finalized).
 //!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
 //!    1. Call `enter_view(r, v + 1)`.
 //!
@@ -1675,7 +1684,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Create engines
             let elector = L::default();
@@ -1770,7 +1779,7 @@ mod tests {
                 Action::Update(link.clone()),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Wait for nullifications to accrue
             context.sleep(Duration::from_secs(60)).await;
@@ -1782,7 +1791,7 @@ mod tests {
                 Action::Unlink,
                 Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Configure engine for first peer
             let me = participants[0].clone();
@@ -1795,7 +1804,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
-            .await;
+                .await;
 
             // Restore network connections for all online peers
             let link = Link {
@@ -1809,7 +1818,7 @@ mod tests {
                 Action::Update(link),
                 Some(|_, i, j| ![i, j].contains(&1usize)),
             )
-            .await;
+                .await;
 
             // Configure engine
             let reporter_config = mocks::reporter::Config {
@@ -1939,7 +1948,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Create engines
             let elector = L::default();
@@ -2703,7 +2712,7 @@ mod tests {
                 Action::Link(link),
                 Some(separated),
             )
-            .await;
+                .await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -2802,7 +2811,7 @@ mod tests {
                 Action::Link(degraded_link),
                 None,
             )
-            .await;
+                .await;
 
             // Create engines
             let elector = L::default();
