@@ -68,7 +68,7 @@ impl<P: PublicKey> Receiver for InertReceiver<P> {
 }
 
 /// Construct an inert point-to-point channel.
-pub fn inert_channel<P: PublicKey>() -> (InertSender<P>, InertReceiver<P>) {
+pub const fn inert_channel<P: PublicKey>() -> (InertSender<P>, InertReceiver<P>) {
     (
         InertSender {
             _phantom: PhantomData,

@@ -84,14 +84,8 @@ impl Scenario {
         if let Some(round) = self.rounds.get(idx) {
             let sender_idx = participants
                 .iter()
-                .position(|participant| participant == sender);
-            assert!(
-                sender_idx.is_some(),
-                "sender missing from runtime participant list"
-            );
-            let Some(sender_idx) = sender_idx else {
-                return SplitTarget::None;
-            };
+                .position(|participant| participant == sender)
+                .expect("sender missing from runtime participant list");
             let bit = 1u64 << sender_idx;
             let in_primary = (round.primary_mask & bit) != 0;
             let in_secondary = (round.secondary_mask & bit) != 0;
@@ -619,13 +613,16 @@ fn canonical_scenario_count(
         return *cached;
     }
 
-    let mut total = 0u128;
-    for (_, next_cells) in next_round_transitions(cells, max_partitions) {
-        let suffix = canonical_scenario_count(&next_cells, rounds - 1, max_partitions, memo)?;
-        total = total.checked_add(suffix)?;
-    }
-    memo.insert(key, Some(total));
-    Some(total)
+    let result = (|| {
+        let mut total = 0u128;
+        for (_, next_cells) in next_round_transitions(cells, max_partitions) {
+            let suffix = canonical_scenario_count(&next_cells, rounds - 1, max_partitions, memo)?;
+            total = total.checked_add(suffix)?;
+        }
+        Some(total)
+    })();
+    memo.insert(key, result);
+    result
 }
 
 /// Reconstructs the canonical scenario at a given lexicographic rank.
@@ -978,6 +975,17 @@ mod tests {
     fn generated_scenarios_fallback_sampling_is_bounded() {
         let scenarios = generate_scenarios(5, 4, 40, 3, 8);
         assert_eq!(scenarios.len(), 8);
+    }
+
+    #[test]
+    fn canonical_scenario_count_caches_overflow_results() {
+        let initial_cells = vec![4];
+        let mut memo = HashMap::new();
+        assert_eq!(
+            canonical_scenario_count(&initial_cells, 40, 3, &mut memo),
+            None
+        );
+        assert_eq!(memo.get(&(initial_cells, 40)), Some(&None));
     }
 
     #[test]
