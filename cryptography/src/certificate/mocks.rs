@@ -883,7 +883,11 @@ mod tests {
             .expect("signer must produce an attestation");
 
         let certificate = fixture.verifier.assemble::<_, N3f1>(
-            [attestation.clone(), attestation, fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap()],
+            [
+                attestation.clone(),
+                attestation,
+                fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+            ],
             &Sequential,
         );
 
