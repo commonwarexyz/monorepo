@@ -153,6 +153,7 @@ fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
     }
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn page_size() -> usize {
     #[cfg(unix)]
     {
@@ -186,7 +187,7 @@ impl AlignedBuffer {
     }
 
     #[inline]
-    fn as_mut_ptr(&self) -> *mut u8 {
+    const fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 }

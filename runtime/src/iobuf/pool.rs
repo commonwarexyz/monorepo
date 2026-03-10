@@ -482,6 +482,7 @@ impl SizeClass {
         (max / (2 * effective_threads)).clamp(1, 8)
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline]
     fn local_bin_mut(&self) -> &mut Vec<AlignedBuffer> {
         let bin = self
@@ -598,7 +599,6 @@ impl BufferPoolInner {
             class: class.clone(),
         })
     }
-
 }
 
 /// A pool of reusable, aligned buffers.
