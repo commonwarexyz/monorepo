@@ -10,7 +10,7 @@ mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
-pub use pool::{BufferPool, BufferPoolConfig, PoolError};
+pub use pool::{BufferPool, BufferPoolConfig, BufferPoolMode, PoolError};
 use pool::{PooledBuf, PooledBufMut};
 use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
 
@@ -64,7 +64,8 @@ impl IoBuf {
     /// returned to the pool when the final reference is dropped.
     ///
     /// Buffers backed by [`Bytes`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// fallback allocations or small-size pool bypass allocations, return
+    /// `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
         match &self.inner {
@@ -422,7 +423,8 @@ impl IoBufMut {
     /// returned to the pool when dropped.
     ///
     /// Buffers backed by [`BytesMut`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// fallback allocations or small-size pool bypass allocations, return
+    /// `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
         match &self.inner {
