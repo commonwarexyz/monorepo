@@ -34,8 +34,8 @@ fn fuzz(input: FuzzInput) {
         pinned_nodes,
     };
 
-    let mut hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = Mmr::init(config, &mut hasher) else {
+    let hasher = StandardHasher::<Sha256>::new();
+    let Ok(mmr) = Mmr::init(config, &hasher) else {
         return;
     };
 

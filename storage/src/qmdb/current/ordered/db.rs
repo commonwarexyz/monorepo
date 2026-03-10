@@ -58,7 +58,7 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &mut H,
+        hasher: &H,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<K, H::Digest, N>,
@@ -94,7 +94,7 @@ where
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &mut H,
+        hasher: &H,
         key: &K,
         proof: &super::ExclusionProof<K, V, H::Digest, N>,
         root: &H::Digest,
@@ -154,7 +154,7 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         key: K,
     ) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
         let op_loc = self.any.get_with_loc(&key).await?;
@@ -176,7 +176,7 @@ where
     /// Returns [Error::KeyExists] if the key exists in the db.
     pub async fn exclusion_proof(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
         match self.any.get_span(key).await? {

@@ -29,7 +29,7 @@ impl<D: Digest> ProofStore<D> {
     /// resulting store can be used to generate proofs over any sub-range of the original range.
     /// Returns an error if the proof is invalid or could not be verified against the given root.
     pub fn new<H, E>(
-        hasher: &mut H,
+        hasher: &H,
         proof: &Proof<D>,
         elements: &[E],
         start_loc: Location,
@@ -172,12 +172,14 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 mod tests {
     use super::*;
     use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        let mut h = Sha256::new();
+        h.update(&[v]);
+        h.finalize()
     }
 
     #[test_traced]
@@ -185,15 +187,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&mut hasher, element);
+                    batch.add(&hasher, element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -206,7 +208,7 @@ mod tests {
                 let range = range_start..range_end;
                 let range_proof = mmr.range_proof(range.clone()).unwrap();
                 let proof_store = ProofStore::new(
-                    &mut hasher,
+                    &hasher,
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
@@ -223,7 +225,7 @@ mod tests {
                     let sub_range = subrange_start..subrange_end;
                     let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
                         root

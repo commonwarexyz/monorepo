@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new();
         let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
@@ -235,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root();
-                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                            assert!(verify_proof(&hasher, &proof, *start_loc, &log, &root));
                         }
                     }
                 }
@@ -276,7 +276,7 @@ fn fuzz(input: FuzzInput) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
+                        assert!(verify_proof(&hasher, &proof, *start_loc, &log, root));
                     }
                 }
 

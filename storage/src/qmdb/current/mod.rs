@@ -433,9 +433,9 @@ where
     .await?;
 
     // Build the grafted MMR from the bitmap and ops MMR.
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &mut hasher,
+        &hasher,
         &status,
         &pinned_nodes,
         &any.log.mmr,
@@ -447,7 +447,7 @@ where
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -517,21 +517,16 @@ where
     .await?;
 
     // Build the grafted MMR from the bitmap and ops MMR.
-    let mut hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &mut hasher,
-        &status,
-        &pinned_nodes,
-        &any.log.mmr,
-        pool.as_ref(),
-    )
-    .await?;
+    let hasher = StandardHasher::<H>::new();
+    let grafted_mmr =
+        db::build_grafted_mmr::<H, N>(&hasher, &status, &pinned_nodes, &any.log.mmr, pool.as_ref())
+            .await?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,

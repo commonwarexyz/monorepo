@@ -199,7 +199,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
         cfg: Config,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -390,7 +390,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let prune_pos = Position::try_from(cfg.range.start)?;
         let end_pos = Position::try_from(cfg.range.end)?;
@@ -803,7 +803,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
     ) -> Result<(), Error> {
         if leaves_to_remove == 0 {
             return Ok(());
@@ -944,14 +944,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let test_mmr = mem::Mmr::new(&mut hasher);
-            let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
+            let hasher: Standard<Sha256> = Standard::new();
+            let test_mmr = mem::Mmr::new(&hasher);
+            let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
             let mut journaled_mmr = Mmr::init(
                 context.clone(),
-                &mut Standard::<Sha256>::new(),
+                &Standard::<Sha256>::new(),
                 test_config(&context),
             )
             .await
@@ -960,11 +960,10 @@ mod tests {
             let changeset = {
                 let mut batch = journaled_mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
-                    batch.add(&mut hasher, &element);
+                    let element = hasher.digest(&i.to_be_bytes());
+                    batch.add(&hasher, &element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             journaled_mmr.apply(changeset).unwrap();
             assert_eq!(journaled_mmr.root(), *expected_root);
@@ -977,14 +976,10 @@ mod tests {
     fn test_journaled_mmr_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(
-                context.with_label("first"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::init(context.with_label("first"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             assert_eq!(mmr.size(), 0);
             assert!(mmr.get_node(Position::new(0)).await.is_err());
             let bounds = mmr.bounds();
@@ -993,44 +988,37 @@ mod tests {
             assert_eq!(bounds.start, 0);
             assert!(mmr.prune(Location::new(0)).await.is_ok());
             assert!(mmr.sync().await.is_ok());
-            assert!(matches!(
-                mmr.rewind(1, &mut hasher).await,
-                Err(Error::Empty)
-            ));
+            assert!(matches!(mmr.rewind(1, &hasher).await, Err(Error::Empty)));
 
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(0));
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 1);
             mmr.sync().await.unwrap();
             assert!(mmr.get_node(Position::new(0)).await.is_ok());
-            assert!(mmr.rewind(1, &mut hasher).await.is_ok());
+            assert!(mmr.rewind(1, &hasher).await.is_ok());
             assert_eq!(mmr.size(), 0);
             mmr.sync().await.unwrap();
 
-            let mut mmr = Mmr::init(
-                context.with_label("second"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("second"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             assert_eq!(mmr.size(), 0);
 
             let empty_proof = Proof::default();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             let root = mmr.root();
             assert!(empty_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &[] as &[Digest],
                 Location::new(0),
                 &root
             ));
             assert!(empty_proof.verify_multi_inclusion(
-                &mut hasher,
+                &hasher,
                 &[] as &[(Digest, Location)],
                 &root
             ));
@@ -1038,19 +1026,19 @@ mod tests {
             // Confirm empty proof no longer verifies after adding an element.
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(0));
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
             assert!(!empty_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &[] as &[Digest],
                 Location::new(0),
                 &root
             ));
             assert!(!empty_proof.verify_multi_inclusion(
-                &mut hasher,
+                &hasher,
                 &[] as &[(Digest, Location)],
                 &root
             ));
@@ -1063,10 +1051,10 @@ mod tests {
     fn test_journaled_prune_out_of_bounds_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(
                 context.with_label("oob_prune"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -1074,8 +1062,8 @@ mod tests {
 
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(0));
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1094,9 +1082,9 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
             let mut c_hasher = Sha256::new();
             let changeset = {
@@ -1104,25 +1092,25 @@ mod tests {
                 for i in 0u64..NUM_ELEMENTS {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch.add(&mut hasher, &element);
+                    batch.add(&hasher, &element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
             // Rewind one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
-                assert!(mmr.rewind(1, &mut hasher).await.is_ok());
+                assert!(mmr.rewind(1, &hasher).await.is_ok());
                 let root = mmr.root();
-                let mut reference_mmr = mem::Mmr::new(&mut hasher);
+                let mut reference_mmr = mem::Mmr::new(&hasher);
                 let changeset = {
                     let mut batch = reference_mmr.new_batch();
                     for j in 0..i {
                         c_hasher.update(&j.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&mut hasher, &element);
+                        batch.add(&hasher, &element);
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 reference_mmr.apply(changeset).unwrap();
                 assert_eq!(
@@ -1131,11 +1119,8 @@ mod tests {
                     "root mismatch after rewind at {i}"
                 );
             }
-            assert!(matches!(
-                mmr.rewind(1, &mut hasher).await,
-                Err(Error::Empty)
-            ));
-            assert!(mmr.rewind(0, &mut hasher).await.is_ok());
+            assert!(matches!(mmr.rewind(1, &hasher).await, Err(Error::Empty)));
+            assert!(mmr.rewind(0, &hasher).await.is_ok());
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and rewind 2 at a time instead of just 1.
@@ -1145,14 +1130,14 @@ mod tests {
                     for i in 0u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&mut hasher, &element);
+                        batch.add(&hasher, &element);
                         if i == 101 {
                             // We can't sync mid-batch, so finalize and apply the first part,
                             // sync, then start a new batch for the rest.
                             break;
                         }
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 mmr.sync().await.unwrap();
@@ -1161,31 +1146,25 @@ mod tests {
                     for i in 102u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&mut hasher, &element);
+                        batch.add(&hasher, &element);
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
 
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
-                assert!(
-                    mmr.rewind(2, &mut hasher).await.is_ok(),
-                    "at position {i:?}"
-                );
+                assert!(mmr.rewind(2, &hasher).await.is_ok(), "at position {i:?}");
                 let root = mmr.root();
-                let reference_mmr = mem::Mmr::new(&mut hasher);
-                let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
+                let reference_mmr = mem::Mmr::new(&hasher);
+                let reference_mmr = build_test_mmr(&hasher, reference_mmr, i);
                 assert_eq!(
                     root,
                     *reference_mmr.root(),
                     "root mismatch at position {i:?}"
                 );
             }
-            assert!(matches!(
-                mmr.rewind(99, &mut hasher).await,
-                Err(Error::Empty)
-            ));
+            assert!(matches!(mmr.rewind(99, &hasher).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
             {
@@ -1194,9 +1173,9 @@ mod tests {
                     for i in 0u64..102 {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&mut hasher, &element);
+                        batch.add(&hasher, &element);
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 mmr.sync().await.unwrap();
@@ -1205,9 +1184,9 @@ mod tests {
                     for i in 102u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&mut hasher, &element);
+                        batch.add(&hasher, &element);
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
@@ -1215,15 +1194,15 @@ mod tests {
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr.prune(prune_loc).await.unwrap();
             // Rewind enough nodes to cause the mem-mmr to be completely emptied, and then some.
-            mmr.rewind(80, &mut hasher).await.unwrap();
+            mmr.rewind(80, &hasher).await.unwrap();
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
             mmr.proof(prune_loc).await.unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > prune_pos {
-                assert!(mmr.rewind(1, &mut hasher).await.is_ok());
+                assert!(mmr.rewind(1, &hasher).await.is_ok());
             }
             assert!(matches!(
-                mmr.rewind(1, &mut hasher).await,
+                mmr.rewind(1, &hasher).await,
                 Err(Error::ElementPruned(_))
             ));
 
@@ -1239,13 +1218,13 @@ mod tests {
     fn test_journaled_mmr_rewind_error_leaves_valid_state() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
 
             // Case 1: rewind partially succeeds, then returns ElementPruned.
             let element_pruned_context = context.with_label("element_pruned_case");
             let mut mmr = Mmr::init(
                 element_pruned_context.clone(),
-                &mut hasher,
+                &hasher,
                 test_config(&element_pruned_context),
             )
             .await
@@ -1253,15 +1232,15 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..32 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.prune(Location::new(8)).await.unwrap();
             let leaves_before = mmr.leaves();
             assert!(matches!(
-                mmr.rewind(128, &mut hasher).await,
+                mmr.rewind(128, &hasher).await,
                 Err(Error::ElementPruned(_))
             ));
             // After error, leaves should reflect any partial rewinds that occurred.
@@ -1271,20 +1250,17 @@ mod tests {
             // Case 2: rewind partially succeeds, then returns Empty.
             let empty_context = context.with_label("empty_case");
             let cfg = test_config(&empty_context);
-            let mut mmr = Mmr::init(empty_context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(empty_context, &hasher, cfg).await.unwrap();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..8 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let leaves_before = mmr.leaves();
-            assert!(matches!(
-                mmr.rewind(9, &mut hasher).await,
-                Err(Error::Empty)
-            ));
+            assert!(matches!(mmr.rewind(9, &hasher).await, Err(Error::Empty)));
             // Rewind returns error without partial modification.
             assert_eq!(mmr.leaves(), leaves_before);
             mmr.destroy().await.unwrap();
@@ -1295,9 +1271,9 @@ mod tests {
     fn test_journaled_mmr_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
             // Build a test MMR with 255 leaves
             const LEAF_COUNT: usize = 255;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
@@ -1307,9 +1283,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&mut hasher, leaf);
+                    batch.add(&hasher, leaf);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), Position::new(502));
@@ -1321,7 +1297,7 @@ mod tests {
             let proof = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
             let root = mmr.root();
             assert!(proof.verify_element_inclusion(
-                &mut hasher,
+                &hasher,
                 &leaves[TEST_ELEMENT],
                 TEST_ELEMENT_LOC,
                 &root,
@@ -1339,7 +1315,7 @@ mod tests {
             let range = Location::new(TEST_ELEMENT as u64)..Location::new(LEAF_COUNT as u64);
             let proof = mmr.range_proof(range.clone()).await.unwrap();
             assert!(proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &leaves[range.to_usize_range()],
                 TEST_ELEMENT_LOC,
                 &root
@@ -1355,14 +1331,10 @@ mod tests {
     fn test_journaled_mmr_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(
-                context.with_label("first"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::init(context.with_label("first"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             assert_eq!(mmr.size(), 0);
 
             // Build a test MMR with 252 leaves
@@ -1374,9 +1346,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&mut hasher, leaf);
+                    batch.add(&hasher, leaf);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 498);
@@ -1399,13 +1371,9 @@ mod tests {
             blob.resize(len - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let mmr = Mmr::init(
-                context.with_label("second"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.with_label("second"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
             // the previous state.
             assert_eq!(mmr.size(), 498);
@@ -1413,13 +1381,9 @@ mod tests {
 
             // Make sure dropping it and re-opening it persists the recovered state.
             drop(mmr);
-            let mmr = Mmr::init(
-                context.with_label("third"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.with_label("third"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             assert_eq!(mmr.size(), 498);
 
             mmr.destroy().await.unwrap();
@@ -1430,17 +1394,14 @@ mod tests {
     fn test_journaled_mmr_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             // make sure pruning doesn't break root computation, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
             let cfg_pruned = test_config(&context);
-            let mut pruned_mmr = Mmr::init(
-                context.with_label("pruned"),
-                &mut hasher,
-                cfg_pruned.clone(),
-            )
-            .await
-            .unwrap();
+            let mut pruned_mmr =
+                Mmr::init(context.with_label("pruned"), &hasher, cfg_pruned.clone())
+                    .await
+                    .unwrap();
             let cfg_unpruned = Config {
                 journal_partition: "unpruned-journal-partition".into(),
                 metadata_partition: "unpruned-metadata-partition".into(),
@@ -1449,7 +1410,7 @@ mod tests {
                 thread_pool: None,
                 page_cache: cfg_pruned.page_cache.clone(),
             };
-            let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
+            let mut mmr = Mmr::init(context.with_label("unpruned"), &hasher, cfg_unpruned)
                 .await
                 .unwrap();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
@@ -1459,17 +1420,17 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&mut hasher, leaf);
+                    batch.add(&hasher, leaf);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let changeset = {
                 let mut batch = pruned_mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&mut hasher, leaf);
+                    batch.add(&hasher, leaf);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             pruned_mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 3994);
@@ -1487,14 +1448,14 @@ mod tests {
                 let last_leaf = leaves.last().unwrap();
                 let changeset = {
                     let mut batch = pruned_mmr.new_batch();
-                    batch.add(&mut hasher, last_leaf);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.add(&hasher, last_leaf);
+                    batch.merkleize(&hasher).finalize()
                 };
                 pruned_mmr.apply(changeset).unwrap();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&mut hasher, last_leaf);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.add(&hasher, last_leaf);
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 assert_eq!(pruned_mmr.root(), mmr.root());
@@ -1509,7 +1470,7 @@ mod tests {
             drop(pruned_mmr);
             let mut pruned_mmr = Mmr::init(
                 context.with_label("pruned_reopen"),
-                &mut hasher,
+                &hasher,
                 cfg_pruned.clone(),
             )
             .await
@@ -1528,14 +1489,14 @@ mod tests {
             // on reopening.
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(LEAF_COUNT));
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let changeset = {
                 let mut batch = pruned_mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(LEAF_COUNT));
+                batch.merkleize(&hasher).finalize()
             };
             pruned_mmr.apply(changeset).unwrap();
             assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
@@ -1543,7 +1504,7 @@ mod tests {
             drop(pruned_mmr);
             let mut pruned_mmr = Mmr::init(
                 context.with_label("pruned_reopen2"),
-                &mut hasher,
+                &hasher,
                 cfg_pruned.clone(),
             )
             .await
@@ -1565,8 +1526,8 @@ mod tests {
             while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
                 let changeset = {
                     let mut batch = pruned_mmr.new_batch();
-                    batch.add(&mut hasher, &test_digest(LEAF_COUNT));
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.add(&hasher, &test_digest(LEAF_COUNT));
+                    batch.merkleize(&hasher).finalize()
                 };
                 pruned_mmr.apply(changeset).unwrap();
             }
@@ -1584,25 +1545,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build MMR with 2000 leaves.
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             for i in 0..LEAF_COUNT {
                 leaves.push(test_digest(i));
             }
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&mut hasher, leaf);
+                    batch.add(&hasher, leaf);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 3994);
@@ -1612,13 +1569,9 @@ mod tests {
             // Prune the MMR in increments of 50, simulating a partial write after each prune.
             for i in 0usize..200 {
                 let label = format!("iter_{i}");
-                let mut mmr = Mmr::init(
-                    context.with_label(&label),
-                    &mut hasher,
-                    test_config(&context),
-                )
-                .await
-                .unwrap();
+                let mut mmr = Mmr::init(context.with_label(&label), &hasher, test_config(&context))
+                    .await
+                    .unwrap();
                 let start_size = mmr.size();
                 let start_leaves = *mmr.leaves();
                 let prune_loc = Location::new(std::cmp::min(i as u64 * 50, start_leaves));
@@ -1634,18 +1587,18 @@ mod tests {
                     leaves.push(digest);
                     let changeset = {
                         let mut batch = mmr.new_batch();
-                        batch.add(&mut hasher, leaves.last().unwrap());
-                        batch.add(&mut hasher, leaves.last().unwrap());
-                        batch.merkleize(&mut hasher).finalize()
+                        batch.add(&hasher, leaves.last().unwrap());
+                        batch.add(&hasher, leaves.last().unwrap());
+                        batch.merkleize(&hasher).finalize()
                     };
                     mmr.apply(changeset).unwrap();
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let changeset = {
                         let mut batch = mmr.new_batch();
-                        batch.add(&mut hasher, leaves.last().unwrap());
-                        batch.add(&mut hasher, leaves.last().unwrap());
-                        batch.merkleize(&mut hasher).finalize()
+                        batch.add(&hasher, leaves.last().unwrap());
+                        batch.add(&hasher, leaves.last().unwrap());
+                        batch.merkleize(&hasher).finalize()
                     };
                     mmr.apply(changeset).unwrap();
                 }
@@ -1657,13 +1610,9 @@ mod tests {
                     .unwrap();
             }
 
-            let mmr = Mmr::init(
-                context.with_label("final"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.with_label("final"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             mmr.destroy().await.unwrap();
         });
     }
@@ -1673,9 +1622,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create MMR with 10 elements
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
             let mut elements = Vec::new();
             for i in 0..10 {
                 elements.push(test_digest(i));
@@ -1683,9 +1632,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let original_leaves = mmr.leaves();
@@ -1698,7 +1647,7 @@ mod tests {
             assert_eq!(historical_proof.leaves, original_leaves);
             let root = mmr.root();
             assert!(historical_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &elements[2..6],
                 Location::new(2),
                 &root
@@ -1717,9 +1666,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements[10..20] {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let new_historical_proof = mmr
@@ -1737,14 +1686,10 @@ mod tests {
     fn test_journaled_mmr_historical_proof_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                context.with_label("main"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.with_label("main"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             // Add many elements
             let mut elements = Vec::new();
@@ -1754,9 +1699,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1767,7 +1712,7 @@ mod tests {
             // Create reference MMR for verification to get correct size
             let mut ref_mmr = Mmr::init(
                 context.with_label("ref"),
-                &mut hasher,
+                &hasher,
                 Config {
                     journal_partition: "ref-journal-pruned".into(),
                     metadata_partition: "ref-metadata-pruned".into(),
@@ -1783,9 +1728,9 @@ mod tests {
             let changeset = {
                 let mut batch = ref_mmr.new_batch();
                 for elt in elements.iter().take(41) {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             ref_mmr.apply(changeset).unwrap();
             let historical_leaves = ref_mmr.leaves();
@@ -1801,7 +1746,7 @@ mod tests {
 
             // Verify proof works despite pruning
             assert!(historical_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &elements[35..39],
                 Location::new(35),
                 &historical_root
@@ -1816,11 +1761,11 @@ mod tests {
     fn test_journaled_mmr_historical_proof_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             let mut mmr = Mmr::init(
                 context.with_label("server"),
-                &mut hasher,
+                &hasher,
                 Config {
                     journal_partition: "server-journal".into(),
                     metadata_partition: "server-metadata".into(),
@@ -1840,9 +1785,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1851,7 +1796,7 @@ mod tests {
             // Only apply elements up to end_loc to the reference MMR.
             let mut ref_mmr = Mmr::init(
                 context.with_label("client"),
-                &mut hasher,
+                &hasher,
                 Config {
                     journal_partition: "client-journal".into(),
                     metadata_partition: "client-metadata".into(),
@@ -1868,9 +1813,9 @@ mod tests {
             let changeset = {
                 let mut batch = ref_mmr.new_batch();
                 for elt in elements.iter().take(*range.end as usize) {
-                    batch.add(&mut hasher, elt);
+                    batch.add(&hasher, elt);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             ref_mmr.apply(changeset).unwrap();
             let historical_leaves = ref_mmr.leaves();
@@ -1883,7 +1828,7 @@ mod tests {
                 .unwrap();
 
             assert!(proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range.start,
                 &expected_root // Compare to historical (reference) root
@@ -1898,15 +1843,15 @@ mod tests {
     fn test_journaled_mmr_historical_proof_singleton() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
             let element = test_digest(0);
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &element);
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &element);
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1918,7 +1863,7 @@ mod tests {
 
             let root = mmr.root();
             assert!(single_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &[element],
                 Location::new(0),
                 &root
@@ -1933,7 +1878,7 @@ mod tests {
     fn test_journaled_mmr_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<sha256::Digest> {
@@ -1942,7 +1887,7 @@ mod tests {
                 pinned_nodes: None,
             };
 
-            let mut sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
+            let mut sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -1956,8 +1901,8 @@ mod tests {
             let new_element = test_digest(999);
             let changeset = {
                 let mut batch = sync_mmr.new_batch();
-                batch.add(&mut hasher, &new_element);
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &new_element);
+                batch.merkleize(&hasher).finalize()
             };
             sync_mmr.apply(changeset).unwrap();
 
@@ -1973,22 +1918,18 @@ mod tests {
     fn test_journaled_mmr_init_sync_nonempty_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2017,7 +1958,7 @@ mod tests {
             mmr.sync().await.unwrap();
             drop(mmr);
 
-            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2045,22 +1986,18 @@ mod tests {
     fn test_journaled_mmr_init_sync_partial_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..30 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2091,7 +2028,7 @@ mod tests {
             mmr.sync().await.unwrap();
             drop(mmr);
 
-            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2122,24 +2059,20 @@ mod tests {
     fn test_journaled_mmr_init_stale_metadata_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data and prune it
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             // Add 50 elements
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2171,7 +2104,7 @@ mod tests {
             // stored in metadata at the lower position)
             let result = Mmr::<_, Digest>::init(
                 context.with_label("reopened"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await;
@@ -2191,24 +2124,20 @@ mod tests {
     fn test_journaled_mmr_init_metadata_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             // Add 50 elements
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2224,7 +2153,7 @@ mod tests {
             // journal boundary (metadata says 30, journal is section-aligned to 28)
             let mmr = Mmr::init(
                 context.with_label("reopened"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -2248,7 +2177,7 @@ mod tests {
     fn test_journaled_mmr_init_sync_computes_pinned_nodes_before_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Use small items_per_blob to create many sections and trigger pruning.
             let cfg = Config {
@@ -2261,15 +2190,15 @@ mod tests {
             };
 
             // Create MMR with enough elements to span multiple sections.
-            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, cfg.clone())
                 .await
                 .unwrap();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..100 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2289,7 +2218,7 @@ mod tests {
                 pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
             };
 
-            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
                 .await
                 .unwrap();
 
@@ -2306,22 +2235,18 @@ mod tests {
     fn test_journaled_mmr_historical_proof_pruned_elements() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..64 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2346,9 +2271,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..8 {
-                    batch.add(&mut hasher, &test_digest(10_000 + i));
+                    batch.add(&hasher, &test_digest(10_000 + i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2366,21 +2291,17 @@ mod tests {
     fn test_journaled_mmr_append_while_historical_proof_is_available() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..20 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2390,9 +2311,9 @@ mod tests {
             // Appends should remain allowed while historical proofs are available.
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &test_digest(100));
-                batch.add(&mut hasher, &test_digest(101));
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, &test_digest(100));
+                batch.add(&hasher, &test_digest(101));
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2415,21 +2336,17 @@ mod tests {
     fn test_journaled_mmr_historical_proof_after_sync_reads_from_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..64 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2465,21 +2382,17 @@ mod tests {
     fn test_journaled_mmr_historical_proof_after_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                context.with_label("init"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..30 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2499,16 +2412,12 @@ mod tests {
     fn test_journaled_mmr_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             // Case 1: Empty MMR.
-            let mmr = Mmr::init(
-                context.with_label("empty"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.with_label("empty"), &hasher, test_config(&context))
+                .await
+                .unwrap();
             let empty_end = Location::new(0);
             let empty_result = mmr
                 .historical_range_proof(empty_end, empty_end..empty_end)
@@ -2526,7 +2435,7 @@ mod tests {
             // Case 2: MMR has nodes but is fully pruned.
             let mut mmr = Mmr::init(
                 context.with_label("fully_pruned"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -2534,9 +2443,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..20 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let end = mmr.leaves();
@@ -2554,7 +2463,7 @@ mod tests {
             // Case 3: All nodes but one (single leaf) are pruned.
             let mut mmr = Mmr::init(
                 context.with_label("single_leaf"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -2562,9 +2471,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..11 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let end = mmr.leaves();
@@ -2589,21 +2498,17 @@ mod tests {
     fn test_journaled_mmr_historical_proof_out_of_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(
-                context.with_label("oob"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.with_label("oob"), &hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..8 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let requested = mmr.leaves() + 1;
@@ -2624,10 +2529,10 @@ mod tests {
     fn test_journaled_mmr_historical_proof_range_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(
                 context.with_label("range_validation"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -2636,9 +2541,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..32 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2699,10 +2604,10 @@ mod tests {
     fn test_journaled_mmr_historical_proof_non_size_prune_excludes_pruned_leaves() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(
                 context.with_label("non_size_prune"),
-                &mut hasher,
+                &hasher,
                 test_config(&context),
             )
             .await
@@ -2711,9 +2616,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..16 {
-                    batch.add(&mut hasher, &test_digest(i));
+                    batch.add(&hasher, &test_digest(i));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -2752,12 +2657,12 @@ mod tests {
     fn test_journaled_mmr_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
 
             // Build base journaled MMR with 10 elements.
             let mut mmr = Mmr::init(
                 context.clone(),
-                &mut Standard::<Sha256>::new(),
+                &Standard::<Sha256>::new(),
                 test_config(&context),
             )
             .await
@@ -2766,11 +2671,10 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..10 {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
-                    batch.add(&mut hasher, &element);
+                    let element = hasher.digest(&i.to_be_bytes());
+                    batch.add(&hasher, &element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             mmr.sync().await.unwrap();
@@ -2778,20 +2682,18 @@ mod tests {
             // Batch A: add 5 elements.
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch_a.add(&mut hasher, &element);
+                let element = hasher.digest(&i.to_be_bytes());
+                batch_a.add(&hasher, &element);
             }
-            let merkleized_a = batch_a.merkleize(&mut hasher);
+            let merkleized_a = batch_a.merkleize(&hasher);
 
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
-                batch_b.add(&mut hasher, &element);
+                let element = hasher.digest(&i.to_be_bytes());
+                batch_b.add(&hasher, &element);
             }
-            let merkleized_b = batch_b.merkleize(&mut hasher);
+            let merkleized_b = batch_b.merkleize(&hasher);
             let expected_root = merkleized_b.root();
 
             // Flatten and apply.
@@ -2801,8 +2703,8 @@ mod tests {
             assert_eq!(mmr.root(), expected_root);
 
             // Build a reference in-memory MMR with 20 elements to verify.
-            let empty = mem::Mmr::new(&mut hasher);
-            let reference = build_test_mmr(&mut hasher, empty, 20);
+            let empty = mem::Mmr::new(&hasher);
+            let reference = build_test_mmr(&hasher, empty, 20);
             assert_eq!(mmr.root(), *reference.root());
 
             mmr.destroy().await.unwrap();
@@ -2813,10 +2715,10 @@ mod tests {
     fn test_stale_changeset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(
                 context.clone(),
-                &mut Standard::<Sha256>::new(),
+                &Standard::<Sha256>::new(),
                 test_config(&context),
             )
             .await
@@ -2825,13 +2727,13 @@ mod tests {
             // Create two batches from the same base.
             let changeset_a = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-a");
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, b"leaf-a");
+                batch.merkleize(&hasher).finalize()
             };
             let changeset_b = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-b");
-                batch.merkleize(&mut hasher).finalize()
+                batch.add(&hasher, b"leaf-b");
+                batch.merkleize(&hasher).finalize()
             };
 
             // Apply A -- should succeed.

@@ -34,7 +34,7 @@ pub struct RangeProof<D: Digest> {
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>, const N: usize>(
-        hasher: &mut H,
+        _hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         range: Range<Location>,
@@ -46,8 +46,9 @@ impl<D: Digest> RangeProof<D> {
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
             // in the proof.
-            hasher.update(last_chunk);
-            Some(hasher.finalize())
+            let mut h = H::new();
+            h.update(last_chunk);
+            Some(h.finalize())
         } else {
             None
         };
@@ -74,7 +75,7 @@ impl<D: Digest> RangeProof<D> {
         S: Storage<D>,
         const N: usize,
     >(
-        hasher: &mut H,
+        hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         log: &C,
@@ -126,7 +127,7 @@ impl<D: Digest> RangeProof<D> {
     /// the db with the provided root, and having the activity status described by `chunks`.
     pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
         &self,
-        hasher: &mut H,
+        _hasher: &H,
         start_loc: Location,
         ops: &[O],
         chunks: &[[u8; N]],
@@ -167,7 +168,7 @@ impl<D: Digest> RangeProof<D> {
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_idx = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
-        let mut verifier =
+        let verifier =
             grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
@@ -198,10 +199,7 @@ impl<D: Digest> RangeProof<D> {
         }
 
         // Reconstruct the grafted MMR root from the proof.
-        let mmr_root = match self
-            .proof
-            .reconstruct_root(&mut verifier, &elements, start_loc)
-        {
+        let mmr_root = match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -210,14 +208,15 @@ impl<D: Digest> RangeProof<D> {
         };
 
         // Compute the canonical root and compare.
-        hasher.update(&self.ops_root);
-        hasher.update(&mmr_root);
+        let mut h = H::new();
+        h.update(&self.ops_root);
+        h.update(&mmr_root);
         if has_partial_chunk {
             // partial_chunk_digest is guaranteed Some by the check above.
-            hasher.update(&next_bit.to_be_bytes());
-            hasher.update(self.partial_chunk_digest.as_ref().unwrap());
+            h.update(&next_bit.to_be_bytes());
+            h.update(self.partial_chunk_digest.as_ref().unwrap());
         }
-        let reconstructed_root = hasher.finalize();
+        let reconstructed_root = h.finalize();
         reconstructed_root == *root
     }
 }
@@ -243,7 +242,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
-        hasher: &mut H,
+        hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         loc: Location,
@@ -266,7 +265,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// `root`.
     pub fn verify<H: CHasher<Digest = D>, O: Codec>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         operation: O,
         root: &D,
     ) -> bool {

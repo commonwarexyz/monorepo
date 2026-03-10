@@ -44,9 +44,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 async fn fuzz(input: FuzzInput) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+    let hasher: Standard<Sha256> = Standard::new();
     let Ok(proof_store) = ProofStore::new(
-        &mut hasher,
+        &hasher,
         &input.proof,
         &input.elements,
         input.start_loc,
@@ -56,15 +56,11 @@ async fn fuzz(input: FuzzInput) {
     };
 
     if let Ok(proof) = proof_store.range_proof(input.range).await {
-        let _ = proof.verify_range_inclusion(
-            &mut hasher,
-            &input.elements,
-            input.start_loc,
-            &input.root,
-        );
+        let _ =
+            proof.verify_range_inclusion(&hasher, &input.elements, input.start_loc, &input.root);
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
-            &mut hasher,
+            &hasher,
             &input.elements,
             input.start_loc,
             &input.root,
@@ -73,7 +69,7 @@ async fn fuzz(input: FuzzInput) {
 
     if let Ok(proof) = proof_store.multi_proof(input.locations.as_slice()).await {
         let _ = proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &input
                 .locations
                 .iter()
@@ -83,7 +79,7 @@ async fn fuzz(input: FuzzInput) {
         );
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
-            &mut hasher,
+            &hasher,
             &input.elements,
             input.start_loc,
             &input.root,

@@ -297,7 +297,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("recovery must succeed");
 
-            let mut hasher = Sha256::new();
+            let hasher = Sha256::new();
 
             // Verify all committed KV pairs survived the crash and are provable.
             let root = db.root();
@@ -313,11 +313,11 @@ fn fuzz(input: FuzzInput) {
                 );
 
                 let proof = db
-                    .key_value_proof(&mut hasher, k.clone())
+                    .key_value_proof(&hasher, k.clone())
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    Db::verify_key_value_proof(&hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -328,11 +328,11 @@ fn fuzz(input: FuzzInput) {
             for i in floor..size {
                 let loc = Location::new(i);
                 let (proof, ops, chunks) = db
-                    .range_proof(&mut hasher, loc, NZU64!(4))
+                    .range_proof(&hasher, loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }

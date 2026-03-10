@@ -54,7 +54,7 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &mut H,
+        hasher: &H,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<H::Digest, N>,
@@ -87,7 +87,7 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         key: K,
     ) -> Result<KeyValueProof<H::Digest, N>, Error> {
         let op_loc = self.any.get_with_loc(&key).await?;

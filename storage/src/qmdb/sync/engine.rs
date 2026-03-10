@@ -420,7 +420,7 @@ where
 
         // Verify the proof
         let proof_valid = qmdb::verify_proof(
-            &mut self.hasher,
+            &self.hasher,
             &proof,
             start_loc,
             &operations,

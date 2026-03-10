@@ -113,7 +113,7 @@ pub mod partitioned {
 mod test {
     use crate::{
         kv::tests::{assert_gettable, assert_send},
-        mmr::{hasher::Hasher as _, Location, StandardHasher},
+        mmr::Location,
         qmdb::{
             any::ordered::variable::Operation,
             current::{
@@ -151,7 +151,7 @@ mod test {
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = Sha256::new();
             let partition = "build-small".into();
             let mut db = open_db(context, partition).await;
 
@@ -168,32 +168,24 @@ mod test {
             db.apply_batch(finalized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
 
             // Proof should be verifiable against current root.
             let root = db.root();
             assert!(CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                k,
-                v1,
-                &proof,
-                &root,
+                &hasher, k, v1, &proof, &root,
             ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
             // Proof should not verify against a mangled next_key.
             let mut mangled_proof = proof.clone();
             mangled_proof.next_key = Sha256::fill(0xFF);
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &hasher,
                 k,
                 v1,
                 &mangled_proof,
@@ -213,37 +205,22 @@ mod test {
 
             // New value should not be verifiable against the old proof.
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                k,
-                v2,
-                &proof,
-                &root,
+                &hasher, k, v2, &proof, &root,
             ));
             // Old value will not verify against new proof.
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                k,
-                v1,
-                &proof,
-                &root,
+                &hasher, k, v1, &proof, &root,
             ));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (p, _, chunks) = db
-                .range_proof(hasher.inner(), op_loc, NZU64!(1))
-                .await
-                .unwrap();
+            let (p, _, chunks) = db.range_proof(&hasher, op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = KeyValueProof {
                 proof: OperationProof {
                     loc: op_loc,
@@ -260,7 +237,7 @@ mod test {
                 next_key: k,
             });
             assert!(CurrentTest::verify_range_proof(
-                hasher.inner(),
+                &hasher,
                 &proof_inactive.proof.range_proof,
                 proof_inactive.proof.loc,
                 &[op],
@@ -270,7 +247,7 @@ mod test {
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &hasher,
                 k,
                 v1,
                 &proof_inactive,
@@ -290,7 +267,7 @@ mod test {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -310,7 +287,7 @@ mod test {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.chunk = modified_chunk;
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -326,7 +303,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".into();
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = Sha256::new();
             let db = open_db(context.clone(), partition).await;
             let root = db.root();
 
@@ -338,7 +315,7 @@ mod test {
                 ops_root: Digest::EMPTY,
             };
             assert!(!CurrentTest::verify_range_proof(
-                hasher.inner(),
+                &hasher,
                 &proof,
                 Location::new(0),
                 &[],
@@ -362,26 +339,17 @@ mod test {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::new(loc);
-                let (proof, ops, chunks) = db
-                    .range_proof(hasher.inner(), loc, NZU64!(max_ops))
-                    .await
-                    .unwrap();
+                let (proof, ops, chunks) =
+                    db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(
-                        hasher.inner(),
-                        &proof,
-                        loc,
-                        &ops,
-                        &chunks,
-                        &root
-                    ),
+                    CurrentTest::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
                 assert!(!CurrentTest::verify_range_proof(
-                    hasher.inner(),
+                    &hasher,
                     &proof,
                     loc,
                     &ops,
@@ -399,7 +367,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = Sha256::new();
             let db = open_db(context.clone(), partition.clone()).await;
             let mut db = apply_random_ops::<CurrentTest>(500, true, context.next_u64(), db)
                 .await
@@ -410,7 +378,7 @@ mod test {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(hasher.inner(), bad_key).await;
+            let res = db.key_value_proof(&hasher, bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
@@ -426,40 +394,28 @@ mod test {
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
-                let proof = db.key_value_proof(hasher.inner(), key).await.unwrap();
+                let proof = db.key_value_proof(&hasher, key).await.unwrap();
 
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
-                    key,
-                    value,
-                    &proof,
-                    &root
+                    &hasher, key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
                 let wrong_val = Sha256::hash(&[0xFF]);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
-                    key,
-                    wrong_val,
-                    &proof,
-                    &root
+                    &hasher, key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::hash(&[0xEE]);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
-                    wrong_key,
-                    value,
-                    &proof,
-                    &root
+                    &hasher, wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::hash(&[0xDD]);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
+                    &hasher,
                     key,
                     value,
                     &proof,
@@ -469,11 +425,7 @@ mod test {
                 let mut bad_proof = proof.clone();
                 bad_proof.next_key = wrong_key;
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
-                    key,
-                    value,
-                    &bad_proof,
-                    &root,
+                    &hasher, key, value, &bad_proof, &root,
                 ));
             }
 
@@ -487,7 +439,7 @@ mod test {
     pub fn test_current_db_proving_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = Sha256::new();
             let partition = "build-small".into();
             let mut db = open_db(context, partition).await;
 
@@ -508,14 +460,14 @@ mod test {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
-                    CurrentTest::verify_key_value_proof(hasher.inner(), k, v, &proof, &root),
+                    CurrentTest::verify_key_value_proof(&hasher, k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), k, old_val, &proof, &root),
+                    !CurrentTest::verify_key_value_proof(&hasher, k, old_val, &proof, &root),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
@@ -530,7 +482,7 @@ mod test {
     pub fn test_current_db_exclusion_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = Sha256::new();
             let partition = "exclusion-proofs".into();
             let mut db = open_db(context, partition).await;
 
@@ -538,12 +490,9 @@ mod test {
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root();
-            let empty_proof = db
-                .exclusion_proof(hasher.inner(), &key_exists_1)
-                .await
-                .unwrap();
+            let empty_proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &empty_proof,
                 &empty_root,
@@ -562,40 +511,34 @@ mod test {
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
-            let result = db.exclusion_proof(hasher.inner(), &key_exists_1).await;
+            let result = db.exclusion_proof(&hasher, &key_exists_1).await;
             assert!(matches!(result, Err(Error::KeyExists)));
 
             // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
-            let proof = db
-                .exclusion_proof(hasher.inner(), &greater_key)
-                .await
-                .unwrap();
-            let proof2 = db
-                .exclusion_proof(hasher.inner(), &lesser_key)
-                .await
-                .unwrap();
+            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
+            let proof2 = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
 
             // Since there's only one span in the DB, the two exclusion proofs should be identical,
             // and the proof should verify any key but the one that exists in the db.
             assert_eq!(proof, proof2);
             // Any key except the one that exists should verify against this proof.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
@@ -620,59 +563,50 @@ mod test {
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
             let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
-            let proof = db
-                .exclusion_proof(hasher.inner(), &greater_key)
-                .await
-                .unwrap();
+            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &middle_key,
                 &proof,
                 &root,
             ));
 
             // Due to the cycle, lesser & greater keys should produce the same proof.
-            let new_proof = db
-                .exclusion_proof(hasher.inner(), &lesser_key)
-                .await
-                .unwrap();
+            let new_proof = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
             assert_eq!(proof, new_proof);
 
             // Test the inner span [k, k2).
-            let proof = db
-                .exclusion_proof(hasher.inner(), &middle_key)
-                .await
-                .unwrap();
+            let proof = db.exclusion_proof(&hasher, &middle_key).await.unwrap();
             // `k` should fail since it's in the db.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &middle_key,
                 &proof,
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -680,7 +614,7 @@ mod test {
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &conflicting_middle_key,
                 &proof,
                 &root,
@@ -688,13 +622,13 @@ mod test {
 
             // Using lesser/greater keys for the middle-proof should fail.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
@@ -719,18 +653,15 @@ mod test {
             assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
-            let proof = db
-                .exclusion_proof(hasher.inner(), &key_exists_1)
-                .await
-                .unwrap();
+            let proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -738,13 +669,13 @@ mod test {
 
             // Try fooling the verifier with improper values.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &empty_proof, // wrong proof
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &hasher,
                 &key_exists_1,
                 &proof,
                 &empty_root, // wrong root
