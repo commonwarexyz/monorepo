@@ -288,6 +288,31 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some((is_retry, nullify))
     }
 
+    /// Returns the best certificate for `view` to help peers enter `view + 1`.
+    ///
+    /// Finalization is strongest, then nullification, then notarization.
+    pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
+        if view == GENESIS_VIEW {
+            return None;
+        }
+
+        // Prefer finalizations since they are the strongest proof available.
+        // Prefer nullifications over notarizations because a nullification
+        // overwrites an uncertified notarization (if we only heard notarizations,
+        // we may never exit a view with an uncertifiable notarization).
+        #[allow(clippy::option_if_let_else)]
+        if let Some(finalization) = self.finalization(view).cloned() {
+            Some(Certificate::Finalization(finalization))
+        } else if let Some(nullification) = self.nullification(view).cloned() {
+            Some(Certificate::Nullification(nullification))
+        } else if let Some(notarization) = self.notarization(view).cloned() {
+            Some(Certificate::Notarization(notarization))
+        } else {
+            warn!(%view, "entry certificate not found");
+            None
+        }
+    }
+
     /// Inserts a notarization certificate and prepares the next view's leader.
     ///
     /// Does not advance into the next view until certification passes.
@@ -306,27 +331,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         result
     }
 
-    /// Returns the best certificate for `view` to help peers enter `view + 1`.
-    ///
-    /// Finalization is strongest, then nullification, then notarization.
-    pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
-        if view == GENESIS_VIEW {
-            return None;
-        }
-
-        #[allow(clippy::option_if_let_else)]
-        if let Some(finalization) = self.finalization(view).cloned() {
-            Some(Certificate::Finalization(finalization))
-        } else if let Some(nullification) = self.nullification(view).cloned() {
-            Some(Certificate::Nullification(nullification))
-        } else if let Some(notarization) = self.notarization(view).cloned() {
-            Some(Certificate::Notarization(notarization))
-        } else {
-            warn!(%view, "entry certificate not found");
-            None
-        }
-    }
-
     /// Inserts a nullification certificate and advances into the next view.
     ///
     /// Unlike finalization, nullification does not cancel pending certification work for the
@@ -336,9 +340,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// the other considers invalid with no way to resolve the conflict).
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
-        let next = view.next();
-        self.enter_view(next);
-        self.set_leader(next, Some(&nullification.certificate));
+        self.enter_view(view.next());
+        self.set_leader(view.next(), Some(&nullification.certificate));
 
         // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
@@ -375,9 +378,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             }
         }
 
-        let next = view.next();
-        self.enter_view(next);
-        self.set_leader(next, Some(&finalization.certificate));
+        self.enter_view(view.next());
+        self.set_leader(view.next(), Some(&finalization.certificate));
         self.create_round(view).add_finalization(finalization)
     }
 
