@@ -5846,9 +5846,8 @@ mod tests {
                 }
             }
 
-            let honest_start = reporters.len();
-
             // Create honest engines.
+            let honest_start = reporters.len();
             for (idx, validator) in participants.iter().enumerate() {
                 if twin_index_set.contains(&idx) {
                     continue;
