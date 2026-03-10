@@ -399,7 +399,7 @@ mod tests {
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, secp256r1, Scheme,
+                ed25519, mock, secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -413,7 +413,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::mocks::{self as certificate_mocks, Fixture, SubjectFamily},
+        certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
         Hasher as _, Sha256, Signer as _,
@@ -445,15 +445,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    #[derive(Clone, Copy, Debug)]
-    struct SimplexSubjectFamily;
-
-    impl SubjectFamily for SimplexSubjectFamily {
-        type Namespace = crate::simplex::scheme::Namespace;
-        type Subject<'a, DigestImpl: commonware_cryptography::Digest> =
-            crate::simplex::types::Subject<'a, DigestImpl>;
-    }
 
     #[test]
     fn test_interesting() {
@@ -6117,7 +6108,7 @@ mod tests {
                 jitter: Duration::from_secs(1),
                 success_rate: 1.0,
             },
-            certificate_mocks::fixture::<SimplexSubjectFamily, _>,
+            mock::fixture,
         );
     }
 }

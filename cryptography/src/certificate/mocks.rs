@@ -1,26 +1,22 @@
 //! Mocks for certificate signing schemes.
 
-use super::{Attestation, Namespace as _, Scheme, Signers, Subject};
+use super::{Attestation, Scheme, Signers, Subject, Verification};
 use crate::{
-    ed25519::{
-        certificate::mocks::participants as identity_participants, PrivateKey, PublicKey,
-    },
-    Digest,
+    ed25519::{PrivateKey, PublicKey},
+    Digest, Signer as _,
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
-use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Quorum, Set},
     sequence::U64,
     sync::Mutex,
-    Participant,
+    Faults, Participant,
 };
-use core::{fmt, marker::PhantomData};
-use rand::{CryptoRng, RngCore};
+use core::fmt;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     vec::Vec,
 };
@@ -37,15 +33,6 @@ pub struct Fixture<S> {
     pub schemes: Vec<S>,
     /// A single scheme verifier.
     pub verifier: S,
-}
-
-/// A family of certificate subjects that share a common namespace type.
-pub trait SubjectFamily: Send + Sync + 'static {
-    /// Namespace derived from the base namespace for all subjects in this family.
-    type Namespace: super::Namespace;
-
-    /// Subject type for signing and verification.
-    type Subject<'a, D: Digest>: Subject<Namespace = Self::Namespace>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -76,6 +63,11 @@ struct Ledger {
     next_certificate: u64,
     certificates: HashMap<u64, StoredCertificate>,
 }
+
+/// Shared state for ledger-backed mock schemes created by the same test fixture.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct SharedLedger(Arc<Mutex<Ledger>>);
 
 /// Cheap certificate type backed by a shared in-memory ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -108,116 +100,87 @@ impl Read for Certificate {
     }
 }
 
-/// Test-only signing scheme backed by a shared in-memory ledger.
+/// Generic ledger-backed certificate implementation.
 ///
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
 /// if the corresponding subject was previously recorded in the shared ledger.
-pub struct LedgerScheme<F: SubjectFamily> {
+#[doc(hidden)]
+pub struct Generic<N: super::Namespace> {
     me: Option<Participant>,
     participants: Set<PublicKey>,
-    namespace: F::Namespace,
-    ledger: Arc<Mutex<Ledger>>,
-    _family: PhantomData<fn() -> F>,
+    namespace: N,
+    ledger: SharedLedger,
 }
 
-impl<F: SubjectFamily> fmt::Debug for LedgerScheme<F> {
+impl<N: super::Namespace> fmt::Debug for Generic<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LedgerScheme")
+        f.debug_struct("Generic")
             .field("me", &self.me)
             .field("participants", &self.participants)
             .finish_non_exhaustive()
     }
 }
 
-impl<F: SubjectFamily> Clone for LedgerScheme<F> {
+impl<N: super::Namespace> Clone for Generic<N> {
     fn clone(&self) -> Self {
         Self {
             me: self.me,
             participants: self.participants.clone(),
             namespace: self.namespace.clone(),
             ledger: self.ledger.clone(),
-            _family: PhantomData,
         }
     }
 }
 
-impl<F: SubjectFamily> LedgerScheme<F> {
-    fn new(
+impl<N: super::Namespace> Generic<N> {
+    /// Creates a signer bound to the participant derived from `private_key`.
+    pub fn signer(
         namespace: &[u8],
         participants: Set<PublicKey>,
-        me: Option<Participant>,
-        ledger: Arc<Mutex<Ledger>>,
-    ) -> Self {
-        Self {
-            me,
+        private_key: PrivateKey,
+        ledger: SharedLedger,
+    ) -> Option<Self> {
+        let public_key = private_key.public_key();
+        let me = participants.index(&public_key)?;
+        Some(Self {
+            me: Some(me),
             participants,
-            namespace: F::Namespace::derive(namespace),
+            namespace: N::derive(namespace),
             ledger,
-            _family: PhantomData,
+        })
+    }
+
+    /// Creates a verifier sharing the provided ledger state.
+    pub fn verifier(namespace: &[u8], participants: Set<PublicKey>, ledger: SharedLedger) -> Self {
+        Self {
+            me: None,
+            participants,
+            namespace: N::derive(namespace),
+            ledger,
         }
     }
-}
 
-/// Builds a shared mock scheme fixture that keeps real participant identities
-/// but replaces expensive cryptographic checks with ledger lookups.
-pub fn fixture<F, R>(rng: &mut R, namespace: &[u8], n: u32) -> Fixture<LedgerScheme<F>>
-where
-    F: SubjectFamily,
-    R: RngCore + CryptoRng,
-{
-    assert!(n > 0);
-
-    let associated = identity_participants(rng, n);
-    let participants = associated.keys().clone();
-    let participants_vec: Vec<_> = participants.clone().into();
-    let private_keys = participants_vec
-        .iter()
-        .map(|public_key| {
-            associated
-                .get_value(public_key)
-                .expect("participant key must have an associated private key")
-                .clone()
-        })
-        .collect();
-
-    let ledger = Arc::new(Mutex::new(Ledger::default()));
-    let schemes = participants_vec
-        .iter()
-        .map(|public_key| {
-            let me = participants
-                .index(public_key)
-                .expect("fixture participant must be indexed");
-            LedgerScheme::new(namespace, participants.clone(), Some(me), ledger.clone())
-        })
-        .collect();
-
-    Fixture {
-        participants: participants_vec,
-        private_keys,
-        schemes,
-        verifier: LedgerScheme::new(namespace, participants, None, ledger),
-    }
-}
-
-impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
-    type Subject<'a, D: Digest> = F::Subject<'a, D>;
-    type PublicKey = PublicKey;
-    type Signature = U64;
-    type Certificate = Certificate;
-
-    fn me(&self) -> Option<Participant> {
+    /// Returns the index of "self" in the participant set, if available.
+    pub const fn me(&self) -> Option<Participant> {
         self.me
     }
 
-    fn participants(&self) -> &Set<Self::PublicKey> {
+    /// Returns the ordered participant set.
+    pub const fn participants(&self) -> &Set<PublicKey> {
         &self.participants
     }
 
-    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
+    /// Signs a subject and returns a cheap synthetic signature ID.
+    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    where
+        S: Scheme<Signature = U64>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        D: Digest,
+    {
         let signer = self.me?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
-        let mut ledger = self.ledger.lock();
+        let mut ledger = self.ledger.0.lock();
         let signature_id = ledger.next_signature;
         ledger.next_signature = ledger.next_signature.wrapping_add(1);
         ledger
@@ -232,15 +195,15 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
         })
     }
 
-    fn verify_attestation<R, D>(
+    /// Verifies a single ledger-backed attestation.
+    pub fn verify_attestation<'a, S, D>(
         &self,
-        _rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        attestation: &Attestation<Self>,
-        _strategy: &impl Strategy,
+        subject: S::Subject<'a, D>,
+        attestation: &Attestation<S>,
     ) -> bool
     where
-        R: CryptoRngCore,
+        S: Scheme<Signature = U64>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
@@ -252,7 +215,7 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let signature_id = u64::from(signature);
-        let ledger = self.ledger.lock();
+        let ledger = self.ledger.0.lock();
         ledger
             .signatures
             .get(&attestation.signer)
@@ -260,20 +223,45 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
             == Some(&expected_subject)
     }
 
-    fn assemble<I, M>(
+    /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
+    pub fn verify_attestations<'a, S, R, D, I>(
         &self,
+        _rng: &mut R,
+        subject: S::Subject<'a, D>,
         attestations: I,
-        _strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
+    ) -> Verification<S>
     where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-        M: commonware_utils::Faults,
+        S: Scheme<Signature = U64>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        R: CryptoRngCore,
+        D: Digest,
+        I: IntoIterator<Item = Attestation<S>>,
+    {
+        let mut invalid = BTreeSet::new();
+        let mut verified = Vec::new();
+
+        for attestation in attestations {
+            if self.verify_attestation::<S, D>(subject.clone(), &attestation) {
+                verified.push(attestation);
+            } else {
+                invalid.insert(attestation.signer);
+            }
+        }
+
+        Verification::new(verified, invalid.into_iter().collect())
+    }
+
+    /// Assembles attestations into a ledger-backed certificate.
+    pub fn assemble<S, I, M>(&self, attestations: I) -> Option<Certificate>
+    where
+        S: Scheme<Signature = U64>,
+        I: IntoIterator<Item = Attestation<S>>,
+        M: Faults,
     {
         let mut unique_signers = HashSet::new();
         let mut signers = Vec::new();
         let mut signed_subject = None;
-        let mut ledger = self.ledger.lock();
+        let mut ledger = self.ledger.0.lock();
 
         for attestation in attestations {
             self.participants.key(attestation.signer)?;
@@ -321,17 +309,19 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
         })
     }
 
-    fn verify_certificate<R, D, M>(
+    /// Verifies a ledger-backed certificate.
+    pub fn verify_certificate<'a, S, R, D, M>(
         &self,
         _rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        certificate: &Self::Certificate,
-        _strategy: &impl Strategy,
+        subject: S::Subject<'a, D>,
+        certificate: &Certificate,
     ) -> bool
     where
+        S: Scheme<Certificate = Certificate>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        M: commonware_utils::Faults,
+        M: Faults,
     {
         if certificate.signers.len() != self.participants.len() {
             return false;
@@ -342,7 +332,7 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
 
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let certificate_id = u64::from(&certificate.id);
-        let ledger = self.ledger.lock();
+        let ledger = self.ledger.0.lock();
         ledger
             .certificates
             .get(&certificate_id)
@@ -351,26 +341,263 @@ impl<F: SubjectFamily> Scheme for LedgerScheme<F> {
             })
     }
 
-    fn is_attributable() -> bool {
+    /// Verifies a batch of certificates one-by-one.
+    pub fn verify_certificates<'a, S, R, D, I, M>(
+        &self,
+        rng: &mut R,
+        mut certificates: I,
+    ) -> bool
+    where
+        S: Scheme<Certificate = Certificate>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        R: rand::Rng + rand::CryptoRng,
+        D: Digest,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
+        M: Faults,
+    {
+        certificates
+            .all(|(subject, certificate)| self.verify_certificate::<S, _, D, M>(rng, subject, certificate))
+    }
+
+    /// Returns whether this scheme is attributable.
+    pub const fn is_attributable() -> bool {
         true
     }
 
-    fn is_batchable() -> bool {
+    /// Returns whether this scheme supports batch verification.
+    pub const fn is_batchable() -> bool {
         false
     }
 
-    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
+    /// Returns the codec bound for certificates produced by this participant set.
+    pub const fn certificate_codec_config(&self) -> usize {
         self.participants.len()
     }
 
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
+    /// Returns the unbounded codec configuration.
+    pub const fn certificate_codec_config_unbounded() -> usize {
         usize::MAX
     }
 }
 
+/// Implements a ledger-backed mock certificate scheme for a concrete subject and namespace.
+///
+/// This follows the same binding pattern as the other certificate macros: the protocol
+/// supplies the subject type and namespace type, and the macro emits a local `Scheme`
+/// wrapper plus a `fixture(...)` helper for tests.
+///
+/// # Example
+/// ```ignore
+/// use commonware_cryptography::impl_certificate_mock;
+///
+/// impl_certificate_mock!(Subject<'a, D>, Namespace);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_mock {
+    ($subject:ty, $namespace:ty) => {
+        /// Generates a test fixture with Ed25519 identities and a ledger-backed mock scheme.
+        #[cfg(feature = "mocks")]
+        #[allow(dead_code)]
+        pub fn fixture<R>(
+            rng: &mut R,
+            namespace: &[u8],
+            n: u32,
+        ) -> $crate::certificate::mocks::Fixture<Scheme>
+        where
+            R: rand::RngCore + rand::CryptoRng,
+        {
+            assert!(n > 0);
+
+            let associated = $crate::ed25519::certificate::mocks::participants(rng, n);
+            let participants = associated.keys().clone();
+            let participants_vec: ::std::vec::Vec<_> = participants.clone().into();
+            let private_keys: ::std::vec::Vec<_> = participants_vec
+                .iter()
+                .map(|public_key| {
+                    associated
+                        .get_value(public_key)
+                        .expect("participant key must have an associated private key")
+                        .clone()
+                })
+                .collect();
+
+            let ledger = $crate::certificate::mocks::SharedLedger::default();
+            let schemes = private_keys
+                .iter()
+                .cloned()
+                .map(|private_key| {
+                    Scheme::signer(namespace, participants.clone(), private_key, ledger.clone())
+                        .expect("scheme signer must be a participant")
+                })
+                .collect();
+            let verifier = Scheme::verifier(namespace, participants, ledger);
+
+            $crate::certificate::mocks::Fixture {
+                participants: participants_vec,
+                private_keys,
+                schemes,
+                verifier,
+            }
+        }
+
+        /// Ledger-backed mock signing scheme wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Scheme {
+            generic: $crate::certificate::mocks::Generic<$namespace>,
+        }
+
+        impl Scheme {
+            fn signer(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                private_key: $crate::ed25519::PrivateKey,
+                ledger: $crate::certificate::mocks::SharedLedger,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::certificate::mocks::Generic::signer(
+                        namespace,
+                        participants,
+                        private_key,
+                        ledger,
+                    )?,
+                })
+            }
+
+            fn verifier(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                ledger: $crate::certificate::mocks::SharedLedger,
+            ) -> Self {
+                Self {
+                    generic: $crate::certificate::mocks::Generic::verifier(
+                        namespace,
+                        participants,
+                        ledger,
+                    ),
+                }
+            }
+        }
+
+        impl $crate::certificate::Scheme for Scheme {
+            type Subject<'a, D: $crate::Digest> = $subject;
+            type PublicKey = $crate::ed25519::PublicKey;
+            type Signature = commonware_utils::sequence::U64;
+            type Certificate = $crate::certificate::mocks::Certificate;
+
+            fn me(&self) -> Option<commonware_utils::Participant> {
+                self.generic.me()
+            }
+
+            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+                self.generic.participants()
+            }
+
+            fn sign<D: $crate::Digest>(
+                &self,
+                subject: Self::Subject<'_, D>,
+            ) -> Option<$crate::certificate::Attestation<Self>> {
+                self.generic.sign::<Self, D>(subject)
+            }
+
+            fn verify_attestation<R, D>(
+                &self,
+                _rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestation: &$crate::certificate::Attestation<Self>,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+            {
+                self.generic.verify_attestation::<Self, D>(subject, attestation)
+            }
+
+            fn verify_attestations<R, D, I>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestations: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> $crate::certificate::Verification<Self>
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+            {
+                self.generic
+                    .verify_attestations::<Self, _, D, _>(rng, subject, attestations)
+            }
+
+            fn assemble<I, M>(
+                &self,
+                attestations: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> Option<Self::Certificate>
+            where
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                M: commonware_utils::Faults,
+            {
+                self.generic.assemble::<Self, _, M>(attestations)
+            }
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand::Rng + rand::CryptoRng,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+            }
+
+            fn is_attributable() -> bool {
+                $crate::certificate::mocks::Generic::<$namespace>::is_attributable()
+            }
+
+            fn is_batchable() -> bool {
+                $crate::certificate::mocks::Generic::<$namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::certificate::mocks::Generic::<$namespace>::certificate_codec_config_unbounded()
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fixture, Certificate, SubjectFamily};
+    use super::Certificate;
     use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
@@ -378,15 +605,7 @@ mod tests {
     use commonware_utils::{test_rng, N3f1};
 
     #[derive(Clone, Copy, Debug)]
-    struct TestFamily;
-
-    impl SubjectFamily for TestFamily {
-        type Namespace = Vec<u8>;
-        type Subject<'a, D: crate::Digest> = TestSubject<'a>;
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct TestSubject<'a> {
+    pub struct TestSubject<'a> {
         message: &'a [u8],
     }
 
@@ -402,10 +621,12 @@ mod tests {
         }
     }
 
+    impl_certificate_mock!(TestSubject<'a>, Vec<u8>);
+
     #[test]
     fn attestation_round_trip_verifies() {
         let mut rng = test_rng();
-        let fixture = fixture::<TestFamily, _>(&mut rng, b"mock-scheme", 4);
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"vote-1" };
         let attestation = fixture.schemes[0]
             .sign::<Sha256Digest>(subject)
@@ -428,7 +649,7 @@ mod tests {
     #[test]
     fn certificate_round_trip_verifies() {
         let mut rng = test_rng();
-        let fixture = fixture::<TestFamily, _>(&mut rng, b"mock-scheme", 4);
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject {
             message: b"certificate-subject",
         };
@@ -439,7 +660,7 @@ mod tests {
         let certificate = fixture.verifier.assemble::<_, N3f1>(attestations, &Sequential).unwrap();
         let encoded = certificate.encode();
         let decoded =
-            Certificate::decode_cfg(encoded, &fixture.verifier.participants.len()).unwrap();
+            Certificate::decode_cfg(encoded, &fixture.verifier.participants().len()).unwrap();
 
         assert!(
             fixture
@@ -468,7 +689,7 @@ mod tests {
     #[test]
     fn certificate_decode_round_trip_uses_participant_bound() {
         let mut rng = test_rng();
-        let fixture = fixture::<TestFamily, _>(&mut rng, b"mock-scheme", 4);
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"bound" };
         let attestations: Vec<_> = fixture.schemes[..3]
             .iter()
