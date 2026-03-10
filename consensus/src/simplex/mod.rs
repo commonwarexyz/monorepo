@@ -402,7 +402,7 @@
 //!       1. Let `parent = select_parent(r, v)`.
 //!       1. If `parent = Err(_)`, return.
 //!       1. Let `c = propose(v, parent)`.
-//!       1. If `c = None`, set `r.round[v].t_l = 0`, and return.
+//!       1. If `c = None`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`, and return.
 //!       1. Call `record_proposal(r, v, c)`.
 //!       1. Set `r.round[v].broadcast_notarize = true`.
 //!       1. Broadcast `notarize(c, v)`.
@@ -417,7 +417,7 @@
 //!    1. If `parent_payload(r, v, v_parent) = None`, return.
 //!    1. Verify `c`.
 //!    1. If verification succeeds, call `record_proposal(r, v, c)`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
-//!    1. If verification fails, set `r.round[v].t_l = 0`.
+//!    1. If verification fails, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!
 //! ### 7.3. Notarization Path
 //!
@@ -446,7 +446,7 @@
 //! 1. On receiving `nullify(v)` from replica `r'`:
 //!    1. If `!record_message(r, r', nullify(v))`, return.
 //!    2. If `r' == leader(v)` and `!r.round[v].broadcast_notarize`:
-//!       3. Set `r.round[v].t_l = 0`.
+//!       3. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
