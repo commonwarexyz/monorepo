@@ -224,7 +224,7 @@ impl<
         }
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(self.state.min_active().get())
+                .prune(self.state.activity_floor().get())
                 .await
                 .expect("unable to prune journal");
         }
