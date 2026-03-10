@@ -30,15 +30,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "no_coding"
-path = "fuzz_targets/no_coding.rs"
+name = "zoda"
+path = "fuzz_targets/zoda.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "zoda"
-path = "fuzz_targets/zoda.rs"
+name = "zoda_phased"
+path = "fuzz_targets/zoda_phased.rs"
 test = false
 doc = false
 bench = false

@@ -52,15 +52,15 @@ pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
     shard: Bytes,
 
-    /// The index of [Chunk] in the original data.
+    /// The index of [`Chunk`] in the original data.
     index: u16,
 
-    /// The multi-proof of the shard in the [bmt] at the given index.
+    /// The multi-proof of the shard in the [`bmt`] at the given index.
     proof: bmt::Proof<D>,
 }
 
 impl<D: Digest> Chunk<D> {
-    /// Create a new [Chunk] from the given shard, index, and proof.
+    /// Create a new [`Chunk`] from the given shard, index, and proof.
     const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
             shard,
@@ -69,7 +69,7 @@ impl<D: Digest> Chunk<D> {
         }
     }
 
-    /// Verify a [Chunk] against the given root.
+    /// Verify a [`Chunk`] against the given root.
     fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
         // Ensure the index matches
         if index != self.index {
@@ -97,7 +97,7 @@ impl<D: Digest> Chunk<D> {
 
 /// A shard that has been checked against a commitment.
 ///
-/// This stores the shard digest computed during [Chunk::verify] and the
+/// This stores the shard digest computed during [`Chunk::verify`] and the
 /// commitment root it was verified against. The root is checked at decode
 /// time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +266,7 @@ fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
 /// Type alias for the internal encoding result.
 type Encoding<D> = (D, Vec<Chunk<D>>);
 
-/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+/// Encode data using a Reed-Solomon coder and insert it into a [`bmt`].
 ///
 /// # Parameters
 ///
@@ -277,8 +277,8 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 ///
 /// # Returns
 ///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+/// - `root`: The root of the [`bmt`].
+/// - `chunks`: [`Chunk`]s of encoded data (that can be proven against `root`).
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
@@ -351,16 +351,16 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
-/// Decode data from a set of [CheckedChunk]s.
+/// Decode data from a set of [`CheckedChunk`]s.
 ///
-/// It is assumed that all chunks have already been verified against the given root using [Chunk::verify].
+/// It is assumed that all chunks have already been verified against the given root using [`Chunk::verify`].
 ///
 /// # Parameters
 ///
 /// - `total`: The total number of chunks to generate.
 /// - `min`: The minimum number of chunks required to decode the data.
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [CheckedChunk]s of encoded data (that can be proven against `root`)
+/// - `root`: The root of the [`bmt`].
+/// - `chunks`: [`CheckedChunk`]s of encoded data (that can be proven against `root`)
 ///
 /// # Returns
 ///
@@ -486,14 +486,14 @@ fn decode<H: Hasher, S: Strategy>(
     extract_data(&shards, k)
 }
 
-/// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
+/// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
 ///
 /// # Behavior
 ///
 /// The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
 /// shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
-/// All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
-/// is packaged as a chunk containing the shard data, its index, and a Merkle multi-proof against the [bmt] root.
+/// All `n = k + m` shards are then used to build a [`bmt`], producing a single root hash. Each shard
+/// is packaged as a chunk containing the shard data, its index, and a Merkle multi-proof against the [`bmt`] root.
 ///
 /// ## Encoding
 ///
@@ -529,7 +529,7 @@ fn decode<H: Hasher, S: Strategy>(
 ///
 /// ## Merkle Tree Construction
 ///
-/// All `n` shards (data and recovery) are hashed and used as leaves to build a [bmt].
+/// All `n` shards (data and recovery) are hashed and used as leaves to build a [`bmt`].
 ///
 /// ```text
 /// Shards:    [Shard 0, Shard 1, ..., Shard n-1]
@@ -550,22 +550,22 @@ fn decode<H: Hasher, S: Strategy>(
 ///                +----------+
 /// ```
 ///
-/// The final output is the [bmt] root and a set of `n` chunks.
+/// The final output is the [`bmt`] root and a set of `n` chunks.
 ///
 /// `(Root, [Chunk 0, Chunk 1, ..., Chunk n-1])`
 ///
 /// Each chunk contains:
 /// - `shard`: The shard data (original or recovery).
 /// - `index`: The shard's original index (0 to n-1).
-/// - `proof`: A Merkle multi-proof of the shard's inclusion in the [bmt].
+/// - `proof`: A Merkle multi-proof of the shard's inclusion in the [`bmt`].
 ///
 /// ## Decoding and Verification
 ///
 /// The decoder requires any `k` chunks to reconstruct the original data.
-/// 1. Each chunk's Merkle multi-proof is verified against the [bmt] root.
+/// 1. Each chunk's Merkle multi-proof is verified against the [`bmt`] root.
 /// 2. The shards from the valid chunks are used to reconstruct the original `k` data shards.
-/// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
-///    generated. This new root MUST match the original [bmt] root. This prevents attacks where
+/// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [`bmt`] root is
+///    generated. This new root MUST match the original [`bmt`] root. This prevents attacks where
 ///    an adversary provides a valid set of chunks that decode to different data.
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
 #[derive(Clone, Copy)]

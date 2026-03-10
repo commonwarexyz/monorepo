@@ -60,3 +60,13 @@ path = "src/benches/bench.rs"
 name = "coding_scheme_sizes"
 harness = false
 path = "src/benches/bench_size.rs"
+
+[[bench]]
+name = "phased_coding_scheme_times"
+harness = false
+path = "src/benches/bench_phased.rs"
+
+[[bench]]
+name = "phased_coding_scheme_sizes"
+harness = false
+path = "src/benches/bench_phased_size.rs"

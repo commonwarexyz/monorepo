@@ -16,9 +16,6 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
 
-    mod no_coding;
-    pub use no_coding::{Error as NoCodingError, NoCoding};
-
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
@@ -157,7 +154,7 @@ commonware_macros::stability_scope!(ALPHA {
         type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// A shard that has been checked for inclusion in the commitment.
         ///
-        /// This allows excluding invalid shards from the function signature of [Self::decode].
+        /// This allows excluding invalid shards from the function signature of [`Self::decode`].
         type CheckedShard: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
@@ -177,7 +174,6 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This takes in an index, to make sure that the shard you're checking
         /// is associated with the participant you expect it to be.
-        ///
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
@@ -211,60 +207,182 @@ commonware_macros::stability_scope!(ALPHA {
         ) -> Result<Vec<u8>, Self::Error>;
     }
 
-    /// A marker trait indicating that [Scheme::check] proves validity of the encoding.
+    /// A phased coding interface with separate local and forwarded shard handling.
     ///
-    /// In more detail, this means that upon a successful call to [Scheme::check],
+    /// This trait models schemes where the initial distributor attaches extra
+    /// verification material to each participant's strong shard. Participants
+    /// derive checking data from that strong shard, then use it to validate
+    /// weaker forwarded shards received from others before reconstruction.
+    ///
+    /// The tradeoff compared to [`Scheme`] is that weak shards cannot be
+    /// verified independently. A participant must first derive
+    /// [`PhasedScheme::CheckingData`] from a strong shard via
+    /// [`PhasedScheme::weaken`].
+    ///
+    /// # Example
+    /// ```
+    /// use commonware_coding::{Config, PhasedScheme as _, Zoda};
+    /// use commonware_cryptography::Sha256;
+    /// use commonware_parallel::Sequential;
+    /// use commonware_utils::NZU16;
+    ///
+    /// const STRATEGY: Sequential = Sequential;
+    ///
+    /// type Z = Zoda<Sha256>;
+    ///
+    /// let config = Config {
+    ///     minimum_shards: NZU16!(2),
+    ///     extra_shards: NZU16!(1),
+    /// };
+    /// let data = b"Hello!";
+    /// let (commitment, mut shards) = Z::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+    ///
+    /// let (checking_data, checked_0, _) =
+    ///     Z::weaken(&config, &commitment, 0, shards.remove(0)).unwrap();
+    /// let (_, _, weak_1) = Z::weaken(&config, &commitment, 1, shards.remove(0)).unwrap();
+    /// let checked_1 = Z::check(&config, &commitment, &checking_data, 1, weak_1).unwrap();
+    ///
+    /// let data2 = Z::decode(
+    ///     &config,
+    ///     &commitment,
+    ///     checking_data,
+    ///     &[checked_0, checked_1],
+    ///     &STRATEGY,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(&data[..], &data2[..]);
+    /// ```
+    ///
+    /// # Guarantees
+    ///
+    /// Here are additional properties that implementors of this trait need to
+    /// consider, and that users of this trait can rely on.
+    ///
+    /// ## Weaken vs Check
+    ///
+    /// [`PhasedScheme::weaken`] and [`PhasedScheme::check`] should agree, even for malicious encoders.
+    ///
+    /// It should not be possible for parties A and B to call `weaken` successfully,
+    /// but then have either of them fail on the other's shard when calling `check`.
+    ///
+    /// In other words, if an honest party considers their shard to be correctly
+    /// formed, then other honest parties which have successfully constructed their
+    /// checking data will also agree with the shard being correct.
+    ///
+    /// A violation of this property would be, for example, if a malicious payload
+    /// could convince two parties that they both have valid shards, but then the
+    /// checking data they produce from the malicious payload reports issues with
+    /// those shards.
+    pub trait PhasedScheme: Debug + Clone + Send + Sync + 'static {
+        /// A commitment attesting to the shards of data.
+        type Commitment: Digest;
+        /// A strong shard of data, to be received by a participant.
+        type StrongShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// A weak shard shared with other participants, to aid them in reconstruction.
+        ///
+        /// In most cases, this will be the same as `StrongShard`, but some schemes might
+        /// have extra information in `StrongShard` that may not be necessary to reconstruct
+        /// the data.
+        type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// Data which can assist in checking shards.
+        type CheckingData: Clone + Send + Sync;
+        /// A shard that has been checked for inclusion in the commitment.
+        ///
+        /// This allows excluding [`PhasedScheme::WeakShard`]s which are invalid, and shouldn't
+        /// be considered as progress towards meeting the minimum number of shards.
+        type CheckedShard: Clone + Send + Sync;
+        /// The type of errors that can occur during encoding, weakening, checking, and decoding.
+        type Error: std::fmt::Debug + Send;
+
+        /// Encode a piece of data, returning a commitment, along with shards, and proofs.
+        ///
+        /// Each shard and proof is intended for exactly one participant. The number of shards returned
+        /// should equal `config.minimum_shards + config.extra_shards`.
+        #[allow(clippy::type_complexity)]
+        fn encode(
+            config: &Config,
+            data: impl Buf,
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
+
+        /// Take your own shard, check it, and produce a [`PhasedScheme::WeakShard`] to forward to others.
+        ///
+        /// This takes in an index, which is the index you expect the shard to be.
+        ///
+        /// This will produce a [`PhasedScheme::CheckedShard`] which counts towards the minimum
+        /// number of shards you need to reconstruct the data, in [`PhasedScheme::decode`].
+        ///
+        /// You also get [`PhasedScheme::CheckingData`], which has information you can use to check
+        /// the shards you receive from others.
+        #[allow(clippy::type_complexity)]
+        fn weaken(
+            config: &Config,
+            commitment: &Self::Commitment,
+            index: u16,
+            shard: Self::StrongShard,
+        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
+
+        /// Check the integrity of a weak shard, producing a checked shard.
+        ///
+        /// This requires the [`PhasedScheme::CheckingData`] produced by [`PhasedScheme::weaken`].
+        ///
+        /// This takes in an index, to make sure that the weak shard you're checking
+        /// is associated with the participant you expect it to be.
+        fn check(
+            config: &Config,
+            commitment: &Self::Commitment,
+            checking_data: &Self::CheckingData,
+            index: u16,
+            weak_shard: Self::WeakShard,
+        ) -> Result<Self::CheckedShard, Self::Error>;
+
+        /// Decode the data from shards received from other participants.
+        ///
+        /// The data must be decodeable with as few as `config.minimum_shards`,
+        /// including your own shard.
+        ///
+        /// Calls to this function with the same commitment, but with different shards,
+        /// or shards in a different should also result in the same output data, or in failure.
+        /// In other words, when using the decoding function in a broader system, you
+        /// get a guarantee that every participant decoding will see the same final
+        /// data, even if they receive different shards, or receive them in a different order.
+        ///
+        /// ## Commitment Binding
+        ///
+        /// Implementations must reject shards that were checked against a different
+        /// commitment than the one passed to `decode`. Mixing checked shards from
+        /// separate `encode` calls (and thus different commitments) must return an
+        /// error.
+        fn decode(
+            config: &Config,
+            commitment: &Self::Commitment,
+            checking_data: Self::CheckingData,
+            shards: &[Self::CheckedShard],
+            strategy: &impl Strategy,
+        ) -> Result<Vec<u8>, Self::Error>;
+    }
+
+    /// A marker trait indicating that [`Scheme::check`] or [`PhasedScheme::check`] proves validity of the encoding.
+    ///
+    /// In more detail, this means that upon a successful call to [`Scheme::check`],
     /// guarantees that the shard results from a valid encoding of the data, and thus,
     /// if other participants also call check, then the data is guaranteed to be reconstructable.
-    pub trait ValidatingScheme: Scheme {}
+    pub trait ValidatingScheme {}
 });
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::reed_solomon::ReedSolomon;
     use arbitrary::Unstructured;
-    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
     const MAX_SHARD_SIZE: usize = 1 << 31;
     const MAX_SHARDS: u16 = 32;
     const MAX_DATA: usize = 1024;
     const MIN_EXTRA_SHARDS: u16 = 1;
-
-    fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
-        // Encode data into shards.
-        let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-        let read_cfg = CodecConfig {
-            maximum_shard_size: MAX_SHARD_SIZE,
-        };
-        for shard in shards.iter() {
-            // Shard codec roundtrip.
-            let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-            assert_eq!(decoded_shard, *shard);
-        }
-
-        // Collect selected shards for decoding.
-        let mut checked_shards = Vec::new();
-        for (i, shard) in shards.into_iter().enumerate() {
-            if !selected.contains(&(i as u16)) {
-                continue;
-            }
-            let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
-            checked_shards.push(checked);
-        }
-
-        // Shuffle the checked shards to verify decode is order-independent.
-        checked_shards.reverse();
-
-        // Decode from the selected shards and verify data integrity.
-        let decoded = S::decode(config, &commitment, &checked_shards, &Sequential).unwrap();
-        assert_eq!(decoded, data);
-    }
 
     fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
         let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
@@ -295,100 +413,253 @@ mod test {
         ))
     }
 
-    fn decode_rejects_mixed_commitments<S: Scheme>(config: &Config, data_a: &[u8], data_b: &[u8]) {
-        let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
-        let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
+    mod scheme {
+        use super::*;
+        use crate::{reed_solomon::ReedSolomon, Scheme, Zoda};
+        use commonware_codec::Encode;
+        use commonware_parallel::Sequential;
 
-        let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
-        let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+        fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
+            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
+            let read_cfg = CodecConfig {
+                maximum_shard_size: MAX_SHARD_SIZE,
+            };
+            for shard in &shards {
+                let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+                assert_eq!(decoded_shard, *shard);
+            }
 
-        let result = S::decode(config, &commitment_a, &[checked_a, checked_b], &Sequential);
-        assert!(
-            result.is_err(),
-            "decode must reject shards checked against different commitments"
-        );
-    }
+            let mut checked_shards = Vec::new();
+            for (i, shard) in shards.into_iter().enumerate() {
+                if !selected.contains(&(i as u16)) {
+                    continue;
+                }
+                let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
+                checked_shards.push(checked);
+            }
 
-    #[test]
-    fn decode_rejects_mixed_commitment_shards() {
-        let config = Config {
-            minimum_shards: NZU16!(2),
-            extra_shards: NZU16!(1),
-        };
+            checked_shards.reverse();
+            let decoded = S::decode(config, &commitment, &checked_shards, &Sequential).unwrap();
+            assert_eq!(decoded, data);
+        }
 
-        decode_rejects_mixed_commitments::<ReedSolomon<Sha256>>(
-            &config,
-            b"alpha payload",
-            b"bravo payload",
-        );
-        decode_rejects_mixed_commitments::<NoCoding<Sha256>>(
-            &config,
-            b"alpha payload",
-            b"bravo payload",
-        );
-        decode_rejects_mixed_commitments::<Zoda<Sha256>>(
-            &config,
-            b"alpha payload",
-            b"bravo payload",
-        );
-    }
+        fn decode_rejects_mixed_commitments<S: Scheme>(
+            config: &Config,
+            data_a: &[u8],
+            data_b: &[u8],
+        ) {
+            let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
+            let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
 
-    #[test]
-    fn roundtrip_empty_data() {
-        let config = Config {
-            minimum_shards: NZU16!(30),
-            extra_shards: NZU16!(70),
-        };
-        let selected: Vec<u16> = (0..30).collect();
+            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
+            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
 
-        roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
-        roundtrip::<NoCoding<Sha256>>(&config, b"", &selected);
-        roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
-    }
+            let result = S::decode(config, &commitment_a, &[checked_a, checked_b], &Sequential);
+            assert!(
+                result.is_err(),
+                "decode must reject shards checked against different commitments"
+            );
+        }
 
-    // This exercises an edge case in ZODA, but is also useful for other schemes.
-    #[test]
-    fn roundtrip_2_pow_16_25_total_shards() {
-        let config = Config {
-            minimum_shards: NZU16!(8),
-            extra_shards: NZU16!(17),
-        };
-        let data = vec![0x67; 1 << 16];
-        let selected: Vec<u16> = (0..8).collect();
+        #[test]
+        fn decode_rejects_mixed_commitment_shards() {
+            let config = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(1),
+            };
 
-        roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-        roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
-        roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
-    }
+            decode_rejects_mixed_commitments::<ReedSolomon<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<Zoda<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+        }
 
-    #[test]
-    fn minifuzz_roundtrip_reed_solomon() {
-        minifuzz::test(|u| {
-            let (config, data, selected) = generate_case(u)?;
+        #[test]
+        fn roundtrip_empty_data() {
+            let config = Config {
+                minimum_shards: NZU16!(30),
+                extra_shards: NZU16!(70),
+            };
+            let selected: Vec<u16> = (0..30).collect();
+
+            roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+            roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+        }
+
+        #[test]
+        fn roundtrip_2_pow_16_25_total_shards() {
+            let config = Config {
+                minimum_shards: NZU16!(8),
+                extra_shards: NZU16!(17),
+            };
+            let data = vec![0x67; 1 << 16];
+            let selected: Vec<u16> = (0..8).collect();
+
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-            Ok(())
-        });
-    }
+            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+        }
 
-    #[test]
-    fn minifuzz_roundtrip_no_coding() {
-        minifuzz::test(|u| {
-            let (config, data, selected) = generate_case(u)?;
-            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
-            Ok(())
-        });
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn minifuzz_roundtrip_zoda() {
-        minifuzz::Builder::default()
-            .with_search_limit(64)
-            .test(|u| {
+        #[test]
+        fn minifuzz_roundtrip_reed_solomon() {
+            minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn minifuzz_roundtrip_zoda() {
+            minifuzz::Builder::default()
+                .with_search_limit(64)
+                .test(|u| {
+                    let (config, data, selected) = generate_case(u)?;
+                    roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                    Ok(())
+                });
+        }
+    }
+
+    mod phased_scheme {
+        use super::*;
+        use crate::{PhasedScheme, Zoda};
+        use commonware_codec::Encode;
+        use commonware_parallel::Sequential;
+
+        fn roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
+            let owner = *selected.first().expect("selected must not be empty");
+            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
+            let read_cfg = CodecConfig {
+                maximum_shard_size: MAX_SHARD_SIZE,
+            };
+            for shard in &shards {
+                let decoded_shard =
+                    S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+                assert_eq!(decoded_shard, *shard);
+            }
+
+            let (checking_data, own_checked, _) =
+                S::weaken(config, &commitment, owner, shards[owner as usize].clone()).unwrap();
+            let mut checked_shards = vec![own_checked];
+            for &index in selected {
+                if index == owner {
+                    continue;
+                }
+                let (_, _, weak_shard) =
+                    S::weaken(config, &commitment, index, shards[index as usize].clone()).unwrap();
+                let decoded_weak =
+                    S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
+                assert_eq!(decoded_weak, weak_shard);
+                let checked =
+                    S::check(config, &commitment, &checking_data, index, decoded_weak).unwrap();
+                checked_shards.push(checked);
+            }
+
+            checked_shards.reverse();
+            let decoded = S::decode(
+                config,
+                &commitment,
+                checking_data,
+                &checked_shards,
+                &Sequential,
+            )
+            .unwrap();
+            assert_eq!(decoded, data);
+        }
+
+        fn check_rejects_mixed_commitments<S: PhasedScheme>(
+            config: &Config,
+            data_a: &[u8],
+            data_b: &[u8],
+        ) {
+            let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
+            let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
+
+            let (checking_data_a, checked_a, _) =
+                S::weaken(config, &commitment_a, 0, shards_a[0].clone()).unwrap();
+            let (checking_data_b, checked_b, weak_b) =
+                S::weaken(config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+
+            let check_result = S::check(config, &commitment_a, &checking_data_a, 1, weak_b);
+            assert!(
+                check_result.is_err(),
+                "check must reject weak shards derived from a different commitment"
+            );
+
+            let decode_result = S::decode(
+                config,
+                &commitment_a,
+                checking_data_a,
+                &[checked_a, checked_b],
+                &Sequential,
+            );
+            assert!(
+                decode_result.is_err(),
+                "decode must reject checked shards derived from a different commitment"
+            );
+
+            let decode_result = S::decode(config, &commitment_b, checking_data_b, &[], &Sequential);
+            assert!(
+                decode_result.is_err(),
+                "decode must reject insufficient checked shards"
+            );
+        }
+
+        #[test]
+        fn check_rejects_mixed_commitment_weak_shards() {
+            let config = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(1),
+            };
+
+            check_rejects_mixed_commitments::<Zoda<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+        }
+
+        #[test]
+        fn roundtrip_empty_data() {
+            let config = Config {
+                minimum_shards: NZU16!(30),
+                extra_shards: NZU16!(70),
+            };
+            let selected: Vec<u16> = (0..30).collect();
+
+            roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+        }
+
+        #[test]
+        fn roundtrip_2_pow_16_25_total_shards() {
+            let config = Config {
+                minimum_shards: NZU16!(8),
+                extra_shards: NZU16!(17),
+            };
+            let data = vec![0x67; 1 << 16];
+            let selected: Vec<u16> = (0..8).collect();
+
+            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn minifuzz_roundtrip_zoda() {
+            minifuzz::Builder::default()
+                .with_search_limit(64)
+                .test(|u| {
+                    let (config, data, selected) = generate_case(u)?;
+                    roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                    Ok(())
+                });
+        }
     }
 
     #[cfg(feature = "arbitrary")]

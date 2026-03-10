@@ -1147,15 +1147,16 @@ where
         }
 
         let pending = std::mem::take(&mut self.pending_shards);
-        let (new_checked, to_block) = strategy.map_partition_collect_vec(pending, |(peer, shard)| {
-            let checked = C::check(
-                &commitment.config(),
-                &commitment.root(),
-                shard.index,
-                &shard.data,
-            );
-            (peer, checked.ok())
-        });
+        let (new_checked, to_block) =
+            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
+                let checked = C::check(
+                    &commitment.config(),
+                    &commitment.root(),
+                    shard.index,
+                    &shard.data,
+                );
+                (peer, checked.ok())
+            });
 
         for peer in to_block {
             commonware_p2p::block!(blocker, peer, "invalid shard received");
