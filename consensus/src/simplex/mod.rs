@@ -372,7 +372,7 @@ pub(crate) fn interesting(
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
-    if !allow_future && pending > current.next() {
+    if !allow_future && pending > current.saturating_add(activity_timeout) {
         return false;
     }
     true
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
+        let activity_timeout = ViewDelta::new(2);
 
         // Genesis view is never interesting
         assert!(!interesting(
@@ -470,7 +470,7 @@ mod tests {
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(5), // below min_active (10)
+            View::new(5), // below min_active (18)
             false
         ));
 
@@ -479,29 +479,29 @@ mod tests {
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(10), // exactly min_active
+            View::new(18), // exactly min_active
             false
         ));
 
-        // Future view beyond current.next() is not interesting when allow_future is false
+        // Future view beyond current + activity_timeout is not interesting when allow_future is false
         assert!(!interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(27),
+            View::new(28),
             false
         ));
 
-        // Future view beyond current.next() is interesting when allow_future is true
+        // Future view beyond current + activity_timeout is interesting when allow_future is true
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(27),
+            View::new(28),
             true
         ));
 
-        // View at current.next() is interesting
+        // View at current + activity_timeout boundary is interesting
         assert!(interesting(
             activity_timeout,
             View::new(20),
