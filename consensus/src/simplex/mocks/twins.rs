@@ -15,7 +15,10 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::{ordered::Set, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -35,7 +38,7 @@ impl RoundScenario {
 }
 
 /// Multi-round scenario from the Twins framework.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Scenario {
     rounds: Vec<RoundScenario>,
 }
@@ -217,6 +220,10 @@ pub struct Case {
 }
 
 /// Generate executable Twins cases from framework parameters.
+///
+/// Scenario generation first collapses participant relabelings into canonical
+/// unlabeled scenario shapes, then combines those shapes with concrete
+/// compromised-node assignments.
 pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
     assert!(framework.faults > 0, "faults must be > 0");
@@ -284,147 +291,261 @@ fn masks_to_partitions<P: Clone>(
     (primary, secondary)
 }
 
-fn checked_pow(base: u128, exp: usize) -> Option<u128> {
-    let mut total = 1u128;
-    for _ in 0..exp {
-        total = total.checked_mul(base)?;
+fn range_mask(start: usize, len: usize) -> u64 {
+    if len == 0 {
+        return 0;
     }
+    (((1u128 << len) - 1) << start) as u64
+}
+
+fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
+    let mut start = 0usize;
+    cells.iter()
+        .copied()
+        .map(|size| {
+            let range = (start, size);
+            start += size;
+            range
+        })
+        .collect()
+}
+
+fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundScenario, Vec<usize>)> {
+    fn no_secondary(
+        ranges: &[(usize, usize)],
+        leader_cell: usize,
+        cell_idx: usize,
+        primary_mask: u64,
+        leader: Option<usize>,
+        next_cells: &mut Vec<usize>,
+        out: &mut Vec<(RoundScenario, Vec<usize>)>,
+    ) {
+        if cell_idx == ranges.len() {
+            out.push((
+                RoundScenario {
+                    leader: leader.expect("leader cell should assign a leader"),
+                    primary_mask,
+                    secondary_mask: primary_mask,
+                },
+                next_cells.clone(),
+            ));
+            return;
+        }
+
+        let (start, size) = ranges[cell_idx];
+        let max_outside = if cell_idx == leader_cell { size - 1 } else { size };
+        for outside in 0..=max_outside {
+            let both = if cell_idx == leader_cell {
+                size - outside - 1
+            } else {
+                size - outside
+            };
+
+            if outside > 0 {
+                next_cells.push(outside);
+            }
+            if both > 0 {
+                next_cells.push(both);
+            }
+
+            let mut next_primary = primary_mask | range_mask(start + outside, both);
+            let mut next_leader = leader;
+            if cell_idx == leader_cell {
+                let leader_idx = start + outside + both;
+                next_primary |= 1u64 << leader_idx;
+                next_cells.push(1);
+                next_leader = Some(leader_idx);
+            }
+
+            no_secondary(
+                ranges,
+                leader_cell,
+                cell_idx + 1,
+                next_primary,
+                next_leader,
+                next_cells,
+                out,
+            );
+
+            if cell_idx == leader_cell {
+                next_cells.pop();
+            }
+            if both > 0 {
+                next_cells.pop();
+            }
+            if outside > 0 {
+                next_cells.pop();
+            }
+        }
+    }
+
+    fn with_secondary(
+        ranges: &[(usize, usize)],
+        max_partitions: usize,
+        leader_cell: usize,
+        cell_idx: usize,
+        primary_mask: u64,
+        secondary_mask: u64,
+        secondary_total: usize,
+        leader: Option<usize>,
+        next_cells: &mut Vec<usize>,
+        out: &mut Vec<(RoundScenario, Vec<usize>)>,
+    ) {
+        if cell_idx == ranges.len() {
+            if secondary_total == 0 {
+                return;
+            }
+            out.push((
+                RoundScenario {
+                    leader: leader.expect("leader cell should assign a leader"),
+                    primary_mask,
+                    secondary_mask,
+                },
+                next_cells.clone(),
+            ));
+            return;
+        }
+
+        let (start, size) = ranges[cell_idx];
+        let has_leader = cell_idx == leader_cell;
+        let available = if has_leader { size - 1 } else { size };
+        let outside_range = if max_partitions == 2 {
+            0..=0
+        } else {
+            0..=available
+        };
+
+        for outside in outside_range {
+            let remaining = available - outside;
+            for secondary in 0..=remaining {
+                let primary = remaining - secondary;
+
+                if outside > 0 {
+                    next_cells.push(outside);
+                }
+                if secondary > 0 {
+                    next_cells.push(secondary);
+                }
+                if primary > 0 {
+                    next_cells.push(primary);
+                }
+
+                let next_secondary = secondary_mask | range_mask(start + outside, secondary);
+                let mut next_primary =
+                    primary_mask | range_mask(start + outside + secondary, primary);
+                let mut next_leader = leader;
+                if has_leader {
+                    let leader_idx = start + outside + secondary + primary;
+                    next_primary |= 1u64 << leader_idx;
+                    next_cells.push(1);
+                    next_leader = Some(leader_idx);
+                }
+
+                with_secondary(
+                    ranges,
+                    max_partitions,
+                    leader_cell,
+                    cell_idx + 1,
+                    next_primary,
+                    next_secondary,
+                    secondary_total + secondary,
+                    next_leader,
+                    next_cells,
+                    out,
+                );
+
+                if has_leader {
+                    next_cells.pop();
+                }
+                if primary > 0 {
+                    next_cells.pop();
+                }
+                if secondary > 0 {
+                    next_cells.pop();
+                }
+                if outside > 0 {
+                    next_cells.pop();
+                }
+            }
+        }
+    }
+
+    let ranges = cells_to_ranges(cells);
+    let mut out = Vec::new();
+    for leader_cell in 0..cells.len() {
+        let mut next_cells = Vec::new();
+        no_secondary(
+            &ranges,
+            leader_cell,
+            0,
+            0,
+            None,
+            &mut next_cells,
+            &mut out,
+        );
+        let mut next_cells = Vec::new();
+        with_secondary(
+            &ranges,
+            max_partitions.min(3),
+            leader_cell,
+            0,
+            0,
+            0,
+            0,
+            None,
+            &mut next_cells,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn canonical_scenario_count(
+    cells: &[usize],
+    rounds: usize,
+    max_partitions: usize,
+    memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
+) -> Option<u128> {
+    if rounds == 0 {
+        return Some(1);
+    }
+    let key = (cells.to_vec(), rounds);
+    if let Some(cached) = memo.get(&key) {
+        return *cached;
+    }
+
+    let mut total = 0u128;
+    for (_, next_cells) in next_round_transitions(cells, max_partitions) {
+        let suffix = canonical_scenario_count(&next_cells, rounds - 1, max_partitions, memo)?;
+        total = total.checked_add(suffix)?;
+    }
+    memo.insert(key, Some(total));
     Some(total)
 }
 
-fn round_scenario_count(n: usize, max_partitions: usize) -> u128 {
-    assert!(n > 1, "n must be > 1");
-    assert!(
-        n < u64::BITS as usize,
-        "mask representation supports fewer than 64 participants"
-    );
-    assert!(max_partitions > 1, "max_partitions must be > 1");
-    assert!(
-        max_partitions <= n,
-        "max_partitions must be less than or equal to n"
-    );
-
-    // Round scenarios only observe the leader's partition, the secondary
-    // partition, and whether any participants remain outside those groups.
-    let effective_partitions = max_partitions.min(3);
-    let per_leader = if effective_partitions == 2 {
-        (1u128 << n) - 1
-    } else {
-        checked_pow(3, n - 1).expect("round scenario count overflow")
-    };
-    (n as u128)
-        .checked_mul(per_leader)
-        .expect("round scenario count overflow")
-}
-
-fn round_scenario(n: usize, max_partitions: usize, idx: u128) -> RoundScenario {
-    let total = round_scenario_count(n, max_partitions);
-    assert!(idx < total, "round scenario index out of bounds");
-
-    let effective_partitions = max_partitions.min(3);
-    let per_leader = if effective_partitions == 2 {
-        (1u128 << n) - 1
-    } else {
-        checked_pow(3, n - 1).expect("round scenario count overflow")
-    };
-
-    let leader = usize::try_from(idx / per_leader).expect("leader index should fit in usize");
-    let mut local = idx % per_leader;
-    let leader_bit = 1u64 << leader;
-    let mut primary_mask = leader_bit;
-
-    if effective_partitions == 2 {
-        let same_partition = 1u128 << (n - 1);
-        if local < same_partition {
-            for participant in 0..n {
-                if participant == leader {
-                    continue;
-                }
-                if (local & 1) == 0 {
-                    primary_mask |= 1u64 << participant;
-                }
-                local >>= 1;
-            }
-            return RoundScenario {
-                leader,
-                primary_mask,
-                secondary_mask: primary_mask,
-            };
-        }
-
-        let mut assignment = (local - same_partition) + 1;
-        let mut secondary_mask = 0u64;
-        for participant in 0..n {
-            if participant == leader {
-                continue;
-            }
-            if (assignment & 1) == 0 {
-                primary_mask |= 1u64 << participant;
-            } else {
-                secondary_mask |= 1u64 << participant;
-            }
-            assignment >>= 1;
-        }
-        return RoundScenario {
-            leader,
-            primary_mask,
-            secondary_mask,
-        };
-    }
-
-    let mut secondary_mask = 0u64;
-    let mut saw_secondary = false;
-    for participant in 0..n {
-        if participant == leader {
-            continue;
-        }
-        match local % 3 {
-            0 => primary_mask |= 1u64 << participant,
-            1 => {
-                saw_secondary = true;
-                secondary_mask |= 1u64 << participant;
-            }
-            2 => {}
-            _ => unreachable!("ternary digit must be in range"),
-        }
-        local /= 3;
-    }
-    RoundScenario {
-        leader,
-        primary_mask,
-        secondary_mask: if saw_secondary {
-            secondary_mask
-        } else {
-            primary_mask
-        },
-    }
-}
-
-#[cfg(test)]
-fn round_scenarios(n: usize, max_partitions: usize) -> Vec<RoundScenario> {
-    let total = round_scenario_count(n, max_partitions);
-    let total = usize::try_from(total).expect("too many round scenarios to materialize");
-    (0..total)
-        .map(|idx| round_scenario(n, max_partitions, idx as u128))
-        .collect()
-}
-
-fn index_to_round_scenarios(
-    mut idx: u128,
-    base: u128,
+fn canonical_scenario_from_rank(
+    cells: &[usize],
     rounds: usize,
-    n: usize,
     max_partitions: usize,
-) -> Vec<RoundScenario> {
-    let mut digits = vec![0u128; rounds];
-    for digit in digits.iter_mut().rev() {
-        *digit = idx % base;
-        idx /= base;
+    mut rank: u128,
+    memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
+) -> Scenario {
+    if rounds == 0 {
+        return Scenario { rounds: Vec::new() };
     }
-    digits
-        .into_iter()
-        .map(|digit| round_scenario(n, max_partitions, digit))
-        .collect()
+
+    for (round, next_cells) in next_round_transitions(cells, max_partitions) {
+        let suffix = canonical_scenario_count(&next_cells, rounds - 1, max_partitions, memo)
+            .expect("canonical scenario count should fit in u128");
+        if rank < suffix {
+            let mut scenario =
+                canonical_scenario_from_rank(&next_cells, rounds - 1, max_partitions, rank, memo);
+            scenario.rounds.insert(0, round);
+            return scenario;
+        }
+        rank -= suffix;
+    }
+    unreachable!("canonical scenario rank out of bounds")
 }
 
 fn combination_count(n: usize, k: usize) -> Option<u128> {
@@ -504,51 +625,65 @@ fn generate_scenarios(
     max_scenarios: usize,
 ) -> Vec<Scenario> {
     let mut rng = test_rng_seeded(seed);
-    let base = round_scenario_count(n, max_partitions);
-    if let Some(total) = checked_pow(base, rounds) {
+    let mut memo = HashMap::new();
+    let initial_cells = vec![n];
+    if let Some(total) =
+        canonical_scenario_count(&initial_cells, rounds, max_partitions.min(3), &mut memo)
+    {
         if total <= max_scenarios as u128 {
             return (0..total)
-                .map(|idx| Scenario {
-                    rounds: index_to_round_scenarios(idx, base, rounds, n, max_partitions),
+                .map(|idx| {
+                    canonical_scenario_from_rank(
+                        &initial_cells,
+                        rounds,
+                        max_partitions.min(3),
+                        idx,
+                        &mut memo,
+                    )
                 })
                 .collect();
         }
 
-        // Deterministically sample unique arrangement indices instead of taking
-        // a lexicographic prefix, while keeping generation bounded by
-        // `max_scenarios`.
-        return sample_unique_indices(&mut rng, total as u128, max_scenarios)
+        return sample_unique_indices(&mut rng, total, max_scenarios)
             .into_iter()
-            .map(|idx| Scenario {
-                rounds: index_to_round_scenarios(idx, base, rounds, n, max_partitions),
+            .map(|idx| {
+                canonical_scenario_from_rank(
+                    &initial_cells,
+                    rounds,
+                    max_partitions.min(3),
+                    idx,
+                    &mut memo,
+                )
             })
             .collect();
     }
 
-    // Extremely large spaces can overflow arrangement counts; sample directly
-    // from the per-round option product while enforcing uniqueness.
-    let mut scenarios = Vec::with_capacity(max_scenarios);
-    let mut seen = HashSet::new();
-    let max_attempts = max_scenarios.saturating_mul(64).max(1024);
+    // Extremely large canonical spaces can overflow counts; sample directly
+    // from the canonical transition graph while enforcing uniqueness.
+    let mut scenarios = BTreeSet::new();
+    let max_attempts = max_scenarios.saturating_mul(1024).max(4096);
     let mut attempts = 0usize;
     while scenarios.len() < max_scenarios && attempts < max_attempts {
         attempts += 1;
-        let digits: Vec<u128> = (0..rounds).map(|_| rng.gen_range(0..base)).collect();
-        if seen.insert(digits.clone()) {
-            scenarios.push(Scenario {
-                rounds: digits
-                    .into_iter()
-                    .map(|digit| round_scenario(n, max_partitions, digit))
-                    .collect(),
-            });
+        let mut cells = initial_cells.clone();
+        let mut scenario = Scenario {
+            rounds: Vec::with_capacity(rounds),
+        };
+        for _ in 0..rounds {
+            let transitions = next_round_transitions(&cells, max_partitions.min(3));
+            let idx = rng.gen_range(0..transitions.len());
+            let (round, next_cells) = transitions[idx].clone();
+            scenario.rounds.push(round);
+            cells = next_cells;
         }
+        scenarios.insert(scenario);
     }
     assert_eq!(
         scenarios.len(),
         max_scenarios,
-        "failed to sample enough unique scenarios in fallback path"
+        "failed to sample enough unique canonical scenarios in fallback path"
     );
-    scenarios
+    scenarios.into_iter().collect()
 }
 
 fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<Vec<usize>> {
@@ -711,22 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn round_scenarios_expand_with_additional_partition_counts() {
-        let two_way = round_scenarios(5, 2);
-        let up_to_three_way = round_scenarios(5, 3);
-        assert!(up_to_three_way.len() > two_way.len());
-    }
-
-    #[test]
-    fn generated_scenarios_cover_full_permutation_space_when_unbounded() {
-        // n=3 with up to two-way partitions now includes full broadcast, so
-        // there are 21 round options. Over 2 rounds, the full arrangement
-        // count is 21^2 = 441.
-        let scenarios = generate_scenarios(0, 3, 2, 2, 1000);
-        assert_eq!(scenarios.len(), 441);
-    }
-
-    #[test]
     fn pruned_scenarios_vary_across_round_positions() {
         let scenarios = generate_scenarios(11, 5, 3, 3, 32);
         for round in 0..3 {
@@ -739,6 +858,21 @@ mod tests {
                 "round index {round} should vary under deterministic pruning"
             );
         }
+    }
+
+    #[test]
+    fn cases_reuse_generated_scenarios_across_compromised_assignments() {
+        let framework = Framework {
+            participants: 5,
+            faults: 1,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 1,
+            max_compromised_sets: 5,
+        };
+        let cases = cases(7, framework);
+        let concrete: HashSet<_> = cases.iter().map(|case| case.scenario.clone()).collect();
+        assert_eq!(concrete.len(), 1);
     }
 
     #[test]
@@ -755,28 +889,6 @@ mod tests {
             scenario.route(View::new(1), &2, &participants),
             SplitTarget::None
         );
-    }
-
-    #[test]
-    fn round_scenarios_include_full_broadcast() {
-        let full = (1u64 << 5) - 1;
-        assert!(round_scenarios(5, 3)
-            .into_iter()
-            .any(|round| { round.primary_mask == full && round.secondary_mask == full }));
-    }
-
-    #[test]
-    fn round_scenarios_cover_all_leaders() {
-        let leaders: HashSet<_> = round_scenarios(10, 3)
-            .into_iter()
-            .map(|round| round.leader())
-            .collect();
-        assert_eq!(leaders, (0..10).collect());
-    }
-
-    #[test]
-    fn round_scenarios_saturate_after_three_partitions() {
-        assert_eq!(round_scenarios(6, 3), round_scenarios(6, 6));
     }
 
     #[test]
