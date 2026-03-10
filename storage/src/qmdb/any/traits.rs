@@ -216,16 +216,6 @@ macro_rules! impl_db_any {
 pub(crate) use impl_db_any;
 
 /// Implements [`Provable`] by delegating each method to an identically-named inherent method.
-///
-/// # Syntax
-///
-/// ```ignore
-/// impl_provable! {
-///     [$($generics)*] TypeName
-///     where { $where_clause }
-///     Operation = ..
-/// }
-/// ```
 macro_rules! impl_provable {
     (
         [$($gen:tt)*] $ty:ty
