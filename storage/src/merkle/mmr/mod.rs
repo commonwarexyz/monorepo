@@ -75,13 +75,11 @@ pub mod read;
 
 // Re-export the location, position, and proof modules from the parent merkle module.
 pub use super::{
-    location,
-    location::{Location, LocationError, LocationRangeExt, MAX_LOCATION},
-    position,
-    position::{Position, MAX_POSITION},
-    proof,
+    location, position, proof,
     proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT},
+    LocationRangeExt,
 };
+use crate::merkle::{self, MerkleFamily};
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -93,6 +91,122 @@ cfg_if::cfg_if! {
         pub mod verification;
     }
 }
+
+/// Marker type for the MMR family.
+#[derive(Copy, Clone, Debug)]
+pub struct Mmr;
+
+impl MerkleFamily for Mmr {
+    /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
+    const MAX_POSITION: u64 = 0x7FFFFFFFFFFFFFFF; // (1 << 63) - 1
+
+    /// Maximum valid location: the largest leaf count is `2^62`.
+    const MAX_LOCATION: u64 = 0x4000_0000_0000_0000; // 2^62
+
+    fn location_to_position(loc: u64) -> u64 {
+        // 2*N - popcount(N) for MMR
+        loc.checked_mul(2)
+            .expect("should not overflow for valid leaf index")
+            - loc.count_ones() as u64
+    }
+
+    fn position_to_location(pos: u64) -> Option<u64> {
+        // Position 0 is always the first leaf at location 0.
+        if pos == 0 {
+            return Some(0);
+        }
+
+        // Find the height of the perfect binary tree containing this position.
+        // Safe: pos + 1 cannot overflow since pos <= MAX_POSITION (checked by caller).
+        let start = u64::MAX >> (pos + 1).leading_zeros();
+        let height = start.trailing_ones();
+        // Height 0 means this position is a peak (not a leaf in a tree).
+        if height == 0 {
+            return None;
+        }
+        let mut two_h = 1 << (height - 1);
+        let mut cur_node = start - 1;
+        let mut leaf_loc_floor = 0u64;
+
+        while two_h > 1 {
+            if cur_node == pos {
+                return None;
+            }
+            let left_pos = cur_node - two_h;
+            two_h >>= 1;
+            if pos > left_pos {
+                // The leaf is in the right subtree, so we must account for the leaves in the left
+                // subtree all of which precede it.
+                leaf_loc_floor += two_h;
+                cur_node -= 1; // move to the right child
+            } else {
+                // The node is in the left subtree
+                cur_node = left_pos;
+            }
+        }
+
+        Some(leaf_loc_floor)
+    }
+
+    fn to_nearest_size(size: Position) -> Position {
+        iterator::PeakIterator::to_nearest_size(size)
+    }
+
+    fn nodes_to_pin(_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
+        iterator::nodes_to_pin(prune_pos).collect()
+    }
+
+    fn is_valid_size(size: Position) -> bool {
+        let size = size.as_u64();
+        if size == 0 {
+            return true;
+        }
+        let leading_zeros = size.leading_zeros();
+        if leading_zeros == 0 {
+            // size overflow
+            return false;
+        }
+        let start = u64::MAX >> leading_zeros;
+        let mut two_h = 1 << start.trailing_ones();
+        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
+        while two_h > 1 {
+            if node_pos < size {
+                if two_h == 2 {
+                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
+                    // invalid.
+                    return node_pos == size - 1;
+                }
+                // move to the right sibling
+                node_pos += two_h - 1;
+                if node_pos < size {
+                    // If the right sibling is in the MMR, then it is invalid.
+                    return false;
+                }
+                continue;
+            }
+            // descend to the left child
+            two_h >>= 1;
+            node_pos -= two_h;
+        }
+        true
+    }
+}
+
+/// A node index or node count in an MMR.
+pub type Position = merkle::Position<Mmr>;
+
+/// A leaf index or leaf count in an MMR.
+pub type Location = merkle::Location<Mmr>;
+
+/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
+///
+/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
+pub const MAX_POSITION: Position = Position::MAX;
+
+/// Maximum valid [Location] value: the largest leaf count an MMR can hold.
+///
+/// `MAX_LOCATION = 2^62`.
+pub const MAX_LOCATION: Location = Location::MAX;
 
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use hasher::Standard as StandardHasher;
@@ -154,12 +268,408 @@ pub enum Error {
     },
 }
 
-impl From<super::Error> for Error {
-    fn from(err: super::Error) -> Self {
+impl From<merkle::Error<Mmr>> for Error {
+    fn from(err: merkle::Error<Mmr>) -> Self {
         match err {
-            super::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
-            super::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
-            super::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
+            merkle::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            merkle::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
+            merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+
+    // --- Position tests ---
+
+    #[test]
+    fn test_from_location() {
+        const CASES: &[(Location, Position)] = &[
+            (Location::new(0), Position::new(0)),
+            (Location::new(1), Position::new(1)),
+            (Location::new(2), Position::new(3)),
+            (Location::new(3), Position::new(4)),
+            (Location::new(4), Position::new(7)),
+            (Location::new(5), Position::new(8)),
+            (Location::new(6), Position::new(10)),
+            (Location::new(7), Position::new(11)),
+            (Location::new(8), Position::new(15)),
+            (Location::new(9), Position::new(16)),
+            (Location::new(10), Position::new(18)),
+            (Location::new(11), Position::new(19)),
+            (Location::new(12), Position::new(22)),
+            (Location::new(13), Position::new(23)),
+            (Location::new(14), Position::new(25)),
+            (Location::new(15), Position::new(26)),
+        ];
+        for (loc, expected_pos) in CASES {
+            let pos = Position::try_from(*loc).unwrap();
+            assert_eq!(pos, *expected_pos);
+        }
+    }
+
+    #[test]
+    fn test_position_checked_add() {
+        let pos = Position::new(10);
+        assert_eq!(pos.checked_add(5).unwrap(), 15);
+        assert!(Position::new(u64::MAX).checked_add(1).is_none());
+        assert!(MAX_POSITION.checked_add(1).is_none());
+        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
+        assert_eq!(
+            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
+            MAX_POSITION
+        );
+    }
+
+    #[test]
+    fn test_position_checked_sub() {
+        let pos = Position::new(10);
+        assert_eq!(pos.checked_sub(5).unwrap(), 5);
+        assert!(pos.checked_sub(11).is_none());
+    }
+
+    #[test]
+    fn test_position_saturating_add() {
+        let pos = Position::new(10);
+        assert_eq!(pos.saturating_add(5), 15);
+        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
+        assert_eq!(
+            Position::new(*MAX_POSITION - 5).saturating_add(10),
+            MAX_POSITION
+        );
+    }
+
+    #[test]
+    fn test_position_saturating_sub() {
+        let pos = Position::new(10);
+        assert_eq!(pos.saturating_sub(5), 5);
+        assert_eq!(Position::new(0).saturating_sub(1), 0);
+    }
+
+    #[test]
+    fn test_position_display() {
+        assert_eq!(Position::new(42).to_string(), "Position(42)");
+    }
+
+    #[test]
+    fn test_position_add() {
+        assert_eq!(Position::new(10) + Position::new(5), 15);
+    }
+
+    #[test]
+    fn test_position_sub() {
+        assert_eq!(Position::new(10) - Position::new(3), 7);
+    }
+
+    #[test]
+    fn test_position_comparison_with_u64() {
+        let pos = Position::new(42);
+        assert_eq!(pos, 42u64);
+        assert_eq!(42u64, pos);
+        assert_ne!(pos, 43u64);
+        assert!(pos < 43u64);
+        assert!(43u64 > pos);
+        assert!(pos > 41u64);
+        assert!(pos <= 42u64);
+        assert!(42u64 >= pos);
+    }
+
+    #[test]
+    fn test_position_assignment_with_u64() {
+        let mut pos = Position::new(10);
+        pos += 5;
+        assert_eq!(pos, 15u64);
+        pos -= 3;
+        assert_eq!(pos, 12u64);
+    }
+
+    #[test]
+    fn test_max_position() {
+        let max_leaves = 1u64 << 62;
+        let max_size = 2 * max_leaves - 1;
+        assert_eq!(*MAX_POSITION, max_size);
+        assert_eq!(*MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(max_size.leading_zeros(), 1);
+
+        let overflow_size = 2 * (max_leaves + 1) - 1;
+        assert_eq!(overflow_size.leading_zeros(), 0);
+
+        let pos = Position::try_from(MAX_LOCATION).unwrap();
+        assert_eq!(pos, MAX_POSITION);
+        assert!(pos.is_valid());
+    }
+
+    #[test]
+    fn test_is_valid_size() {
+        let mut size_to_check = Position::new(0);
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = mem::Mmr::new(&mut hasher);
+        let digest = [1u8; 32];
+        for _i in 0..10000 {
+            while size_to_check != mmr.size() {
+                assert!(
+                    !size_to_check.is_valid_size(),
+                    "size_to_check: {} {}",
+                    size_to_check,
+                    mmr.size()
+                );
+                size_to_check += 1;
+            }
+            assert!(size_to_check.is_valid_size());
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                batch.add(&mut hasher, &digest);
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            size_to_check += 1;
+        }
+        assert!(!Position::new(u64::MAX).is_valid_size());
+        assert!(Position::new(u64::MAX >> 1).is_valid_size());
+        assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
+        assert!(MAX_POSITION.is_valid_size());
+    }
+
+    #[test]
+    fn test_position_read_cfg_valid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        let pos = Position::new(0);
+        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
+
+        let pos = Position::new(12345);
+        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
+
+        assert_eq!(
+            Position::read(&mut MAX_POSITION.encode().as_ref()).unwrap(),
+            MAX_POSITION
+        );
+    }
+
+    #[test]
+    fn test_position_read_cfg_invalid_values() {
+        use commonware_codec::{varint::UInt, Encode, ReadExt};
+
+        let encoded = UInt(*MAX_POSITION + 1).encode();
+        assert!(matches!(
+            Position::read(&mut encoded.as_ref()),
+            Err(commonware_codec::Error::Invalid("Position", _))
+        ));
+
+        let encoded = UInt(u64::MAX).encode();
+        assert!(matches!(
+            Position::read(&mut encoded.as_ref()),
+            Err(commonware_codec::Error::Invalid("Position", _))
+        ));
+    }
+
+    // --- Location tests ---
+
+    #[test]
+    fn test_try_from_position() {
+        const CASES: &[(Position, Location)] = &[
+            (Position::new(0), Location::new(0)),
+            (Position::new(1), Location::new(1)),
+            (Position::new(3), Location::new(2)),
+            (Position::new(4), Location::new(3)),
+            (Position::new(7), Location::new(4)),
+            (Position::new(8), Location::new(5)),
+            (Position::new(10), Location::new(6)),
+            (Position::new(11), Location::new(7)),
+            (Position::new(15), Location::new(8)),
+            (Position::new(16), Location::new(9)),
+            (Position::new(18), Location::new(10)),
+            (Position::new(19), Location::new(11)),
+            (Position::new(22), Location::new(12)),
+            (Position::new(23), Location::new(13)),
+            (Position::new(25), Location::new(14)),
+            (Position::new(26), Location::new(15)),
+        ];
+        for (pos, expected_loc) in CASES {
+            let loc = Location::try_from(*pos).expect("should map to a leaf location");
+            assert_eq!(loc, *expected_loc);
+        }
+    }
+
+    #[test]
+    fn test_try_from_position_error() {
+        const CASES: &[Position] = &[
+            Position::new(2),
+            Position::new(5),
+            Position::new(6),
+            Position::new(9),
+            Position::new(12),
+            Position::new(13),
+            Position::new(14),
+            Position::new(17),
+            Position::new(20),
+            Position::new(21),
+            Position::new(24),
+            Position::new(27),
+            Position::new(28),
+            Position::new(29),
+            Position::new(30),
+        ];
+        for &pos in CASES {
+            assert_eq!(
+                Location::try_from(pos).unwrap_err(),
+                merkle::Error::NonLeaf(pos)
+            );
+        }
+    }
+
+    #[test]
+    fn test_try_from_position_error_overflow() {
+        let overflow_pos = Position::new(u64::MAX);
+        assert_eq!(
+            Location::try_from(overflow_pos).unwrap_err(),
+            merkle::Error::PositionOverflow(overflow_pos)
+        );
+
+        let loc = Location::try_from(MAX_POSITION).unwrap();
+        assert_eq!(loc, MAX_LOCATION);
+
+        let overflow_pos = MAX_POSITION + 1;
+        assert_eq!(
+            Location::try_from(overflow_pos).unwrap_err(),
+            merkle::Error::PositionOverflow(overflow_pos)
+        );
+    }
+
+    #[test]
+    fn test_location_checked_add() {
+        let loc = Location::new(10);
+        assert_eq!(loc.checked_add(5).unwrap(), 15);
+        assert!(Location::new(u64::MAX).checked_add(1).is_none());
+        assert!(MAX_LOCATION.checked_add(1).is_none());
+        let loc = Location::new(*MAX_LOCATION - 10);
+        assert_eq!(loc.checked_add(10).unwrap(), *MAX_LOCATION);
+    }
+
+    #[test]
+    fn test_location_checked_sub() {
+        let loc = Location::new(10);
+        assert_eq!(loc.checked_sub(5).unwrap(), 5);
+        assert!(loc.checked_sub(11).is_none());
+    }
+
+    #[test]
+    fn test_location_saturating_add() {
+        let loc = Location::new(10);
+        assert_eq!(loc.saturating_add(5), 15);
+        assert_eq!(Location::new(u64::MAX).saturating_add(1), MAX_LOCATION);
+        assert_eq!(MAX_LOCATION.saturating_add(1), MAX_LOCATION);
+        assert_eq!(MAX_LOCATION.saturating_add(1000), MAX_LOCATION);
+    }
+
+    #[test]
+    fn test_location_saturating_sub() {
+        let loc = Location::new(10);
+        assert_eq!(loc.saturating_sub(5), 5);
+        assert_eq!(Location::new(0).saturating_sub(1), 0);
+    }
+
+    #[test]
+    fn test_location_display() {
+        assert_eq!(Location::new(42).to_string(), "Location(42)");
+    }
+
+    #[test]
+    fn test_location_add() {
+        assert_eq!(Location::new(10) + Location::new(5), 15);
+    }
+
+    #[test]
+    fn test_location_sub() {
+        assert_eq!(Location::new(10) - Location::new(3), 7);
+    }
+
+    #[test]
+    fn test_location_comparison_with_u64() {
+        let loc = Location::new(42);
+        assert_eq!(loc, 42u64);
+        assert_eq!(42u64, loc);
+        assert_ne!(loc, 43u64);
+        assert!(loc < 43u64);
+        assert!(43u64 > loc);
+        assert!(loc > 41u64);
+        assert!(loc <= 42u64);
+        assert!(42u64 >= loc);
+    }
+
+    #[test]
+    fn test_location_assignment_with_u64() {
+        let mut loc = Location::new(10);
+        loc += 5;
+        assert_eq!(loc, 15u64);
+        loc -= 3;
+        assert_eq!(loc, 12u64);
+    }
+
+    #[test]
+    fn test_location_is_valid() {
+        assert!(Location::new(0).is_valid());
+        assert!(Location::new(1000).is_valid());
+        assert!(MAX_LOCATION.is_valid());
+        assert!(!Location::new(u64::MAX).is_valid());
+    }
+
+    #[test]
+    fn test_max_location_boundary() {
+        assert!(MAX_LOCATION.is_valid());
+        let pos = Position::try_from(MAX_LOCATION).unwrap();
+        assert_eq!(pos, MAX_POSITION);
+        assert!(pos.is_valid());
+
+        let loc = Location::try_from(pos).unwrap();
+        assert_eq!(loc, MAX_LOCATION);
+    }
+
+    #[test]
+    fn test_overflow_location_returns_error() {
+        let over_loc = Location::new(*MAX_LOCATION + 1);
+        assert!(!over_loc.is_valid());
+        assert_eq!(
+            Position::try_from(over_loc).unwrap_err(),
+            merkle::Error::LocationOverflow(over_loc)
+        );
+    }
+
+    #[test]
+    fn test_location_read_cfg_valid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        let loc = Location::new(0);
+        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
+
+        let loc = Location::new(12345);
+        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
+
+        assert_eq!(
+            Location::read(&mut MAX_LOCATION.encode().as_ref()).unwrap(),
+            MAX_LOCATION
+        );
+    }
+
+    #[test]
+    fn test_location_read_cfg_invalid_values() {
+        use commonware_codec::{varint::UInt, Encode, ReadExt};
+
+        let encoded = UInt(*MAX_LOCATION + 1).encode();
+        assert!(matches!(
+            Location::read(&mut encoded.as_ref()),
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
+
+        let encoded = UInt(u64::MAX).encode();
+        assert!(matches!(
+            Location::read(&mut encoded.as_ref()),
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
     }
 }

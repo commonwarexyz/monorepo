@@ -1635,7 +1635,7 @@ mod tests {
 
         let many_peaks_size = Position::new((1u64 << 63) - 64);
         assert!(
-            many_peaks_size.is_mmr_size(),
+            many_peaks_size.is_valid_size(),
             "Size {many_peaks_size} should be a valid MMR size",
         );
 
@@ -1689,7 +1689,7 @@ mod tests {
         // MMR size = 2*N - popcount(N) = 2*N - K
         //
         // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
-        // This exceeds MAX_POSITION, so is_mmr_size() returns false.
+        // This exceeds MAX_POSITION, so is_valid_size() returns false.
 
         let n_for_63_peaks = (1u128 << 63) - 1;
         let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
@@ -1700,8 +1700,8 @@ mod tests {
 
         let size_truncated = size_for_63_peaks as u64;
         assert!(
-            !Position::new(size_truncated).is_mmr_size(),
-            "Size for 63 peaks should fail is_mmr_size()"
+            !Position::new(size_truncated).is_valid_size(),
+            "Size for 63 peaks should fail is_valid_size()"
         );
     }
 

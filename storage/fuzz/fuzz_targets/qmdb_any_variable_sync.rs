@@ -13,7 +13,7 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use mmr::location::Location;
+use mmr::Location;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64},

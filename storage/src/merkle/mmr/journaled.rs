@@ -17,12 +17,10 @@ use crate::{
         batch::{self, UnmerkleizedBatch},
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
-        location::Location,
         mem::{Config as MemConfig, Mmr as MemMmr},
-        position::Position,
         read::{BatchChainInfo, Readable},
         storage::Storage,
-        verification, Error, Proof,
+        verification, Error, Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
