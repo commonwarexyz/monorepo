@@ -539,7 +539,6 @@ mod test {
             pk: &PublicKey,
             epoch: Epoch,
             output: Option<Output<MinSig, PublicKey>>,
-            success_target: u64,
         ) -> anyhow::Result<()> {
             match self.status.get(pk).copied() {
                 None => {}
@@ -588,13 +587,10 @@ mod test {
         }
 
         fn all_reached_success_target(&self, total: usize, success_target: u64) -> bool {
-            self.status
-                .values()
-                .filter(
-                    |e| matches!(self.success_target_epoch(success_target), Some(target) if **e >= target),
-                )
-                .count()
-                >= total
+            let Some(target_epoch) = self.success_target_epoch(success_target) else {
+                return false;
+            };
+            self.status.values().filter(|e| **e >= target_epoch).count() >= total
         }
 
         fn min_epoch(&self) -> Epoch {
@@ -704,7 +700,7 @@ mod test {
                                 (epoch, Some(output))
                             }
                         };
-                        progress.observe(&update.pk, epoch, output, target)?;
+                        progress.observe(&update.pk, epoch, output)?;
 
                         // If all have reached the epoch, stop
                         let all_reached_epoch =
@@ -873,10 +869,10 @@ mod test {
         let restarted = PrivateKey::from_seed(1).public_key();
 
         progress
-            .observe(&first, Epoch::zero(), Some(test_output(0)), 1)
+            .observe(&first, Epoch::zero(), Some(test_output(0)))
             .unwrap();
         progress
-            .observe(&restarted, Epoch::new(1), Some(test_output(1)), 1)
+            .observe(&restarted, Epoch::new(1), Some(test_output(1)))
             .unwrap();
         assert_eq!(progress.status.get(&restarted), Some(&Epoch::new(1)));
     }
@@ -886,13 +882,13 @@ mod test {
         let mut progress = ProgressTracker::default();
         let pk = PrivateKey::from_seed(0).public_key();
 
-        progress.observe(&pk, Epoch::new(1), None, 1).unwrap();
-        let err = progress.observe(&pk, Epoch::new(1), None, 1).unwrap_err();
+        progress.observe(&pk, Epoch::new(1), None).unwrap();
+        let err = progress.observe(&pk, Epoch::new(1), None).unwrap_err();
         assert!(err
             .to_string()
             .contains("unexpected update epoch transition"));
 
-        let err = progress.observe(&pk, Epoch::zero(), None, 1).unwrap_err();
+        let err = progress.observe(&pk, Epoch::zero(), None).unwrap_err();
         assert!(err
             .to_string()
             .contains("unexpected update epoch transition"));
@@ -905,33 +901,31 @@ mod test {
         let second = PrivateKey::from_seed(1).public_key();
 
         progress
-            .observe(&first, Epoch::zero(), Some(test_output(0)), 1)
+            .observe(&first, Epoch::zero(), Some(test_output(0)))
             .unwrap();
         let err = progress
-            .observe(&second, Epoch::zero(), Some(test_output(1)), 1)
+            .observe(&second, Epoch::zero(), Some(test_output(1)))
             .unwrap_err();
         assert!(err.to_string().contains("mismatched outputs"));
     }
 
     #[test]
-    fn progress_tracker_keeps_success_target_on_sorted_success_epoch() {
+    fn progress_tracker_ignores_late_failures_when_tracking_success_target() {
         let mut progress = ProgressTracker::default();
         let first = PrivateKey::from_seed(0).public_key();
         let second = PrivateKey::from_seed(1).public_key();
         let third = PrivateKey::from_seed(2).public_key();
 
         progress
-            .observe(&first, Epoch::zero(), Some(test_output(0)), 2)
+            .observe(&first, Epoch::zero(), Some(test_output(0)))
             .unwrap();
         progress
-            .observe(&second, Epoch::new(2), Some(test_output(2)), 2)
+            .observe(&second, Epoch::new(2), Some(test_output(2)))
             .unwrap();
         assert_eq!(progress.success_target_epoch(2), Some(Epoch::new(2)));
 
-        progress
-            .observe(&third, Epoch::new(1), Some(test_output(1)), 2)
-            .unwrap();
-        assert_eq!(progress.success_target_epoch(2), Some(Epoch::new(1)));
+        progress.observe(&third, Epoch::new(1), None).unwrap();
+        assert_eq!(progress.success_target_epoch(2), Some(Epoch::new(2)));
     }
 
     #[test_group("slow")]
