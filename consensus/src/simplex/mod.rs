@@ -6043,49 +6043,49 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_multisig_min_pk() {
         test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_multisig_min_sig() {
         test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_threshold_vrf_min_pk() {
         test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_threshold_vrf_min_sig() {
         test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_threshold_std_min_pk() {
         test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_threshold_std_min_sig() {
         test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_ed25519() {
         test_twins::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_ed25519_without_relabeling() {
         let campaign = TwinsCampaign {
             n: 5,
@@ -6109,13 +6109,13 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_secp256r1() {
         test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_large_view() {
         let campaign = TwinsCampaign {
             n: 10,
@@ -6139,7 +6139,7 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_twins_large_campaign() {
         let campaign = TwinsCampaign {
             n: 10,
