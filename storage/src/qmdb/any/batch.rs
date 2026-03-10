@@ -258,7 +258,6 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    U::Value: Send + Sync,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
 {
     /// Read an operation at a given location from the correct source.
@@ -561,7 +560,6 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
@@ -684,7 +682,6 @@ where
     I: OrderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
@@ -1187,7 +1184,6 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
@@ -1222,7 +1218,6 @@ mod trait_impls {
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
@@ -1277,7 +1272,6 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;
@@ -1309,7 +1303,6 @@ mod trait_impls {
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;

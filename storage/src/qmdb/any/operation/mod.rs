@@ -1,11 +1,8 @@
 use crate::{
     mmr::Location,
-    qmdb::{
-        any::value::ValueEncoding,
-        operation::{Committable, Key},
-    },
+    qmdb::{any::value::ValueEncoding, operation::Committable},
 };
-use commonware_codec::{Codec, Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::hex;
 use std::fmt;
@@ -60,10 +57,7 @@ where
     }
 }
 
-impl<S: Update> crate::qmdb::operation::Operation for Operation<S>
-where
-    S::Value: Codec,
-{
+impl<S: Update> crate::qmdb::operation::Operation for Operation<S> {
     type Key = S::Key;
 
     fn key(&self) -> Option<&Self::Key> {
@@ -90,10 +84,7 @@ where
     }
 }
 
-impl<S: Update> Committable for Operation<S>
-where
-    S::Value: Codec,
-{
+impl<S: Update> Committable for Operation<S> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
@@ -121,37 +112,7 @@ where
     }
 }
 
-impl<K, V> fmt::Display for Operation<update::Ordered<K, V>>
-where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
-            Self::Update(payload) => payload.fmt(f),
-            Self::CommitFloor(value, loc) => {
-                if let Some(value) = value {
-                    write!(
-                        f,
-                        "[commit {} with inactivity floor: {loc}]",
-                        hex(&value.encode())
-                    )
-                } else {
-                    write!(f, "[commit with inactivity floor: {loc}]")
-                }
-            }
-        }
-    }
-}
-
-impl<K, V> fmt::Display for Operation<update::Unordered<K, V>>
-where
-    K: Key,
-    V: ValueEncoding,
-    V::Value: Codec,
-{
+impl<S: Update> fmt::Display for Operation<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),

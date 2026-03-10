@@ -45,7 +45,6 @@ impl<
     > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -78,7 +77,6 @@ impl<
     > Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
@@ -112,7 +110,6 @@ impl<
     > kv::Gettable for Db<E, C, K, V, I, H, N>
 where
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     type Key = K;
     type Value = V::Value;
