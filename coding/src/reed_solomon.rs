@@ -582,7 +582,6 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
     type Shard = Chunk<H::Digest>;
-    type CheckingData = ();
     type CheckedShard = CheckedChunk<H::Digest>;
     type Error = Error;
 
@@ -605,8 +604,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
-        _checking_data: Option<Self::CheckingData>,
-    ) -> Result<(Self::CheckedShard, Self::CheckingData), Self::Error> {
+    ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
         if index >= total {
             return Err(Error::InvalidIndex(index));
@@ -617,16 +615,14 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         if shard.index != index {
             return Err(Error::InvalidIndex(shard.index));
         }
-        let checked = shard
+        shard
             .verify::<H>(shard.index, commitment)
-            .ok_or(Error::InvalidProof)?;
-        Ok((checked, ()))
+            .ok_or(Error::InvalidProof)
     }
 
     fn decode(
         config: &Config,
         commitment: &Self::Commitment,
-        _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
@@ -846,7 +842,7 @@ mod tests {
 
         // Previously this passed because check() ignored config and only verified
         // against commitment root. It must now fail immediately.
-        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0], None);
+        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 

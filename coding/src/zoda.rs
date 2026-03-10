@@ -395,11 +395,15 @@ where
 
 /// A ZODA shard that has been checked for integrity already.
 #[derive(Clone)]
-pub struct CheckedShard {
+pub struct CheckedShard<D: Digest> {
     /// The shard index within the encoded data.
     index: usize,
     /// The checked shard data.
     shard: Matrix<F>,
+    /// Metadata required to recompute checking data during decode.
+    data_bytes: usize,
+    root: D,
+    checksum: Arc<Matrix<F>>,
     /// The commitment this shard was checked against.
     commitment: Summary,
 }
@@ -435,8 +439,7 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
 ///
 /// Computing this is expensive (Reed-Solomon encoding of the checksum, etc.),
 /// so it can be reused across multiple calls to [`Scheme::check`].
-#[derive(Clone)]
-pub struct CheckingData<D: Digest> {
+struct CheckingData<D: Digest> {
     commitment: Summary,
     topology: Topology,
     root: D,
@@ -512,7 +515,7 @@ impl<D: Digest> CheckingData<D> {
         commitment: Summary,
         index: u16,
         shard: &Shard<D>,
-    ) -> Result<CheckedShard, Error> {
+    ) -> Result<CheckedShard<D>, Error> {
         if !self.metadata_matches(shard) {
             return Err(Error::InvalidShard);
         }
@@ -554,8 +557,29 @@ impl<D: Digest> CheckingData<D> {
         Ok(CheckedShard {
             index: shard_idx,
             shard: shard.rows.clone(),
+            data_bytes: shard.data_bytes,
+            root: shard.root,
+            checksum: shard.checksum.clone(),
             commitment,
         })
+    }
+}
+
+impl<D: Digest> CheckedShard<D> {
+    fn checking_data(&self, config: &Config) -> Result<CheckingData<D>, Error> {
+        CheckingData::reckon(
+            config,
+            &self.commitment,
+            self.data_bytes,
+            self.root,
+            self.checksum.clone(),
+        )
+    }
+
+    fn metadata_matches(&self, other: &Self) -> bool {
+        self.data_bytes == other.data_bytes
+            && self.root == other.root
+            && self.checksum.as_ref() == other.checksum.as_ref()
     }
 }
 
@@ -591,8 +615,7 @@ impl<H> std::fmt::Debug for Zoda<H> {
 impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
     type Shard = Shard<H::Digest>;
-    type CheckingData = CheckingData<H::Digest>;
-    type CheckedShard = CheckedShard;
+    type CheckedShard = CheckedShard<H::Digest>;
     type Error = Error;
 
     fn encode(
@@ -678,35 +701,40 @@ impl<H: Hasher> Scheme for Zoda<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
-        checking_data: Option<Self::CheckingData>,
-    ) -> Result<(Self::CheckedShard, Self::CheckingData), Self::Error> {
-        let checking_data = match checking_data {
-            Some(cd) => cd,
-            None => CheckingData::reckon(
-                config,
-                commitment,
-                shard.data_bytes,
-                shard.root,
-                shard.checksum.clone(),
-            )?,
-        };
+    ) -> Result<Self::CheckedShard, Self::Error> {
+        let checking_data = CheckingData::reckon(
+            config,
+            commitment,
+            shard.data_bytes,
+            shard.root,
+            shard.checksum.clone(),
+        )?;
         if checking_data.commitment != *commitment {
             return Err(Error::InvalidShard);
         }
-        let checked = checking_data.check::<H>(*commitment, index, shard)?;
-        Ok((checked, checking_data))
+        checking_data.check::<H>(*commitment, index, shard)
     }
 
     fn decode(
-        _config: &Config,
+        config: &Config,
         commitment: &Self::Commitment,
-        checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        if checking_data.commitment != *commitment {
+        let first = shards.first().ok_or(Error::InsufficientShards(
+            shards.len(),
+            usize::from(config.minimum_shards.get()),
+        ))?;
+        if &first.commitment != commitment {
             return Err(Error::InconsistentCheckedShard);
         }
+        if !shards.iter().all(|s| &s.commitment == commitment) {
+            return Err(Error::InconsistentCheckedShard);
+        }
+        if !shards.iter().all(|s| s.metadata_matches(first)) {
+            return Err(Error::InconsistentCheckedShard);
+        }
+        let checking_data = first.checking_data(config)?;
         let Topology {
             encoded_rows,
             data_cols,
@@ -718,9 +746,6 @@ impl<H: Hasher> Scheme for Zoda<H> {
         } = checking_data.topology;
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
-        }
-        if !shards.iter().all(|s| &s.commitment == commitment) {
-            return Err(Error::InconsistentCheckedShard);
         }
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
@@ -795,11 +820,10 @@ mod tests {
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
-        let (checked_shard0, cd) =
-            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
+        let checked_shard0 = Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0]).unwrap();
         let duplicate = checked_shard0.clone();
         let shards = vec![checked_shard0, duplicate];
-        let result = Zoda::<Sha256>::decode(&config, &commitment, cd, &shards, &STRATEGY);
+        let result = Zoda::<Sha256>::decode(&config, &commitment, &shards, &STRATEGY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);
@@ -809,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_check_does_not_hide_mutated_metadata() {
+    fn check_rejects_mutated_metadata() {
         let config = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(1),
@@ -818,22 +842,16 @@ mod tests {
         let (commitment, mut shards) =
             Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
 
-        let (_, checking_data) =
-            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
         shards[1].data_bytes += 1;
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
-            Err(Error::InvalidShard)
-        ));
-        assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1]),
             Err(Error::InvalidShard)
         ));
     }
 
     #[test]
-    fn cached_check_does_not_hide_mutated_root() {
+    fn check_rejects_mutated_root() {
         let config = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(1),
@@ -842,22 +860,16 @@ mod tests {
         let (commitment, mut shards) =
             Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
 
-        let (_, checking_data) =
-            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
         shards[1].root = Sha256::hash(b"mutated root");
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
-            Err(Error::InvalidShard)
-        ));
-        assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1]),
             Err(Error::InvalidShard)
         ));
     }
 
     #[test]
-    fn checksum_malleability_with_cached_checking_data() {
+    fn check_rejects_mutated_checksum() {
         let config = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(1),
@@ -866,20 +878,31 @@ mod tests {
         let (commitment, mut shards) =
             Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
 
-        let (_, checking_data) =
-            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
-
         let mut checksum = (*shards[1].checksum).clone();
         checksum[(0, 0)] += &F::one();
         shards[1].checksum = Arc::new(checksum);
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1]),
             Err(Error::InvalidShard)
         ));
+    }
+
+    #[test]
+    fn decode_rejects_mixed_checked_shard_metadata() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = b"metadata mismatch";
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+        let checked_a = Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0]).unwrap();
+        let mut checked_b = Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1]).unwrap();
+        checked_b.root = Sha256::hash(b"mutated root");
+
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
-            Err(Error::InvalidShard)
+            Zoda::<Sha256>::decode(&config, &commitment, &[checked_a, checked_b], &STRATEGY),
+            Err(Error::InconsistentCheckedShard)
         ));
     }
 
@@ -947,14 +970,14 @@ mod tests {
         }
 
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, &shards[b_i], None),
+            Zoda::<Sha256>::check(&config, &commitment, b_i as u16, &shards[b_i]),
             Err(Error::InvalidShard)
         ));
 
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
-            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, &shards[a_i], None),
+            Zoda::<Sha256>::check(&config, &commitment, a_i as u16, &shards[a_i]),
             Err(Error::InvalidShard)
         ));
     }

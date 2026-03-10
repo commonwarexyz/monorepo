@@ -77,26 +77,12 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     shuffle.shuffle(&mut shards);
 
     // Check and collect `to_use` shards.
-    let mut checking_data = None;
     let checked_shards = shards
         .into_iter()
         .take(to_use as usize)
-        .map(|(i, shard)| {
-            let (checked, cd) =
-                S::check(&config, &commitment, i, &shard, checking_data.take()).unwrap();
-            checking_data = Some(cd);
-            checked
-        })
+        .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
         .collect::<Vec<_>>();
 
-    let checking_data = checking_data.unwrap();
-    let decoded = S::decode(
-        &config,
-        &commitment,
-        checking_data,
-        &checked_shards,
-        &STRATEGY,
-    )
-    .unwrap();
+    let decoded = S::decode(&config, &commitment, &checked_shards, &STRATEGY).unwrap();
     assert_eq!(&decoded, &data);
 }

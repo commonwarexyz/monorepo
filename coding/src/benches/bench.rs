@@ -137,40 +137,21 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     (commitment, selected_shards)
                                 },
                                 |(commitment, selected_shards)| {
-                                    // Check shards, reusing checking data across calls
-                                    let mut checking_data = None;
                                     let checked_shards = selected_shards
                                         .iter()
                                         .map(|(idx, shard)| {
-                                            let (checked, cd) = S::check(
-                                                &config,
-                                                &commitment,
-                                                *idx,
-                                                shard,
-                                                checking_data.take(),
-                                            )
-                                            .unwrap();
-                                            checking_data = Some(cd);
-                                            checked
+                                            S::check(&config, &commitment, *idx, shard).unwrap()
                                         })
                                         .collect::<Vec<_>>();
 
                                     // Decode data
-                                    let checking_data = checking_data.unwrap();
                                     if conc > 1 {
-                                        S::decode(
-                                            &config,
-                                            &commitment,
-                                            checking_data,
-                                            &checked_shards,
-                                            &strategy,
-                                        )
-                                        .unwrap()
+                                        S::decode(&config, &commitment, &checked_shards, &strategy)
+                                            .unwrap()
                                     } else {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            checking_data,
                                             &checked_shards,
                                             &Sequential,
                                         )

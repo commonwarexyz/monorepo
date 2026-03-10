@@ -552,13 +552,9 @@ where
         }
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
-        let checking_data = state
-            .take_checking_data()
-            .expect("checking data must be cached before decode");
         let blob = C::decode(
             &commitment.config(),
             &commitment.root(),
-            checking_data,
             state.checked_shards(),
             &self.strategy,
         )
@@ -1037,9 +1033,6 @@ where
     /// Raw shard data received per index, retained for equivocation detection.
     /// Keyed by shard index.
     received_shards: BTreeMap<u16, C::Shard>,
-    /// Cached checking data derived from the first successful `check` call,
-    /// reused to avoid redundant computation on subsequent shards.
-    checking_data: Option<C::CheckingData>,
     /// Whether the leader's shard for our index has been verified.
     own_shard_verified: bool,
 }
@@ -1088,7 +1081,6 @@ where
             contributed: BitMap::zeroes(participants_len),
             round,
             received_shards: BTreeMap::new(),
-            checking_data: None,
             own_shard_verified: false,
         }
     }
@@ -1123,18 +1115,11 @@ where
         // for both check and storage.
         self.common.received_shards.insert(index, shard.data);
         let data = self.common.received_shards.get(&index).unwrap();
-        let Ok((checked, checking_data)) = C::check(
-            &commitment.config(),
-            &commitment.root(),
-            index,
-            data,
-            self.common.checking_data.take(),
-        ) else {
+        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data) else {
             self.common.received_shards.remove(&index);
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
         };
-        self.common.checking_data = Some(checking_data);
 
         self.common.contributed.set(u64::from(index), true);
         self.common.checked_shards.push(checked);
@@ -1161,56 +1146,22 @@ where
             return None;
         }
 
-        // If checking data is not yet cached, verify shards sequentially
-        // until one succeeds, seeding the cache for the parallel batch.
-        //
-        // Without this, a Byzantine peer can force every parallel task to
-        // independently recompute checking data.
-        let mut pending = std::mem::take(&mut self.pending_shards);
-        while self.common.checking_data.is_none() {
-            let Some((peer, shard)) = pending.pop_first() else {
-                break;
-            };
-            match C::check(
+        let pending = std::mem::take(&mut self.pending_shards);
+        let (new_checked, to_block) = strategy.map_partition_collect_vec(pending, |(peer, shard)| {
+            let checked = C::check(
                 &commitment.config(),
                 &commitment.root(),
                 shard.index,
                 &shard.data,
-                None,
-            ) {
-                Ok((checked, checking_data)) => {
-                    self.common.checking_data = Some(checking_data);
-                    self.common.checked_shards.push(checked);
-                }
-                Err(_) => {
-                    commonware_p2p::block!(blocker, peer, "invalid shard received");
-                }
-            }
-        }
-
-        // Batch-validate remaining pending shards in parallel, sharing
-        // the cached checking data across all tasks.
-        let checking_data = self.common.checking_data.clone();
-        let (new_checked, to_block) =
-            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
-                let checked = C::check(
-                    &commitment.config(),
-                    &commitment.root(),
-                    shard.index,
-                    &shard.data,
-                    checking_data.clone(),
-                );
-                (peer, checked.ok())
-            });
+            );
+            (peer, checked.ok())
+        });
 
         for peer in to_block {
             commonware_p2p::block!(blocker, peer, "invalid shard received");
         }
-        for (checked, cd) in new_checked {
+        for checked in new_checked {
             self.common.checked_shards.push(checked);
-            if self.common.checking_data.is_none() {
-                self.common.checking_data = Some(cd);
-            }
         }
 
         // After validation, some may have failed; recheck threshold.
@@ -1308,11 +1259,6 @@ where
     /// Returns all verified shards accumulated for reconstruction.
     const fn checked_shards(&self) -> &[C::CheckedShard] {
         self.common().checked_shards.as_slice()
-    }
-
-    /// Returns the cached checking data, if available.
-    const fn take_checking_data(&mut self) -> Option<C::CheckingData> {
-        self.common_mut().checking_data.take()
     }
 
     /// Takes the pending action for this commitment's validated shard.

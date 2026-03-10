@@ -67,7 +67,6 @@ pub struct CheckedShard<D: Digest> {
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
     type Shard = Shard;
-    type CheckingData = ();
     type CheckedShard = CheckedShard<H::Digest>;
     type Error = Error;
 
@@ -89,25 +88,20 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         commitment: &Self::Commitment,
         _index: u16,
         shard: &Self::Shard,
-        _checking_data: Option<Self::CheckingData>,
-    ) -> Result<(Self::CheckedShard, Self::CheckingData), Self::Error> {
+    ) -> Result<Self::CheckedShard, Self::Error> {
         let shard_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &shard_commitment != commitment {
             return Err(Error::BadData);
         }
-        Ok((
-            CheckedShard {
-                data: shard.0.clone(),
-                commitment: *commitment,
-            },
-            (),
-        ))
+        Ok(CheckedShard {
+            data: shard.0.clone(),
+            commitment: *commitment,
+        })
     }
 
     fn decode(
         _config: &Config,
         commitment: &Self::Commitment,
-        _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
@@ -142,7 +136,7 @@ mod tests {
         let mut shard = shards.pop().expect("missing shard");
         shard.0[0] ^= 0x01;
 
-        let result = NoCoding::<Sha256>::check(&config, &commitment, 0, &shard, None);
+        let result = NoCoding::<Sha256>::check(&config, &commitment, 0, &shard);
         assert!(matches!(result, Err(Error::BadData)));
     }
 }
