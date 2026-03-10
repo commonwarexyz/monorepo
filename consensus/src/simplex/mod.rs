@@ -5994,6 +5994,7 @@ mod tests {
                 max_partitions: campaign.max_partitions,
                 max_scenarios: campaign.max_scenarios,
                 max_compromised_sets: campaign.max_compromised_sets,
+                relabel: true,
             },
         );
         assert!(

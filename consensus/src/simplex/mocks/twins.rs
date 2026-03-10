@@ -6,6 +6,20 @@
 //! 2. Combine partitions with leader assignments per round.
 //! 3. Arrange those round choices into full multi-round scenarios.
 //! 4. Execute each scenario across compromised-node assignments.
+//!
+//! Scenarios are generated in a canonical unlabeled form instead of by
+//! enumerating every participant relabeling. The generator tracks participant
+//! symmetry classes as `cells`, where each cell is a group of participants that
+//! have been indistinguishable across all attack rounds generated so far.
+//! Advancing one round refines those cells by splitting each group according to
+//! the role its members take in the new round.
+//!
+//! `cases()` can then either emit those canonical scenarios directly or map each
+//! one onto a concrete participant permutation derived from the case seed,
+//! depending on [`Framework::relabel`]. In both modes, cases are cross-producted
+//! with concrete compromised-node sets. That keeps the scenario budget focused
+//! on distinct shapes while still allowing concrete player assignments to be
+//! exercised when desired.
 
 use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
@@ -93,6 +107,7 @@ impl Scenario {
     }
 }
 
+/// Routes a sender according to explicit primary and secondary groups.
 fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
     let in_primary = primary.contains(sender);
     let in_secondary = secondary.contains(sender);
@@ -206,6 +221,9 @@ pub struct Framework {
     pub max_scenarios: usize,
     /// Maximum number of generated compromised-node sets.
     pub max_compromised_sets: usize,
+    /// Whether to relabel canonical scenarios onto concrete participant
+    /// permutations before emitting executable cases.
+    pub relabel: bool,
 }
 
 /// Executable case from the Twins framework.
@@ -222,8 +240,10 @@ pub struct Case {
 /// Generate executable Twins cases from framework parameters.
 ///
 /// Scenario generation first collapses participant relabelings into canonical
-/// unlabeled scenario shapes, then combines those shapes with concrete
-/// compromised-node assignments.
+/// unlabeled scenario shapes. Depending on [`Framework::relabel`], each case
+/// then either emits that canonical shape directly or deterministically
+/// relabels it onto a concrete participant permutation before combining it
+/// with a concrete compromised-node assignment.
 pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
     assert!(framework.faults > 0, "faults must be > 0");
@@ -263,7 +283,13 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
             let case_seed = derive_case_seed(seed, compromised_idx, scenario_idx, scenarios.len());
             out.push(Case {
                 compromised: compromised.clone(),
-                scenario: scenario.clone(),
+                scenario: if framework.relabel {
+                    let permutation =
+                        assignment_from_seed(case_seed ^ 0xA11C_E55E_u64, framework.participants);
+                    permute_scenario(scenario, &permutation)
+                } else {
+                    scenario.clone()
+                },
                 seed: case_seed,
             });
         }
@@ -271,6 +297,7 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     out
 }
 
+/// Materializes the participants selected by a bitmask.
 fn partition_for_mask<P: Clone>(mask: u64, participants: &[P]) -> Vec<P> {
     let mut group = Vec::new();
     for (idx, participant) in participants.iter().enumerate() {
@@ -281,6 +308,7 @@ fn partition_for_mask<P: Clone>(mask: u64, participants: &[P]) -> Vec<P> {
     group
 }
 
+/// Converts twins routing bitmasks into concrete participant groups.
 fn masks_to_partitions<P: Clone>(
     primary_mask: u64,
     secondary_mask: u64,
@@ -291,6 +319,50 @@ fn masks_to_partitions<P: Clone>(
     (primary, secondary)
 }
 
+/// Applies a participant permutation to a routing bitmask.
+fn permute_mask(mask: u64, permutation: &[usize]) -> u64 {
+    let mut permuted = 0u64;
+    for (participant, &mapped) in permutation.iter().enumerate() {
+        if (mask & (1u64 << participant)) != 0 {
+            permuted |= 1u64 << mapped;
+        }
+    }
+    permuted
+}
+
+/// Applies a participant permutation to every round in a scenario.
+fn permute_scenario(scenario: &Scenario, permutation: &[usize]) -> Scenario {
+    assert!(
+        scenario
+            .rounds
+            .iter()
+            .all(|round| round.leader < permutation.len()),
+        "permutation must cover the scenario participants"
+    );
+    Scenario {
+        rounds: scenario
+            .rounds
+            .iter()
+            .map(|round| RoundScenario {
+                leader: permutation[round.leader],
+                primary_mask: permute_mask(round.primary_mask, permutation),
+                secondary_mask: permute_mask(round.secondary_mask, permutation),
+            })
+            .collect(),
+    }
+}
+
+/// Derives a deterministic participant permutation from a case seed.
+fn assignment_from_seed(seed: u64, n: usize) -> Vec<usize> {
+    let mut rng = test_rng_seeded(seed);
+    let mut assignment: Vec<_> = (0..n).collect();
+    for idx in (1..n).rev() {
+        assignment.swap(idx, rng.gen_range(0..=idx));
+    }
+    assignment
+}
+
+/// Returns a contiguous bitmask range `[start, start + len)`.
 fn range_mask(start: usize, len: usize) -> u64 {
     if len == 0 {
         return 0;
@@ -298,6 +370,7 @@ fn range_mask(start: usize, len: usize) -> u64 {
     (((1u128 << len) - 1) << start) as u64
 }
 
+/// Converts cell sizes into contiguous index ranges.
 fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
     let mut start = 0usize;
     cells.iter()
@@ -310,7 +383,9 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// Enumerates all canonical next-round refinements from the current cell state.
 fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundScenario, Vec<usize>)> {
+    /// Refines cells for a round where primary and secondary coincide.
     fn no_secondary(
         ranges: &[(usize, usize)],
         leader_cell: usize,
@@ -379,6 +454,7 @@ fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundS
         }
     }
 
+    /// Refines cells for a round with a distinct secondary partition.
     fn with_secondary(
         ranges: &[(usize, usize)],
         max_partitions: usize,
@@ -500,6 +576,7 @@ fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundS
     out
 }
 
+/// Counts canonical scenario suffixes reachable from a cell state.
 fn canonical_scenario_count(
     cells: &[usize],
     rounds: usize,
@@ -523,6 +600,7 @@ fn canonical_scenario_count(
     Some(total)
 }
 
+/// Reconstructs the canonical scenario at a given lexicographic rank.
 fn canonical_scenario_from_rank(
     cells: &[usize],
     rounds: usize,
@@ -548,6 +626,7 @@ fn canonical_scenario_from_rank(
     unreachable!("canonical scenario rank out of bounds")
 }
 
+/// Counts `k`-subsets of an `n`-element set without overflow.
 fn combination_count(n: usize, k: usize) -> Option<u128> {
     if k > n {
         return Some(0);
@@ -561,6 +640,7 @@ fn combination_count(n: usize, k: usize) -> Option<u128> {
     Some(total)
 }
 
+/// Reconstructs the lexicographically ranked `k`-subset of `[0, n)`.
 fn combination_from_rank(n: usize, k: usize, mut rank: u128) -> Vec<usize> {
     let mut set = Vec::with_capacity(k);
     let mut start = 0usize;
@@ -579,6 +659,7 @@ fn combination_from_rank(n: usize, k: usize, mut rank: u128) -> Vec<usize> {
     set
 }
 
+/// Derives a stable seed for a `(compromised set, scenario)` pair.
 fn derive_case_seed(
     seed: u64,
     compromised_idx: usize,
@@ -592,6 +673,7 @@ fn derive_case_seed(
     seed ^ u64::try_from(case_idx).expect("case index should fit in u64")
 }
 
+/// Samples unique indices without replacement from `[0, total)`.
 fn sample_unique_indices(rng: &mut StdRng, total: u128, samples: usize) -> Vec<u128> {
     assert!(
         (samples as u128) <= total,
@@ -617,6 +699,7 @@ fn sample_unique_indices(rng: &mut StdRng, total: u128, samples: usize) -> Vec<u
     sampled
 }
 
+/// Generates canonical scenarios subject to the framework bounds.
 fn generate_scenarios(
     seed: u64,
     n: usize,
@@ -686,7 +769,9 @@ fn generate_scenarios(
     scenarios.into_iter().collect()
 }
 
+/// Generates concrete compromised-node assignments subject to the framework bounds.
 fn compromised_sets(seed: u64, n: usize, faults: usize, max_sets: usize) -> Vec<Vec<usize>> {
+    /// Recursively enumerates all `remaining`-subsets starting at `start`.
     fn choose(
         start: usize,
         n: usize,
@@ -732,6 +817,25 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
     use commonware_utils::ordered::Set;
 
+    fn scenario(rounds: &[(usize, u64, u64)]) -> Scenario {
+        Scenario {
+            rounds: rounds
+                .iter()
+                .map(|&(leader, primary_mask, secondary_mask)| RoundScenario {
+                    leader,
+                    primary_mask,
+                    secondary_mask,
+                })
+                .collect(),
+        }
+    }
+
+    fn case_tuples(cases: &[Case]) -> Vec<(Vec<usize>, Scenario, u64)> {
+        cases.iter()
+            .map(|case| (case.compromised.clone(), case.scenario.clone(), case.seed))
+            .collect()
+    }
+
     #[test]
     fn cases_cover_all_compromised_nodes_for_n5_f1() {
         let framework = Framework {
@@ -741,6 +845,7 @@ mod tests {
             max_partitions: 3,
             max_scenarios: 3,
             max_compromised_sets: 5,
+            relabel: true,
         };
         let cases = cases(0, framework);
         let compromised: HashSet<_> = cases.iter().map(|case| case.compromised[0]).collect();
@@ -756,6 +861,7 @@ mod tests {
             max_partitions: 3,
             max_scenarios: 4,
             max_compromised_sets: 5,
+            relabel: true,
         };
         let first = cases(42, framework);
         let second = cases(42, framework);
@@ -861,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn cases_reuse_generated_scenarios_across_compromised_assignments() {
+    fn cases_relabel_generated_scenarios_across_compromised_assignments() {
         let framework = Framework {
             participants: 5,
             faults: 1,
@@ -869,10 +975,102 @@ mod tests {
             max_partitions: 3,
             max_scenarios: 1,
             max_compromised_sets: 5,
+            relabel: true,
+        };
+        let cases = cases(7, framework);
+        let concrete: HashSet<_> = cases.iter().map(|case| case.scenario.clone()).collect();
+        assert!(concrete.len() > 1);
+    }
+
+    #[test]
+    fn cases_reuse_generated_scenarios_without_relabeling() {
+        let framework = Framework {
+            participants: 5,
+            faults: 1,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 1,
+            max_compromised_sets: 5,
+            relabel: false,
         };
         let cases = cases(7, framework);
         let concrete: HashSet<_> = cases.iter().map(|case| case.scenario.clone()).collect();
         assert_eq!(concrete.len(), 1);
+    }
+
+    #[test]
+    fn small_two_way_cases_match_expected() {
+        let cases = cases(
+            0,
+            Framework {
+                participants: 3,
+                faults: 1,
+                rounds: 1,
+                max_partitions: 2,
+                max_scenarios: usize::MAX,
+                max_compromised_sets: usize::MAX,
+                relabel: true,
+            },
+        );
+        assert_eq!(
+            case_tuples(&cases),
+            vec![
+                (vec![0], scenario(&[(2, 7, 7)]), 0),
+                (vec![0], scenario(&[(1, 3, 3)]), 1),
+                (vec![0], scenario(&[(2, 4, 4)]), 2),
+                (vec![0], scenario(&[(0, 3, 4)]), 3),
+                (vec![0], scenario(&[(0, 1, 6)]), 4),
+                (vec![1], scenario(&[(2, 7, 7)]), 5),
+                (vec![1], scenario(&[(1, 3, 3)]), 6),
+                (vec![1], scenario(&[(0, 1, 1)]), 7),
+                (vec![1], scenario(&[(0, 3, 4)]), 8),
+                (vec![1], scenario(&[(2, 4, 3)]), 9),
+                (vec![2], scenario(&[(2, 7, 7)]), 10),
+                (vec![2], scenario(&[(1, 3, 3)]), 11),
+                (vec![2], scenario(&[(1, 2, 2)]), 12),
+                (vec![2], scenario(&[(2, 6, 1)]), 13),
+                (vec![2], scenario(&[(2, 4, 3)]), 14),
+            ]
+        );
+    }
+
+    #[test]
+    fn small_three_way_cases_match_expected() {
+        let cases = cases(
+            0,
+            Framework {
+                participants: 3,
+                faults: 1,
+                rounds: 1,
+                max_partitions: 3,
+                max_scenarios: usize::MAX,
+                max_compromised_sets: usize::MAX,
+                relabel: true,
+            },
+        );
+        assert_eq!(
+            case_tuples(&cases),
+            vec![
+                (vec![0], scenario(&[(2, 7, 7)]), 0),
+                (vec![0], scenario(&[(1, 3, 3)]), 1),
+                (vec![0], scenario(&[(2, 4, 4)]), 2),
+                (vec![0], scenario(&[(0, 3, 4)]), 3),
+                (vec![0], scenario(&[(0, 1, 6)]), 4),
+                (vec![0], scenario(&[(2, 4, 1)]), 5),
+                (vec![1], scenario(&[(1, 7, 7)]), 6),
+                (vec![1], scenario(&[(0, 5, 5)]), 7),
+                (vec![1], scenario(&[(0, 1, 1)]), 8),
+                (vec![1], scenario(&[(2, 5, 2)]), 9),
+                (vec![1], scenario(&[(2, 4, 3)]), 10),
+                (vec![1], scenario(&[(1, 2, 1)]), 11),
+                (vec![2], scenario(&[(1, 7, 7)]), 12),
+                (vec![2], scenario(&[(2, 6, 6)]), 13),
+                (vec![2], scenario(&[(2, 4, 4)]), 14),
+                (vec![2], scenario(&[(0, 3, 4)]), 15),
+                (vec![2], scenario(&[(1, 2, 5)]), 16),
+                (vec![2], scenario(&[(0, 1, 4)]), 17),
+            ]
+        );
     }
 
     #[test]
@@ -914,6 +1112,7 @@ mod tests {
             max_partitions: 3,
             max_scenarios: 1,
             max_compromised_sets: 1,
+            relabel: true,
         };
         let case = cases(0, framework)
             .into_iter()
