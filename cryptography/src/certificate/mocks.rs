@@ -109,7 +109,7 @@ pub struct Generic<
     P: PublicKey,
     N: super::Namespace,
     const ATTRIBUTABLE: bool = true,
-    const BATCHABLE: bool = false,
+    const BATCHABLE: bool = true,
     const ALLOW_INVALID: bool = true,
 > {
     me: Option<Participant>,
@@ -454,7 +454,7 @@ macro_rules! impl_certificate_mock {
         where
             R: rand::RngCore + rand::CryptoRng,
         {
-            fixture_with::<true, false, true, R>(rng, namespace, n)
+            fixture_with::<true, true, true, R>(rng, namespace, n)
         }
 
         /// Generates a test fixture with explicit mock certificate behavior flags.
@@ -519,7 +519,7 @@ macro_rules! impl_certificate_mock {
         pub struct Scheme<
             P: $crate::PublicKey,
             const ATTRIBUTABLE: bool = true,
-            const BATCHABLE: bool = false,
+            const BATCHABLE: bool = true,
             const ALLOW_INVALID: bool = true,
         > {
             generic: $crate::certificate::mocks::Generic<
@@ -768,10 +768,10 @@ mod tests {
     #[test]
     fn configurable_properties_follow_type_flags() {
         assert!(Scheme::<Ed25519PublicKey>::is_attributable());
-        assert!(!Scheme::<Ed25519PublicKey>::is_batchable());
+        assert!(Scheme::<Ed25519PublicKey>::is_batchable());
 
-        assert!(!Scheme::<Ed25519PublicKey, false, true>::is_attributable());
-        assert!(Scheme::<Ed25519PublicKey, false, true>::is_batchable());
+        assert!(!Scheme::<Ed25519PublicKey, false, false>::is_attributable());
+        assert!(!Scheme::<Ed25519PublicKey, false, false>::is_batchable());
     }
 
     #[test]
