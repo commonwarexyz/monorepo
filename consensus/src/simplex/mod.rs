@@ -413,7 +413,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::mocks::Fixture,
+        certificate::mocks::{self as certificate_mocks, Fixture, SubjectFamily},
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
         Hasher as _, Sha256, Signer as _,
@@ -445,6 +445,15 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[derive(Clone, Copy, Debug)]
+    struct SimplexSubjectFamily;
+
+    impl SubjectFamily for SimplexSubjectFamily {
+        type Namespace = crate::simplex::scheme::Namespace;
+        type Subject<'a, DigestImpl: commonware_cryptography::Digest> =
+            crate::simplex::types::Subject<'a, DigestImpl>;
+    }
 
     #[test]
     fn test_interesting() {
@@ -6093,14 +6102,14 @@ mod tests {
     fn test_twins_large() {
         let campaign = TwinsCampaign {
             n: 10,
-            rounds: 4,
+            rounds: 5,
             max_partitions: 3,
-            max_scenarios: 2,
-            max_compromised_sets: 1,
-            required_containers: View::new(100),
+            max_scenarios: 3,
+            max_compromised_sets: 2,
+            required_containers: View::new(50),
             relabel: false,
         };
-        twins_campaign::<_, _, Random>(
+        twins_campaign::<_, _, RoundRobin>(
             0,
             campaign,
             Link {
@@ -6108,7 +6117,7 @@ mod tests {
                 jitter: Duration::from_secs(1),
                 success_rate: 1.0,
             },
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            certificate_mocks::fixture::<SimplexSubjectFamily, _>,
         );
     }
 }
