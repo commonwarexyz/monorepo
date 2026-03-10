@@ -336,6 +336,9 @@ commonware_macros::stability_scope!(ALPHA {
             weak_shard: Self::WeakShard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
+        /// Construct an insufficient-shards error for this scheme.
+        fn insufficient_shards(actual: usize, expected: usize) -> Self::Error;
+
         /// Decode the data from shards received from other participants.
         ///
         /// The data must be decodeable with as few as `config.minimum_shards`,
@@ -360,6 +363,78 @@ commonware_macros::stability_scope!(ALPHA {
             shards: &[Self::CheckedShard],
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
+    }
+
+    /// An adapter that exposes a [`PhasedScheme`] through the [`Scheme`] trait.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct PhasedAsScheme<P>(core::marker::PhantomData<P>);
+
+    /// A checked shard produced by adapting a phased scheme into [`Scheme`].
+    #[derive(Clone)]
+    pub struct PhasedCheckedShard<P: PhasedScheme> {
+        checking_data: P::CheckingData,
+        checked_shard: P::CheckedShard,
+    }
+
+    impl<P: PhasedScheme> Debug for PhasedCheckedShard<P> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("PhasedCheckedShard")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<P: PhasedScheme> Scheme for PhasedAsScheme<P> {
+        type Commitment = P::Commitment;
+        type Shard = P::StrongShard;
+        type CheckedShard = PhasedCheckedShard<P>;
+        type Error = P::Error;
+
+        fn encode(
+            config: &Config,
+            data: impl Buf,
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+            P::encode(config, data, strategy)
+        }
+
+        fn check(
+            config: &Config,
+            commitment: &Self::Commitment,
+            index: u16,
+            shard: &Self::Shard,
+        ) -> Result<Self::CheckedShard, Self::Error> {
+            let (checking_data, checked_shard, _) =
+                P::weaken(config, commitment, index, shard.clone())?;
+            Ok(PhasedCheckedShard {
+                checking_data,
+                checked_shard,
+            })
+        }
+
+        fn decode(
+            config: &Config,
+            commitment: &Self::Commitment,
+            shards: &[Self::CheckedShard],
+            strategy: &impl Strategy,
+        ) -> Result<Vec<u8>, Self::Error> {
+            let Some(first) = shards.first() else {
+                return Err(P::insufficient_shards(
+                    0,
+                    usize::from(config.minimum_shards.get()),
+                ));
+            };
+            let checked_shards = shards
+                .iter()
+                .map(|shard| shard.checked_shard.clone())
+                .collect::<Vec<_>>();
+            P::decode(
+                config,
+                commitment,
+                first.checking_data.clone(),
+                &checked_shards,
+                strategy,
+            )
+        }
     }
 
     /// A marker trait indicating that [`Scheme::check`] or [`PhasedScheme::check`] proves validity of the encoding.
@@ -415,7 +490,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{reed_solomon::ReedSolomon, Scheme, Zoda};
+        use crate::{reed_solomon::ReedSolomon, PhasedAsScheme, Scheme, Zoda};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -461,6 +536,15 @@ mod test {
             );
         }
 
+        fn decode_rejects_empty_checked_shards<S: Scheme>(config: &Config, data: &[u8]) {
+            let (commitment, _) = S::encode(config, data, &Sequential).unwrap();
+            let result = S::decode(config, &commitment, &[], &Sequential);
+            assert!(
+                result.is_err(),
+                "decode must reject empty checked shard sets"
+            );
+        }
+
         #[test]
         fn decode_rejects_mixed_commitment_shards() {
             let config = Config {
@@ -473,10 +557,15 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
-            decode_rejects_mixed_commitments::<Zoda<Sha256>>(
+            decode_rejects_mixed_commitments::<PhasedAsScheme<Zoda<Sha256>>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
+            );
+            decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<Zoda<Sha256>>>(
+                &config,
+                b"alpha payload",
             );
         }
 
@@ -489,7 +578,7 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
-            roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
         }
 
         #[test]
@@ -502,7 +591,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
         }
 
         #[test]
@@ -521,7 +610,7 @@ mod test {
                 .with_search_limit(64)
                 .test(|u| {
                     let (config, data, selected) = generate_case(u)?;
-                    roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                    roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
                     Ok(())
                 });
         }

@@ -1428,7 +1428,9 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::Encode;
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Zoda};
+    use commonware_coding::{
+        CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
+    };
     use commonware_cryptography::{
         certificate::Subject,
         ed25519::{PrivateKey, PublicKey},
@@ -1847,7 +1849,11 @@ mod tests {
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, Zoda<H>, H>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, PhasedAsScheme<Zoda<H>>, H>::new(
+                    inner,
+                    coding_config,
+                    &STRATEGY,
+                );
                 let commitment = coded_block.commitment();
 
                 let leader = peers[0].public_key.clone();
