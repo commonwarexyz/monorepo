@@ -1003,53 +1003,13 @@ module replica {
                 | Some(cert_block_val) => all {
                     val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
                     val newer = cert_view_num > self.last_finalized
-                    val walk_result = VIEWS.fold({
-                        current_view: cert_view_num,
-                        current_block: cert_block_val,
-                        done: false,
-                        acc: List(),
-                    }, (st, _v) => {
-                        if (st.done)
-                            st
-                        else {
-                            val refs = learned_parents(st.current_view, st.current_block)
-                            if (refs.size() != 1)
-                                {
-                                    ...st,
-                                    done: true
-                                }
-                            else
-                                match (refs.fold(None, (_acc, p) => Some(p))) {
-                                    | Some(parent) => {
-                                        val include_parent = and {
-                                            parent.parent_block != GENESIS_BLOCK,
-                                            parent.parent_view > self.last_finalized,
-                                        }
-                                        if (include_parent)
-                                            {
-                                                current_view: parent.parent_view,
-                                                current_block: parent.parent_block,
-                                                done: false,
-                                                acc: List(parent.parent_block).concat(st.acc),
-                                            }
-                                        else
-                                            {
-                                                ...st,
-                                                done: true
-                                            }
-                                    }
-                                    | None => {
-                                        ...st,
-                                        done: true
-                                    }
-                                }
-                        }
-                    })
-                    val committed_chain = walk_result.acc.append(cert_block_val)
 
                     all {
+                        // Watermark-only finalization: append just the finalized block.
+                        // No recursive ancestor walk -- matches the Rust implementation
+                        // which updates last_finalized as a simple watermark.
                         if (is_new_cert and newer)
-                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.concat(committed_chain))
+                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_block_val))
                         else
                             ghost_committed_blocks' = ghost_committed_blocks,
 
@@ -1210,19 +1170,21 @@ module replica {
         Q == N - F,
     }
 
-    // No two correct replicas disagree on finalized chains (prefix agreement).
+    // No two correct replicas disagree on which block was finalized in a view.
+    // With watermark-only finalization (no ancestor walk), we check set agreement
+    // rather than prefix agreement: the set of committed blocks at each replica
+    // must be consistent (any block committed by one must also be committed by
+    // the other, or not yet committed).
     val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
         val blocks1 = ghost_committed_blocks.get(p1)
         val blocks2 = ghost_committed_blocks.get(p2)
+        val set1 = blocks1.indices().map(i => blocks1[i])
+        val set2 = blocks2.indices().map(i => blocks2[i])
+        // Every block committed by p1 is either committed by p2 or will be
+        // (subset in either direction).
         or {
-            and {
-                blocks1.length() <= blocks2.length(),
-                blocks1.indices().forall(i => blocks1[i] == blocks2[i]),
-            },
-            and {
-                blocks2.length() <= blocks1.length(),
-                blocks2.indices().forall(i => blocks2[i] == blocks1[i]),
-            }
+            set1.subseteq(set2),
+            set2.subseteq(set1),
         }
     })
 
@@ -1364,16 +1326,17 @@ module replica {
             .forall(c => option_has(cert_block(c), b => list_contains_block(chain, b)))
     })
 
-    // Committed chains must be recursively parent-linked: each committed block
-    // (except the first in the chain) points to the previous committed block.
-    val committed_chain_is_parent_linked = CORRECT.forall(id => {
+    // With watermark-only finalization (no recursive ancestor walk),
+    // committed blocks are not guaranteed to be consecutively parent-linked.
+    // Instead, we verify the weaker property that every committed block
+    // is distinct (no duplicates).
+    val committed_blocks_no_duplicates = CORRECT.forall(id => {
         val chain = ghost_committed_blocks.get(id)
-        chain.indices().forall(i => {
-            if (i == 0)
-                true
-            else
-                block_links_to_parent(chain[i], chain[i - 1])
-        })
+        chain.indices().forall(i =>
+            chain.indices().forall(j =>
+                (i == j) or (chain[i] != chain[j])
+            )
+        )
     })
 
     val safe_finalization = all {
@@ -1395,7 +1358,7 @@ module replica {
         finalize_requires_notarization,
         finalized_blocks_have_unique_parent,
         finalized_certificates_are_committed,
-        committed_chain_is_parent_linked,
+        committed_blocks_no_duplicates,
     }
 
     val safe = all_invariants
