@@ -6113,4 +6113,28 @@ mod tests {
             scheme_mocks::fixture,
         );
     }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_sustained() {
+        let campaign = TwinsCampaign {
+            n: 5,
+            rounds: 100,
+            max_partitions: 3,
+            max_scenarios: 3,
+            max_compromised_sets: 3,
+            required_containers: View::new(100),
+            relabel: true,
+        };
+        twins_campaign::<_, _, RoundRobin>(
+            0,
+            campaign,
+            Link {
+                latency: Duration::from_millis(500),
+                jitter: Duration::from_secs(1),
+                success_rate: 1.0,
+            },
+            scheme_mocks::fixture,
+        );
+    }
 }
