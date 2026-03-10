@@ -35,8 +35,9 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
-//! [crate::Persistable].
+//! All variants implement [store::LogStore] and [store::MerkleizedStore]. Keyed mutable
+//! variants ([any] and [current]) also implement [store::PrunableStore] and
+//! [crate::Persistable]. The [immutable] variant implements [crate::kv::Gettable].
 //!
 //! # Acknowledgments
 //!
@@ -67,7 +68,7 @@ pub mod sync;
 pub mod verify;
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
+    verify_proof_and_extract_digests,
 };
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -113,8 +114,8 @@ pub enum Error {
     StaleChangeset { expected: u64, actual: u64 },
 }
 
-impl From<crate::merkle::Error> for Error {
-    fn from(e: crate::merkle::Error) -> Self {
+impl From<crate::merkle::Error<crate::mmr::Mmr>> for Error {
+    fn from(e: crate::merkle::Error<crate::mmr::Mmr>) -> Self {
         Self::Mmr(e.into())
     }
 }

@@ -5,8 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
-    location::{Location, LocationRangeExt},
-    mem, Error, Position, StandardHasher as Standard,
+    mem, Error, Location, LocationRangeExt, Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;

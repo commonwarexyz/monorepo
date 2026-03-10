@@ -1,37 +1,32 @@
-use super::{location::Location, Error};
+use super::{location::Location, MerkleFamily};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, ReadExt};
 use core::{
     fmt,
+    marker::PhantomData,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
-/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
-///
-/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
-///
-/// Node indices are 0-based, so valid indices satisfy `pos < MAX_POSITION`. Node counts
-/// and MMR sizes satisfy `pos <= MAX_POSITION`.
-pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
-
-/// A [Position] is an index into an MMR's nodes.
-/// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
-pub struct Position(u64);
+/// A [Position] is an index into a Merkle structure's nodes.
+/// This is in contrast to a [Location], which is an index into the structure's _leaves_.
+pub struct Position<F: MerkleFamily>(u64, PhantomData<F>);
 
 #[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Position {
+impl<F: MerkleFamily> arbitrary::Arbitrary<'_> for Position<F> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let value = u.int_in_range(0..=MAX_POSITION.0)?;
-        Ok(Self(value))
+        let value = u.int_in_range(0..=F::MAX_POSITION)?;
+        Ok(Self(value, PhantomData))
     }
 }
 
-impl Position {
+impl<F: MerkleFamily> Position<F> {
+    /// The maximum valid [Position] for this Merkle family.
+    pub const MAX: Self = Self(F::MAX_POSITION, PhantomData);
+
     /// Return a new [Position] from a raw `u64`.
     #[inline]
     pub const fn new(pos: u64) -> Self {
-        Self(pos)
+        Self(pos, PhantomData)
     }
 
     /// Return the underlying `u64` value.
@@ -40,20 +35,20 @@ impl Position {
         self.0
     }
 
-    /// Returns `true` iff this value is within the valid range (`<= MAX_POSITION`).
-    /// This covers both node indices (`< MAX_POSITION`) and node counts (`<= MAX_POSITION`).
+    /// Returns `true` iff this value is within the valid range (`<= MAX`).
+    /// This covers both node indices (`< MAX`) and node counts (`<= MAX`).
     #[inline]
     pub const fn is_valid(self) -> bool {
-        self.0 <= MAX_POSITION.0
+        self.0 <= F::MAX_POSITION
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds the maximum.
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
             Some(value) => {
-                if value <= MAX_POSITION.0 {
-                    Some(Self(value))
+                if value <= F::MAX_POSITION {
+                    Some(Self(value, PhantomData))
                 } else {
                     None
                 }
@@ -66,157 +61,157 @@ impl Position {
     #[inline]
     pub const fn checked_sub(self, rhs: u64) -> Option<Self> {
         match self.0.checked_sub(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => Some(Self(value, PhantomData)),
             None => None,
         }
     }
 
-    /// Return `self + rhs` saturating at [MAX_POSITION].
+    /// Return `self + rhs` saturating at the maximum.
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
-        if result > MAX_POSITION.0 {
-            MAX_POSITION
+        if result > F::MAX_POSITION {
+            Self::MAX
         } else {
-            Self(result)
+            Self(result, PhantomData)
         }
     }
 
     /// Return `self - rhs` saturating at zero.
     #[inline]
     pub const fn saturating_sub(self, rhs: u64) -> Self {
-        Self(self.0.saturating_sub(rhs))
+        Self(self.0.saturating_sub(rhs), PhantomData)
     }
 
-    /// Returns whether this is a valid MMR size.
-    ///
-    /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
-    /// MMR of the given size have strictly decreasing height, which is a necessary condition for
-    /// MMR validity.
+    /// Returns whether this is a valid size for this Merkle structure.
     #[inline]
-    pub const fn is_mmr_size(self) -> bool {
-        if self.0 == 0 {
-            return true;
-        }
-        let leading_zeros = self.0.leading_zeros();
-        if leading_zeros == 0 {
-            // size overflow
-            return false;
-        }
-        let start = u64::MAX >> leading_zeros;
-        let mut two_h = 1 << start.trailing_ones();
-        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
-        while two_h > 1 {
-            if node_pos < self.0 {
-                if two_h == 2 {
-                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
-                    // invalid.
-                    return node_pos == self.0 - 1;
-                }
-                // move to the right sibling
-                node_pos += two_h - 1;
-                if node_pos < self.0 {
-                    // If the right sibling is in the MMR, then it is invalid.
-                    return false;
-                }
-                continue;
-            }
-            // descend to the left child
-            two_h >>= 1;
-            node_pos -= two_h;
-        }
-        true
+    pub fn is_valid_size(self) -> bool {
+        F::is_valid_size(self)
     }
 }
 
-impl fmt::Display for Position {
+// --- Manual trait implementations (to avoid unnecessary bounds on F) ---
+
+impl<F: MerkleFamily> Copy for Position<F> {}
+
+impl<F: MerkleFamily> Clone for Position<F> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: MerkleFamily> PartialEq for Position<F> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<F: MerkleFamily> Eq for Position<F> {}
+
+impl<F: MerkleFamily> PartialOrd for Position<F> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: MerkleFamily> Ord for Position<F> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl<F: MerkleFamily> core::hash::Hash for Position<F> {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<F: MerkleFamily> Default for Position<F> {
+    #[inline]
+    fn default() -> Self {
+        Self(0, PhantomData)
+    }
+}
+
+impl<F: MerkleFamily> fmt::Debug for Position<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Position").field(&self.0).finish()
+    }
+}
+
+impl<F: MerkleFamily> fmt::Display for Position<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Position({})", self.0)
     }
 }
 
-impl Deref for Position {
+impl<F: MerkleFamily> Deref for Position<F> {
     type Target = u64;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl AsRef<u64> for Position {
+impl<F: MerkleFamily> AsRef<u64> for Position<F> {
     fn as_ref(&self) -> &u64 {
         &self.0
     }
 }
 
-impl From<u64> for Position {
+impl<F: MerkleFamily> From<u64> for Position<F> {
     #[inline]
     fn from(value: u64) -> Self {
         Self::new(value)
     }
 }
 
-impl From<usize> for Position {
+impl<F: MerkleFamily> From<usize> for Position<F> {
     #[inline]
     fn from(value: usize) -> Self {
         Self::new(value as u64)
     }
 }
 
-impl From<Position> for u64 {
+impl<F: MerkleFamily> From<Position<F>> for u64 {
     #[inline]
-    fn from(position: Position) -> Self {
+    fn from(position: Position<F>) -> Self {
         *position
     }
 }
 
 /// Try to convert a leaf [Location] to its node [Position].
 ///
-/// Returns [Error::LocationOverflow] if `!loc.is_valid()`.
-///
-/// # Examples
-///
-/// ```
-/// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
-/// use core::convert::TryFrom;
-///
-/// let loc = Location::new(5);
-/// let pos = Position::try_from(loc).unwrap();
-/// assert_eq!(pos, Position::new(8));
-///
-/// // MAX_LOCATION converts successfully (it is the leaf count for 2^62 leaves)
-/// let pos = Position::try_from(MAX_LOCATION).unwrap();
-/// assert!(pos.is_valid());
-/// ```
-impl TryFrom<Location> for Position {
-    type Error = Error;
+/// Returns [`super::Error::LocationOverflow`] if `!loc.is_valid()`.
+impl<F: MerkleFamily> TryFrom<Location<F>> for Position<F> {
+    type Error = super::Error<F>;
 
     #[inline]
-    fn try_from(loc: Location) -> Result<Self, Self::Error> {
+    fn try_from(loc: Location<F>) -> Result<Self, Self::Error> {
         if !loc.is_valid() {
-            return Err(Error::LocationOverflow(loc));
+            return Err(super::Error::LocationOverflow(loc));
         }
-        // This will never underflow since 2*n >= count_ones(n).
-        let loc_val = *loc;
-        Ok(Self(
-            loc_val
-                .checked_mul(2)
-                .expect("should not overflow for valid leaf index")
-                - loc_val.count_ones() as u64,
-        ))
+        Ok(Self(F::location_to_position(*loc), PhantomData))
     }
 }
+
+// --- Arithmetic operators ---
 
 /// Add two positions together.
 ///
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl Add for Position {
+impl<F: MerkleFamily> Add for Position<F> {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
+        Self(self.0 + rhs.0, PhantomData)
     }
 }
 
@@ -225,12 +220,12 @@ impl Add for Position {
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl Add<u64> for Position {
+impl<F: MerkleFamily> Add<u64> for Position<F> {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: u64) -> Self::Output {
-        Self(self.0 + rhs)
+        Self(self.0 + rhs, PhantomData)
     }
 }
 
@@ -239,12 +234,12 @@ impl Add<u64> for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl Sub for Position {
+impl<F: MerkleFamily> Sub for Position<F> {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 - rhs.0)
+        Self(self.0 - rhs.0, PhantomData)
     }
 }
 
@@ -253,40 +248,39 @@ impl Sub for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl Sub<u64> for Position {
+impl<F: MerkleFamily> Sub<u64> for Position<F> {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: u64) -> Self::Output {
-        Self(self.0 - rhs)
+        Self(self.0 - rhs, PhantomData)
     }
 }
 
-impl PartialEq<u64> for Position {
+impl<F: MerkleFamily> PartialEq<u64> for Position<F> {
     #[inline]
     fn eq(&self, other: &u64) -> bool {
         self.0 == *other
     }
 }
 
-impl PartialOrd<u64> for Position {
+impl<F: MerkleFamily> PartialOrd<u64> for Position<F> {
     #[inline]
     fn partial_cmp(&self, other: &u64) -> Option<core::cmp::Ordering> {
         self.0.partial_cmp(other)
     }
 }
 
-// Allow u64 to be compared with Position too
-impl PartialEq<Position> for u64 {
+impl<F: MerkleFamily> PartialEq<Position<F>> for u64 {
     #[inline]
-    fn eq(&self, other: &Position) -> bool {
+    fn eq(&self, other: &Position<F>) -> bool {
         *self == other.0
     }
 }
 
-impl PartialOrd<Position> for u64 {
+impl<F: MerkleFamily> PartialOrd<Position<F>> for u64 {
     #[inline]
-    fn partial_cmp(&self, other: &Position) -> Option<core::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Position<F>) -> Option<core::cmp::Ordering> {
         self.partial_cmp(&other.0)
     }
 }
@@ -296,7 +290,7 @@ impl PartialOrd<Position> for u64 {
 /// # Panics
 ///
 /// Panics if the result overflows.
-impl AddAssign<u64> for Position {
+impl<F: MerkleFamily> AddAssign<u64> for Position<F> {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
         self.0 += rhs;
@@ -308,34 +302,35 @@ impl AddAssign<u64> for Position {
 /// # Panics
 ///
 /// Panics if the result underflows.
-impl SubAssign<u64> for Position {
+impl<F: MerkleFamily> SubAssign<u64> for Position<F> {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
         self.0 -= rhs;
     }
 }
 
-// Codec implementations using varint encoding for efficient storage
-impl commonware_codec::Write for Position {
+// --- Codec implementations using varint encoding ---
+
+impl<F: MerkleFamily> commonware_codec::Write for Position<F> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.0).write(buf);
     }
 }
 
-impl commonware_codec::EncodeSize for Position {
+impl<F: MerkleFamily> commonware_codec::EncodeSize for Position<F> {
     #[inline]
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
 }
 
-impl commonware_codec::Read for Position {
+impl<F: MerkleFamily> commonware_codec::Read for Position<F> {
     type Cfg = ();
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let pos = Self(UInt::read(buf)?.into());
+        let pos = Self(UInt::read(buf)?.into(), PhantomData);
         if pos.is_valid() {
             Ok(pos)
         } else {
@@ -346,7 +341,6 @@ impl commonware_codec::Read for Position {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};

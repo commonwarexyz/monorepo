@@ -25,7 +25,7 @@ impl PeakIterator {
     /// # Panics
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
-    /// [Position::is_mmr_size] first.
+    /// [Position::is_valid_size] first.
     pub fn new(size: Position) -> Self {
         if size == 0 {
             return Self::default();
@@ -290,7 +290,7 @@ mod tests {
 
                 // Verify rounded is a valid MMR size
                 assert!(
-                    rounded.is_mmr_size(),
+                    rounded.is_valid_size(),
                     "rounded size {rounded} should be valid (test_pos: {test_pos}, current: {current_size})",
                 );
 
@@ -303,7 +303,7 @@ mod tests {
                 // Verify rounded is the largest valid size <= test_pos
                 if rounded < test_pos {
                     assert!(
-                        !(rounded + 1).is_mmr_size(),
+                        !(rounded + 1).is_valid_size(),
                         "rounded {rounded} should be largest valid size <= {test_pos} (current: {current_size})",
                     );
                 }
@@ -329,7 +329,7 @@ mod tests {
         for size in 0..=20 {
             let rounded = PeakIterator::to_nearest_size(Position::new(size));
             assert_eq!(rounded, expected);
-            if Position::new(size + 1).is_mmr_size() {
+            if Position::new(size + 1).is_valid_size() {
                 expected = Position::new(size + 1);
             }
         }
@@ -337,13 +337,13 @@ mod tests {
         // Test with large value
         let large_size = Position::new(1_000_000);
         let rounded = PeakIterator::to_nearest_size(large_size);
-        assert!(rounded.is_mmr_size());
+        assert!(rounded.is_valid_size());
         assert!(rounded <= large_size);
 
         // Test maximum allowed input
         let largest_valid_size = crate::mmr::MAX_POSITION;
         let rounded = PeakIterator::to_nearest_size(largest_valid_size);
-        assert!(rounded.is_mmr_size());
+        assert!(rounded.is_valid_size());
         assert!(rounded <= largest_valid_size);
     }
 }
