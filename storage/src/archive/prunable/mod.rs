@@ -214,7 +214,6 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::Error as JournalError,
-        kv::tests::test_key,
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
@@ -223,6 +222,14 @@ mod tests {
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
+
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;

@@ -10,7 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::qmdb::{any::traits::DbAny, store::LogStore, Error};
+use commonware_storage::qmdb::{any::traits::DbAny, Error};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -109,7 +109,7 @@ async fn test_db<C>(
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    C: DbAny<Key = Digest> + LogStore<Value = Digest>,
+    C: DbAny<Key = Digest, Value = Digest>,
 {
     let start = Instant::now();
 

@@ -15,10 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr::Location,
-    qmdb::{
-        current::{unordered::variable::Db as Current, VariableConfig},
-        store::LogStore as _,
-    },
+    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64};
@@ -324,7 +321,7 @@ fn fuzz(input: FuzzInput) {
 
             // Verify range proofs over the recovered DB.
             let floor = *db.inactivity_floor_loc();
-            let size = *db.size().await;
+            let size = *db.bounds().await.end;
             for i in floor..size {
                 let loc = Location::new(i);
                 let (proof, ops, chunks) = db

@@ -11,12 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{Location, Proof},
-    qmdb::{
-        build_snapshot_from_log,
-        operation::Operation as OperationTrait,
-        store::{LogStore, MerkleizedStore, PrunableStore},
-        Error,
-    },
+    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
@@ -103,6 +98,30 @@ where
     pub fn root(&self) -> H::Digest {
         self.log.root()
     }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let reader = self.log.reader().await;
+        for loc in locs {
+            let op = reader.read(*loc).await?;
+            let Operation::Update(data) = op else {
+                panic!("location does not reference update operation. loc={loc}");
+            };
+            if data.key() == key {
+                return Ok(Some(data.value().clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub async fn bounds(&self) -> std::ops::Range<Location> {
+        let bounds = self.log.reader().await.bounds();
+        Location::new(bounds.start)..Location::new(bounds.end)
+    }
 }
 
 // Functionality requiring Mutable journal.
@@ -133,6 +152,27 @@ where
         self.log.prune(prune_loc).await?;
 
         Ok(())
+    }
+
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn proof(
+        &self,
+        loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
+        self.historical_proof(self.log.size().await, loc, max_ops)
+            .await
     }
 }
 
@@ -212,27 +252,6 @@ where
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
-
-    pub async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn proof(
-        &self,
-        loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
-    }
 }
 
 impl<E, U, C, I, H> Persistable for Db<E, C, I, H, U>
@@ -256,73 +275,5 @@ where
 
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
-    }
-}
-
-impl<E, U, C, I, H> MerkleizedStore for Db<E, C, I, H, U>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<U>;
-
-    fn root(&self) -> H::Digest {
-        self.root()
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-            .map_err(Into::into)
-    }
-}
-
-impl<E, U, C, I, H> LogStore for Db<E, C, I, H, U>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    type Value = U::Value;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        let bounds = self.log.reader().await.bounds();
-        Location::new(bounds.start)..Location::new(bounds.end)
-    }
-
-    async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
-        self.get_metadata().await
-    }
-}
-
-impl<E, U, C, I, H> PrunableStore for Db<E, C, I, H, U>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
     }
 }

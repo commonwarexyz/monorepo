@@ -15,7 +15,7 @@ use crate::{
         iterator::{nodes_to_pin, PeakIterator},
         mem::MIN_TO_PARALLELIZE,
         storage::Storage as _,
-        Location, Position, Proof, StandardHasher,
+        Location, Position, StandardHasher,
     },
     qmdb::{
         any::{
@@ -26,7 +26,6 @@ use crate::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
-        store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
     Persistable,
@@ -108,6 +107,12 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         self.any.get_metadata().await
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
@@ -425,76 +430,6 @@ where
 
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
-    }
-}
-
-// TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
-// proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
-// root.
-impl<E, U, C, I, H, const N: usize> MerkleizedStore for Db<E, C, I, H, U, N>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<U>;
-
-    // Returns the `ops_root` of this Current Db.
-    fn root(&self) -> H::Digest {
-        self.ops_root()
-    }
-
-    /// Returns the historical proof for the specified range, which will verify against the
-    /// ops_root of this Current Db.
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        Self::ops_historical_proof(self, historical_size, start_loc, max_ops).await
-    }
-}
-
-impl<E, U, C, I, H, const N: usize> LogStore for Db<E, C, I, H, U, N>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    type Value = U::Value;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds().await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
-        self.get_metadata().await
-    }
-}
-
-impl<E, U, C, I, H, const N: usize> PrunableStore for Db<E, C, I, H, U, N>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
     }
 }
 

@@ -65,12 +65,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Proof,
     },
-    qmdb::{
-        any::VariableValue,
-        operation::Committable,
-        store::{LogStore, MerkleizedStore},
-        Error,
-    },
+    qmdb::{any::VariableValue, operation::Committable, Error},
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
@@ -153,6 +148,13 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         self.last_commit_loc
     }
 
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub async fn bounds(&self) -> std::ops::Range<Location> {
+        let bounds = self.journal.reader().await.bounds();
+        Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let op = self
@@ -224,7 +226,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        self.historical_proof(self.size().await, start_loc, max_ops)
+        self.historical_proof(self.bounds().await.end, start_loc, max_ops)
             .await
     }
 
@@ -334,49 +336,10 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedStore
-    for Keyless<E, V, H>
-{
-    type Digest = H::Digest;
-    type Operation = Operation<V>;
-
-    fn root(&self) -> Self::Digest {
-        self.journal.root()
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        Ok(self
-            .journal
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await?)
-    }
-}
-
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> LogStore for Keyless<E, V, H> {
-    type Value = V;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        let bounds = self.journal.reader().await.bounds();
-        Location::new(bounds.start)..Location::new(bounds.end)
-    }
-
-    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
-        self.get_metadata().await
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        mmr::StandardHasher as Standard,
-        qmdb::{store::LogStore, verify_proof},
-    };
+    use crate::{mmr::StandardHasher as Standard, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
@@ -1201,17 +1164,14 @@ mod test {
         });
     }
 
-    use crate::{
-        kv::tests::assert_send,
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store},
-    };
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(db: &mut Db, loc: Location) {
-        assert_log_store(db);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
-        assert_send(db.get(loc));
+        is_send(db.get_metadata());
+        is_send(db.proof(loc, NZU64!(1)));
+        is_send(db.sync());
+        is_send(db.get(loc));
     }
 
     /// batch.get() reads pending appends and falls through to base DB.

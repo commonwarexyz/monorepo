@@ -3,7 +3,6 @@ use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    kv,
     mmr::Location,
     qmdb::{
         any::{
@@ -58,13 +57,6 @@ where
 
         Ok(None)
     }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.get_with_loc(key)
-            .await
-            .map(|op| op.map(|(value, _)| value))
-    }
 }
 
 impl<
@@ -111,36 +103,34 @@ impl<
     }
 }
 
-impl<
+#[cfg(any(test, feature = "test-traits"))]
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    where {
         E: Storage + Clock + Metrics,
         K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        V: ValueEncoding + 'static,
+        C: PersistableMutableLog<Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-    type Value = V::Value;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
+        Operation<K, V>: Codec,
+        V::Value: Send + Sync,
     }
+    Key = K, Value = V::Value, Digest = H::Digest
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> crate::qmdb::any::traits::DbAny for Db<E, C, I, H, Update<K, V>>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding + 'static,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-{
-    type Digest = H::Digest;
+crate::qmdb::any::traits::impl_provable! {
+    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    where {
+        E: Storage + Clock + Metrics,
+        K: Key,
+        V: ValueEncoding + 'static,
+        C: PersistableMutableLog<Operation<K, V>>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+        Operation<K, V>: Codec,
+        V::Value: Send + Sync,
+    }
+    Operation = Operation<K, V>
 }

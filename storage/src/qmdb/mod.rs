@@ -35,9 +35,8 @@
 //!
 //! # Traits
 //!
-//! All variants implement [store::LogStore] and [store::MerkleizedStore]. Keyed mutable
-//! variants ([any] and [current]) also implement [store::PrunableStore] and
-//! [crate::Persistable]. The [immutable] variant implements [crate::kv::Gettable].
+//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
+//! [crate::Persistable].
 //!
 //! # Acknowledgments
 //!

@@ -6,7 +6,6 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    kv,
     mmr::Location,
     qmdb::{
         any::{
@@ -213,27 +212,5 @@ where
                 Ok(super::ExclusionProof::Commit(op_proof, value))
             }
         }
-    }
-}
-
-// Store implementation
-impl<
-        E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<K, V>>,
-        K: Key,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location>,
-        H: Hasher,
-        const N: usize,
-    > kv::Gettable for Db<E, C, K, V, I, H, N>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-    type Value = V::Value;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
     }
 }

@@ -85,7 +85,6 @@ use crate::{
         },
         build_snapshot_from_log, delete_key,
         operation::{Committable as _, Key, Operation as _},
-        store::{LogStore, PrunableStore},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -520,64 +519,10 @@ where
     }
 }
 
-impl<E, K, V, T> LogStore for Db<E, K, V, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    type Value = V;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        self.bounds().await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        self.get_metadata().await
-    }
-}
-
-impl<E, K, V, T> PrunableStore for Db<E, K, V, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        Self::prune(self, prune_loc).await
-    }
-
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-}
-
-impl<E, K, V, T> crate::kv::Gettable for Db<E, K, V, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        kv::tests::{assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_prunable_store},
-        translator::TwoCap,
-    };
+    use crate::translator::TwoCap;
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -1104,12 +1049,14 @@ mod test {
         });
     }
 
+    fn is_send<T: Send>(_: T) {}
+
     #[allow(dead_code)]
     fn assert_read_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_gettable(db, &key);
-        assert_send(db.sync());
+        is_send(db.get(&key));
+        is_send(db.get_metadata());
+        is_send(db.prune(loc));
+        is_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -1118,16 +1065,15 @@ mod test {
         key: Digest,
         value: Vec<u8>,
     ) {
-        assert_log_store(db);
-        assert_gettable(db, &key);
-        assert_send(db.apply_batch(Changeset::from([(key, Some(value))])));
-        assert_send(db.apply_batch(Changeset::from([(key, None)])));
+        is_send(db.get(&key));
+        is_send(db.apply_batch(Changeset::from([(key, Some(value))])));
+        is_send(db.apply_batch(Changeset::from([(key, None)])));
         let batch = db.new_batch();
-        assert_send(batch.get(&key));
+        is_send(batch.get(&key));
     }
 
     #[allow(dead_code)]
     fn assert_commit_is_send(db: &Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
-        assert_send(db.commit());
+        is_send(db.commit());
     }
 }

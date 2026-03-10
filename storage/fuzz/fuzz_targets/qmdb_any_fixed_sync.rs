@@ -9,7 +9,6 @@ use commonware_storage::{
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        store::LogStore as _,
         sync,
     },
     translator::TwoCap,

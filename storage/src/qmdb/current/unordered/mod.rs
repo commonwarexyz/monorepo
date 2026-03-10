@@ -22,10 +22,7 @@ pub mod tests {
         qmdb::{
             any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             current::BitmapPrunedBits,
-            store::{
-                tests::{TestKey, TestValue},
-                LogStore,
-            },
+            store::tests::{TestKey, TestValue},
         },
     };
     use commonware_runtime::{
@@ -42,7 +39,7 @@ pub mod tests {
     where
         C: DbAny + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -60,7 +57,7 @@ pub mod tests {
 
             // Add one key.
             let k1: C::Key = TestKey::from_seed(0);
-            let v1: <C as LogStore>::Value = TestValue::from_seed(10);
+            let v1: <C as DbAny>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
             let finalized = db
                 .new_batch()
@@ -85,7 +82,7 @@ pub mod tests {
 
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
-            let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
+            let metadata: <C as DbAny>::Value = TestValue::from_seed(1);
             let finalized = db
                 .new_batch()
                 .write(k1, None)

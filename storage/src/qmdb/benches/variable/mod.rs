@@ -14,7 +14,6 @@ use commonware_storage::{
             ordered::variable::Db as OVCurrent, unordered::variable::Db as UVCurrent,
             VariableConfig as CConfig,
         },
-        store::LogStore,
     },
     translator::EightCap,
 };
@@ -154,7 +153,7 @@ async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
 /// after every `commit_frequency` operations.
 async fn gen_random_kv<M>(db: &mut M, num_elements: u64, num_operations: u64, commit_frequency: u32)
 where
-    M: DbAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    M: DbAny<Key = Digest, Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 

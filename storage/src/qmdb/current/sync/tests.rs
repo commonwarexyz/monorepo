@@ -4,7 +4,7 @@
 //! by implementing [SyncTestHarness] for current database types. The key difference from
 //! `any` harnesses is that `sync_target_root` returns the **ops root** (via
 //! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
-//! returned by [MerkleizedStore::root](crate::qmdb::store::MerkleizedStore::root).
+//! returned by `Db::root()`.
 
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},

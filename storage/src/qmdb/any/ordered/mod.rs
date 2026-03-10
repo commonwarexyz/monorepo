@@ -3,7 +3,6 @@ use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Reader},
-    kv,
     mmr::Location,
     qmdb::{
         any::{db::Db, ValueEncoding},
@@ -11,7 +10,7 @@ use crate::{
         Error,
     },
 };
-use commonware_codec::{Codec, CodecShared};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use futures::{
@@ -149,13 +148,6 @@ where
         Ok(None)
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.get_with_loc(key)
-            .await
-            .map(|op| op.map(|(data, _)| data.value))
-    }
-
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
@@ -215,29 +207,6 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync + 'static,
-        H: Hasher,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: CodecShared,
-{
-    type Key = K;
-    type Value = V::Value;
-    type Error = Error;
-
-    fn get(
-        &self,
-        key: &Self::Key,
-    ) -> impl std::future::Future<Output = Result<Option<Self::Value>, Self::Error>> {
-        self.get(key)
-    }
-}
-
 /// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
 /// first key if `key` is the last key.
 ///
@@ -280,46 +249,49 @@ pub(crate) fn find_prev_key<'a, K: Ord, V>(
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> crate::qmdb::any::traits::DbAny for Db<E, C, I, H, Update<K, V>>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding + 'static,
-    C: PersistableMutableLog<Operation<K, V>>,
-    I: Index<Value = Location> + 'static,
-    H: Hasher,
-    Operation<K, V>: Codec,
-{
-    type Digest = H::Digest;
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    where {
+        E: Storage + Clock + Metrics,
+        K: Key,
+        V: ValueEncoding + 'static,
+        C: PersistableMutableLog<Operation<K, V>>,
+        I: Index<Value = Location> + 'static,
+        H: Hasher,
+        Operation<K, V>: Codec,
+        V::Value: Send + Sync,
+    }
+    Key = K, Value = V::Value, Digest = H::Digest
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+crate::qmdb::any::traits::impl_provable! {
+    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    where {
+        E: Storage + Clock + Metrics,
+        K: Key,
+        V: ValueEncoding + 'static,
+        C: PersistableMutableLog<Operation<K, V>>,
+        I: Index<Value = Location> + 'static,
+        H: Hasher,
+        Operation<K, V>: Codec,
+        V::Value: Send + Sync,
+    }
+    Operation = Operation<K, V>
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        kv::Gettable,
-        qmdb::{
-            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-            store::LogStore,
-        },
-    };
+    use crate::qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::deterministic::Context;
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
 
-    /// Helper trait for testing Any databases with FixedBytes<4> keys.
-    /// Used for edge case tests that require specific key patterns.
-    pub(crate) trait FixedBytesDb:
-        DbAny<Digest = Digest> + Gettable<Key = FixedBytes<4>> + LogStore<Value = Digest>
-    {
-    }
-    impl<T> FixedBytesDb for T where
-        T: DbAny<Digest = Digest> + Gettable<Key = FixedBytes<4>> + LogStore<Value = Digest>
-    {
-    }
-
-    pub(crate) async fn test_ordered_any_db_empty<D: FixedBytesDb>(
+    pub(crate) async fn test_ordered_any_db_empty<
+        D: DbAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    >(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -378,7 +350,9 @@ mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_ordered_any_db_basic<D: FixedBytesDb>(
+    pub(crate) async fn test_ordered_any_db_basic<
+        D: DbAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    >(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -590,7 +564,11 @@ mod test {
 
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
-    pub(crate) async fn test_ordered_any_update_collision_edge_case<D: FixedBytesDb>(mut db: D) {
+    pub(crate) async fn test_ordered_any_update_collision_edge_case<
+        D: DbAny<Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+    >(
+        mut db: D,
+    ) {
         // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
         // collisions.
         let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);

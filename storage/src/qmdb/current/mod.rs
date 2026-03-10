@@ -220,8 +220,7 @@
 //! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
 //!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
 //!
-//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root) and
-//! [MerkleizedStore](crate::qmdb::store::MerkleizedStore)`::`[root()](crate::qmdb::store::MerkleizedStore::root).
+//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
 //! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
 //! verifies batches against the ops root, not the canonical root.
 //!
@@ -565,10 +564,7 @@ pub mod tests {
     use crate::{
         qmdb::{
             any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-            store::{
-                tests::{TestKey, TestValue},
-                LogStore,
-            },
+            store::tests::{TestKey, TestValue},
             Error,
         },
         translator::Translator,
@@ -637,7 +633,7 @@ pub mod tests {
     /// Commit a set of writes as a single batch.
     async fn commit_writes<C: DbAny>(
         db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as LogStore>::Value>)>,
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny>::Value>)>,
     ) -> Result<(), Error> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
@@ -662,7 +658,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -682,7 +678,7 @@ pub mod tests {
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
-        let mut pending: Vec<(C::Key, Option<<C as LogStore>::Value>)> = Vec::new();
+        let mut pending: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
@@ -710,7 +706,7 @@ pub mod tests {
     where
         C: DbAny + 'static,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
     {
         Box::pin(apply_random_ops_inner::<C>(
             num_elements,
@@ -728,7 +724,7 @@ pub mod tests {
     where
         C: DbAny + 'static,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -792,7 +788,7 @@ pub mod tests {
     where
         C: DbAny + 'static,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -871,7 +867,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -888,11 +884,11 @@ pub mod tests {
 
             // Apply identical operations to both databases, but only prune one.
             // Accumulate writes between commits.
-            let mut pending_no_pruning: Vec<(C::Key, Option<<C as LogStore>::Value>)> = Vec::new();
-            let mut pending_pruning: Vec<(C::Key, Option<<C as LogStore>::Value>)> = Vec::new();
+            let mut pending_no_pruning: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
+            let mut pending_pruning: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
             for i in 0..NUM_OPERATIONS {
                 let key: C::Key = TestKey::from_seed(i);
-                let value: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+                let value: <C as DbAny>::Value = TestValue::from_seed(i * 1000);
 
                 pending_no_pruning.push((key, Some(value.clone())));
                 pending_pruning.push((key, Some(value)));
@@ -945,7 +941,7 @@ pub mod tests {
     where
         C: DbAny + BitmapPrunedBits + 'static,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1015,7 +1011,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1026,7 +1022,7 @@ pub mod tests {
         executor.start(|context| async move {
             let mut db: C = open_db_clone(context.with_label("first"), "build-big".into()).await;
 
-            let mut map = std::collections::HashMap::<C::Key, <C as LogStore>::Value>::default();
+            let mut map = std::collections::HashMap::<C::Key, <C as DbAny>::Value>::default();
 
             // All creates, updates, and deletes in one batch.
             let finalized = {
@@ -1035,7 +1031,7 @@ pub mod tests {
                 // Initial creates
                 for i in 0u64..ELEMENTS {
                     let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+                    let v: <C as DbAny>::Value = TestValue::from_seed(i * 1000);
                     batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
@@ -1046,7 +1042,7 @@ pub mod tests {
                         continue;
                     }
                     let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
+                    let v: <C as DbAny>::Value = TestValue::from_seed((i + 1) * 10000);
                     batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
@@ -1100,7 +1096,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -1111,8 +1107,8 @@ pub mod tests {
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
-            let value1 = <<C as LogStore>::Value as TestValue>::from_seed(10);
-            let value2 = <<C as LogStore>::Value as TestValue>::from_seed(20);
+            let value1 = <<C as DbAny>::Value as TestValue>::from_seed(10);
+            let value2 = <<C as DbAny>::Value as TestValue>::from_seed(20);
 
             let changeset_a = {
                 let mut batch = db.new_batch();
@@ -1254,7 +1250,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1265,7 +1261,7 @@ pub mod tests {
     where
         C: DbAny,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
