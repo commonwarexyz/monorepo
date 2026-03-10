@@ -6099,8 +6099,8 @@ mod tests {
             rounds: 5,
             max_partitions: 3,
             max_scenarios: 3,
-            max_compromised_sets: 2,
-            required_containers: View::new(50),
+            max_compromised_sets: 3,
+            required_containers: View::new(100),
             relabel: false,
         };
         twins_campaign::<_, _, RoundRobin>(
