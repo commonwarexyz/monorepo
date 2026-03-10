@@ -13,14 +13,18 @@
 //!
 //! # Pool Lifecycle
 //!
-//! Each tracked buffer holds a strong reference to the specific size class it
-//! came from. This means:
-//! - Buffers can outlive the public [`BufferPool`] handle and still return to
-//!   their original size class.
-//! - A size class is reclaimed only after both the pool and all outstanding
-//!   tracked buffers for that class have been dropped.
+//! Pool ownership is configurable:
+//! - [`BufferPoolMode::Strict`] keeps exact ownership with a strong reference to
+//!   the originating size class. Buffers can outlive the public
+//!   [`BufferPool`] handle and still return to their original size class.
+//! - [`BufferPoolMode::Leaky`] stores a stable raw pointer to the originating
+//!   size class and intentionally leaks per-class allocator state for process
+//!   lifetime to keep the hot path free of ownership bookkeeping.
 //! - Untracked fallback allocations store no class reference and deallocate
 //!   directly when dropped.
+//! - A configurable small-allocation cutoff can bypass pooling entirely and
+//!   return untracked aligned allocations from both [`BufferPool::try_alloc`]
+//!   and [`BufferPool::alloc`].
 //!
 //! # Size Classes
 //!
@@ -140,6 +144,20 @@ pub struct BufferPoolConfig {
     /// Buffer alignment. Must be a power of two.
     /// Use `page_size()` for storage I/O and `cache_line_size()` for network I/O.
     pub alignment: NonZeroUsize,
+    /// Ownership mode for tracked pooled buffers.
+    pub mode: BufferPoolMode,
+    /// Requests whose resolved size class is at most this cutoff bypass the
+    /// pool and use untracked aligned allocation instead.
+    pub small_alloc_cutoff: Option<NonZeroUsize>,
+}
+
+/// Ownership strategy for tracked pooled buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferPoolMode {
+    /// Preserve "buffers can outlive pool" semantics with exact ownership.
+    Strict,
+    /// Favor hot-path performance by leaking per-class allocator state.
+    Leaky,
 }
 
 impl BufferPoolConfig {
@@ -158,6 +176,8 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(4096),
             prefill: false,
             alignment: cache_line,
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         }
     }
 
@@ -173,6 +193,8 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(32),
             prefill: false,
             alignment: page,
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         }
     }
 
@@ -203,6 +225,21 @@ impl BufferPoolConfig {
     /// Returns a copy of this config with a new alignment.
     pub const fn with_alignment(mut self, alignment: NonZeroUsize) -> Self {
         self.alignment = alignment;
+        self
+    }
+
+    /// Returns a copy of this config with a new tracked-buffer ownership mode.
+    pub const fn with_mode(mut self, mode: BufferPoolMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Returns a copy of this config with a new small-allocation bypass cutoff.
+    pub const fn with_small_alloc_cutoff(
+        mut self,
+        small_alloc_cutoff: Option<NonZeroUsize>,
+    ) -> Self {
+        self.small_alloc_cutoff = small_alloc_cutoff;
         self
     }
 
@@ -544,21 +581,70 @@ impl SizeClass {
     }
 }
 
+enum PoolClasses {
+    Strict(Vec<Arc<SizeClass>>),
+    Leaky(Vec<NonNull<SizeClass>>),
+}
+
+// SAFETY: strict mode stores `Arc<SizeClass>`. Leaky mode stores pointers to
+// `SizeClass` values intentionally leaked at construction time and therefore
+// valid for the process lifetime.
+unsafe impl Send for PoolClasses {}
+// SAFETY: see above.
+unsafe impl Sync for PoolClasses {}
+
+impl PoolClasses {
+    fn len(&self) -> usize {
+        match self {
+            Self::Strict(classes) => classes.len(),
+            Self::Leaky(classes) => classes.len(),
+        }
+    }
+
+    fn tracked_owner(&self, index: usize) -> PooledOwner {
+        match self {
+            Self::Strict(classes) => PooledOwner::Strict(classes[index].clone()),
+            Self::Leaky(classes) => PooledOwner::Leaky(classes[index]),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for PoolClasses {
+    type Output = SizeClass;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        match self {
+            Self::Strict(classes) => classes[index].as_ref(),
+            Self::Leaky(classes) => {
+                // SAFETY: leaky classes are leaked at construction time and the
+                // stored pointer remains valid for the process lifetime.
+                unsafe { classes[index].as_ref() }
+            }
+        }
+    }
+}
+
 /// Internal allocation result for pooled allocations.
 struct Allocation {
     buffer: AlignedBuffer,
     is_new: bool,
-    class: Arc<SizeClass>,
+    owner: PooledOwner,
 }
 
 /// Internal state of the buffer pool.
 pub(crate) struct BufferPoolInner {
     config: BufferPoolConfig,
-    classes: Vec<Arc<SizeClass>>,
+    classes: PoolClasses,
     metrics: PoolMetrics,
 }
 
 impl BufferPoolInner {
+    fn should_bypass(&self, class_index: usize) -> bool {
+        self.config
+            .small_alloc_cutoff
+            .is_some_and(|cutoff| self.config.class_size(class_index) <= cutoff.get())
+    }
+
     /// Try to allocate a buffer from the given size class.
     ///
     /// If `zero_on_new` is true, newly-created buffers are allocated with
@@ -575,7 +661,7 @@ impl BufferPoolInner {
             return Some(Allocation {
                 buffer,
                 is_new: false,
-                class: class.clone(),
+                owner: self.classes.tracked_owner(class_index),
             });
         }
 
@@ -596,7 +682,7 @@ impl BufferPoolInner {
         Some(Allocation {
             buffer,
             is_new: true,
-            class: class.clone(),
+            owner: self.classes.tracked_owner(class_index),
         })
     }
 }
@@ -628,6 +714,16 @@ impl std::fmt::Debug for BufferPool {
 }
 
 impl BufferPool {
+    fn alloc_small_bypass(&self, class_index: usize, zeroed: bool) -> IoBufMut {
+        let size = self.inner.config.class_size(class_index);
+        let buffer = if zeroed {
+            AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get())
+        } else {
+            AlignedBuffer::new(size, self.inner.config.alignment.get())
+        };
+        IoBufMut::from_pooled(PooledBufMut::new(buffer, PooledOwner::Untracked))
+    }
+
     /// Creates a new buffer pool with the given configuration.
     ///
     /// # Panics
@@ -638,21 +734,41 @@ impl BufferPool {
 
         let metrics = PoolMetrics::new(registry);
 
-        let mut classes = Vec::with_capacity(config.num_classes());
-        for i in 0..config.num_classes() {
-            let size = config.class_size(i);
-            let class = Arc::new(SizeClass::new(
-                size,
-                config.alignment.get(),
-                config.max_per_class.get(),
-                config.prefill,
-            ));
-            classes.push(class);
-        }
+        let classes = match config.mode {
+            BufferPoolMode::Strict => {
+                let mut classes = Vec::with_capacity(config.num_classes());
+                for i in 0..config.num_classes() {
+                    let size = config.class_size(i);
+                    let class = Arc::new(SizeClass::new(
+                        size,
+                        config.alignment.get(),
+                        config.max_per_class.get(),
+                        config.prefill,
+                    ));
+                    classes.push(class);
+                }
+                PoolClasses::Strict(classes)
+            }
+            BufferPoolMode::Leaky => {
+                let mut classes = Vec::with_capacity(config.num_classes());
+                for i in 0..config.num_classes() {
+                    let size = config.class_size(i);
+                    let class = Box::leak(Box::new(SizeClass::new(
+                        size,
+                        config.alignment.get(),
+                        config.max_per_class.get(),
+                        config.prefill,
+                    )));
+                    classes.push(NonNull::from(class));
+                }
+                PoolClasses::Leaky(classes)
+            }
+        };
 
         // Update created metrics after prefill
         if config.prefill {
-            for class in &classes {
+            for i in 0..classes.len() {
+                let class = &classes[i];
                 let label = SizeClassLabel {
                     size_class: class.size as u64,
                 };
@@ -682,7 +798,10 @@ impl BufferPool {
     /// Attempts to allocate a pooled buffer.
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
-    /// allocation.
+    /// allocation on exhaustion or oversized requests. If
+    /// [`BufferPoolConfig::small_alloc_cutoff`] selects the resolved size class,
+    /// this method intentionally bypasses pooling and returns an untracked
+    /// aligned allocation instead.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
     ///
@@ -700,10 +819,14 @@ impl BufferPool {
             .class_index_or_record_oversized(capacity)
             .ok_or(PoolError::Oversized)?;
 
+        if self.inner.should_bypass(class_index) {
+            return Ok(self.alloc_small_bypass(class_index, false));
+        }
+
         let buffer = self
             .inner
             .try_alloc(class_index, false)
-            .map(|allocation| PooledBufMut::new(allocation.buffer, Some(allocation.class)))
+            .map(|allocation| PooledBufMut::new(allocation.buffer, allocation.owner))
             .ok_or(PoolError::Exhausted)?;
         Ok(IoBufMut::from_pooled(buffer))
     }
@@ -717,8 +840,11 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Otherwise, falls back to an untracked aligned heap
-    /// allocation that is deallocated when dropped.
+    /// when dropped. If the resolved size class is at or below
+    /// [`BufferPoolConfig::small_alloc_cutoff`], this bypasses pooling and
+    /// returns an untracked aligned allocation. Otherwise, oversized or
+    /// exhausted requests fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
     /// Use [`Self::try_alloc`] if you need pooled-only behavior.
     ///
@@ -730,7 +856,7 @@ impl BufferPool {
         self.try_alloc(capacity).unwrap_or_else(|_| {
             let size = capacity.max(self.inner.config.min_size.get());
             let buffer = AlignedBuffer::new(size, self.inner.config.alignment.get());
-            IoBufMut::from_pooled(PooledBufMut::new(buffer, None))
+            IoBufMut::from_pooled(PooledBufMut::new(buffer, PooledOwner::Untracked))
         })
     }
 
@@ -752,7 +878,10 @@ impl BufferPool {
     /// Attempts to allocate a zero-initialized pooled buffer.
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
-    /// untracked allocation.
+    /// untracked allocation on exhaustion or oversized requests. If
+    /// [`BufferPoolConfig::small_alloc_cutoff`] selects the resolved size class,
+    /// this method intentionally bypasses pooling and returns an untracked
+    /// aligned allocation instead.
     ///
     /// The returned buffer has `len() == len` and `capacity() >= len`.
     ///
@@ -769,13 +898,18 @@ impl BufferPool {
         let class_index = self
             .class_index_or_record_oversized(len)
             .ok_or(PoolError::Oversized)?;
+        if self.inner.should_bypass(class_index) {
+            let mut buf = self.alloc_small_bypass(class_index, true);
+            // SAFETY: buffer was allocated with alloc_zeroed.
+            unsafe { buf.set_len(len) };
+            return Ok(buf);
+        }
         let allocation = self
             .inner
             .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
 
-        let mut buf =
-            IoBufMut::from_pooled(PooledBufMut::new(allocation.buffer, Some(allocation.class)));
+        let mut buf = IoBufMut::from_pooled(PooledBufMut::new(allocation.buffer, allocation.owner));
         if allocation.is_new {
             // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
             unsafe { buf.set_len(len) };
@@ -792,8 +926,11 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (len within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Otherwise, falls back to an untracked aligned heap
-    /// allocation that is deallocated when dropped.
+    /// when dropped. If the resolved size class is at or below
+    /// [`BufferPoolConfig::small_alloc_cutoff`], this bypasses pooling and
+    /// returns an untracked aligned allocation. Otherwise, oversized or
+    /// exhausted requests fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
     /// Use this for read APIs that require an initialized `&mut [u8]`.
     /// This avoids `unsafe set_len` at callsites.
@@ -809,7 +946,7 @@ impl BufferPool {
             // Pool exhausted or oversized: allocate untracked zeroed memory.
             let size = len.max(self.inner.config.min_size.get());
             let buffer = AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get());
-            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, None));
+            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, PooledOwner::Untracked));
             // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
             unsafe { buf.set_len(len) };
             buf
@@ -825,16 +962,28 @@ impl BufferPool {
 /// Shared pooled allocation.
 ///
 /// On drop, returns the aligned buffer to the pool if tracked.
-struct PooledBufInner {
-    buffer: ManuallyDrop<AlignedBuffer>,
-    class: Option<Arc<SizeClass>>,
+enum PooledOwner {
+    Strict(Arc<SizeClass>),
+    Leaky(NonNull<SizeClass>),
+    Untracked,
 }
 
+struct PooledBufInner {
+    buffer: ManuallyDrop<AlignedBuffer>,
+    owner: PooledOwner,
+}
+
+// SAFETY: `PooledBufInner` either contains an `Arc<SizeClass>`, a leaked
+// `NonNull<SizeClass>`, or no owner for untracked buffers.
+unsafe impl Send for PooledBufInner {}
+// SAFETY: see above.
+unsafe impl Sync for PooledBufInner {}
+
 impl PooledBufInner {
-    const fn new(buffer: AlignedBuffer, class: Option<Arc<SizeClass>>) -> Self {
+    const fn new(buffer: AlignedBuffer, owner: PooledOwner) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),
-            class,
+            owner,
         }
     }
 
@@ -848,8 +997,14 @@ impl Drop for PooledBufInner {
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        if let Some(class) = &self.class {
-            class.push(buffer);
+        match &self.owner {
+            PooledOwner::Strict(class) => class.push(buffer),
+            PooledOwner::Leaky(class) => {
+                // SAFETY: leaky-mode classes are leaked and remain valid for
+                // the process lifetime.
+                unsafe { class.as_ref().push(buffer) };
+            }
+            PooledOwner::Untracked => {}
         }
         // else: buffer is dropped here, which deallocates it
     }
@@ -904,10 +1059,11 @@ impl PooledBuf {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to their pool when dropped.
     ///
-    /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
+    /// Untracked fallback allocations, including small-size bypass allocations,
+    /// return `false`.
     #[inline]
     pub fn is_tracked(&self) -> bool {
-        self.inner.class.is_some()
+        !matches!(self.inner.owner, PooledOwner::Untracked)
     }
 
     /// Returns a pointer to the first readable byte.
@@ -1120,9 +1276,9 @@ impl std::fmt::Debug for PooledBufMut {
 }
 
 impl PooledBufMut {
-    const fn new(buffer: AlignedBuffer, class: Option<Arc<SizeClass>>) -> Self {
+    const fn new(buffer: AlignedBuffer, owner: PooledOwner) -> Self {
         Self {
-            inner: ManuallyDrop::new(PooledBufInner::new(buffer, class)),
+            inner: ManuallyDrop::new(PooledBufInner::new(buffer, owner)),
             cursor: 0,
             len: 0,
         }
@@ -1133,10 +1289,11 @@ impl PooledBufMut {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to their pool when dropped.
     ///
-    /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
+    /// Untracked fallback allocations, including small-size bypass allocations,
+    /// return `false`.
     #[inline]
     pub fn is_tracked(&self) -> bool {
-        self.inner.class.is_some()
+        !matches!(self.inner.owner, PooledOwner::Untracked)
     }
 
     /// Returns the number of readable bytes remaining in the buffer.
@@ -1346,6 +1503,8 @@ mod tests {
             max_per_class: NZUsize!(max_per_class),
             prefill: false,
             alignment: NZUsize!(page_size()),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         }
     }
 
@@ -1424,6 +1583,8 @@ mod tests {
             max_per_class: NZUsize!(10),
             prefill: false,
             alignment: NZUsize!(page_size()),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         };
         config.validate();
     }
@@ -1537,6 +1698,51 @@ mod tests {
     }
 
     #[test]
+    fn test_small_alloc_cutoff_bypasses_pool() {
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            BufferPoolConfig {
+                min_size: NZUsize!(128),
+                max_size: NZUsize!(1024),
+                max_per_class: NZUsize!(2),
+                prefill: false,
+                alignment: NZUsize!(128),
+                mode: BufferPoolMode::Strict,
+                small_alloc_cutoff: Some(NZUsize!(512)),
+            },
+            &mut registry,
+        );
+
+        let buf = pool.try_alloc(200).unwrap();
+        assert!(!buf.is_pooled());
+        assert_eq!(buf.capacity(), 256);
+
+        let zeroed = pool.try_alloc_zeroed(200).unwrap();
+        assert!(!zeroed.is_pooled());
+        assert_eq!(zeroed.len(), 200);
+        assert!(zeroed.as_ref().iter().all(|&b| b == 0));
+
+        let pooled = pool.try_alloc(600).unwrap();
+        assert!(pooled.is_pooled());
+        assert_eq!(pooled.capacity(), 1024);
+    }
+
+    #[test]
+    fn test_leaky_mode_pool_drop_before_buffer() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            test_config(page, page, 1).with_mode(BufferPoolMode::Leaky),
+            &mut registry,
+        );
+
+        let buf = pool.try_alloc(100).unwrap();
+        assert!(buf.is_pooled());
+        drop(pool);
+        drop(buf);
+    }
+
+    #[test]
     fn test_pool_exhaustion() {
         let page = page_size();
         let mut registry = test_registry();
@@ -1613,6 +1819,8 @@ mod tests {
                 max_per_class: NZUsize!(5),
                 prefill: true,
                 alignment: page,
+                mode: BufferPoolMode::Strict,
+                small_alloc_cutoff: None,
             },
             &mut registry,
         );
@@ -1636,6 +1844,8 @@ mod tests {
         assert_eq!(config.max_per_class.get(), 4096);
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), cache_line_size());
+        assert_eq!(config.mode, BufferPoolMode::Strict);
+        assert_eq!(config.small_alloc_cutoff, None);
     }
 
     #[test]
@@ -1647,6 +1857,8 @@ mod tests {
         assert_eq!(config.max_per_class.get(), 32);
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.mode, BufferPoolMode::Strict);
+        assert_eq!(config.small_alloc_cutoff, None);
     }
 
     #[test]
@@ -1665,13 +1877,17 @@ mod tests {
             .with_max_per_class(NZUsize!(64))
             .with_prefill(true)
             .with_min_size(page)
-            .with_max_size(NZUsize!(128 * 1024));
+            .with_max_size(NZUsize!(128 * 1024))
+            .with_mode(BufferPoolMode::Leaky)
+            .with_small_alloc_cutoff(Some(NZUsize!(512)));
 
         config.validate();
         assert_eq!(config.min_size, page);
         assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
         assert!(config.prefill);
+        assert_eq!(config.mode, BufferPoolMode::Leaky);
+        assert_eq!(config.small_alloc_cutoff, Some(NZUsize!(512)));
 
         // Storage profile alignment stays page-sized unless explicitly changed.
         assert_eq!(config.alignment.get(), page_size());
@@ -1694,6 +1910,8 @@ mod tests {
             max_per_class: NZUsize!(1),
             prefill: false,
             alignment: NZUsize!(4),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         }
         .with_budget_bytes(NZUsize!(280));
         assert_eq!(config.max_per_class.get(), 10);
@@ -1705,6 +1923,8 @@ mod tests {
             max_per_class: NZUsize!(1),
             prefill: false,
             alignment: NZUsize!(4),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         }
         .with_budget_bytes(NZUsize!(10));
         assert_eq!(small_budget.max_per_class.get(), 1);
@@ -1730,6 +1950,8 @@ mod tests {
             max_per_class: NZUsize!(1),
             prefill: false,
             alignment: NZUsize!(4),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         };
         assert_eq!(invalid_order.num_classes(), 0);
         let unchanged = invalid_order.clone().with_budget_bytes(NZUsize!(128));
@@ -1741,6 +1963,8 @@ mod tests {
             max_per_class: NZUsize!(1),
             prefill: false,
             alignment: NZUsize!(4),
+            mode: BufferPoolMode::Strict,
+            small_alloc_cutoff: None,
         };
         assert_eq!(non_power_two_max.class_index(12), None);
     }
@@ -1789,16 +2013,19 @@ mod tests {
         let page = page_size();
 
         let pooled_mut_debug = {
-            let pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
+            let pooled_mut =
+                PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked);
             format!("{pooled_mut:?}")
         };
         assert!(pooled_mut_debug.contains("PooledBufMut"));
         assert!(pooled_mut_debug.contains("cursor"));
 
-        let empty_from_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
+        let empty_from_mut =
+            PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked);
         assert!(empty_from_mut.into_bytes().is_empty());
 
-        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), None).into_pooled();
+        let pooled =
+            PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked).into_pooled();
         let pooled_debug = format!("{pooled:?}");
         assert!(pooled_debug.contains("PooledBuf"));
         assert!(pooled_debug.contains("capacity"));
@@ -1809,7 +2036,8 @@ mod tests {
     #[should_panic(expected = "range start overflow")]
     fn test_pooled_slice_excluded_start_overflow() {
         let page = page_size();
-        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), None).into_pooled();
+        let pooled =
+            PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked).into_pooled();
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
     }
 
@@ -2230,7 +2458,8 @@ mod tests {
     #[test]
     fn test_bytes_parity_iobuf_split_to() {
         let page = page_size();
-        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
+        let mut pooled_mut =
+            PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked);
         pooled_mut.put_slice(b"abcdefgh");
         let mut pooled = pooled_mut.into_pooled();
         let mut bytes = Bytes::from_static(b"abcdefgh");
@@ -2256,7 +2485,8 @@ mod tests {
     #[should_panic(expected = "split_to out of bounds")]
     fn test_iobuf_split_to_out_of_bounds() {
         let page = page_size();
-        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
+        let mut pooled_mut =
+            PooledBufMut::new(AlignedBuffer::new(page, page), PooledOwner::Untracked);
         pooled_mut.put_slice(b"abc");
         let mut pooled = pooled_mut.into_pooled();
         let _ = pooled.split_to(4);
