@@ -103,17 +103,12 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        kv::tests::{assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Proof, StandardHasher},
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
                 proof::RangeProof,
                 tests::{apply_random_ops, fixed_config},
-            },
-            store::{
-                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-                LogStore as _,
             },
         },
         translator::TwoCap,
@@ -330,7 +325,7 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.size().await;
+            let end_loc = db.bounds().await.end;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -487,14 +482,5 @@ pub mod test {
 
             db.destroy().await.unwrap();
         });
-    }
-
-    #[allow(dead_code)]
-    fn assert_db_futures_are_send(db: &mut CurrentTest, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
     }
 }

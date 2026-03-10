@@ -156,17 +156,13 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        kv::tests::{assert_gettable, assert_send},
-        mmr::{Location, Position},
-        qmdb::{
-            any::{
-                ordered::test::{
-                    test_ordered_any_db_basic, test_ordered_any_db_empty,
-                    test_ordered_any_update_collision_edge_case,
-                },
-                test::variable_db_config,
+        mmr::Position,
+        qmdb::any::{
+            ordered::test::{
+                test_ordered_any_db_basic, test_ordered_any_db_empty,
+                test_ordered_any_update_collision_edge_case,
             },
-            store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            test::variable_db_config,
         },
         translator::TwoCap,
     };
@@ -443,22 +439,13 @@ pub(crate) mod test {
         });
     }
 
-    #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
-    }
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut AnyTest, key: Digest) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_send(db.get_all(&key));
-        assert_send(db.get_with_loc(&key));
-        assert_send(db.get_span(&key));
+    fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
+        is_send(db.get_all(&key));
+        is_send(db.get_with_loc(&key));
+        is_send(db.get_span(&key));
     }
 
     // FromSyncTestable implementation for from_sync_result tests

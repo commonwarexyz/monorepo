@@ -7,7 +7,6 @@ use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
-        store::LogStore as _,
         verify_proof,
     },
     translator::TwoCap,

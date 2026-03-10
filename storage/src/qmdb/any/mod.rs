@@ -340,12 +340,8 @@ pub(crate) mod test {
     }
 
     use crate::{
-        kv::Gettable,
         mmr::Location,
-        qmdb::{
-            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-            store::MerkleizedStore,
-        },
+        qmdb::any::traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -360,7 +356,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -456,7 +452,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
     {
         let root = db.root();
 
@@ -535,9 +531,9 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
-        <D as MerkleizedStore>::Operation: Codec,
+        <D as Provable>::Operation: Codec,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
 
@@ -623,7 +619,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
     {
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -657,8 +653,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
+        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
@@ -736,8 +732,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
+        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
@@ -870,8 +866,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
+        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
 
@@ -920,7 +916,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny + Gettable<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();

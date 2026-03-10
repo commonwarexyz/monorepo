@@ -62,7 +62,6 @@ use crate::{
             Contiguous as _, Reader,
         },
     },
-    kv,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Proof,
@@ -425,53 +424,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         let end_loc = Location::new(batch.total_size);
         Ok(start_loc..end_loc)
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    kv::Gettable for Immutable<E, K, V, H, T>
-{
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    crate::qmdb::store::LogStore for Immutable<E, K, V, H, T>
-{
-    type Value = V;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        self.bounds().await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        self.get_metadata().await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T>
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-
-    fn root(&self) -> Self::Digest {
-        self.root()
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.historical_proof(historical_size, start_loc, max_ops)
-            .await
     }
 }
 
@@ -919,22 +871,17 @@ pub(super) mod test {
         });
     }
 
-    use crate::{
-        kv::tests::{assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store},
-    };
+    type Db = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
-    type TestDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_db_futures_are_send(db: &mut TestDb, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
+    fn assert_db_futures_are_send(db: &mut Db, key: Digest, loc: Location) {
+        is_send(db.get(&key));
+        is_send(db.get_metadata());
+        is_send(db.proof(loc, NZU64!(1)));
+        is_send(db.sync());
     }
-
-    type Db = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// batch.get() reads pending mutations and falls through to base DB.
     #[test_traced("INFO")]

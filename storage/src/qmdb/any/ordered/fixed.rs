@@ -144,7 +144,6 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_gettable, assert_send},
         mmr::{Location, StandardHasher as Standard},
         qmdb::{
             any::{
@@ -156,10 +155,6 @@ pub(crate) mod test {
                     Update,
                 },
                 test::fixed_db_config,
-            },
-            store::{
-                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-                LogStore,
             },
             verify_proof,
         },
@@ -434,7 +429,7 @@ pub(crate) mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.size().await;
+            let end_loc = db.bounds().await.end;
             let start_loc = db.log.mmr.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
@@ -1455,22 +1450,13 @@ pub(crate) mod test {
         });
     }
 
-    #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
-    }
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut AnyTest, key: Digest) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_send(db.get_all(&key));
-        assert_send(db.get_with_loc(&key));
-        assert_send(db.get_span(&key));
+    fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
+        is_send(db.get_all(&key));
+        is_send(db.get_with_loc(&key));
+        is_send(db.get_span(&key));
     }
 
     // FromSyncTestable implementation for from_sync_result tests

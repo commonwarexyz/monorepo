@@ -19,7 +19,6 @@ use commonware_storage::{
             unordered::{fixed::Db as UCurrent, variable::Db as UVCurrent},
             FixedConfig as CConfig, VariableConfig as VariableCurrentConfig,
         },
-        store::LogStore,
     },
     translator::EightCap,
 };
@@ -244,7 +243,7 @@ async fn gen_random_kv<M>(
     num_operations: u64,
     commit_frequency: Option<u32>,
 ) where
-    M: DbAny<Key = Digest> + LogStore<Value = Digest>,
+    M: DbAny<Key = Digest, Value = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 

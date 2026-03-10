@@ -25,7 +25,6 @@ use commonware_storage::{
         any::unordered::{fixed::Operation as FixedOperation, Update},
         current::{self, FixedConfig as Config},
         operation::Committable,
-        store::LogStore,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -128,7 +127,7 @@ where
     }
 
     async fn size(&self) -> Location {
-        LogStore::bounds(self).await.end
+        self.bounds().await.end
     }
 
     async fn inactivity_floor(&self) -> Location {

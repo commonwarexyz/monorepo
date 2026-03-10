@@ -6,7 +6,6 @@ use crate::{
         authenticated::{self, BatchChain},
         contiguous::{Contiguous, Mutable, Reader},
     },
-    kv,
     mmr::{
         journaled::Mmr,
         read::{BatchChainInfo, Readable},
@@ -536,7 +535,6 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
-    Db<E, C, I, H, U>: kv::Gettable<Key = U::Key, Value = U::Value, Error = Error>,
 {
     /// Read through: mutations -> base diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
@@ -546,7 +544,7 @@ where
         if let Some(entry) = self.base_diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        kv::Gettable::get(self.db, key).await
+        self.db.get(key).await
     }
 }
 
@@ -947,14 +945,13 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
-    Db<E, C, I, H, U>: kv::Gettable<Key = U::Key, Value = U::Value, Error = Error>,
 {
     /// Read through: diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
         if let Some(entry) = self.diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        kv::Gettable::get(self.db, key).await
+        self.db.get(key).await
     }
 }
 

@@ -6,7 +6,6 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    kv,
     mmr::Location,
     qmdb::{
         any::{
@@ -95,27 +94,5 @@ where
             return Err(Error::KeyNotFound);
         };
         self.operation_proof(hasher, loc).await
-    }
-}
-
-// Store implementation
-impl<
-        E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
-        const N: usize,
-    > kv::Gettable for Db<E, C, K, V, I, H, N>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-    type Value = V::Value;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
     }
 }

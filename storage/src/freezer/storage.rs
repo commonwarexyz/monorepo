@@ -1,9 +1,6 @@
 use super::{Config, Error, Identifier};
-use crate::{
-    journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
-    },
-    kv,
+use crate::journal::segmented::oversized::{
+    Config as OversizedConfig, Oversized, Record as OversizedRecord,
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
@@ -1148,27 +1145,6 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable
-    for Freezer<E, K, V>
-{
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(Identifier::Key(key)).await
-    }
-}
-
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable
-    for Freezer<E, K, V>
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.put(key, value).await?;
-        Ok(())
-    }
-}
-
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
@@ -1186,7 +1162,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
+    use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
@@ -1196,17 +1172,27 @@ mod tests {
         NZUsize, NZU16,
     };
 
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
+
     type TestFreezer = Freezer<Context, U64, u64>;
+
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
     fn assert_freezer_futures_are_send(freezer: &mut TestFreezer, key: U64) {
-        assert_gettable(freezer, &key);
-        assert_updatable(freezer, key, 0u64);
+        is_send(freezer.get(Identifier::Key(&key)));
+        is_send(freezer.put(key, 0u64));
     }
 
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
-        assert_send(freezer.destroy());
+        is_send(freezer.destroy());
     }
 
     #[test_traced]

@@ -3,12 +3,8 @@
 use super::{fixed, variable};
 use crate::{
     qmdb::{
-        any::{
-            traits::DbAny, unordered::variable::Operation as VariableOperation, FixedValue,
-            VariableValue,
-        },
+        any::{unordered::variable::Operation as VariableOperation, FixedValue, VariableValue},
         current::BitmapPrunedBits,
-        store::LogStore as _,
     },
     translator::Translator,
 };
@@ -21,34 +17,33 @@ use commonware_utils::Array;
 // Fixed variant test trait implementations
 // =============================================================================
 
-impl<
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, H, T, const N: usize] fixed::Db<E, K, V, H, T, N>
+    where {
         E: Storage + Clock + Metrics,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
-        const N: usize,
-    > DbAny for fixed::Db<E, K, V, H, T, N>
-{
-    type Digest = H::Digest;
+    }
+    Key = K, Value = V, Digest = H::Digest
 }
 
 // =============================================================================
 // Variable variant test trait implementations
 // =============================================================================
 
-impl<
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, H, T, const N: usize] variable::Db<E, K, V, H, T, N>
+    where {
         E: Storage + Clock + Metrics,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
-        const N: usize,
-    > DbAny for variable::Db<E, K, V, H, T, N>
-where
-    VariableOperation<K, V>: Read,
-{
-    type Digest = H::Digest;
+        VariableOperation<K, V>: Read,
+    }
+    Key = K, Value = V, Digest = H::Digest
 }
 
 // =============================================================================
@@ -105,17 +100,16 @@ where
 // Partitioned Fixed variant test trait implementations
 // =============================================================================
 
-impl<
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, H, T, const P: usize, const N: usize] fixed::partitioned::Db<E, K, V, H, T, P, N>
+    where {
         E: Storage + Clock + Metrics,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
         T: Translator,
-        const P: usize,
-        const N: usize,
-    > DbAny for fixed::partitioned::Db<E, K, V, H, T, P, N>
-{
-    type Digest = H::Digest;
+    }
+    Key = K, Value = V, Digest = H::Digest
 }
 
 impl<
@@ -145,19 +139,18 @@ impl<
 // Partitioned Variable variant test trait implementations
 // =============================================================================
 
-impl<
+crate::qmdb::any::traits::impl_db_any! {
+    [E, K, V, H, T, const P: usize, const N: usize]
+    variable::partitioned::Db<E, K, V, H, T, P, N>
+    where {
         E: Storage + Clock + Metrics,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
-        const P: usize,
-        const N: usize,
-    > DbAny for variable::partitioned::Db<E, K, V, H, T, P, N>
-where
-    VariableOperation<K, V>: Read,
-{
-    type Digest = H::Digest;
+        VariableOperation<K, V>: Read,
+    }
+    Key = K, Value = V, Digest = H::Digest
 }
 
 impl<

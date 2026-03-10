@@ -13,7 +13,7 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _,
 };
-use commonware_storage::qmdb::{any::traits::DbAny, store::LogStore};
+use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 
@@ -34,7 +34,7 @@ cfg_if::cfg_if! {
 /// Helper function to setup a database with random data, prune, and close it.
 async fn setup_db<C>(mut db: C, elements: u64, operations: u64)
 where
-    C: DbAny<Key = Digest> + LogStore<Value = Digest>,
+    C: DbAny<Key = Digest, Value = Digest>,
 {
     gen_random_kv(&mut db, elements, operations, Some(COMMIT_FREQUENCY)).await;
     db.prune(db.inactivity_floor_loc().await).await.unwrap();

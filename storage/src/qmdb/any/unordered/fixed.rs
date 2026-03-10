@@ -141,16 +141,11 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_gettable, assert_send},
         mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::{
                 test::fixed_db_config,
                 unordered::{fixed::Operation, Update},
-            },
-            store::{
-                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-                LogStore,
             },
             verify_proof,
         },
@@ -682,22 +677,13 @@ pub(crate) mod test {
         });
     }
 
-    #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
-    }
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_batch_futures_are_send(db: &AnyTest, key: Digest, value: Digest) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
+    fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Digest) {
         let batch = db.new_batch().write(key, Some(value));
-        assert_send(batch.merkleize(None));
-        assert_send(db.get_with_loc(&key));
+        is_send(batch.merkleize(None));
+        is_send(db.get_with_loc(&key));
     }
 
     // FromSyncTestable implementation for from_sync_result tests
