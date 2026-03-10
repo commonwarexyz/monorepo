@@ -154,11 +154,12 @@ pub enum Error {
     },
 }
 
-impl From<LocationError> for Error {
-    fn from(err: LocationError) -> Self {
+impl From<super::Error> for Error {
+    fn from(err: super::Error) -> Self {
         match err {
-            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
-            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+            super::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            super::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
+            super::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
         }
     }
 }

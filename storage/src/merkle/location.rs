@@ -6,7 +6,6 @@ use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
-use thiserror::Error;
 
 /// Maximum valid [Location] value: the largest leaf count an MMR can hold.
 ///
@@ -281,11 +280,11 @@ impl SubAssign<u64> for Location {
 }
 
 impl TryFrom<Position> for Location {
-    type Error = LocationError;
+    type Error = super::Error;
 
     /// Attempt to derive the [Location] of a given node [Position].
     ///
-    /// Returns an error if the position does not correspond to an MMR leaf or if position
+    /// Returns an error if the position does not correspond to a leaf or if position
     /// overflow occurs.
     ///
     /// This computation is O(log2(n)) in the given position.
@@ -293,7 +292,7 @@ impl TryFrom<Position> for Location {
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
         // Reject positions beyond the valid range.
         if !pos.is_valid() {
-            return Err(LocationError::Overflow(pos));
+            return Err(super::Error::PositionOverflow(pos));
         }
         // Position 0 is always the first leaf at location 0.
         if *pos == 0 {
@@ -306,7 +305,7 @@ impl TryFrom<Position> for Location {
         let height = start.trailing_ones();
         // Height 0 means this position is a peak (not a leaf in a tree).
         if height == 0 {
-            return Err(LocationError::NonLeaf(pos));
+            return Err(super::Error::NonLeaf(pos));
         }
         let mut two_h = 1 << (height - 1);
         let mut cur_node = start - 1;
@@ -314,7 +313,7 @@ impl TryFrom<Position> for Location {
 
         while two_h > 1 {
             if cur_node == *pos {
-                return Err(LocationError::NonLeaf(pos));
+                return Err(super::Error::NonLeaf(pos));
             }
             let left_pos = cur_node - two_h;
             two_h >>= 1;
@@ -333,15 +332,8 @@ impl TryFrom<Position> for Location {
     }
 }
 
-/// Error returned when attempting to convert a [Position] to a [Location].
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-pub enum LocationError {
-    #[error("{0} is not a leaf")]
-    NonLeaf(Position),
-
-    #[error("{0} > MAX_LOCATION")]
-    Overflow(Position),
-}
+/// Backwards-compatible alias for [enum@super::Error].
+pub type LocationError = super::Error;
 
 /// Extension trait for converting `Range<Location>` into other range types.
 pub trait LocationRangeExt {
@@ -359,7 +351,7 @@ impl LocationRangeExt for Range<Location> {
 #[cfg(test)]
 mod tests {
     use super::{Location, MAX_LOCATION};
-    use crate::mmr::{position::Position, LocationError, MAX_POSITION};
+    use crate::merkle::{position::Position, Error, MAX_POSITION};
 
     // Test that the [Location::try_from] function returns the correct location for leaf positions.
     #[test]
@@ -410,7 +402,7 @@ mod tests {
         ];
         for &pos in CASES {
             let err = Location::try_from(pos).expect_err("position is not a leaf");
-            assert_eq!(err, LocationError::NonLeaf(pos));
+            assert_eq!(err, Error::NonLeaf(pos));
         }
     }
 
@@ -418,7 +410,7 @@ mod tests {
     fn test_try_from_position_error_overflow() {
         let overflow_pos = Position::new(u64::MAX);
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
-        assert_eq!(err, LocationError::Overflow(overflow_pos));
+        assert_eq!(err, Error::PositionOverflow(overflow_pos));
 
         // MAX_POSITION is the leaf at MAX_LOCATION
         let result = Location::try_from(MAX_POSITION);
@@ -426,7 +418,7 @@ mod tests {
 
         let overflow_pos = MAX_POSITION + 1;
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
-        assert_eq!(err, LocationError::Overflow(overflow_pos));
+        assert_eq!(err, Error::PositionOverflow(overflow_pos));
     }
 
     #[test]
@@ -552,10 +544,10 @@ mod tests {
         assert!(Position::try_from(over_loc).is_err());
 
         match Position::try_from(over_loc) {
-            Err(crate::mmr::Error::LocationOverflow(loc)) => {
+            Err(Error::LocationOverflow(loc)) => {
                 assert_eq!(loc, over_loc);
             }
-            _ => panic!("expected LocationOverflow error"),
+            _ => panic!("expected Error::LocationOverflow"),
         }
     }
 

@@ -1,4 +1,4 @@
-use super::{location::Location, mmr::Error};
+use super::{location::Location, Error};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, ReadExt};
 use core::{
