@@ -57,19 +57,19 @@ struct StoredCertificate {
 }
 
 #[derive(Debug, Default)]
-struct Ledger {
+struct Inner {
     next_signature: u64,
     signatures: HashMap<Participant, HashMap<u64, SignedSubject>>,
     next_certificate: u64,
     certificates: HashMap<u64, StoredCertificate>,
 }
 
-/// Shared state for ledger-backed mock schemes created by the same test fixture.
+/// Shared state for mock schemes created by the same test fixture.
 #[doc(hidden)]
 #[derive(Clone, Default)]
-pub struct SharedLedger(Arc<Mutex<Ledger>>);
+pub struct Shared(Arc<Mutex<Inner>>);
 
-/// Cheap certificate type backed by a shared in-memory ledger.
+/// Cheap certificate type backed by shared in-memory state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     id: U64,
@@ -100,10 +100,10 @@ impl Read for Certificate {
     }
 }
 
-/// Generic ledger-backed certificate implementation.
+/// Generic mock certificate implementation.
 ///
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
-/// if the corresponding subject was previously recorded in the shared ledger.
+/// if the corresponding subject was previously recorded in shared state.
 #[doc(hidden)]
 pub struct Generic<
     P: PublicKey,
@@ -115,7 +115,7 @@ pub struct Generic<
     me: Option<Participant>,
     participants: Set<P>,
     namespace: N,
-    ledger: SharedLedger,
+    shared: Shared,
 }
 
 impl<
@@ -147,7 +147,7 @@ impl<
             me: self.me,
             participants: self.participants.clone(),
             namespace: self.namespace.clone(),
-            ledger: self.ledger.clone(),
+            shared: self.shared.clone(),
         }
     }
 }
@@ -181,24 +181,24 @@ impl<
         namespace: &[u8],
         participants: Set<P>,
         me: Participant,
-        ledger: SharedLedger,
+        shared: Shared,
     ) -> Option<Self> {
         participants.key(me)?;
         Some(Self {
             me: Some(me),
             participants,
             namespace: N::derive(namespace),
-            ledger,
+            shared,
         })
     }
 
-    /// Creates a verifier sharing the provided ledger state.
-    pub fn verifier(namespace: &[u8], participants: Set<P>, ledger: SharedLedger) -> Self {
+    /// Creates a verifier sharing the provided state.
+    pub fn verifier(namespace: &[u8], participants: Set<P>, shared: Shared) -> Self {
         Self {
             me: None,
             participants,
             namespace: N::derive(namespace),
-            ledger,
+            shared,
         }
     }
 
@@ -222,10 +222,10 @@ impl<
         let signer = self.me?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
-        let mut ledger = self.ledger.0.lock();
-        let signature_id = ledger.next_signature;
-        ledger.next_signature = ledger.next_signature.wrapping_add(1);
-        ledger
+        let mut inner = self.shared.0.lock();
+        let signature_id = inner.next_signature;
+        inner.next_signature = inner.next_signature.wrapping_add(1);
+        inner
             .signatures
             .entry(signer)
             .or_default()
@@ -237,7 +237,7 @@ impl<
         })
     }
 
-    /// Verifies a single ledger-backed attestation.
+    /// Verifies a single mock attestation.
     pub fn verify_attestation<'a, S, D>(
         &self,
         subject: S::Subject<'a, D>,
@@ -257,13 +257,13 @@ impl<
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let signature_id = u64::from(signature);
-        let ledger = self.ledger.0.lock();
-        ledger
+        let inner = self.shared.0.lock();
+        inner
             .signatures
             .get(&attestation.signer)
             .and_then(|entries| entries.get(&signature_id))
             .is_some_and(|stored| stored == &expected_subject)
-            || Self::invalid_bool("attestation not recorded in ledger or subject mismatched")
+            || Self::invalid_bool("attestation not found or subject mismatched")
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
@@ -294,7 +294,7 @@ impl<
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles attestations into a ledger-backed certificate.
+    /// Assembles attestations into a mock certificate.
     pub fn assemble<S, I, M>(&self, attestations: I) -> Option<Certificate>
     where
         S: Scheme<Signature = U64>,
@@ -304,7 +304,7 @@ impl<
         let mut unique_signers = HashSet::new();
         let mut signers = Vec::new();
         let mut signed_subject = None;
-        let mut ledger = self.ledger.0.lock();
+        let mut inner = self.shared.0.lock();
 
         for attestation in attestations {
             self.participants.key(attestation.signer).or_else(|| {
@@ -316,12 +316,12 @@ impl<
                 .get()
                 .or_else(|| Self::invalid_none("attestation signature missing"))?;
             let signature_id = u64::from(signature);
-            let entry = ledger
+            let entry = inner
                 .signatures
                 .get(&attestation.signer)
-                .or_else(|| Self::invalid_none("attestation signer missing from ledger"))?
+                .or_else(|| Self::invalid_none("attestation signer not found"))?
                 .get(&signature_id)
-                .or_else(|| Self::invalid_none("attestation signature missing from ledger"))?
+                .or_else(|| Self::invalid_none("attestation signature not found"))?
                 .clone();
 
             if let Some(existing) = &signed_subject {
@@ -343,9 +343,9 @@ impl<
 
         let subject = signed_subject?;
         let signers = Signers::from(self.participants.len(), signers);
-        let certificate_id = ledger.next_certificate;
-        ledger.next_certificate = ledger.next_certificate.wrapping_add(1);
-        ledger.certificates.insert(
+        let certificate_id = inner.next_certificate;
+        inner.next_certificate = inner.next_certificate.wrapping_add(1);
+        inner.certificates.insert(
             certificate_id,
             StoredCertificate {
                 subject,
@@ -359,7 +359,7 @@ impl<
         })
     }
 
-    /// Verifies a ledger-backed certificate.
+    /// Verifies a mock certificate.
     pub fn verify_certificate<'a, S, R, D, M>(
         &self,
         _rng: &mut R,
@@ -382,14 +382,14 @@ impl<
 
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let certificate_id = u64::from(&certificate.id);
-        let ledger = self.ledger.0.lock();
-        ledger
+        let inner = self.shared.0.lock();
+        inner
             .certificates
             .get(&certificate_id)
             .is_some_and(|stored| {
                 stored.subject == expected_subject && stored.signers == certificate.signers
             })
-            || Self::invalid_bool("certificate missing from ledger or subject/signers mismatched")
+            || Self::invalid_bool("certificate not found or subject/signers mismatched")
     }
 
     /// Verifies a batch of certificates one-by-one.
@@ -428,7 +428,7 @@ impl<
     }
 }
 
-/// Implements a ledger-backed mock certificate scheme for a concrete subject and namespace.
+/// Implements a mock mock certificate scheme for a concrete subject and namespace.
 ///
 /// This follows the same binding pattern as the other certificate macros: the protocol
 /// supplies the subject type and namespace type, and the macro emits a local `Scheme`
@@ -443,7 +443,7 @@ impl<
 #[macro_export]
 macro_rules! impl_certificate_mock {
     ($subject:ty, $namespace:ty) => {
-        /// Generates a test fixture with Ed25519 identities and a ledger-backed mock scheme.
+        /// Generates a test fixture with Ed25519 identities and a mock mock scheme.
         #[cfg(feature = "mocks")]
         #[allow(dead_code)]
         pub fn fixture<R>(
@@ -490,7 +490,7 @@ macro_rules! impl_certificate_mock {
                 })
                 .collect();
 
-            let ledger = $crate::certificate::mocks::SharedLedger::default();
+            let shared = $crate::certificate::mocks::Shared::default();
             let schemes = participants_vec
                 .iter()
                 .enumerate()
@@ -499,12 +499,12 @@ macro_rules! impl_certificate_mock {
                         namespace,
                         participants.clone(),
                         commonware_utils::Participant::new(idx as u32),
-                        ledger.clone(),
+                        shared.clone(),
                     )
                     .expect("scheme signer must be a participant")
                 })
                 .collect();
-            let verifier = Scheme::verifier(namespace, participants, ledger);
+            let verifier = Scheme::verifier(namespace, participants, shared);
 
             $crate::certificate::mocks::Fixture {
                 participants: participants_vec,
@@ -542,14 +542,14 @@ macro_rules! impl_certificate_mock {
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 me: commonware_utils::Participant,
-                ledger: $crate::certificate::mocks::SharedLedger,
+                shared: $crate::certificate::mocks::Shared,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::certificate::mocks::Generic::signer(
                         namespace,
                         participants,
                         me,
-                        ledger,
+                        shared,
                     )?,
                 })
             }
@@ -557,13 +557,13 @@ macro_rules! impl_certificate_mock {
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
-                ledger: $crate::certificate::mocks::SharedLedger,
+                shared: $crate::certificate::mocks::Shared,
             ) -> Self {
                 Self {
                     generic: $crate::certificate::mocks::Generic::verifier(
                         namespace,
                         participants,
-                        ledger,
+                        shared,
                     ),
                 }
             }

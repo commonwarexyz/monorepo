@@ -392,14 +392,17 @@ mod tests {
     use crate::{
         simplex::{
             elector::{Config as Elector, Random, RoundRobin},
-            mocks::twins::{self, Elector as TwinsElector},
+            mocks::{
+                scheme as scheme_mocks,
+                twins::{self, Elector as TwinsElector},
+            },
             scheme::{
                 bls12381_multisig,
                 bls12381_threshold::{
                     standard as bls12381_threshold_std,
                     vrf::{self as bls12381_threshold_vrf, Seedable},
                 },
-                ed25519, mock, secp256r1, Scheme,
+                ed25519, secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -6108,7 +6111,7 @@ mod tests {
                 jitter: Duration::from_secs(1),
                 success_rate: 1.0,
             },
-            mock::fixture,
+            scheme_mocks::fixture,
         );
     }
 }
