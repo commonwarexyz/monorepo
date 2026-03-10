@@ -6101,7 +6101,7 @@ mod tests {
             max_scenarios: 3,
             max_compromised_sets: 3,
             required_containers: View::new(100),
-            relabel: false,
+            relabel: true,
         };
         twins_campaign::<_, _, RoundRobin>(
             0,
