@@ -725,8 +725,9 @@ pub mod fuzz {
 }
 #[cfg(test)]
 mod test {
-    use super::*;
+    use super::{fuzz::Plan, *};
     use crate::test::F;
+    use arbitrary::Unstructured;
 
     #[test]
     fn test_eq() {
@@ -745,6 +746,34 @@ mod test {
         assert!(eq(&[1, 2, 0, 0], &[1, 2]));
         assert!(!eq(&[1, 2, 0], &[2, 3]));
         assert!(!eq(&[2, 3], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn lin_comb_eval_edge_cases() {
+        fn poly(coeffs: &[u8]) -> Poly<F> {
+            Poly {
+                coeffs: coeffs.iter().copied().map(F::from).try_collect().unwrap(),
+            }
+        }
+
+        fn pairs(values: &[(u8, u8)]) -> Vec<(F, F)> {
+            values
+                .iter()
+                .map(|(a, b)| (F::from(*a), F::from(*b)))
+                .collect()
+        }
+
+        let cases = [
+            Plan::LinCombEval(poly(&[3, 5, 7]), vec![]),
+            Plan::LinCombEval(poly(&[11]), pairs(&[(2, 0), (3, 1), (5, 8)])),
+            Plan::LinCombEval(poly(&[4, 6, 8]), pairs(&[(2, 5), (7, 5), (3, 5)])),
+            Plan::LinCombEval(poly(&[9, 2, 3, 4]), pairs(&[(6, 0), (1, 0), (5, 7)])),
+            Plan::LinCombEval(poly(&[1, 2, 4, 8]), pairs(&[(3, 1), (7, 1), (2, 6)])),
+        ];
+        let mut u = Unstructured::new(&[]);
+        for case in cases {
+            case.run(&mut u).unwrap();
+        }
     }
 
     #[cfg(feature = "arbitrary")]
