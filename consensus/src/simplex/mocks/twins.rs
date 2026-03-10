@@ -11,12 +11,8 @@ use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
     types::{Participant, Round, View},
 };
-use commonware_cryptography::{certificate::Scheme, PublicKey};
-use commonware_p2p::{
-    simulated::{SplitOrigin, SplitTarget},
-    Recipients,
-};
-use commonware_runtime::IoBuf;
+use commonware_cryptography::certificate::Scheme;
+use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::{ordered::Set, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
 use std::{collections::HashSet, sync::Arc};
@@ -116,24 +112,6 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
     route_with_groups(sender, &primary, &secondary)
-}
-
-/// Drop resolver sends for twins.
-///
-/// Twins currently model resolver connectivity as unavailable under partition.
-pub fn blackhole_resolver_forwarder<P: PublicKey>(
-    _: SplitOrigin,
-    _: &Recipients<P>,
-    _: &IoBuf,
-) -> Option<Recipients<P>> {
-    None
-}
-
-/// Drop resolver receives for twins.
-///
-/// Twins currently model resolver connectivity as unavailable under partition.
-pub fn blackhole_resolver_router<P: PublicKey>(_: &(P, IoBuf)) -> SplitTarget {
-    SplitTarget::None
 }
 
 /// Twins leader-election config that follows scripted scenario leaders before

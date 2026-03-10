@@ -426,8 +426,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics,
-        Quota, Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
+        Runner, Spawner,
     };
     use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -6007,14 +6007,6 @@ mod tests {
         }
     }
 
-    fn high_variance_twins_link() -> Link {
-        Link {
-            latency: Duration::from_millis(100),
-            jitter: Duration::from_millis(500),
-            success_rate: 1.0,
-        }
-    }
-
     fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6035,7 +6027,11 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            high_variance_twins_link(),
+            Link {
+                latency: Duration::from_millis(250),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            },
         ] {
             twins_campaign::<S, _, L>(0, campaign, link, |context, namespace, n| {
                 fixture(context, namespace, n)
@@ -6105,7 +6101,11 @@ mod tests {
         twins_campaign::<_, _, Random>(
             0,
             campaign,
-            high_variance_twins_link(),
+            Link {
+                latency: Duration::from_millis(250),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            },
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
@@ -6124,7 +6124,11 @@ mod tests {
         twins_campaign::<_, _, Random>(
             42,
             campaign,
-            high_variance_twins_link(),
+            Link {
+                latency: Duration::from_millis(250),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            },
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }

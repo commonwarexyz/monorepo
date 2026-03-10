@@ -121,14 +121,6 @@ async fn setup_degraded_network<E: Clock>(
     }
 }
 
-fn high_variance_twins_link() -> Link {
-    Link {
-        latency: Duration::from_millis(100),
-        jitter: Duration::from_millis(500),
-        success_rate: 1.0,
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
@@ -490,7 +482,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         link_peers(
             &mut oracle,
             participants.as_ref(),
-            Action::Update(high_variance_twins_link()),
+            Action::Update(Link {
+                latency: Duration::from_millis(250),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            }),
             input.partition.filter(),
         )
         .await;
