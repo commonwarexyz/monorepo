@@ -329,6 +329,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
+#[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator<
     P,
     PendingSender,
