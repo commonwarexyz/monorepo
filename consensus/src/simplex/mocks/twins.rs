@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::{ordered::Set, test_rng_seeded};
+use commonware_utils::{ordered::Set, rng::mix64, test_rng_seeded};
 use rand::{rngs::StdRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -543,16 +543,57 @@ fn next_round_transitions(
                 }
 
                 let next_secondary = state.secondary_mask | range_mask(start + outside, secondary);
-                let mut next_primary =
+                let next_primary =
                     state.primary_mask | range_mask(start + outside + secondary, primary);
                 let mut next_leader = state.leader;
                 if has_leader {
                     // As in `no_secondary`, keep the leader as a singleton at
-                    // the tail of its source cell's refined block.
+                    // the tail of its source cell's refined block. Enumerate
+                    // both twin-half assignments so the leader may be isolated
+                    // with either partition when the halves differ.
                     let leader_idx = start + outside + secondary + primary;
-                    next_primary |= 1u64 << leader_idx;
                     next_cells.push(1);
                     next_leader = Some(leader_idx);
+
+                    for leader_in_primary in [true, false] {
+                        let leader_bit = 1u64 << leader_idx;
+                        with_secondary(
+                            ranges,
+                            max_partitions,
+                            leader_cell,
+                            cell_idx + 1,
+                            SecondaryState {
+                                primary_mask: if leader_in_primary {
+                                    next_primary | leader_bit
+                                } else {
+                                    next_primary
+                                },
+                                secondary_mask: if leader_in_primary {
+                                    next_secondary
+                                } else {
+                                    next_secondary | leader_bit
+                                },
+                                secondary_total: state.secondary_total
+                                    + secondary
+                                    + usize::from(!leader_in_primary),
+                                leader: next_leader,
+                            },
+                            next_cells,
+                            out,
+                        );
+                    }
+
+                    next_cells.pop();
+                    if primary > 0 {
+                        next_cells.pop();
+                    }
+                    if secondary > 0 {
+                        next_cells.pop();
+                    }
+                    if outside > 0 {
+                        next_cells.pop();
+                    }
+                    continue;
                 }
 
                 with_secondary(
@@ -711,7 +752,7 @@ fn derive_case_seed(
         .checked_mul(scenarios)
         .and_then(|offset| offset.checked_add(scenario_idx))
         .expect("case index overflow");
-    seed ^ u64::try_from(case_idx).expect("case index should fit in u64")
+    mix64(seed ^ u64::try_from(case_idx).expect("case index should fit in u64"))
 }
 
 /// Samples unique indices without replacement from `[0, total)`.
@@ -925,6 +966,22 @@ mod tests {
     }
 
     #[test]
+    fn first_case_seed_differs_from_framework_seed() {
+        let seed = 42;
+        assert_ne!(derive_case_seed(seed, 0, 0, 1), seed);
+    }
+
+    #[test]
+    fn generated_scenarios_include_leaders_visible_only_to_secondary() {
+        let scenarios = generate_scenarios(0, 3, 1, 2, usize::MAX);
+        assert!(scenarios.iter().any(|scenario| {
+            let round = scenario.rounds[0];
+            let leader_bit = 1u64 << round.leader;
+            (round.primary_mask & leader_bit) == 0 && (round.secondary_mask & leader_bit) != 0
+        }));
+    }
+
+    #[test]
     fn unique_index_sampling_handles_near_full_ranges() {
         let total = 100_000u128;
         let samples = 99_999usize;
@@ -1086,20 +1143,29 @@ mod tests {
             case_tuples(&cases),
             vec![
                 (vec![0], scenario(&[(2, 7, 7)]), 0),
-                (vec![0], scenario(&[(1, 3, 3)]), 1),
-                (vec![0], scenario(&[(2, 4, 4)]), 2),
-                (vec![0], scenario(&[(0, 3, 4)]), 3),
-                (vec![0], scenario(&[(0, 1, 6)]), 4),
-                (vec![1], scenario(&[(2, 7, 7)]), 5),
-                (vec![1], scenario(&[(1, 3, 3)]), 6),
-                (vec![1], scenario(&[(0, 1, 1)]), 7),
-                (vec![1], scenario(&[(0, 3, 4)]), 8),
-                (vec![1], scenario(&[(2, 4, 3)]), 9),
-                (vec![2], scenario(&[(2, 7, 7)]), 10),
-                (vec![2], scenario(&[(1, 3, 3)]), 11),
-                (vec![2], scenario(&[(1, 2, 2)]), 12),
-                (vec![2], scenario(&[(2, 6, 1)]), 13),
-                (vec![2], scenario(&[(2, 4, 3)]), 14),
+                (vec![0], scenario(&[(1, 6, 6)]), 6238072747940578789),
+                (vec![0], scenario(&[(1, 2, 2)]), 15839785061582574730),
+                (vec![0], scenario(&[(2, 3, 4)]), 2185194620014831856),
+                (vec![0], scenario(&[(0, 5, 2)]), 13232826040865663252),
+                (vec![0], scenario(&[(0, 4, 3)]), 13168350753275463132),
+                (vec![0], scenario(&[(2, 4, 3)]), 15093541023163888492),
+                (vec![0], scenario(&[(1, 0, 7)]), 1346066267577507604),
+                (vec![1], scenario(&[(2, 7, 7)]), 15378420243238726120),
+                (vec![1], scenario(&[(1, 6, 6)]), 9398003893131893463),
+                (vec![1], scenario(&[(2, 4, 4)]), 530445201382180217),
+                (vec![1], scenario(&[(1, 5, 2)]), 3774817245553408877),
+                (vec![1], scenario(&[(0, 5, 2)]), 4016745674725997500),
+                (vec![1], scenario(&[(1, 1, 6)]), 15923203627879530961),
+                (vec![1], scenario(&[(0, 1, 6)]), 2692132535155015209),
+                (vec![1], scenario(&[(2, 0, 7)]), 257397085994358073),
+                (vec![2], scenario(&[(2, 7, 7)]), 15673735954724858045),
+                (vec![2], scenario(&[(1, 6, 6)]), 3471015484745077182),
+                (vec![2], scenario(&[(2, 4, 4)]), 18431927716282009713),
+                (vec![2], scenario(&[(2, 3, 4)]), 16377936876142721111),
+                (vec![2], scenario(&[(2, 6, 1)]), 1060890402764360434),
+                (vec![2], scenario(&[(2, 1, 6)]), 15434875530296372041),
+                (vec![2], scenario(&[(2, 4, 3)]), 18272786274765299067),
+                (vec![2], scenario(&[(2, 0, 7)]), 4002107291894103205),
             ]
         );
     }
@@ -1122,23 +1188,41 @@ mod tests {
             case_tuples(&cases),
             vec![
                 (vec![0], scenario(&[(2, 7, 7)]), 0),
-                (vec![0], scenario(&[(1, 3, 3)]), 1),
-                (vec![0], scenario(&[(2, 4, 4)]), 2),
-                (vec![0], scenario(&[(0, 3, 4)]), 3),
-                (vec![0], scenario(&[(0, 1, 6)]), 4),
-                (vec![0], scenario(&[(2, 4, 1)]), 5),
-                (vec![1], scenario(&[(1, 7, 7)]), 6),
-                (vec![1], scenario(&[(0, 5, 5)]), 7),
-                (vec![1], scenario(&[(0, 1, 1)]), 8),
-                (vec![1], scenario(&[(2, 5, 2)]), 9),
-                (vec![1], scenario(&[(2, 4, 3)]), 10),
-                (vec![1], scenario(&[(1, 2, 1)]), 11),
-                (vec![2], scenario(&[(1, 7, 7)]), 12),
-                (vec![2], scenario(&[(2, 6, 6)]), 13),
-                (vec![2], scenario(&[(2, 4, 4)]), 14),
-                (vec![2], scenario(&[(0, 3, 4)]), 15),
-                (vec![2], scenario(&[(1, 2, 5)]), 16),
-                (vec![2], scenario(&[(0, 1, 4)]), 17),
+                (vec![0], scenario(&[(1, 6, 6)]), 6238072747940578789),
+                (vec![0], scenario(&[(1, 2, 2)]), 15839785061582574730),
+                (vec![0], scenario(&[(2, 3, 4)]), 2185194620014831856),
+                (vec![0], scenario(&[(0, 5, 2)]), 13232826040865663252),
+                (vec![0], scenario(&[(0, 4, 3)]), 13168350753275463132),
+                (vec![0], scenario(&[(2, 4, 3)]), 15093541023163888492),
+                (vec![0], scenario(&[(1, 0, 7)]), 1346066267577507604),
+                (vec![0], scenario(&[(2, 2, 4)]), 15378420243238726120),
+                (vec![0], scenario(&[(1, 2, 4)]), 9398003893131893463),
+                (vec![0], scenario(&[(2, 0, 6)]), 530445201382180217),
+                (vec![0], scenario(&[(1, 0, 2)]), 3774817245553408877),
+                (vec![1], scenario(&[(0, 7, 7)]), 4016745674725997500),
+                (vec![1], scenario(&[(1, 3, 3)]), 15923203627879530961),
+                (vec![1], scenario(&[(0, 1, 1)]), 2692132535155015209),
+                (vec![1], scenario(&[(2, 3, 4)]), 257397085994358073),
+                (vec![1], scenario(&[(2, 6, 1)]), 15673735954724858045),
+                (vec![1], scenario(&[(1, 4, 3)]), 3471015484745077182),
+                (vec![1], scenario(&[(2, 4, 3)]), 18431927716282009713),
+                (vec![1], scenario(&[(2, 0, 7)]), 16377936876142721111),
+                (vec![1], scenario(&[(2, 2, 4)]), 1060890402764360434),
+                (vec![1], scenario(&[(2, 4, 1)]), 15434875530296372041),
+                (vec![1], scenario(&[(2, 0, 6)]), 18272786274765299067),
+                (vec![1], scenario(&[(2, 0, 4)]), 4002107291894103205),
+                (vec![2], scenario(&[(2, 7, 7)]), 15393003569519446712),
+                (vec![2], scenario(&[(0, 3, 3)]), 15540095754773462584),
+                (vec![2], scenario(&[(2, 4, 4)]), 16763302723927541467),
+                (vec![2], scenario(&[(0, 6, 1)]), 3622748380379877116),
+                (vec![2], scenario(&[(2, 5, 2)]), 16107416851779296162),
+                (vec![2], scenario(&[(2, 1, 6)]), 5727095992301866834),
+                (vec![2], scenario(&[(1, 2, 5)]), 514794171988716146),
+                (vec![2], scenario(&[(2, 0, 7)]), 6057085510246920549),
+                (vec![2], scenario(&[(1, 4, 2)]), 12536647777456729413),
+                (vec![2], scenario(&[(0, 1, 2)]), 13012059237407811783),
+                (vec![2], scenario(&[(2, 0, 6)]), 14301543196384307260),
+                (vec![2], scenario(&[(2, 0, 4)]), 4893107102001668798),
             ]
         );
     }

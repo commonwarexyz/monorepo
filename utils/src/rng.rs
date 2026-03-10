@@ -18,6 +18,19 @@ pub fn test_rng_seeded(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)
 }
 
+/// Applies a SplitMix64-style finalizer to a deterministic input word.
+///
+/// This is useful for cheaply decorrelating derived deterministic seeds while
+/// preserving reproducibility.
+#[inline]
+pub fn mix64(mut word: u64) -> u64 {
+    word ^= word >> 30;
+    word = word.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    word ^= word >> 27;
+    word = word.wrapping_mul(0x94d0_49bb_1331_11eb);
+    word ^ (word >> 31)
+}
+
 /// Domain-separation constant for the mixing step. This ensures the mixed stream
 /// is not derived from `word ^ ctr` alone and helps avoid accidental fixed points
 /// when fuzz input has low structure (for example empty or repeated bytes).
@@ -118,15 +131,9 @@ impl FuzzRng {
 
         // Mix the structured word into a high-quality output block without
         // hashing the entire seed into an avalanche-style global state.
-        let mut out = word ^ self.ctr ^ FUZZ_RNG_MIX_DOMAIN;
-        out ^= out >> 30;
-        out = out.wrapping_mul(0xbf58476d1ce4e5b9);
-        out ^= out >> 27;
-        out = out.wrapping_mul(0x94d049bb133111eb);
-        out ^= out >> 31;
-
+        let ctr = self.ctr;
         self.ctr = self.ctr.wrapping_add(1);
-        out
+        mix64(word ^ ctr ^ FUZZ_RNG_MIX_DOMAIN)
     }
 }
 
