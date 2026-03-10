@@ -2,9 +2,7 @@ use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
-        interesting, InterestContext,
         metrics::{Leader, Timeout, TimeoutReason},
-        min_active,
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -102,11 +100,6 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
-    /// Best known certificate that advanced us into the current view.
-    ///
-    /// `None` only for view 1 (bootstrapped from genesis).
-    best_certificate: Option<Certificate<S, D>>,
-
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -145,7 +138,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
-            best_certificate: None,
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -160,7 +152,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.genesis = Some(genesis);
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
-        self.best_certificate = None;
     }
 
     /// Returns the epoch managed by this state machine.
@@ -180,27 +171,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub const fn min_active(&self) -> View {
-        min_active(self.activity_timeout, self.last_finalized)
+        self.last_finalized.saturating_sub(self.activity_timeout)
     }
 
     /// Returns whether a vote for `pending` is still relevant for progress.
     pub fn is_interesting_vote(&self, pending: View) -> bool {
-        interesting(
-            InterestContext::strict(self.activity_timeout, self.last_finalized, self.view),
-            pending,
-        )
+        if pending.is_zero() {
+            return false;
+        }
+        if pending < self.min_active() {
+            return false;
+        }
+        pending <= self.view.next()
     }
 
     /// Returns whether a certificate for `pending` is relevant for progress.
     pub fn is_interesting_certificate(&self, pending: View) -> bool {
-        interesting(
-            InterestContext::allow_unbounded_future(
-                self.activity_timeout,
-                self.last_finalized,
-                self.view,
-            ),
-            pending,
-        )
+        if pending.is_zero() {
+            return false;
+        }
+        pending >= self.min_active()
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -316,6 +306,27 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         result
     }
 
+    /// Returns the best certificate for `view` to help peers enter `view + 1`.
+    ///
+    /// Finalization is strongest, then nullification, then notarization.
+    pub fn get_best_certificate(&self, view: View) -> Option<Certificate<S, D>> {
+        if view == GENESIS_VIEW {
+            return None;
+        }
+
+        #[allow(clippy::option_if_let_else)]
+        if let Some(finalization) = self.finalization(view).cloned() {
+            Some(Certificate::Finalization(finalization))
+        } else if let Some(nullification) = self.nullification(view).cloned() {
+            Some(Certificate::Nullification(nullification))
+        } else if let Some(notarization) = self.notarization(view).cloned() {
+            Some(Certificate::Notarization(notarization))
+        } else {
+            warn!(%view, "entry certificate not found");
+            None
+        }
+    }
+
     /// Inserts a nullification certificate and advances into the next view.
     ///
     /// Unlike finalization, nullification does not cancel pending certification work for the
@@ -326,10 +337,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let next = view.next();
-        if self.enter_view(next) {
-            self.set_leader(next, Some(&nullification.certificate));
-        }
-        self.maybe_replace_best_with_nullification(&nullification);
+        self.enter_view(next);
+        self.set_leader(next, Some(&nullification.certificate));
 
         // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
@@ -367,10 +376,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         let next = view.next();
-        if self.enter_view(next) {
-            self.set_leader(next, Some(&finalization.certificate));
-        }
-        self.maybe_replace_best_with_finalization(&finalization);
+        self.enter_view(next);
+        self.set_leader(next, Some(&finalization.certificate));
         self.create_round(view).add_finalization(finalization)
     }
 
@@ -406,7 +413,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Return a notarization certificate, if one exists.
-    #[cfg(test)]
     pub fn notarization(&self, view: View) -> Option<&Notarization<S, D>> {
         self.views.get(&view).and_then(|round| round.notarization())
     }
@@ -419,7 +425,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Return a finalization certificate, if one exists.
-    #[cfg(test)]
     pub fn finalization(&self, view: View) -> Option<&Finalization<S, D>> {
         self.views.get(&view).and_then(|round| round.finalization())
     }
@@ -620,9 +625,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .expect("notarization must exist for certified view");
 
         if is_success {
-            if self.enter_view(view.next()) {
-                self.maybe_replace_best_with_notarization(&notarization);
-            }
+            self.enter_view(view.next());
         } else {
             self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
@@ -668,51 +671,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             None => return false,
         };
         round.nullification().is_some()
-    }
-
-    /// Returns the best certificate that advanced us into the current view.
-    pub fn best_certificate(&self) -> Option<Certificate<S, D>> {
-        self.best_certificate.clone()
-    }
-
-    fn should_replace_best_certificate(&self, certificate_view: View, priority: u8) -> bool {
-        let target_view = certificate_view.next();
-        if self.view != target_view {
-            return false;
-        }
-
-        match self.best_certificate.as_ref() {
-            None => true,
-            Some(current) if certificate_view > current.view() => true,
-            Some(current) if certificate_view < current.view() => false,
-            Some(current) => priority > Self::certificate_priority(current),
-        }
-    }
-
-    fn maybe_replace_best_with_nullification(&mut self, nullification: &Nullification<S>) {
-        if self.should_replace_best_certificate(nullification.view(), 2) {
-            self.best_certificate = Some(Certificate::Nullification(nullification.clone()));
-        }
-    }
-
-    fn maybe_replace_best_with_finalization(&mut self, finalization: &Finalization<S, D>) {
-        if self.should_replace_best_certificate(finalization.view(), 3) {
-            self.best_certificate = Some(Certificate::Finalization(finalization.clone()));
-        }
-    }
-
-    fn maybe_replace_best_with_notarization(&mut self, notarization: &Notarization<S, D>) {
-        if self.should_replace_best_certificate(notarization.view(), 1) {
-            self.best_certificate = Some(Certificate::Notarization(notarization.clone()));
-        }
-    }
-
-    const fn certificate_priority(certificate: &Certificate<S, D>) -> u8 {
-        match certificate {
-            Certificate::Finalization(_) => 3,
-            Certificate::Nullification(_) => 2,
-            Certificate::Notarization(_) => 1,
-        }
     }
 
     /// Returns true if certification for the view was aborted due to finalization.
