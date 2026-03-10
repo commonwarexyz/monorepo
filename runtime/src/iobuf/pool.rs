@@ -57,14 +57,13 @@ use prometheus_client::{
 };
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
-    cell::UnsafeCell,
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
     ptr::NonNull,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use thread_local::ThreadLocal;
@@ -444,14 +443,13 @@ struct SizeClass {
     /// Maximum number of buffers retained in the current thread's local bin.
     local_capacity: usize,
     /// Per-thread local free buffers for this size class.
-    local: ThreadLocal<UnsafeCell<Vec<AlignedBuffer>>>,
+    local: ThreadLocal<Mutex<Vec<AlignedBuffer>>>,
 }
 
-// SAFETY: shared state in `SizeClass` is synchronized through atomics and the
-// global queue. The `UnsafeCell<Vec<_>>` bins live inside `ThreadLocal`, so
-// each thread only mutates its own bin.
+// SAFETY: shared state in `SizeClass` is synchronized through atomics, mutexes,
+// and the global queue.
 unsafe impl Send for SizeClass {}
-// SAFETY: see above. Distinct threads access distinct local bins.
+// SAFETY: see above.
 unsafe impl Sync for SizeClass {}
 
 impl SizeClass {
@@ -483,14 +481,22 @@ impl SizeClass {
     }
 
     #[inline]
-    fn local_bin_mut(&self) -> &mut Vec<AlignedBuffer> {
+    fn local_bin(&self) -> &Mutex<Vec<AlignedBuffer>> {
         let bin = self
             .local
-            .get_or(|| UnsafeCell::new(Vec::with_capacity(self.local_capacity)));
+            .get_or(|| Mutex::new(Vec::with_capacity(self.local_capacity)));
+        bin
+    }
 
-        // SAFETY: `ThreadLocal` returns the current thread's bin. No other
-        // thread aliases this `Vec`.
-        unsafe { &mut *bin.get() }
+    #[inline]
+    fn pop_from_any_local(&self) -> Option<AlignedBuffer> {
+        for bin in self.local.iter() {
+            let mut bin = bin.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(buffer) = bin.pop() {
+                return Some(buffer);
+            }
+        }
+        None
     }
 
     fn try_reserve(&self) -> bool {
@@ -502,7 +508,10 @@ impl SizeClass {
     }
 
     fn pop(&self) -> Option<AlignedBuffer> {
-        let bin = self.local_bin_mut();
+        let mut bin = self
+            .local_bin()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Same-thread reuse should stay entirely local on the steady path.
         if let Some(buffer) = bin.pop() {
@@ -511,18 +520,27 @@ impl SizeClass {
 
         // Refill a small batch from the shared freelist on local miss.
         let target = (self.local_capacity / 2).max(1);
-        let buffer = self.global.pop()?;
-        while bin.len() + 1 < target {
-            let Some(buffer) = self.global.pop() else {
-                break;
-            };
-            bin.push(buffer);
+        if let Some(buffer) = self.global.pop() {
+            while bin.len() + 1 < target {
+                let Some(buffer) = self.global.pop() else {
+                    break;
+                };
+                bin.push(buffer);
+            }
+            return Some(buffer);
         }
-        Some(buffer)
+        drop(bin);
+
+        // If local/global misses, reclaim a buffer parked in another thread's
+        // local cache (including caches owned by exited threads).
+        self.pop_from_any_local()
     }
 
     fn push(&self, buffer: AlignedBuffer) {
-        let bin = self.local_bin_mut();
+        let mut bin = self
+            .local_bin()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if bin.len() < self.local_capacity {
             bin.push(buffer);
             return;
@@ -598,7 +616,6 @@ impl BufferPoolInner {
             class: class.clone(),
         })
     }
-
 }
 
 /// A pool of reusable, aligned buffers.
@@ -1370,8 +1387,8 @@ mod tests {
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
         class.local.get().map_or(0, |bin| {
-            // SAFETY: tests only inspect the current thread's local bin.
-            unsafe { (&*bin.get()).len() }
+            let bin = bin.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            bin.len()
         })
     }
 
@@ -2132,6 +2149,41 @@ mod tests {
         });
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_thread_exit_does_not_strand_capacity() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = Arc::new(BufferPool::new(test_config(page, page, 1), &mut registry));
+
+        let pool_for_worker = pool.clone();
+        thread::spawn(move || {
+            let buf = pool_for_worker
+                .try_alloc(100)
+                .expect("worker should allocate tracked buffer");
+            drop(buf);
+        })
+        .join()
+        .expect("worker thread should finish");
+
+        let class_index = pool
+            .inner
+            .config
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        let class = &pool.inner.classes[class_index];
+        assert_eq!(
+            class.created.load(Ordering::Relaxed),
+            1,
+            "one tracked buffer should remain created"
+        );
+        assert_eq!(class.global.len(), 0, "none should be in global freelist");
+
+        // Must still be allocatable from another live thread.
+        let _buf = pool
+            .try_alloc(100)
+            .expect("thread-exited local caches should remain reclaimable");
     }
 
     #[test]
