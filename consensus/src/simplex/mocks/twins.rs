@@ -824,18 +824,40 @@ fn generate_scenarios(
     }
 
     // Extremely large canonical spaces can overflow counts; sample directly
-    // from the canonical transition graph while enforcing uniqueness.
-    let mut scenarios = BTreeSet::new();
+    // from the canonical transition graph while enforcing uniqueness. This
+    // path treats `max_scenarios` as an upper bound, since concentrated random
+    // walks may not discover that many distinct scenarios within the attempt
+    // budget even when the canonical space is much larger.
     let max_attempts = max_scenarios.saturating_mul(1024).max(4096);
+    sample_scenarios_fallback(
+        &mut rng,
+        &initial_cells,
+        rounds,
+        max_partitions.min(3),
+        max_scenarios,
+        max_attempts,
+    )
+}
+
+/// Samples unique scenarios from the canonical transition graph without using counts.
+fn sample_scenarios_fallback(
+    rng: &mut StdRng,
+    initial_cells: &[usize],
+    rounds: usize,
+    max_partitions: usize,
+    max_scenarios: usize,
+    max_attempts: usize,
+) -> Vec<Scenario> {
+    let mut scenarios = BTreeSet::new();
     let mut attempts = 0usize;
     while scenarios.len() < max_scenarios && attempts < max_attempts {
         attempts += 1;
-        let mut cells = initial_cells.clone();
+        let mut cells = initial_cells.to_vec();
         let mut scenario = Scenario {
             rounds: Vec::with_capacity(rounds),
         };
         for _ in 0..rounds {
-            let transitions = next_round_transitions(&cells, max_partitions.min(3));
+            let transitions = next_round_transitions(&cells, max_partitions);
             let idx = rng.gen_range(0..transitions.len());
             let (round, next_cells) = transitions[idx].clone();
             scenario.rounds.push(round);
@@ -843,11 +865,6 @@ fn generate_scenarios(
         }
         scenarios.insert(scenario);
     }
-    assert_eq!(
-        scenarios.len(),
-        max_scenarios,
-        "failed to sample enough unique canonical scenarios in fallback path"
-    );
     scenarios.into_iter().collect()
 }
 
@@ -1047,7 +1064,15 @@ mod tests {
     #[test]
     fn generated_scenarios_fallback_sampling_is_bounded() {
         let scenarios = generate_scenarios(5, 4, 40, 3, 8);
-        assert_eq!(scenarios.len(), 8);
+        assert!(!scenarios.is_empty());
+        assert!(scenarios.len() <= 8);
+    }
+
+    #[test]
+    fn fallback_sampling_returns_partial_results_when_attempt_budget_is_exhausted() {
+        let mut rng = test_rng_seeded(0);
+        let scenarios = sample_scenarios_fallback(&mut rng, &[4], 40, 3, 8, 1);
+        assert_eq!(scenarios.len(), 1);
     }
 
     #[test]

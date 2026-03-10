@@ -23,7 +23,7 @@ pub fn test_rng_seeded(seed: u64) -> StdRng {
 /// This is useful for cheaply decorrelating derived deterministic seeds while
 /// preserving reproducibility.
 #[inline]
-pub fn mix64(mut word: u64) -> u64 {
+pub const fn mix64(mut word: u64) -> u64 {
     word ^= word >> 30;
     word = word.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     word ^= word >> 27;
