@@ -121,7 +121,6 @@ impl<
     > kv::Gettable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     type Key = K;
     type Value = V::Value;
@@ -142,7 +141,6 @@ where
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
 }

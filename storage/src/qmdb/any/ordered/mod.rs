@@ -41,7 +41,6 @@ impl<
     > Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     async fn get_update_op(
         reader: &impl Reader<Item = Operation<K, V>>,
@@ -165,7 +164,6 @@ where
     ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
     where
         V: 'a,
-        V::Value: Send + Sync,
     {
         let start_iter = self.snapshot.get(&start);
         let mut init_pending = self.fetch_all_updates(start_iter).await?;
@@ -291,7 +289,6 @@ where
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
-    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
 }

@@ -416,7 +416,6 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
@@ -466,7 +465,6 @@ where
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
@@ -758,7 +756,6 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
@@ -782,7 +779,6 @@ where
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    V::Value: Send + Sync,
     P: Readable<H::Digest>
         + BatchChainInfo<H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
@@ -871,7 +867,6 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
@@ -906,7 +901,6 @@ mod trait_impls {
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        V::Value: Send + Sync,
         P: Readable<H::Digest>
             + BatchChainInfo<H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
@@ -966,7 +960,6 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;
@@ -1010,7 +1003,6 @@ mod trait_impls {
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        V::Value: Send + Sync,
     {
         type K = K;
         type V = V::Value;
