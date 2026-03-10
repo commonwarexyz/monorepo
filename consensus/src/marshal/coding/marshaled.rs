@@ -771,7 +771,9 @@ where
 
         match scheme.me() {
             Some(_) => {
-                // Subscribe to shard validity. The subscription completes when a valid shard arrives.
+                // Subscribe to local shard readiness. This completes once we
+                // can vote on the proposal, either because our shard verified
+                // directly or because the block was reconstructed first.
                 let validity_rx = self.shards.subscribe_shard(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context

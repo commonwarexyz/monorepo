@@ -319,8 +319,11 @@ where
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
     reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
 
-    /// Open subscriptions for the receipt of our valid shard corresponding
-    /// to the keyed [`Commitment`] from the leader.
+    /// Open subscriptions for local shard readiness for the keyed
+    /// [`Commitment`].
+    ///
+    /// Readiness is satisfied once our shard has been verified directly or
+    /// once the full block has already been reconstructed.
     shard_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
@@ -846,10 +849,10 @@ where
         }
     }
 
-    /// Handles the registry of a shard subscription.
+    /// Handles the registry of a local shard readiness subscription.
     fn handle_shard_subscription(&mut self, commitment: Commitment, response: oneshot::Sender<()>) {
-        // Answer immediately if we have our shard or the block has already
-        // been reconstructed (implies that our shard arrived and was verified).
+        // Answer immediately if our shard has already been verified or if the
+        // block has already been reconstructed through other shards.
         let has_shard = self
             .state
             .get(&commitment)
@@ -894,7 +897,8 @@ where
             .push(response);
     }
 
-    /// Notifies and cleans up any subscriptions for a valid shard.
+    /// Notifies and cleans up any subscriptions waiting for local shard
+    /// readiness.
     fn notify_shard_subscribers(&mut self, commitment: Commitment) {
         if let Some(mut subscribers) = self.shard_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {

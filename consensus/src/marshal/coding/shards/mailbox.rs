@@ -50,8 +50,12 @@ where
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
-    /// A request to open a subscription for the receipt of our valid shard from
-    /// the leader.
+    /// A request to open a subscription for local shard readiness.
+    ///
+    /// This resolves once the node can proceed as if it had validated its
+    /// shard for the commitment, either because the leader's shard for this
+    /// node was verified directly or because the full block was reconstructed
+    /// before that shard arrived.
     SubscribeShard {
         /// The block's commitment.
         commitment: Commitment,
@@ -145,7 +149,12 @@ where
             .flatten()
     }
 
-    /// Subscribe to the receipt of our valid shard from the leader.
+    /// Subscribe to local shard readiness for a commitment.
+    ///
+    /// This resolves once the node can proceed as if it had validated its
+    /// shard for the commitment, either because the leader's shard for this
+    /// node was verified directly or because the full block was reconstructed
+    /// before that shard arrived.
     pub async fn subscribe_shard(&self, commitment: Commitment) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeShard {
