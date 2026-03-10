@@ -348,6 +348,44 @@ pub mod mocks;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Copy, Clone)]
+pub(crate) struct InterestContext {
+    pub(crate) activity_timeout: ViewDelta,
+    pub(crate) last_finalized: View,
+    pub(crate) current: View,
+    pub(crate) allow_unbounded_future: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl InterestContext {
+    pub(crate) const fn strict(
+        activity_timeout: ViewDelta,
+        last_finalized: View,
+        current: View,
+    ) -> Self {
+        Self {
+            activity_timeout,
+            last_finalized,
+            current,
+            allow_unbounded_future: false,
+        }
+    }
+
+    pub(crate) const fn allow_unbounded_future(
+        activity_timeout: ViewDelta,
+        last_finalized: View,
+        current: View,
+    ) -> Self {
+        Self {
+            activity_timeout,
+            last_finalized,
+            current,
+            allow_unbounded_future: true,
+        }
+    }
+}
+
 /// The minimum view we are tracking both in-memory and on-disk.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
@@ -359,20 +397,17 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
 /// in the future (based on the view we are currently in).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn interesting(
-    activity_timeout: ViewDelta,
-    last_finalized: View,
-    current: View,
+    context: InterestContext,
     pending: View,
-    allow_future: bool,
 ) -> bool {
     // If the view is genesis, skip it, genesis doesn't have votes
     if pending.is_zero() {
         return false;
     }
-    if pending < min_active(activity_timeout, last_finalized) {
+    if pending < min_active(context.activity_timeout, context.last_finalized) {
         return false;
     }
-    if !allow_future && pending > current.saturating_add(activity_timeout) {
+    if !context.allow_unbounded_future && pending > context.current.next() {
         return false;
     }
     true
@@ -451,82 +486,55 @@ mod tests {
 
         // Genesis view is never interesting
         assert!(!interesting(
-            activity_timeout,
+            InterestContext::strict(activity_timeout, View::zero(), View::zero()),
             View::zero(),
-            View::zero(),
-            View::zero(),
-            false
         ));
         assert!(!interesting(
-            activity_timeout,
+            InterestContext::allow_unbounded_future(activity_timeout, View::zero(), View::new(1)),
             View::zero(),
-            View::new(1),
-            View::zero(),
-            true
         ));
 
         // View below min_active is not interesting
         assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
+            InterestContext::strict(activity_timeout, View::new(20), View::new(25)),
             View::new(5), // below min_active (18)
-            false
         ));
 
         // View at min_active boundary is interesting
         assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
+            InterestContext::strict(activity_timeout, View::new(20), View::new(25)),
             View::new(18), // exactly min_active
-            false
         ));
 
-        // Future view beyond current + activity_timeout is not interesting when allow_future is false
+        // Future view beyond current.next() is not interesting when allow_future is false
         assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(28),
-            false
+            InterestContext::strict(activity_timeout, View::new(20), View::new(25)),
+            View::new(27),
         ));
 
-        // Future view beyond current + activity_timeout is interesting when allow_future is true
+        // Future view beyond current.next() is interesting when allow_future is true
         assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(28),
-            true
+            InterestContext::allow_unbounded_future(activity_timeout, View::new(20), View::new(25)),
+            View::new(27),
         ));
 
         // View at current + activity_timeout boundary is interesting
         assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
+            InterestContext::strict(activity_timeout, View::new(20), View::new(25)),
             View::new(26),
-            false
         ));
 
         // View within valid range is interesting
         assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
+            InterestContext::strict(activity_timeout, View::new(20), View::new(25)),
             View::new(22),
-            false
         ));
 
         // When last_finalized is 0 and activity_timeout would underflow
         // min_active saturates at 0, so view 1 should still be interesting
         assert!(interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(5),
+            InterestContext::strict(activity_timeout, View::zero(), View::new(5)),
             View::new(1),
-            false
         ));
     }
 

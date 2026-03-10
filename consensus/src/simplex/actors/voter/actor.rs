@@ -375,7 +375,7 @@ impl<
         if !retry {
             return;
         }
-        if let Some(certificate) = self.state.entry_certificate() {
+        if let Some(certificate) = self.state.best_certificate() {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }

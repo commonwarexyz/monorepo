@@ -2,7 +2,7 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     simplex::{
         actors::voter,
-        interesting,
+        interesting, InterestContext,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
@@ -280,7 +280,10 @@ impl<
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                    if !interesting(
+                        InterestContext::strict(self.activity_timeout, finalized, current.view),
+                        view,
+                    ) {
                         continue;
                     }
 
@@ -318,11 +321,12 @@ impl<
                 // Allow future certificates (they advance our view)
                 let view = message.view();
                 if !interesting(
-                    self.activity_timeout,
-                    finalized,
-                    current.view,
+                    InterestContext::allow_unbounded_future(
+                        self.activity_timeout,
+                        finalized,
+                        current.view,
+                    ),
                     view,
-                    true, // allow future
                 ) {
                     continue;
                 }
@@ -424,7 +428,10 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                if !interesting(
+                    InterestContext::strict(self.activity_timeout, finalized, current.view),
+                    view,
+                ) {
                     continue;
                 }
 
@@ -562,7 +569,10 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.view, view, false)
+                    !interesting(
+                        InterestContext::strict(self.activity_timeout, finalized, current.view),
+                        view,
+                    )
                 }) {
                     work.pop_first();
                 }
