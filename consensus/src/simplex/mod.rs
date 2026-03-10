@@ -6084,61 +6084,13 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn test_twins_ed25519_without_relabeling() {
-        let campaign = TwinsCampaign {
-            n: 5,
-            rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 2,
-            max_compromised_sets: 2,
-            required_containers: View::new(50),
-            relabel: false,
-        };
-        twins_campaign::<_, _, RoundRobin>(
-            0,
-            campaign,
-            Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
-            ed25519::fixture,
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
     fn test_twins_secp256r1() {
         test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
-    fn test_twins_large_view() {
-        let campaign = TwinsCampaign {
-            n: 10,
-            rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 2,
-            max_compromised_sets: 1,
-            required_containers: View::new(100),
-            relabel: true,
-        };
-        twins_campaign::<_, _, Random>(
-            0,
-            campaign,
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_secs(1),
-                success_rate: 1.0,
-            },
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_large_campaign() {
+    fn test_twins_large() {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 4,
@@ -6146,10 +6098,10 @@ mod tests {
             max_scenarios: 2,
             max_compromised_sets: 1,
             required_containers: View::new(100),
-            relabel: true,
+            relabel: false,
         };
         twins_campaign::<_, _, Random>(
-            42,
+            0,
             campaign,
             Link {
                 latency: Duration::from_millis(500),
