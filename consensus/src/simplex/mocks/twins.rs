@@ -373,7 +373,8 @@ fn range_mask(start: usize, len: usize) -> u64 {
 /// Converts cell sizes into contiguous index ranges.
 fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
     let mut start = 0usize;
-    cells.iter()
+    cells
+        .iter()
         .copied()
         .map(|size| {
             let range = (start, size);
@@ -384,7 +385,10 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 }
 
 /// Enumerates all canonical next-round refinements from the current cell state.
-fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundScenario, Vec<usize>)> {
+fn next_round_transitions(
+    cells: &[usize],
+    max_partitions: usize,
+) -> Vec<(RoundScenario, Vec<usize>)> {
     /// Refines cells for a round where primary and secondary coincide.
     fn no_secondary(
         ranges: &[(usize, usize)],
@@ -408,7 +412,11 @@ fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundS
         }
 
         let (start, size) = ranges[cell_idx];
-        let max_outside = if cell_idx == leader_cell { size - 1 } else { size };
+        let max_outside = if cell_idx == leader_cell {
+            size - 1
+        } else {
+            size
+        };
         for outside in 0..=max_outside {
             let both = if cell_idx == leader_cell {
                 size - outside - 1
@@ -550,15 +558,7 @@ fn next_round_transitions(cells: &[usize], max_partitions: usize) -> Vec<(RoundS
     let mut out = Vec::new();
     for leader_cell in 0..cells.len() {
         let mut next_cells = Vec::new();
-        no_secondary(
-            &ranges,
-            leader_cell,
-            0,
-            0,
-            None,
-            &mut next_cells,
-            &mut out,
-        );
+        no_secondary(&ranges, leader_cell, 0, 0, None, &mut next_cells, &mut out);
         let mut next_cells = Vec::new();
         with_secondary(
             &ranges,
@@ -831,7 +831,8 @@ mod tests {
     }
 
     fn case_tuples(cases: &[Case]) -> Vec<(Vec<usize>, Scenario, u64)> {
-        cases.iter()
+        cases
+            .iter()
             .map(|case| (case.compromised.clone(), case.scenario.clone(), case.seed))
             .collect()
     }
