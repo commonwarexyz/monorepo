@@ -1,4 +1,4 @@
-use super::location::Location;
+use super::{location::Location, mmr::Error};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, ReadExt};
 use core::{
@@ -171,7 +171,7 @@ impl From<Position> for u64 {
 
 /// Try to convert a leaf [Location] to its node [Position].
 ///
-/// Returns [super::Error::LocationOverflow] if `!loc.is_valid()`.
+/// Returns [Error::LocationOverflow] if `!loc.is_valid()`.
 ///
 /// # Examples
 ///
@@ -188,12 +188,12 @@ impl From<Position> for u64 {
 /// assert!(pos.is_valid());
 /// ```
 impl TryFrom<Location> for Position {
-    type Error = super::Error;
+    type Error = Error;
 
     #[inline]
     fn try_from(loc: Location) -> Result<Self, Self::Error> {
         if !loc.is_valid() {
-            return Err(super::Error::LocationOverflow(loc));
+            return Err(Error::LocationOverflow(loc));
         }
         // This will never underflow since 2*n >= count_ones(n).
         let loc_val = *loc;

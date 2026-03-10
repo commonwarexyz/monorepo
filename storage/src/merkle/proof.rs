@@ -31,7 +31,7 @@ use tracing::debug;
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ReconstructionError {
     #[error("missing digests in proof")]
     MissingDigests,
@@ -336,7 +336,7 @@ impl<D: Digest> Proof<D> {
         elements: &[E],
         start_loc: Location,
         root: &D,
-    ) -> Result<Vec<(Position, D)>, super::Error>
+    ) -> Result<Vec<(Position, D)>, Error>
     where
         H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
