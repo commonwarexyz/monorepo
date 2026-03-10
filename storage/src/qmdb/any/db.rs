@@ -11,12 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{iterator::nodes_to_pin, Location, Position, Proof},
-    qmdb::{
-        build_snapshot_from_log,
-        operation::Operation as OperationTrait,
-        store::{LogStore, MerkleizedStore, PrunableStore},
-        Error,
-    },
+    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
@@ -128,7 +123,7 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
-    /// Return the pinned MMR nodes at the given location.
+    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
         let pos = Position::try_from(loc)?;
         let futs: Vec<_> = nodes_to_pin(pos)

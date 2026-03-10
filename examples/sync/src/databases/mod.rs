@@ -78,7 +78,7 @@ pub trait Syncable: Sized {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
 
-    /// Get the pinned MMR nodes at the given location.
+    /// Get the pinned MMR nodes for a lower operation boundary of `loc`.
     fn pinned_nodes_at(
         &self,
         loc: Location,

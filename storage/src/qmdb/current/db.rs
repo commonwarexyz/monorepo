@@ -260,8 +260,8 @@ where
             .await
     }
 
-    /// Return the pinned MMR nodes at the given location.
-    pub async fn ops_pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
         self.any.pinned_nodes_at(loc).await
     }
 

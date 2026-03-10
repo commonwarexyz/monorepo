@@ -148,7 +148,7 @@ where
         &self,
         loc: Location,
     ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
-        self.ops_pinned_nodes_at(loc)
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {
