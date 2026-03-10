@@ -621,9 +621,6 @@ fn next_round_transitions(
                 );
 
                 // Undo the refined cells before trying the next allocation.
-                if has_leader {
-                    next_cells.pop();
-                }
                 if primary > 0 {
                     next_cells.pop();
                 }
