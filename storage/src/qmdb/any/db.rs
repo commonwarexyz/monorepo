@@ -131,17 +131,16 @@ where
     /// Return the pinned MMR nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
         let pos = Position::try_from(loc)?;
-        let mut nodes = Vec::new();
-        for p in nodes_to_pin(pos) {
-            let digest = self
-                .log
-                .mmr
-                .get_node(p)
-                .await?
-                .ok_or(crate::mmr::Error::ElementPruned(p))?;
-            nodes.push(digest);
-        }
-        Ok(nodes)
+        let futs: Vec<_> = nodes_to_pin(pos)
+            .map(|p| async move {
+                self.log
+                    .mmr
+                    .get_node(p)
+                    .await?
+                    .ok_or(crate::mmr::Error::ElementPruned(p).into())
+            })
+            .collect();
+        futures::future::try_join_all(futs).await
     }
 }
 

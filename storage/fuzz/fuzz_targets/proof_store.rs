@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::mmr::{
-    verification::ProofStore, Location, Position, Proof, StandardHasher as Standard,
+    verification::ProofStore, Location, Proof, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -17,7 +17,6 @@ struct FuzzInput {
     elements: Vec<Vec<u8>>,
     start_loc: Location,
     root: Digest,
-    peaks: Vec<(Position, Digest)>,
     range: Range<Location>,
     locations: Vec<Location>,
 }
@@ -26,7 +25,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_digests = u.int_in_range(0..=MAX_ITEMS)?;
         let num_elements = u.int_in_range(0..=MAX_ITEMS)?;
-        let num_peaks = u.int_in_range(0..=MAX_ITEMS)?;
         let num_locations = u.int_in_range(0..=MAX_ITEMS)?;
         Ok(FuzzInput {
             proof: Proof {
@@ -40,14 +38,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                 .collect::<arbitrary::Result<Vec<_>>>()?,
             start_loc: Location::from(u.arbitrary::<u64>()?),
             root: Digest::from(u.arbitrary::<[u8; 32]>()?),
-            peaks: (0..num_peaks)
-                .map(|_| {
-                    Ok((
-                        Position::new(u.arbitrary::<u64>()?),
-                        Digest::from(u.arbitrary::<[u8; 32]>()?),
-                    ))
-                })
-                .collect::<arbitrary::Result<Vec<_>>>()?,
             range: Location::from(u.arbitrary::<u64>()?)..Location::from(u.arbitrary::<u64>()?),
             locations: (0..num_locations)
                 .map(|_| Ok(Location::from(u.arbitrary::<u64>()?)))
@@ -56,7 +46,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-async fn fuzz(input: FuzzInput) {
+fn fuzz(input: FuzzInput) {
     let mut hasher: Standard<Sha256> = Standard::new();
     let Ok(proof_store) = ProofStore::new(
         &mut hasher,
@@ -64,12 +54,11 @@ async fn fuzz(input: FuzzInput) {
         &input.elements,
         input.start_loc,
         &input.root,
-        &input.peaks,
     ) else {
         return;
     };
 
-    if let Ok(proof) = proof_store.range_proof(&mut hasher, input.range).await {
+    if let Ok(proof) = proof_store.range_proof(&mut hasher, input.range) {
         let _ = proof.verify_range_inclusion(
             &mut hasher,
             &input.elements,
@@ -85,7 +74,7 @@ async fn fuzz(input: FuzzInput) {
         );
     }
 
-    if let Ok(proof) = proof_store.multi_proof(input.locations.as_slice()).await {
+    if let Ok(proof) = proof_store.multi_proof(input.locations.as_slice(), &[]) {
         let _ = proof.verify_multi_inclusion(
             &mut hasher,
             &input
@@ -106,5 +95,5 @@ async fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    futures::executor::block_on(fuzz(input));
+    fuzz(input);
 });
