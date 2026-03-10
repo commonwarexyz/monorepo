@@ -262,16 +262,16 @@ fn start_disrupter<P: simplex::Simplex>(
     scheme: P::Scheme,
     strategy: &StrategyChoice,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl Sender<PublicKey = Ed25519PublicKey>,
+        impl Receiver<PublicKey = Ed25519PublicKey>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl Sender<PublicKey = Ed25519PublicKey>,
+        impl Receiver<PublicKey = Ed25519PublicKey>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+        impl Sender<PublicKey = Ed25519PublicKey>,
+        impl Receiver<PublicKey = Ed25519PublicKey>,
     ),
 ) {
     match *strategy {
