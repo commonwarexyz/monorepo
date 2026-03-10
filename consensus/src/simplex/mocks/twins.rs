@@ -34,6 +34,13 @@ use std::{
     sync::Arc,
 };
 
+/// Keeps case seeds off the raw framework seed, including the `(0, 0)` fixed point.
+const CASE_SEED_DOMAIN: u64 = 0x8f36_d01c_4ea8_9b27;
+/// Separates compromised-set sampling from scenario generation.
+const COMPROMISED_SET_DOMAIN: u64 = 0x0000_0000_dead_beef;
+/// Separates participant relabeling from the raw case seed stream.
+const RELABEL_ASSIGNMENT_DOMAIN: u64 = 0x0000_0000_a11c_e55e;
+
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RoundScenario {
@@ -274,7 +281,7 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
         framework.max_scenarios,
     );
     let compromised = compromised_sets(
-        seed ^ 0xDEAD_BEEF,
+        seed ^ COMPROMISED_SET_DOMAIN,
         framework.participants,
         framework.faults,
         framework.max_compromised_sets,
@@ -287,8 +294,10 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
             out.push(Case {
                 compromised: compromised.clone(),
                 scenario: if framework.relabel {
-                    let permutation =
-                        assignment_from_seed(case_seed ^ 0xA11C_E55E_u64, framework.participants);
+                    let permutation = assignment_from_seed(
+                        case_seed ^ RELABEL_ASSIGNMENT_DOMAIN,
+                        framework.participants,
+                    );
                     permute_scenario(scenario, &permutation)
                 } else {
                     scenario.clone()
@@ -752,7 +761,7 @@ fn derive_case_seed(
         .checked_mul(scenarios)
         .and_then(|offset| offset.checked_add(scenario_idx))
         .expect("case index overflow");
-    mix64(seed ^ u64::try_from(case_idx).expect("case index should fit in u64"))
+    mix64(seed ^ u64::try_from(case_idx).expect("case index should fit in u64") ^ CASE_SEED_DOMAIN)
 }
 
 /// Samples unique indices without replacement from `[0, total)`.
@@ -984,7 +993,7 @@ mod tests {
 
     #[test]
     fn first_case_seed_differs_from_framework_seed() {
-        let seed = 42;
+        let seed = 0;
         assert_ne!(derive_case_seed(seed, 0, 0, 1), seed);
     }
 
@@ -1167,30 +1176,30 @@ mod tests {
         assert_eq!(
             case_tuples(&cases),
             vec![
-                (vec![0], scenario(&[(2, 7, 7)]), 0),
-                (vec![0], scenario(&[(1, 6, 6)]), 6238072747940578789),
-                (vec![0], scenario(&[(1, 2, 2)]), 15839785061582574730),
-                (vec![0], scenario(&[(2, 3, 4)]), 2185194620014831856),
-                (vec![0], scenario(&[(0, 5, 2)]), 13232826040865663252),
-                (vec![0], scenario(&[(0, 4, 3)]), 13168350753275463132),
-                (vec![0], scenario(&[(2, 4, 3)]), 15093541023163888492),
-                (vec![0], scenario(&[(1, 0, 7)]), 1346066267577507604),
-                (vec![1], scenario(&[(2, 7, 7)]), 15378420243238726120),
-                (vec![1], scenario(&[(1, 6, 6)]), 9398003893131893463),
-                (vec![1], scenario(&[(2, 4, 4)]), 530445201382180217),
-                (vec![1], scenario(&[(1, 5, 2)]), 3774817245553408877),
-                (vec![1], scenario(&[(0, 5, 2)]), 4016745674725997500),
-                (vec![1], scenario(&[(1, 1, 6)]), 15923203627879530961),
-                (vec![1], scenario(&[(0, 1, 6)]), 2692132535155015209),
-                (vec![1], scenario(&[(2, 0, 7)]), 257397085994358073),
-                (vec![2], scenario(&[(2, 7, 7)]), 15673735954724858045),
-                (vec![2], scenario(&[(1, 6, 6)]), 3471015484745077182),
-                (vec![2], scenario(&[(2, 4, 4)]), 18431927716282009713),
-                (vec![2], scenario(&[(2, 3, 4)]), 16377936876142721111),
-                (vec![2], scenario(&[(2, 6, 1)]), 1060890402764360434),
-                (vec![2], scenario(&[(2, 1, 6)]), 15434875530296372041),
-                (vec![2], scenario(&[(2, 4, 3)]), 18272786274765299067),
-                (vec![2], scenario(&[(2, 0, 7)]), 4002107291894103205),
+                (vec![0], scenario(&[(1, 7, 7)]), 2170739273462938283),
+                (vec![0], scenario(&[(2, 6, 6)]), 4465124358439419799),
+                (vec![0], scenario(&[(1, 2, 2)]), 8002959681992535999),
+                (vec![0], scenario(&[(1, 5, 2)]), 6108070350708085049),
+                (vec![0], scenario(&[(1, 3, 4)]), 9989874130994336479),
+                (vec![0], scenario(&[(2, 2, 5)]), 10325517022425501071),
+                (vec![0], scenario(&[(1, 2, 5)]), 18117611283088466541),
+                (vec![0], scenario(&[(1, 0, 7)]), 5679428222510952296),
+                (vec![1], scenario(&[(1, 7, 7)]), 1472286416061459289),
+                (vec![1], scenario(&[(1, 3, 3)]), 13499682107543998298),
+                (vec![1], scenario(&[(1, 2, 2)]), 4136269653119000327),
+                (vec![1], scenario(&[(1, 5, 2)]), 6929273731067172831),
+                (vec![1], scenario(&[(1, 3, 4)]), 10007311085265012729),
+                (vec![1], scenario(&[(2, 1, 6)]), 4458826077016808784),
+                (vec![1], scenario(&[(2, 4, 3)]), 15937942260472093875),
+                (vec![1], scenario(&[(1, 0, 7)]), 14820960278153147396),
+                (vec![2], scenario(&[(0, 7, 7)]), 11179427316405893828),
+                (vec![2], scenario(&[(1, 3, 3)]), 10131263269842774556),
+                (vec![2], scenario(&[(2, 4, 4)]), 9128492615816103125),
+                (vec![2], scenario(&[(1, 5, 2)]), 2928794839749781711),
+                (vec![2], scenario(&[(1, 6, 1)]), 3392439396611310632),
+                (vec![2], scenario(&[(2, 1, 6)]), 7533739392812329049),
+                (vec![2], scenario(&[(2, 4, 3)]), 13228754465217521794),
+                (vec![2], scenario(&[(2, 0, 7)]), 8857000381058704332),
             ]
         );
     }
@@ -1212,42 +1221,42 @@ mod tests {
         assert_eq!(
             case_tuples(&cases),
             vec![
-                (vec![0], scenario(&[(2, 7, 7)]), 0),
-                (vec![0], scenario(&[(1, 6, 6)]), 6238072747940578789),
-                (vec![0], scenario(&[(1, 2, 2)]), 15839785061582574730),
-                (vec![0], scenario(&[(2, 3, 4)]), 2185194620014831856),
-                (vec![0], scenario(&[(0, 5, 2)]), 13232826040865663252),
-                (vec![0], scenario(&[(0, 4, 3)]), 13168350753275463132),
-                (vec![0], scenario(&[(2, 4, 3)]), 15093541023163888492),
-                (vec![0], scenario(&[(1, 0, 7)]), 1346066267577507604),
-                (vec![0], scenario(&[(2, 2, 4)]), 15378420243238726120),
-                (vec![0], scenario(&[(1, 2, 4)]), 9398003893131893463),
-                (vec![0], scenario(&[(2, 0, 6)]), 530445201382180217),
-                (vec![0], scenario(&[(1, 0, 2)]), 3774817245553408877),
-                (vec![1], scenario(&[(0, 7, 7)]), 4016745674725997500),
-                (vec![1], scenario(&[(1, 3, 3)]), 15923203627879530961),
-                (vec![1], scenario(&[(0, 1, 1)]), 2692132535155015209),
-                (vec![1], scenario(&[(2, 3, 4)]), 257397085994358073),
-                (vec![1], scenario(&[(2, 6, 1)]), 15673735954724858045),
-                (vec![1], scenario(&[(1, 4, 3)]), 3471015484745077182),
-                (vec![1], scenario(&[(2, 4, 3)]), 18431927716282009713),
-                (vec![1], scenario(&[(2, 0, 7)]), 16377936876142721111),
-                (vec![1], scenario(&[(2, 2, 4)]), 1060890402764360434),
-                (vec![1], scenario(&[(2, 4, 1)]), 15434875530296372041),
-                (vec![1], scenario(&[(2, 0, 6)]), 18272786274765299067),
-                (vec![1], scenario(&[(2, 0, 4)]), 4002107291894103205),
-                (vec![2], scenario(&[(2, 7, 7)]), 15393003569519446712),
-                (vec![2], scenario(&[(0, 3, 3)]), 15540095754773462584),
-                (vec![2], scenario(&[(2, 4, 4)]), 16763302723927541467),
-                (vec![2], scenario(&[(0, 6, 1)]), 3622748380379877116),
-                (vec![2], scenario(&[(2, 5, 2)]), 16107416851779296162),
-                (vec![2], scenario(&[(2, 1, 6)]), 5727095992301866834),
-                (vec![2], scenario(&[(1, 2, 5)]), 514794171988716146),
-                (vec![2], scenario(&[(2, 0, 7)]), 6057085510246920549),
-                (vec![2], scenario(&[(1, 4, 2)]), 12536647777456729413),
-                (vec![2], scenario(&[(0, 1, 2)]), 13012059237407811783),
-                (vec![2], scenario(&[(2, 0, 6)]), 14301543196384307260),
-                (vec![2], scenario(&[(2, 0, 4)]), 4893107102001668798),
+                (vec![0], scenario(&[(1, 7, 7)]), 2170739273462938283),
+                (vec![0], scenario(&[(2, 6, 6)]), 4465124358439419799),
+                (vec![0], scenario(&[(1, 2, 2)]), 8002959681992535999),
+                (vec![0], scenario(&[(1, 5, 2)]), 6108070350708085049),
+                (vec![0], scenario(&[(1, 3, 4)]), 9989874130994336479),
+                (vec![0], scenario(&[(2, 2, 5)]), 10325517022425501071),
+                (vec![0], scenario(&[(1, 2, 5)]), 18117611283088466541),
+                (vec![0], scenario(&[(1, 0, 7)]), 5679428222510952296),
+                (vec![0], scenario(&[(1, 4, 2)]), 1472286416061459289),
+                (vec![0], scenario(&[(1, 2, 1)]), 13499682107543998298),
+                (vec![0], scenario(&[(1, 0, 6)]), 4136269653119000327),
+                (vec![0], scenario(&[(1, 0, 2)]), 6929273731067172831),
+                (vec![1], scenario(&[(1, 7, 7)]), 10007311085265012729),
+                (vec![1], scenario(&[(2, 5, 5)]), 4458826077016808784),
+                (vec![1], scenario(&[(2, 4, 4)]), 15937942260472093875),
+                (vec![1], scenario(&[(1, 5, 2)]), 14820960278153147396),
+                (vec![1], scenario(&[(0, 5, 2)]), 11179427316405893828),
+                (vec![1], scenario(&[(1, 1, 6)]), 10131263269842774556),
+                (vec![1], scenario(&[(2, 4, 3)]), 9128492615816103125),
+                (vec![1], scenario(&[(1, 0, 7)]), 2928794839749781711),
+                (vec![1], scenario(&[(1, 4, 2)]), 3392439396611310632),
+                (vec![1], scenario(&[(2, 4, 1)]), 7533739392812329049),
+                (vec![1], scenario(&[(2, 0, 6)]), 13228754465217521794),
+                (vec![1], scenario(&[(2, 0, 4)]), 8857000381058704332),
+                (vec![2], scenario(&[(0, 7, 7)]), 18274429830946313084),
+                (vec![2], scenario(&[(2, 6, 6)]), 11084478744584418441),
+                (vec![2], scenario(&[(2, 4, 4)]), 11686864087075984732),
+                (vec![2], scenario(&[(0, 6, 1)]), 1543352670129978634),
+                (vec![2], scenario(&[(2, 6, 1)]), 3022581153672932472),
+                (vec![2], scenario(&[(0, 4, 3)]), 192248451665106653),
+                (vec![2], scenario(&[(1, 2, 5)]), 11870905462056970452),
+                (vec![2], scenario(&[(1, 0, 7)]), 10791667775650329745),
+                (vec![2], scenario(&[(0, 4, 1)]), 10991605233820999680),
+                (vec![2], scenario(&[(1, 2, 1)]), 9903328472526535128),
+                (vec![2], scenario(&[(1, 0, 6)]), 922995990465865764),
+                (vec![2], scenario(&[(0, 0, 1)]), 3263032590923257502),
             ]
         );
     }
