@@ -32,7 +32,7 @@ use commonware_cryptography::{
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     utils::mocks::inert_channel,
-    Recipients,
+    Receiver, Recipients, Sender,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -352,12 +352,12 @@ fn spawn_honest_validator<
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
 where
     P: simplex::Simplex,
-    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-    PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
-    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
-    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
-    ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+    PendingSender: Sender<PublicKey = Ed25519PublicKey>,
+    PendingReceiver: Receiver<PublicKey = Ed25519PublicKey>,
+    RecoveredSender: Sender<PublicKey = Ed25519PublicKey>,
+    RecoveredReceiver: Receiver<PublicKey = Ed25519PublicKey>,
+    ResolverSender: Sender<PublicKey = Ed25519PublicKey>,
+    ResolverReceiver: Receiver<PublicKey = Ed25519PublicKey>,
 {
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
