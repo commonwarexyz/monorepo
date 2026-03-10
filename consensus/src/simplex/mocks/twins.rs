@@ -404,6 +404,8 @@ fn next_round_transitions(
         out: &mut Vec<(RoundScenario, Vec<usize>)>,
     ) {
         if cell_idx == ranges.len() {
+            // Primary and secondary coincide in this branch, so the round is
+            // fully described by a single mask.
             out.push((
                 RoundScenario {
                     leader: leader.expect("leader cell should assign a leader"),
@@ -416,12 +418,19 @@ fn next_round_transitions(
         }
 
         let (start, size) = ranges[cell_idx];
+        // The designated leader must be isolated into its own singleton cell,
+        // so the leader's source cell can contribute at most `size - 1`
+        // non-leader members to the ordinary partition buckets.
         let max_outside = if cell_idx == leader_cell {
             size - 1
         } else {
             size
         };
         for outside in 0..=max_outside {
+            // Within a cell we keep participants contiguous in canonical role
+            // order: excluded from both partitions first, then shared by both
+            // halves, and finally the leader singleton (if this is the leader
+            // cell). `next_cells` records those refined cell sizes.
             let both = if cell_idx == leader_cell {
                 size - outside - 1
             } else {
@@ -438,6 +447,8 @@ fn next_round_transitions(
             let mut next_primary = primary_mask | range_mask(start + outside, both);
             let mut next_leader = leader;
             if cell_idx == leader_cell {
+                // Place the leader at the end of its refined block so later
+                // rounds can distinguish it from the rest of the cell.
                 let leader_idx = start + outside + both;
                 next_primary |= 1u64 << leader_idx;
                 next_cells.push(1);
@@ -454,6 +465,7 @@ fn next_round_transitions(
                 out,
             );
 
+            // Backtrack in reverse push order before exploring the next split.
             if cell_idx == leader_cell {
                 next_cells.pop();
             }
@@ -481,6 +493,8 @@ fn next_round_transitions(
     ) {
         if cell_idx == ranges.len() {
             if secondary_total == 0 {
+                // A zero-sized secondary partition is already emitted by
+                // `no_secondary`, so skipping it here avoids duplicates.
                 return;
             }
             out.push((
@@ -497,6 +511,8 @@ fn next_round_transitions(
         let (start, size) = ranges[cell_idx];
         let has_leader = cell_idx == leader_cell;
         let available = if has_leader { size - 1 } else { size };
+        // `max_partitions == 2` forbids an "outside both halves" bucket, so the
+        // cell may only split between secondary and primary in that mode.
         let outside_range = if max_partitions == 2 {
             0..=0
         } else {
@@ -506,6 +522,8 @@ fn next_round_transitions(
         for outside in outside_range {
             let remaining = available - outside;
             for secondary in 0..=remaining {
+                // The canonical contiguous layout for a refined cell is:
+                // outside -> secondary-only -> primary-only -> leader.
                 let primary = remaining - secondary;
 
                 if outside > 0 {
@@ -523,6 +541,8 @@ fn next_round_transitions(
                     primary_mask | range_mask(start + outside + secondary, primary);
                 let mut next_leader = leader;
                 if has_leader {
+                    // As in `no_secondary`, keep the leader as a singleton at
+                    // the tail of its source cell's refined block.
                     let leader_idx = start + outside + secondary + primary;
                     next_primary |= 1u64 << leader_idx;
                     next_cells.push(1);
@@ -542,6 +562,7 @@ fn next_round_transitions(
                     out,
                 );
 
+                // Undo the refined cells before trying the next allocation.
                 if has_leader {
                     next_cells.pop();
                 }
@@ -561,6 +582,9 @@ fn next_round_transitions(
     let ranges = cells_to_ranges(cells);
     let mut out = Vec::new();
     for leader_cell in 0..cells.len() {
+        // Any current symmetry cell may supply the next leader. Enumerate the
+        // no-secondary and with-secondary cases separately to keep the output
+        // canonical and duplicate-free.
         let mut next_cells = Vec::new();
         no_secondary(&ranges, leader_cell, 0, 0, None, &mut next_cells, &mut out);
         let mut next_cells = Vec::new();
