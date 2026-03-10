@@ -5649,6 +5649,7 @@ mod tests {
         max_scenarios: usize,
         max_compromised_sets: usize,
         required_containers: View,
+        relabel: bool,
     }
 
     fn twins_case<S, F, L>(case: twins::Case, campaign: TwinsCampaign, link: Link, mut fixture: F)
@@ -5994,6 +5995,7 @@ mod tests {
                 max_partitions: campaign.max_partitions,
                 max_scenarios: campaign.max_scenarios,
                 max_compromised_sets: campaign.max_compromised_sets,
+                relabel: campaign.relabel,
             },
         );
         assert!(
@@ -6020,6 +6022,7 @@ mod tests {
             max_scenarios: 4,
             max_compromised_sets: 5, // f=1 for n=5: cover each compromised identity.
             required_containers: View::new(100),
+            relabel: true,
         };
         for link in [
             Link {
@@ -6083,6 +6086,30 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
+    fn test_twins_ed25519_without_relabeling() {
+        let campaign = TwinsCampaign {
+            n: 5,
+            rounds: 3,
+            max_partitions: 3,
+            max_scenarios: 2,
+            max_compromised_sets: 2,
+            required_containers: View::new(50),
+            relabel: false,
+        };
+        twins_campaign::<_, _, RoundRobin>(
+            0,
+            campaign,
+            Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            ed25519::fixture,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
     fn test_twins_secp256r1() {
         test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
@@ -6097,6 +6124,7 @@ mod tests {
             max_scenarios: 2,
             max_compromised_sets: 1,
             required_containers: View::new(100),
+            relabel: true,
         };
         twins_campaign::<_, _, Random>(
             0,
@@ -6120,6 +6148,7 @@ mod tests {
             max_scenarios: 2,
             max_compromised_sets: 1,
             required_containers: View::new(100),
+            relabel: true,
         };
         twins_campaign::<_, _, Random>(
             42,
