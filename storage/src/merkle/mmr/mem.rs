@@ -144,7 +144,7 @@ impl<D: Digest> Mmr<D> {
         let Some(size) = pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_mmr_size() {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
@@ -360,11 +360,11 @@ impl<D: Digest> Mmr<D> {
     /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
     /// Recomputes the root after truncation.
     ///
-    /// `new_size` must be a valid MMR size (i.e., `new_size.is_mmr_size()`) and must be
+    /// `new_size` must be a valid MMR size (i.e., `new_size.is_valid_size()`) and must be
     /// >= `pruned_to_pos`.
     #[cfg(feature = "std")]
     pub(crate) fn truncate(&mut self, new_size: Position, hasher: &mut impl Hasher<Digest = D>) {
-        debug_assert!(new_size.is_mmr_size());
+        debug_assert!(new_size.is_valid_size());
         debug_assert!(new_size >= self.pruned_to_pos);
         let keep = (*new_size - *self.pruned_to_pos) as usize;
         self.nodes.truncate(keep);
@@ -710,7 +710,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
-                    mmr.size().is_mmr_size(),
+                    mmr.size().is_valid_size(),
                     "mmr of size {} should be valid",
                     mmr.size()
                 );
@@ -723,7 +723,7 @@ mod tests {
                 mmr.apply(changeset).unwrap();
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !Position::new(size).is_mmr_size(),
+                        !Position::new(size).is_valid_size(),
                         "mmr of size {size} should be invalid",
                     );
                 }
