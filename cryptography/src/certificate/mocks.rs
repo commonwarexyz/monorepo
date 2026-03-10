@@ -307,9 +307,9 @@ impl<
         let mut ledger = self.ledger.0.lock();
 
         for attestation in attestations {
-            self.participants
-                .key(attestation.signer)
-                .or_else(|| Self::invalid_none("attestation signer missing from participant set"))?;
+            self.participants.key(attestation.signer).or_else(|| {
+                Self::invalid_none("attestation signer missing from participant set")
+            })?;
 
             let signature = attestation
                 .signature
@@ -393,11 +393,7 @@ impl<
     }
 
     /// Verifies a batch of certificates one-by-one.
-    pub fn verify_certificates<'a, S, R, D, I, M>(
-        &self,
-        rng: &mut R,
-        mut certificates: I,
-    ) -> bool
+    pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, mut certificates: I) -> bool
     where
         S: Scheme<Certificate = Certificate>,
         S::Subject<'a, D>: Subject<Namespace = N>,
@@ -406,8 +402,9 @@ impl<
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
         M: Faults,
     {
-        certificates
-            .all(|(subject, certificate)| self.verify_certificate::<S, _, D, M>(rng, subject, certificate))
+        certificates.all(|(subject, certificate)| {
+            self.verify_certificate::<S, _, D, M>(rng, subject, certificate)
+        })
     }
 
     /// Returns whether this scheme is attributable.
@@ -463,7 +460,12 @@ macro_rules! impl_certificate_mock {
         /// Generates a test fixture with explicit mock certificate behavior flags.
         #[cfg(feature = "mocks")]
         #[allow(dead_code)]
-        pub fn fixture_with<const ATTRIBUTABLE: bool, const BATCHABLE: bool, const ALLOW_INVALID: bool, R>(
+        pub fn fixture_with<
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+            R,
+        >(
             rng: &mut R,
             namespace: &[u8],
             n: u32,
@@ -572,8 +574,7 @@ macro_rules! impl_certificate_mock {
                 const ATTRIBUTABLE: bool,
                 const BATCHABLE: bool,
                 const ALLOW_INVALID: bool,
-            > $crate::certificate::Scheme
-            for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
@@ -606,7 +607,8 @@ macro_rules! impl_certificate_mock {
                 R: rand_core::CryptoRngCore,
                 D: $crate::Digest,
             {
-                self.generic.verify_attestation::<Self, D>(subject, attestation)
+                self.generic
+                    .verify_attestation::<Self, D>(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -783,7 +785,10 @@ mod tests {
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
             .collect();
-        let certificate = fixture.verifier.assemble::<_, N3f1>(attestations, &Sequential).unwrap();
+        let certificate = fixture
+            .verifier
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .unwrap();
         let encoded = certificate.encode();
         let decoded =
             Certificate::decode_cfg(encoded, &fixture.verifier.participants().len()).unwrap();
@@ -798,18 +803,16 @@ mod tests {
                     &Sequential,
                 )
         );
-        assert!(
-            !fixture
-                .verifier
-                .verify_certificate::<_, Sha256Digest, N3f1>(
-                    &mut rng,
-                    TestSubject {
-                        message: b"other-subject",
-                    },
-                    &decoded,
-                    &Sequential,
-                )
-        );
+        assert!(!fixture
+            .verifier
+            .verify_certificate::<_, Sha256Digest, N3f1>(
+                &mut rng,
+                TestSubject {
+                    message: b"other-subject",
+                },
+                &decoded,
+                &Sequential,
+            ));
     }
 
     #[test]
@@ -821,7 +824,10 @@ mod tests {
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
             .collect();
-        let certificate = fixture.verifier.assemble::<_, N3f1>(attestations, &Sequential).unwrap();
+        let certificate = fixture
+            .verifier
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .unwrap();
         let encoded = certificate.encode();
 
         assert!(Certificate::decode_cfg(encoded.clone(), &4).is_ok());
