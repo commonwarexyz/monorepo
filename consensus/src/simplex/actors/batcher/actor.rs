@@ -592,8 +592,10 @@ where
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Collect candidates while we still hold `round`.
-                    let candidates = round.missing_notarize_voters(&notarization.proposal);
-                    forward_candidates = Some((notarization.proposal.clone(), candidates));
+                    if !matches!(self.forwarding, ForwardingPolicy::Disabled) {
+                        let candidates = round.missing_notarize_voters(&notarization.proposal);
+                        forward_candidates = Some((notarization.proposal.clone(), candidates));
+                    }
 
                     voter
                         .recovered(Certificate::Notarization(notarization))

@@ -532,9 +532,7 @@ where
                             debug!(?commitment, "block not found for forwarding");
                             continue;
                         };
-                        buffer
-                            .send(round, block, Recipients::Some(peers))
-                            .await;
+                        buffer.send(round, block, Recipients::Some(peers)).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.digest(), block).await;

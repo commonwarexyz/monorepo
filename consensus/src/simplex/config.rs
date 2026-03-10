@@ -26,7 +26,8 @@ pub enum ForwardingPolicy {
 }
 
 /// Configuration for the consensus engine.
-pub struct Config<
+pub struct Config<S, L, B, D, A, R, F, T>
+where
     S: Scheme,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -35,7 +36,7 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
-> {
+{
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
@@ -129,16 +130,16 @@ pub struct Config<
     pub forwarding: ForwardingPolicy,
 }
 
-impl<
-        S: Scheme,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-        R: Relay,
-        F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+impl<S, L, B, D, A, R, F, T> Config<S, L, B, D, A, R, F, T>
+where
+    S: Scheme,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
