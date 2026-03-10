@@ -105,14 +105,27 @@ impl Read for Certificate {
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
 /// if the corresponding subject was previously recorded in the shared ledger.
 #[doc(hidden)]
-pub struct Generic<P: PublicKey, N: super::Namespace> {
+pub struct Generic<
+    P: PublicKey,
+    N: super::Namespace,
+    const ATTRIBUTABLE: bool = true,
+    const BATCHABLE: bool = false,
+    const ALLOW_INVALID: bool = true,
+> {
     me: Option<Participant>,
     participants: Set<P>,
     namespace: N,
     ledger: SharedLedger,
 }
 
-impl<P: PublicKey, N: super::Namespace> fmt::Debug for Generic<P, N> {
+impl<
+        P: PublicKey,
+        N: super::Namespace,
+        const ATTRIBUTABLE: bool,
+        const BATCHABLE: bool,
+        const ALLOW_INVALID: bool,
+    > fmt::Debug for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Generic")
             .field("me", &self.me)
@@ -121,7 +134,14 @@ impl<P: PublicKey, N: super::Namespace> fmt::Debug for Generic<P, N> {
     }
 }
 
-impl<P: PublicKey, N: super::Namespace> Clone for Generic<P, N> {
+impl<
+        P: PublicKey,
+        N: super::Namespace,
+        const ATTRIBUTABLE: bool,
+        const BATCHABLE: bool,
+        const ALLOW_INVALID: bool,
+    > Clone for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+{
     fn clone(&self) -> Self {
         Self {
             me: self.me,
@@ -132,7 +152,30 @@ impl<P: PublicKey, N: super::Namespace> Clone for Generic<P, N> {
     }
 }
 
-impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
+impl<
+        P: PublicKey,
+        N: super::Namespace,
+        const ATTRIBUTABLE: bool,
+        const BATCHABLE: bool,
+        const ALLOW_INVALID: bool,
+    > Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+{
+    fn invalid_none<T>(reason: &str) -> Option<T> {
+        if ALLOW_INVALID {
+            None
+        } else {
+            panic!("invalid mock certificate request: {reason}");
+        }
+    }
+
+    fn invalid_bool(reason: &str) -> bool {
+        if ALLOW_INVALID {
+            false
+        } else {
+            panic!("invalid mock certificate request: {reason}");
+        }
+    }
+
     /// Creates a signer bound to the provided participant index.
     pub fn signer(
         namespace: &[u8],
@@ -206,11 +249,11 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
         D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
-            return false;
+            return Self::invalid_bool("attestation signer missing from participant set");
         }
 
         let Some(signature) = attestation.signature.get() else {
-            return false;
+            return Self::invalid_bool("attestation signature missing");
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let signature_id = u64::from(signature);
@@ -219,7 +262,8 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
             .signatures
             .get(&attestation.signer)
             .and_then(|entries| entries.get(&signature_id))
-            == Some(&expected_subject)
+            .is_some_and(|stored| stored == &expected_subject)
+            || Self::invalid_bool("attestation not recorded in ledger or subject mismatched")
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
@@ -263,19 +307,26 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
         let mut ledger = self.ledger.0.lock();
 
         for attestation in attestations {
-            self.participants.key(attestation.signer)?;
+            self.participants
+                .key(attestation.signer)
+                .or_else(|| Self::invalid_none("attestation signer missing from participant set"))?;
 
-            let signature = attestation.signature.get()?;
+            let signature = attestation
+                .signature
+                .get()
+                .or_else(|| Self::invalid_none("attestation signature missing"))?;
             let signature_id = u64::from(signature);
             let entry = ledger
                 .signatures
-                .get(&attestation.signer)?
-                .get(&signature_id)?
+                .get(&attestation.signer)
+                .or_else(|| Self::invalid_none("attestation signer missing from ledger"))?
+                .get(&signature_id)
+                .or_else(|| Self::invalid_none("attestation signature missing from ledger"))?
                 .clone();
 
             if let Some(existing) = &signed_subject {
                 if existing != &entry {
-                    return None;
+                    return Self::invalid_none("attestations signed different subjects");
                 }
             } else {
                 signed_subject = Some(entry);
@@ -323,10 +374,10 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
         M: Faults,
     {
         if certificate.signers.len() != self.participants.len() {
-            return false;
+            return Self::invalid_bool("certificate signer set length mismatched participant set");
         }
         if certificate.signers.count() < self.participants.quorum::<M>() as usize {
-            return false;
+            return Self::invalid_bool("certificate below quorum");
         }
 
         let expected_subject = SignedSubject::new(subject, &self.namespace);
@@ -338,6 +389,7 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
             .is_some_and(|stored| {
                 stored.subject == expected_subject && stored.signers == certificate.signers
             })
+            || Self::invalid_bool("certificate missing from ledger or subject/signers mismatched")
     }
 
     /// Verifies a batch of certificates one-by-one.
@@ -360,12 +412,12 @@ impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
 
     /// Returns whether this scheme is attributable.
     pub const fn is_attributable() -> bool {
-        true
+        ATTRIBUTABLE
     }
 
     /// Returns whether this scheme supports batch verification.
     pub const fn is_batchable() -> bool {
-        false
+        BATCHABLE
     }
 
     /// Returns the codec bound for certificates produced by this participant set.
@@ -402,6 +454,22 @@ macro_rules! impl_certificate_mock {
             namespace: &[u8],
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
+        where
+            R: rand::RngCore + rand::CryptoRng,
+        {
+            fixture_with::<true, false, true, R>(rng, namespace, n)
+        }
+
+        /// Generates a test fixture with explicit mock certificate behavior flags.
+        #[cfg(feature = "mocks")]
+        #[allow(dead_code)]
+        pub fn fixture_with<const ATTRIBUTABLE: bool, const BATCHABLE: bool, const ALLOW_INVALID: bool, R>(
+            rng: &mut R,
+            namespace: &[u8],
+            n: u32,
+        ) -> $crate::certificate::mocks::Fixture<
+            Scheme<$crate::ed25519::PublicKey, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>,
+        >
         where
             R: rand::RngCore + rand::CryptoRng,
         {
@@ -446,12 +514,29 @@ macro_rules! impl_certificate_mock {
 
         /// Ledger-backed mock signing scheme wrapper.
         #[derive(Clone, Debug)]
-        pub struct Scheme<P: $crate::PublicKey> {
-            generic: $crate::certificate::mocks::Generic<P, $namespace>,
+        pub struct Scheme<
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool = true,
+            const BATCHABLE: bool = false,
+            const ALLOW_INVALID: bool = true,
+        > {
+            generic: $crate::certificate::mocks::Generic<
+                P,
+                $namespace,
+                ATTRIBUTABLE,
+                BATCHABLE,
+                ALLOW_INVALID,
+            >,
         }
 
-        impl<P: $crate::PublicKey> Scheme<P> {
-            fn signer(
+        impl<
+                P: $crate::PublicKey,
+                const ATTRIBUTABLE: bool,
+                const BATCHABLE: bool,
+                const ALLOW_INVALID: bool,
+            > Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+        {
+            pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 me: commonware_utils::Participant,
@@ -467,7 +552,7 @@ macro_rules! impl_certificate_mock {
                 })
             }
 
-            fn verifier(
+            pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 ledger: $crate::certificate::mocks::SharedLedger,
@@ -482,7 +567,14 @@ macro_rules! impl_certificate_mock {
             }
         }
 
-        impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
+        impl<
+                P: $crate::PublicKey,
+                const ATTRIBUTABLE: bool,
+                const BATCHABLE: bool,
+                const ALLOW_INVALID: bool,
+            > $crate::certificate::Scheme
+            for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+        {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
             type Signature = commonware_utils::sequence::U64;
@@ -578,11 +670,23 @@ macro_rules! impl_certificate_mock {
             }
 
             fn is_attributable() -> bool {
-                $crate::certificate::mocks::Generic::<P, $namespace>::is_attributable()
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::is_attributable()
             }
 
             fn is_batchable() -> bool {
-                $crate::certificate::mocks::Generic::<P, $namespace>::is_batchable()
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::is_batchable()
             }
 
             fn certificate_codec_config(
@@ -593,7 +697,13 @@ macro_rules! impl_certificate_mock {
 
             fn certificate_codec_config_unbounded(
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::certificate::mocks::Generic::<P, $namespace>::certificate_codec_config_unbounded()
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::certificate_codec_config_unbounded()
             }
         }
     };
@@ -602,7 +712,10 @@ macro_rules! impl_certificate_mock {
 #[cfg(test)]
 mod tests {
     use super::Certificate;
-    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+    use crate::{
+        certificate::Scheme as _, ed25519::PublicKey as Ed25519PublicKey,
+        sha256::Digest as Sha256Digest,
+    };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
@@ -648,6 +761,15 @@ mod tests {
             &attestation,
             &Sequential,
         ));
+    }
+
+    #[test]
+    fn configurable_properties_follow_type_flags() {
+        assert!(Scheme::<Ed25519PublicKey>::is_attributable());
+        assert!(!Scheme::<Ed25519PublicKey>::is_batchable());
+
+        assert!(!Scheme::<Ed25519PublicKey, false, true>::is_attributable());
+        assert!(Scheme::<Ed25519PublicKey, false, true>::is_batchable());
     }
 
     #[test]
@@ -704,5 +826,23 @@ mod tests {
 
         assert!(Certificate::decode_cfg(encoded.clone(), &4).is_ok());
         assert!(Certificate::decode_cfg(encoded, &2).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid mock certificate request")]
+    fn strict_invalid_requests_panic() {
+        let mut rng = test_rng();
+        let fixture = fixture_with::<true, false, false, _>(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let attestation = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+
+        let _ = fixture.verifier.verify_attestation::<_, Sha256Digest>(
+            &mut rng,
+            TestSubject { message: b"vote-2" },
+            &attestation,
+            &Sequential,
+        );
     }
 }
