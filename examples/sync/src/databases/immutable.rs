@@ -98,11 +98,12 @@ where
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    batch.set(key, value);
+                    batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
                     let finalized = batch.merkleize(metadata).finalize();
                     self.apply_batch(finalized).await?;
+                    self.commit().await?;
                     batch = self.new_batch();
                 }
             }

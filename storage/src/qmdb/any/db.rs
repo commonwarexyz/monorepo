@@ -202,6 +202,12 @@ where
         self.log.sync().await.map_err(Into::into)
     }
 
+    /// Durably commit the journal state published by prior [`Db::apply_batch`]
+    /// calls.
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.log.commit().await.map_err(Into::into)
+    }
+
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
@@ -241,8 +247,7 @@ where
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        // No-op, DB already in recoverable state.
-        Ok(())
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {

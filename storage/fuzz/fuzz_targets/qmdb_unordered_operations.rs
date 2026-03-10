@@ -53,13 +53,14 @@ async fn commit_pending(
     let finalized = {
         let mut batch = db.new_batch();
         for (k, v) in pending_writes.drain(..) {
-            batch.write(k, v);
+            batch = batch.write(k, v);
         }
         batch.merkleize(None).await.unwrap().finalize()
     };
     db.apply_batch(finalized)
         .await
         .expect("commit should not fail");
+    db.commit().await.expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
 }
 

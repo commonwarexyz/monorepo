@@ -33,7 +33,7 @@ pub trait UnmerkleizedBatch: Sized {
     type Merkleized: MerkleizedBatch;
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
-    fn write(&mut self, key: Self::K, value: Option<Self::V>);
+    fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
     /// Resolve mutations, compute the new root, and return a merkleized batch.
     fn merkleize(

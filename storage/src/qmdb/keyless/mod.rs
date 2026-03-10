@@ -4,11 +4,53 @@
 //! # Examples
 //!
 //! ```ignore
+//! // Simple mode: apply a batch, then durably commit it.
 //! let mut batch = db.new_batch();
 //! let loc = batch.append(value);  // returns the location
-//! let merkleized = batch.merkleize(None);  // synchronous
+//! let merkleized = batch.merkleize(None);
 //! let finalized = merkleized.finalize();
 //! db.apply_batch(finalized).await?;
+//! db.commit().await?;
+//! ```
+//!
+//! ```ignore
+//! // Batches can still fork before you apply them.
+//! let mut parent = db.new_batch();
+//! let _ = parent.append(value_a);
+//! let parent = parent.merkleize(None);
+//!
+//! let mut child_a = parent.new_batch();
+//! let _ = child_a.append(value_b);
+//! let child_a = child_a.merkleize(None);
+//!
+//! let mut child_b = parent.new_batch();
+//! let _ = child_b.append(value_c);
+//! let child_b = child_b.merkleize(None);
+//!
+//! db.apply_batch(child_a.finalize()).await?;
+//! db.commit().await?;
+//! ```
+//!
+//! ```ignore
+//! // Advanced mode: while the previous batch is being committed, build one child batch from the
+//! // the newly published state.
+//! let mut parent = db.new_batch();
+//! let _ = parent.append(value_a);
+//! let parent_finalized = parent.merkleize(None).finalize();
+//! db.apply_batch(parent_finalized).await?;
+//!
+//! let (child_finalized, commit_result) = futures::join!(
+//!     async {
+//!         let mut child = db.new_batch();
+//!         let _ = child.append(value_b);
+//!         child.merkleize(None).finalize()
+//!     },
+//!     db.commit(),
+//! );
+//! commit_result?;
+//!
+//! db.apply_batch(child_finalized).await?;
+//! db.commit().await?;
 //! ```
 
 use crate::{
@@ -225,8 +267,14 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.journal.sync().await.map_err(Into::into)
+    }
+
+    /// Durably commit the journal state published by prior [`Keyless::apply_batch`]
+    /// calls.
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.journal.commit().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
@@ -256,6 +304,11 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// a stale changeset returns [`Error::StaleChangeset`].
     ///
     /// Returns the range of locations written.
+    ///
+    /// This publishes the batch to the in-memory database state and appends it to
+    /// the journal, but does not durably commit it. Call [`Keyless::commit`] to
+    /// wait for the underlying journal commit, or [`Keyless::sync`] for a
+    /// stronger durability boundary.
     pub async fn apply_batch(
         &mut self,
         batch: batch::Changeset<H::Digest, V>,
@@ -271,9 +324,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
 
         // Write all operations to the authenticated journal + apply MMR changeset.
         self.journal.apply_batch(batch.journal_finalized).await?;
-
-        // Flush journal to disk.
-        self.journal.commit().await?;
 
         // Update state.
         self.last_commit_loc = Location::new(batch.total_size - 1);
@@ -395,6 +445,7 @@ mod test {
             let metadata = vec![3u8; 10];
             let finalized = db.new_batch().merkleize(Some(metadata.clone())).finalize();
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.bounds().await.end, 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -510,6 +561,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let root = db.root();
 
             // Create uncommitted appends then simulate failure.
@@ -534,6 +586,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
@@ -564,6 +617,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let root = db.root();
             let op_count = db.bounds().await.end;
 
@@ -620,6 +674,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let db = open_db(context.with_label("db5")).await;
             let bounds = db.bounds().await;
             assert!(bounds.end > op_count);
@@ -706,6 +761,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let db = open_db(context.with_label("db6")).await;
             assert!(db.bounds().await.end > 1);
             assert_ne!(db.root(), root);
@@ -970,6 +1026,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let committed_root = db.root();
             let committed_size = db.bounds().await.end;
 
@@ -1011,6 +1068,7 @@ mod test {
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
 
             // Verify we can read the new value
             assert_eq!(db.get(committed_size).await.unwrap(), Some(new_value));
@@ -1371,6 +1429,7 @@ mod test {
             // Apply only the final child -- it contains everything.
             let child_finalized = child_m.finalize();
             db.apply_batch(child_finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.root(), child_root);
             assert_eq!(db.get(loc1).await.unwrap(), Some(v1));
             assert_eq!(db.get(loc2).await.unwrap(), Some(v2));

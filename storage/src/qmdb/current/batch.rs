@@ -399,8 +399,9 @@ where
     ///
     /// If the same key is written multiple times within a batch, the last
     /// value wins.
-    pub fn write(&mut self, key: U::Key, value: Option<U::Value>) {
-        self.inner.write(key, value);
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
+        self.inner = self.inner.write(key, value);
+        self
     }
 }
 
@@ -883,8 +884,8 @@ mod trait_impls {
         type Merkleized =
             super::MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>;
 
-        fn write(&mut self, key: K, value: Option<V::Value>) {
-            UnmerkleizedBatch::write(self, key, value);
+        fn write(self, key: K, value: Option<V::Value>) -> Self {
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         fn merkleize(
@@ -917,8 +918,8 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>;
 
-        fn write(&mut self, key: K, value: Option<V::Value>) {
-            UnmerkleizedBatch::write(self, key, value);
+        fn write(self, key: K, value: Option<V::Value>) -> Self {
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         fn merkleize(

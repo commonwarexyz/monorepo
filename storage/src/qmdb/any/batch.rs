@@ -498,8 +498,9 @@ where
     ///
     /// If the same key is written multiple times within a batch, the last
     /// value wins.
-    pub fn write(&mut self, key: U::Key, value: Option<U::Value>) {
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.mutations.insert(key, value);
+        self
     }
 
     /// Split into pending mutations and the merkleization machinery.
@@ -1097,14 +1098,15 @@ where
     H: Hasher,
     Operation<U>: Codec,
 {
-    /// Apply a changeset to the database.
+    /// Apply a changeset to the database, returning the range of written operations.
     ///
-    /// A changeset is only valid if the database has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from the
-    /// same parent for speculative execution, but only one may be applied. Applying
-    /// a stale changeset returns [`Error::StaleChangeset`].
+    /// A changeset is only valid if the database has not been modified since the batch that
+    /// produced it was created. Multiple batches can be forked from the same parent for speculative
+    /// execution, but only one may be applied. Applying a stale changeset returns
+    /// [`Error::StaleChangeset`].
     ///
-    /// Returns the range of locations written.
+    /// This publishes the batch to the in-memory database state and appends it to the journal, but
+    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
         batch: Changeset<U::Key, H::Digest, Operation<U>>,
@@ -1121,11 +1123,7 @@ where
         // 1. Write all operations to the authenticated journal + apply MMR changeset.
         self.log.apply_batch(batch.journal_finalized).await?;
 
-        // 2. Flush journal to disk.
-        // TODO(#3118): allow fsync with non-mutable reference to database.
-        self.log.commit().await?;
-
-        // 3. Apply snapshot diffs to the in-memory index.
+        // 2. Apply snapshot diffs to the in-memory index.
         for diff in batch.snapshot_diffs {
             match diff {
                 SnapshotDiff::Update {
@@ -1144,7 +1142,7 @@ where
             }
         }
 
-        // 4. Update DB metadata.
+        // 3. Update DB metadata.
         let new_active_keys = self.active_keys as isize + batch.active_keys_delta;
         debug_assert!(
             new_active_keys >= 0,
@@ -1156,7 +1154,7 @@ where
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
 
-        // 5. Return the committed location range.
+        // 4. Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
         Ok(start_loc..end_loc)
     }
@@ -1199,8 +1197,9 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>;
 
-        fn write(&mut self, key: K, value: Option<V::Value>) {
+        fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
+            self
         }
 
         fn merkleize(
@@ -1233,8 +1232,9 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>;
 
-        fn write(&mut self, key: K, value: Option<V::Value>) {
+        fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
+            self
         }
 
         fn merkleize(

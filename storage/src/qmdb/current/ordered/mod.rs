@@ -70,12 +70,15 @@ pub mod tests {
             let k1: C::Key = TestKey::from_seed(0);
             let v1: <C as LogStore>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(k1, Some(v1.clone()));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(k1, Some(v1.clone()))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
@@ -91,16 +94,15 @@ pub mod tests {
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(k1, None);
-                batch
-                    .merkleize(Some(metadata.clone()))
-                    .await
-                    .unwrap()
-                    .finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(k1, None)
+                .merkleize(Some(metadata.clone()))
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
 
@@ -113,6 +115,7 @@ pub mod tests {
             assert!(db.get(&k1).await.unwrap().is_none());
             let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let root3 = db.root();
             assert_ne!(root3, root2);
 
@@ -124,11 +127,13 @@ pub mod tests {
             assert!(db.get_bit(*bounds.end - 1));
 
             // Test that we can get a non-durable root.
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(k1, Some(v1));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(k1, Some(v1))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             assert_ne!(db.root(), root3);
 

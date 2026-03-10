@@ -152,7 +152,7 @@ async fn commit_pending(
     let result = {
         let mut batch = db.new_batch();
         for (k, v) in pending_writes.drain(..) {
-            batch.write(k, v);
+            batch = batch.write(k, v);
         }
         let merkleized = match batch.merkleize(None).await {
             Ok(m) => m,
@@ -164,6 +164,10 @@ async fn commit_pending(
         db.apply_batch(merkleized.finalize()).await
     };
     if result.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    if db.commit().await.is_err() {
         forget_pending(pending, committed);
         return false;
     }
@@ -336,14 +340,19 @@ fn fuzz(input: FuzzInput) {
             // Verify the recovered DB is usable.
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(test_key, Some(test_value));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(test_key, Some(test_value))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized)
                 .await
                 .expect("apply_batch after recovery should succeed");
+            db.commit()
+                .await
+                .expect("commit after recovery should succeed");
 
             db.destroy()
                 .await

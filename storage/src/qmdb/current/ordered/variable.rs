@@ -158,11 +158,13 @@ mod test {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(k, Some(v1));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(k, Some(v1))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
@@ -199,11 +201,13 @@ mod test {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(k, Some(v2));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(k, Some(v2))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -492,11 +496,13 @@ mod test {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                let finalized = {
-                    let mut batch = db.new_batch();
-                    batch.write(k, Some(v));
-                    batch.merkleize(None).await.unwrap().finalize()
-                };
+                let finalized = db
+                    .new_batch()
+                    .write(k, Some(v))
+                    .merkleize(None)
+                    .await
+                    .unwrap()
+                    .finalize();
                 db.apply_batch(finalized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
@@ -545,11 +551,13 @@ mod test {
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(key_exists_1, Some(v1));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(key_exists_1, Some(v1))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -597,11 +605,13 @@ mod test {
             let key_exists_2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
 
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(key_exists_2, Some(v2));
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(key_exists_2, Some(v2))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -692,12 +702,14 @@ mod test {
 
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(key_exists_1, None);
-                batch.write(key_exists_2, None);
-                batch.merkleize(None).await.unwrap().finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .write(key_exists_1, None)
+                .write(key_exists_2, None)
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();

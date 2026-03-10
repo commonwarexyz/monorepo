@@ -92,14 +92,15 @@ where
         for operation in operations {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    batch.write(key, Some(value));
+                    batch = batch.write(key, Some(value));
                 }
                 Operation::Delete(key) => {
-                    batch.write(key, None);
+                    batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
                     let finalized = batch.merkleize(metadata).await?.finalize();
                     self.apply_batch(finalized).await?;
+                    self.commit().await?;
                     batch = self.new_batch();
                 }
             }

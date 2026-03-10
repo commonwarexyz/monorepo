@@ -181,11 +181,12 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
-                            batch.set(k, v);
+                            batch = batch.set(k, v);
                         }
                         batch.merkleize(metadata).finalize()
                     };
                     db.apply_batch(finalized).await.unwrap();
+                    db.commit().await.unwrap();
                     last_commit_loc = Some(db.bounds().await.end - 1);
                 }
 
@@ -202,11 +203,12 @@ fn fuzz(input: FuzzInput) {
                         let finalized = {
                             let mut batch = db.new_batch();
                             for (k, v) in pending_sets.drain(..) {
-                                batch.set(k, v);
+                                batch = batch.set(k, v);
                             }
                             batch.merkleize(None).finalize()
                         };
                         db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         db.prune(safe_loc).await.expect("prune should not fail");
                         let oldest = db.bounds().await.start;
@@ -234,11 +236,12 @@ fn fuzz(input: FuzzInput) {
                         let finalized = {
                             let mut batch = db.new_batch();
                             for (k, v) in pending_sets.drain(..) {
-                                batch.set(k, v);
+                                batch = batch.set(k, v);
                             }
                             batch.merkleize(None).finalize()
                         };
                         db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                             let root = db.root();
@@ -263,6 +266,7 @@ fn fuzz(input: FuzzInput) {
 
                         let finalized = db.new_batch().merkleize(None).finalize();
                         db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         if safe_start >= db.bounds().await.start {
                             let _ = db
@@ -294,11 +298,12 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for (k, v) in pending_sets.drain(..) {
-                            batch.set(k, v);
+                            batch = batch.set(k, v);
                         }
                         batch.merkleize(None).finalize()
                     };
                     db.apply_batch(finalized).await.unwrap();
+                    db.commit().await.unwrap();
                     last_commit_loc = Some(db.bounds().await.end - 1);
                     let _ = db.root();
                 }
@@ -314,7 +319,7 @@ fn fuzz(input: FuzzInput) {
         let finalized = {
             let mut batch = db.new_batch();
             for (k, v) in pending_sets.drain(..) {
-                batch.set(k, v);
+                batch = batch.set(k, v);
             }
             batch.merkleize(None).finalize()
         };

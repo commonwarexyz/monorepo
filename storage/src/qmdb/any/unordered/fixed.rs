@@ -215,10 +215,10 @@ pub(crate) mod test {
             for op in ops {
                 match op {
                     Operation::Update(Update(key, value)) => {
-                        batch.write(key, Some(value));
+                        batch = batch.write(key, Some(value));
                     }
                     Operation::Delete(key) => {
-                        batch.write(key, None);
+                        batch = batch.write(key, None);
                     }
                     Operation::CommitFloor(_, _) => {
                         panic!("CommitFloor not supported in apply_ops");
@@ -246,11 +246,12 @@ pub(crate) mod test {
                 let mut batch = db.new_batch();
                 for i in 0u64..UPDATES {
                     let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                    batch.write(k, Some(v));
+                    batch = batch.write(k, Some(v));
                 }
                 batch.merkleize(None).await.unwrap().finalize()
             };
             db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -455,10 +456,12 @@ pub(crate) mod test {
     ) -> std::ops::Range<Location> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
-            batch.write(k, v);
+            batch = batch.write(k, v);
         }
         let finalized = batch.merkleize(metadata).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap()
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
     }
 
     /// An empty batch (no mutations) still produces a valid commit.
@@ -518,15 +521,15 @@ pub(crate) mod test {
             let mut batch = db.new_batch();
             assert_eq!(batch.get(&ka).await.unwrap(), Some(va));
 
-            batch.write(kb, Some(vb));
+            batch = batch.write(kb, Some(vb));
             assert_eq!(batch.get(&kb).await.unwrap(), Some(vb));
             assert_eq!(batch.get(&kc).await.unwrap(), None);
 
             let va2 = val(100);
-            batch.write(ka, Some(va2));
+            batch = batch.write(ka, Some(va2));
             assert_eq!(batch.get(&ka).await.unwrap(), Some(va2));
 
-            batch.write(ka, None);
+            batch = batch.write(ka, None);
             assert_eq!(batch.get(&ka).await.unwrap(), None);
 
             db.destroy().await.unwrap();
@@ -549,11 +552,14 @@ pub(crate) mod test {
 
             let va2 = val(100);
             let vc = val(2);
-            let mut batch = db.new_batch();
-            batch.write(ka, Some(va2));
-            batch.write(kb, None);
-            batch.write(kc, Some(vc));
-            let merkleized = batch.merkleize(None).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(ka, Some(va2))
+                .write(kb, None)
+                .write(kc, Some(vc))
+                .merkleize(None)
+                .await
+                .unwrap();
 
             assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
             assert_eq!(merkleized.get(&kb).await.unwrap(), None);
@@ -574,20 +580,23 @@ pub(crate) mod test {
             let ka = key(0);
             let kb = key(1);
 
-            let mut batch = db.new_batch();
-            batch.write(ka, Some(val(0)));
-            let merkleized = batch.merkleize(None).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(ka, Some(val(0)))
+                .merkleize(None)
+                .await
+                .unwrap();
 
             let mut child = merkleized.new_batch();
             assert_eq!(child.get(&ka).await.unwrap(), Some(val(0)));
 
-            child.write(ka, Some(val(100)));
+            child = child.write(ka, Some(val(100)));
             assert_eq!(child.get(&ka).await.unwrap(), Some(val(100)));
 
-            child.write(kb, Some(val(1)));
+            child = child.write(kb, Some(val(1)));
             assert_eq!(child.get(&kb).await.unwrap(), Some(val(1)));
 
-            child.write(ka, None);
+            child = child.write(ka, None);
             assert_eq!(child.get(&ka).await.unwrap(), None);
 
             drop(child);
@@ -606,14 +615,20 @@ pub(crate) mod test {
 
             commit_writes(&mut db, [(ka, Some(val(0)))], None).await;
 
-            let mut parent = db.new_batch();
-            parent.write(ka, None);
-            let parent_m = parent.merkleize(None).await.unwrap();
+            let parent_m = db
+                .new_batch()
+                .write(ka, None)
+                .merkleize(None)
+                .await
+                .unwrap();
             assert_eq!(parent_m.get(&ka).await.unwrap(), None);
 
-            let mut child = parent_m.new_batch();
-            child.write(ka, Some(val(200)));
-            let child_m = child.merkleize(None).await.unwrap();
+            let child_m = parent_m
+                .new_batch()
+                .write(ka, Some(val(200)))
+                .merkleize(None)
+                .await
+                .unwrap();
             assert_eq!(child_m.get(&ka).await.unwrap(), Some(val(200)));
 
             let finalized = child_m.finalize();
@@ -654,7 +669,7 @@ pub(crate) mod test {
 
             let mut batch = db.new_batch();
             for i in 0..10 {
-                batch.write(key(i), Some(val(i)));
+                batch = batch.write(key(i), Some(val(i)));
             }
             let merkleized = batch.merkleize(None).await.unwrap();
             let speculative_root = merkleized.root();
@@ -680,8 +695,7 @@ pub(crate) mod test {
     fn assert_batch_futures_are_send(db: &AnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        let mut batch = db.new_batch();
-        batch.write(key, Some(value));
+        let batch = db.new_batch().write(key, Some(value));
         assert_send(batch.merkleize(None));
         assert_send(db.get_with_loc(&key));
     }

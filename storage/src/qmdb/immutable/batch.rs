@@ -120,8 +120,9 @@ where
     ///
     /// The key must not already exist in the database or in any ancestor batch
     /// in the chain. Setting a key that already exists causes undefined behavior.
-    pub fn set(&mut self, key: K, value: V) {
+    pub fn set(mut self, key: K, value: V) -> Self {
         self.mutations.insert(key, value);
+        self
     }
 
     /// Read through: mutations -> base diff -> committed DB.
