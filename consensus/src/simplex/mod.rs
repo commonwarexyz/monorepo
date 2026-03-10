@@ -421,7 +421,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
-        utils::mocks as p2p_mocks,
+        utils::mocks::inert_channel,
         Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
@@ -5839,7 +5839,7 @@ mod tests {
                     engine_handlers.push(engine.start(
                         pending,
                         recovered,
-                        p2p_mocks::channel::<PublicKey>(),
+                        inert_channel::<PublicKey>(),
                     ));
                 }
             }
@@ -5911,7 +5911,7 @@ mod tests {
                 engine_handlers.push(engine.start(
                     (pending_sender, pending_receiver),
                     (recovered_sender, recovered_receiver),
-                    p2p_mocks::channel::<PublicKey>(),
+                    inert_channel::<PublicKey>(),
                 ));
             }
 

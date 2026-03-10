@@ -31,7 +31,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
-    utils::mocks as p2p_mocks,
+    utils::mocks::inert_channel,
     Recipients,
 };
 use commonware_parallel::Sequential;
@@ -629,7 +629,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
-                p2p_mocks::channel::<Ed25519PublicKey>(),
+                inert_channel::<Ed25519PublicKey>(),
             );
 
             // Secondary: Disrupter
@@ -639,7 +639,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
-                p2p_mocks::channel::<Ed25519PublicKey>(),
+                inert_channel::<Ed25519PublicKey>(),
             );
         }
 
@@ -658,7 +658,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 relay.clone(),
                 pending,
                 recovered,
-                p2p_mocks::channel::<Ed25519PublicKey>(),
+                inert_channel::<Ed25519PublicKey>(),
             );
             reporters.push(reporter);
         }
