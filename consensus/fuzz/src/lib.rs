@@ -634,7 +634,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
-                inert_channel::<Ed25519PublicKey>(),
+                inert_channel(participants.as_ref()),
             );
 
             // Secondary: Disrupter
@@ -644,7 +644,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
-                inert_channel::<Ed25519PublicKey>(),
+                inert_channel(participants.as_ref()),
             );
         }
 
@@ -665,7 +665,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 Duration::from_millis(1_500),
                 pending,
                 recovered,
-                inert_channel::<Ed25519PublicKey>(),
+                inert_channel(participants.as_ref()),
             );
             reporters.push(reporter);
         }

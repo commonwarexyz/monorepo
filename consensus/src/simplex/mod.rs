@@ -5838,7 +5838,7 @@ mod tests {
                     engine_handlers.push(engine.start(
                         pending,
                         recovered,
-                        inert_channel::<PublicKey>(),
+                        inert_channel(participants.as_ref()),
                     ));
                 }
             }
@@ -5910,7 +5910,7 @@ mod tests {
                 engine_handlers.push(engine.start(
                     (pending_sender, pending_receiver),
                     (recovered_sender, recovered_receiver),
-                    inert_channel::<PublicKey>(),
+                    inert_channel(participants.as_ref()),
                 ));
             }
 

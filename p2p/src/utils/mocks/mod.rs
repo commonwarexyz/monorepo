@@ -4,12 +4,15 @@ use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{IoBuf, IoBufs};
 use core::future;
-use std::{convert::Infallible, marker::PhantomData, time::SystemTime};
+use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
 
 /// Sender that accepts messages without delivering them.
+///
+/// The sender retains a static peer set so that [`Recipients::All`] can be
+/// expanded consistently with the [`crate::Sender`] contract.
 #[derive(Clone, Debug, Default)]
 pub struct InertSender<P> {
-    _phantom: PhantomData<P>,
+    peers: Arc<[P]>,
 }
 
 /// Checked sender returned by [`InertSender`].
@@ -37,7 +40,7 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
     ) -> Result<Self::Checked<'_>, SystemTime> {
         Ok(InertCheckedSender {
             recipients: match recipients {
-                Recipients::All => Vec::new(),
+                Recipients::All => self.peers.iter().cloned().collect(),
                 Recipients::Some(recipients) => recipients,
                 Recipients::One(recipient) => vec![recipient],
             },
@@ -67,14 +70,39 @@ impl<P: PublicKey> Receiver for InertReceiver<P> {
     }
 }
 
-/// Construct an inert point-to-point channel.
-pub const fn inert_channel<P: PublicKey>() -> (InertSender<P>, InertReceiver<P>) {
+/// Construct an inert point-to-point channel over a static peer set.
+pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, InertReceiver<P>) {
     (
         InertSender {
-            _phantom: PhantomData,
+            peers: Arc::from(peers.as_ref()),
         },
         InertReceiver {
             _phantom: PhantomData,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Sender;
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
+    use futures::executor::block_on;
+
+    #[test]
+    fn inert_sender_expands_all_recipients() {
+        let mut rng = test_rng();
+        let peers = vec![
+            PrivateKey::random(&mut rng).public_key(),
+            PrivateKey::random(&mut rng).public_key(),
+            PrivateKey::random(&mut rng).public_key(),
+        ];
+
+        let (mut sender, _) = inert_channel(peers.as_slice());
+        let sent = block_on(sender.send(Recipients::All, b"hello".to_vec(), false)).unwrap();
+
+        assert_eq!(sent, peers);
+    }
 }
