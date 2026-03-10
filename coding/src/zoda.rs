@@ -440,6 +440,7 @@ pub struct CheckingData<D: Digest> {
     commitment: Summary,
     topology: Topology,
     root: D,
+    checksum: Arc<Matrix<F>>,
     checking_matrix: Matrix<F>,
     encoded_checksum: Matrix<F>,
     shuffled_indices: Vec<u32>,
@@ -459,7 +460,7 @@ impl<D: Digest> CheckingData<D> {
         commitment: &Summary,
         data_bytes: usize,
         root: D,
-        checksum: &Matrix<F>,
+        checksum: Arc<Matrix<F>>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
@@ -493,10 +494,17 @@ impl<D: Digest> CheckingData<D> {
             commitment: expected_commitment,
             topology,
             root,
+            checksum,
             checking_matrix,
             encoded_checksum,
             shuffled_indices,
         })
+    }
+
+    fn metadata_matches(&self, shard: &Shard<D>) -> bool {
+        shard.data_bytes == self.topology.data_bytes
+            && shard.root == self.root
+            && shard.checksum.as_ref() == self.checksum.as_ref()
     }
 
     fn check<H: Hasher<Digest = D>>(
@@ -505,6 +513,9 @@ impl<D: Digest> CheckingData<D> {
         index: u16,
         shard: &Shard<D>,
     ) -> Result<CheckedShard, Error> {
+        if !self.metadata_matches(shard) {
+            return Err(Error::InvalidShard);
+        }
         self.topology.check_index(index)?;
         if shard.rows.rows() != self.topology.samples
             || shard.rows.cols() != self.topology.data_cols
@@ -676,7 +687,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 commitment,
                 shard.data_bytes,
                 shard.root,
-                shard.checksum.as_ref(),
+                shard.checksum.clone(),
             )?,
         };
         if checking_data.commitment != *commitment {
@@ -798,6 +809,81 @@ mod tests {
     }
 
     #[test]
+    fn cached_check_does_not_hide_mutated_metadata() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = b"metadata coverage";
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+
+        let (_, checking_data) =
+            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
+        shards[1].data_bytes += 1;
+
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
+            Err(Error::InvalidShard)
+        ));
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
+            Err(Error::InvalidShard)
+        ));
+    }
+
+    #[test]
+    fn cached_check_does_not_hide_mutated_root() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = b"root coverage";
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+
+        let (_, checking_data) =
+            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
+        shards[1].root = Sha256::hash(b"mutated root");
+
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
+            Err(Error::InvalidShard)
+        ));
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
+            Err(Error::InvalidShard)
+        ));
+    }
+
+    #[test]
+    fn checksum_malleability_with_cached_checking_data() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = vec![0x5Au8; 256 * 1024];
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+
+        let (_, checking_data) =
+            Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
+
+        let mut checksum = (*shards[1].checksum).clone();
+        checksum[(0, 0)] += &F::one();
+        shards[1].checksum = Arc::new(checksum);
+
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], None),
+            Err(Error::InvalidShard)
+        ));
+        assert!(matches!(
+            Zoda::<Sha256>::check(&config, &commitment, 1, &shards[1], Some(checking_data)),
+            Err(Error::InvalidShard)
+        ));
+    }
+
+    #[test]
     fn checksum_malleability() {
         /// Construct the vanishing polynomial over specific indices.
         ///
@@ -841,7 +927,7 @@ mod tests {
                 &commitment,
                 shards[0].data_bytes,
                 shards[0].root,
-                shards[0].checksum.as_ref(),
+                shards[0].checksum.clone(),
             )
             .unwrap();
 
