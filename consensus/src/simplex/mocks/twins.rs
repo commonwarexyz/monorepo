@@ -361,7 +361,7 @@ fn assignment_from_seed(seed: u64, n: usize) -> Vec<usize> {
 }
 
 /// Returns a contiguous bitmask range `[start, start + len)`.
-fn range_mask(start: usize, len: usize) -> u64 {
+const fn range_mask(start: usize, len: usize) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -387,6 +387,16 @@ fn next_round_transitions(
     cells: &[usize],
     max_partitions: usize,
 ) -> Vec<(RoundScenario, Vec<usize>)> {
+    // Accumulated state for a round where the secondary partition differs:
+    // the masks built so far, whether any secondary members exist, and leader.
+    #[derive(Clone, Copy)]
+    struct SecondaryState {
+        primary_mask: u64,
+        secondary_mask: u64,
+        secondary_total: usize,
+        leader: Option<usize>,
+    }
+
     /// Refines cells for a round where primary and secondary coincide.
     fn no_secondary(
         ranges: &[(usize, usize)],
@@ -478,24 +488,21 @@ fn next_round_transitions(
         max_partitions: usize,
         leader_cell: usize,
         cell_idx: usize,
-        primary_mask: u64,
-        secondary_mask: u64,
-        secondary_total: usize,
-        leader: Option<usize>,
+        state: SecondaryState,
         next_cells: &mut Vec<usize>,
         out: &mut Vec<(RoundScenario, Vec<usize>)>,
     ) {
         if cell_idx == ranges.len() {
-            if secondary_total == 0 {
+            if state.secondary_total == 0 {
                 // A zero-sized secondary partition is already emitted by
                 // `no_secondary`, so skipping it here avoids duplicates.
                 return;
             }
             out.push((
                 RoundScenario {
-                    leader: leader.expect("leader cell should assign a leader"),
-                    primary_mask,
-                    secondary_mask,
+                    leader: state.leader.expect("leader cell should assign a leader"),
+                    primary_mask: state.primary_mask,
+                    secondary_mask: state.secondary_mask,
                 },
                 next_cells.clone(),
             ));
@@ -530,10 +537,10 @@ fn next_round_transitions(
                     next_cells.push(primary);
                 }
 
-                let next_secondary = secondary_mask | range_mask(start + outside, secondary);
+                let next_secondary = state.secondary_mask | range_mask(start + outside, secondary);
                 let mut next_primary =
-                    primary_mask | range_mask(start + outside + secondary, primary);
-                let mut next_leader = leader;
+                    state.primary_mask | range_mask(start + outside + secondary, primary);
+                let mut next_leader = state.leader;
                 if has_leader {
                     // As in `no_secondary`, keep the leader as a singleton at
                     // the tail of its source cell's refined block.
@@ -548,10 +555,12 @@ fn next_round_transitions(
                     max_partitions,
                     leader_cell,
                     cell_idx + 1,
-                    next_primary,
-                    next_secondary,
-                    secondary_total + secondary,
-                    next_leader,
+                    SecondaryState {
+                        primary_mask: next_primary,
+                        secondary_mask: next_secondary,
+                        secondary_total: state.secondary_total + secondary,
+                        leader: next_leader,
+                    },
                     next_cells,
                     out,
                 );
@@ -587,10 +596,12 @@ fn next_round_transitions(
             max_partitions.min(3),
             leader_cell,
             0,
-            0,
-            0,
-            0,
-            None,
+            SecondaryState {
+                primary_mask: 0,
+                secondary_mask: 0,
+                secondary_total: 0,
+                leader: None,
+            },
             &mut next_cells,
             &mut out,
         );
