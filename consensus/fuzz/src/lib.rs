@@ -32,7 +32,7 @@ use commonware_cryptography::{
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     utils::mocks::inert_channel,
-    Receiver, Recipients, Sender,
+    Recipients,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -262,16 +262,16 @@ fn start_disrupter<P: simplex::Simplex>(
     scheme: P::Scheme,
     strategy: &StrategyChoice,
     vote_network: (
-        impl Sender<PublicKey = Ed25519PublicKey>,
-        impl Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     certificate_network: (
-        impl Sender<PublicKey = Ed25519PublicKey>,
-        impl Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     resolver_network: (
-        impl Sender<PublicKey = Ed25519PublicKey>,
-        impl Receiver<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
 ) {
     match *strategy {
@@ -352,12 +352,12 @@ fn spawn_honest_validator<
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
 where
     P: simplex::Simplex,
-    PendingSender: Sender<PublicKey = Ed25519PublicKey>,
-    PendingReceiver: Receiver<PublicKey = Ed25519PublicKey>,
-    RecoveredSender: Sender<PublicKey = Ed25519PublicKey>,
-    RecoveredReceiver: Receiver<PublicKey = Ed25519PublicKey>,
-    ResolverSender: Sender<PublicKey = Ed25519PublicKey>,
-    ResolverReceiver: Receiver<PublicKey = Ed25519PublicKey>,
+    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
