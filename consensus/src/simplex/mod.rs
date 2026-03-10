@@ -1684,7 +1684,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-                .await;
+            .await;
 
             // Create engines
             let elector = L::default();
@@ -1779,7 +1779,7 @@ mod tests {
                 Action::Update(link.clone()),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-                .await;
+            .await;
 
             // Wait for nullifications to accrue
             context.sleep(Duration::from_secs(60)).await;
@@ -1791,7 +1791,7 @@ mod tests {
                 Action::Unlink,
                 Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
-                .await;
+            .await;
 
             // Configure engine for first peer
             let me = participants[0].clone();
@@ -1804,7 +1804,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
-                .await;
+            .await;
 
             // Restore network connections for all online peers
             let link = Link {
@@ -1818,7 +1818,7 @@ mod tests {
                 Action::Update(link),
                 Some(|_, i, j| ![i, j].contains(&1usize)),
             )
-                .await;
+            .await;
 
             // Configure engine
             let reporter_config = mocks::reporter::Config {
@@ -1948,7 +1948,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-                .await;
+            .await;
 
             // Create engines
             let elector = L::default();
@@ -2712,7 +2712,7 @@ mod tests {
                 Action::Link(link),
                 Some(separated),
             )
-                .await;
+            .await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -2811,7 +2811,7 @@ mod tests {
                 Action::Link(degraded_link),
                 None,
             )
-                .await;
+            .await;
 
             // Create engines
             let elector = L::default();
