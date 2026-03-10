@@ -2,8 +2,8 @@
 
 use super::{Attestation, Scheme, Signers, Subject, Verification};
 use crate::{
-    ed25519::{PrivateKey, PublicKey},
-    Digest, Signer as _,
+    ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+    Digest, PublicKey,
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
@@ -26,7 +26,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct Fixture<S> {
     /// A sorted vector of participant public identity keys.
-    pub participants: Vec<PublicKey>,
+    pub participants: Vec<Ed25519PublicKey>,
     /// A sorted vector of participant private identity keys (matching order with `participants`).
     pub private_keys: Vec<PrivateKey>,
     /// A vector of per-participant scheme instances (matching order with `participants`).
@@ -105,14 +105,14 @@ impl Read for Certificate {
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
 /// if the corresponding subject was previously recorded in the shared ledger.
 #[doc(hidden)]
-pub struct Generic<N: super::Namespace> {
+pub struct Generic<P: PublicKey, N: super::Namespace> {
     me: Option<Participant>,
-    participants: Set<PublicKey>,
+    participants: Set<P>,
     namespace: N,
     ledger: SharedLedger,
 }
 
-impl<N: super::Namespace> fmt::Debug for Generic<N> {
+impl<P: PublicKey, N: super::Namespace> fmt::Debug for Generic<P, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Generic")
             .field("me", &self.me)
@@ -121,7 +121,7 @@ impl<N: super::Namespace> fmt::Debug for Generic<N> {
     }
 }
 
-impl<N: super::Namespace> Clone for Generic<N> {
+impl<P: PublicKey, N: super::Namespace> Clone for Generic<P, N> {
     fn clone(&self) -> Self {
         Self {
             me: self.me,
@@ -132,16 +132,15 @@ impl<N: super::Namespace> Clone for Generic<N> {
     }
 }
 
-impl<N: super::Namespace> Generic<N> {
-    /// Creates a signer bound to the participant derived from `private_key`.
+impl<P: PublicKey, N: super::Namespace> Generic<P, N> {
+    /// Creates a signer bound to the provided participant index.
     pub fn signer(
         namespace: &[u8],
-        participants: Set<PublicKey>,
-        private_key: PrivateKey,
+        participants: Set<P>,
+        me: Participant,
         ledger: SharedLedger,
     ) -> Option<Self> {
-        let public_key = private_key.public_key();
-        let me = participants.index(&public_key)?;
+        participants.key(me)?;
         Some(Self {
             me: Some(me),
             participants,
@@ -151,7 +150,7 @@ impl<N: super::Namespace> Generic<N> {
     }
 
     /// Creates a verifier sharing the provided ledger state.
-    pub fn verifier(namespace: &[u8], participants: Set<PublicKey>, ledger: SharedLedger) -> Self {
+    pub fn verifier(namespace: &[u8], participants: Set<P>, ledger: SharedLedger) -> Self {
         Self {
             me: None,
             participants,
@@ -166,7 +165,7 @@ impl<N: super::Namespace> Generic<N> {
     }
 
     /// Returns the ordered participant set.
-    pub const fn participants(&self) -> &Set<PublicKey> {
+    pub const fn participants(&self) -> &Set<P> {
         &self.participants
     }
 
@@ -402,7 +401,7 @@ macro_rules! impl_certificate_mock {
             rng: &mut R,
             namespace: &[u8],
             n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme>
+        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
             R: rand::RngCore + rand::CryptoRng,
         {
@@ -422,12 +421,17 @@ macro_rules! impl_certificate_mock {
                 .collect();
 
             let ledger = $crate::certificate::mocks::SharedLedger::default();
-            let schemes = private_keys
+            let schemes = participants_vec
                 .iter()
-                .cloned()
-                .map(|private_key| {
-                    Scheme::signer(namespace, participants.clone(), private_key, ledger.clone())
-                        .expect("scheme signer must be a participant")
+                .enumerate()
+                .map(|(idx, _)| {
+                    Scheme::signer(
+                        namespace,
+                        participants.clone(),
+                        commonware_utils::Participant::new(idx as u32),
+                        ledger.clone(),
+                    )
+                    .expect("scheme signer must be a participant")
                 })
                 .collect();
             let verifier = Scheme::verifier(namespace, participants, ledger);
@@ -442,22 +446,22 @@ macro_rules! impl_certificate_mock {
 
         /// Ledger-backed mock signing scheme wrapper.
         #[derive(Clone, Debug)]
-        pub struct Scheme {
-            generic: $crate::certificate::mocks::Generic<$namespace>,
+        pub struct Scheme<P: $crate::PublicKey> {
+            generic: $crate::certificate::mocks::Generic<P, $namespace>,
         }
 
-        impl Scheme {
+        impl<P: $crate::PublicKey> Scheme<P> {
             fn signer(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
-                private_key: $crate::ed25519::PrivateKey,
+                participants: commonware_utils::ordered::Set<P>,
+                me: commonware_utils::Participant,
                 ledger: $crate::certificate::mocks::SharedLedger,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::certificate::mocks::Generic::signer(
                         namespace,
                         participants,
-                        private_key,
+                        me,
                         ledger,
                     )?,
                 })
@@ -465,7 +469,7 @@ macro_rules! impl_certificate_mock {
 
             fn verifier(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                participants: commonware_utils::ordered::Set<P>,
                 ledger: $crate::certificate::mocks::SharedLedger,
             ) -> Self {
                 Self {
@@ -478,9 +482,9 @@ macro_rules! impl_certificate_mock {
             }
         }
 
-        impl $crate::certificate::Scheme for Scheme {
+        impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
             type Subject<'a, D: $crate::Digest> = $subject;
-            type PublicKey = $crate::ed25519::PublicKey;
+            type PublicKey = P;
             type Signature = commonware_utils::sequence::U64;
             type Certificate = $crate::certificate::mocks::Certificate;
 
@@ -574,11 +578,11 @@ macro_rules! impl_certificate_mock {
             }
 
             fn is_attributable() -> bool {
-                $crate::certificate::mocks::Generic::<$namespace>::is_attributable()
+                $crate::certificate::mocks::Generic::<P, $namespace>::is_attributable()
             }
 
             fn is_batchable() -> bool {
-                $crate::certificate::mocks::Generic::<$namespace>::is_batchable()
+                $crate::certificate::mocks::Generic::<P, $namespace>::is_batchable()
             }
 
             fn certificate_codec_config(
@@ -589,7 +593,7 @@ macro_rules! impl_certificate_mock {
 
             fn certificate_codec_config_unbounded(
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::certificate::mocks::Generic::<$namespace>::certificate_codec_config_unbounded()
+                $crate::certificate::mocks::Generic::<P, $namespace>::certificate_codec_config_unbounded()
             }
         }
     };
