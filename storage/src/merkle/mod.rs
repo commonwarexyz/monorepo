@@ -7,6 +7,7 @@
 
 pub mod hasher;
 pub mod location;
+pub mod mmr;
 pub mod position;
 pub mod proof;
 

@@ -15,7 +15,7 @@ commonware_macros::stability_scope!(ALPHA {
 
     pub mod merkle;
     pub mod mmb;
-    pub mod mmr;
+    pub use merkle::mmr;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;

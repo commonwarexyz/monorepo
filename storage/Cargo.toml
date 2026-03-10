@@ -122,7 +122,7 @@ path = "src/mmb/benches/bench.rs"
 [[bench]]
 name="mmr"
 harness = false
-path = "src/mmr/benches/bench.rs"
+path = "src/merkle/mmr/benches/bench.rs"
 
 [[bench]]
 name="ordinal"
