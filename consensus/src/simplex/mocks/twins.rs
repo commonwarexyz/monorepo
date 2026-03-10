@@ -246,6 +246,10 @@ pub struct Case {
 /// with a concrete compromised-node assignment.
 pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
+    assert!(
+        framework.participants <= u64::BITS as usize,
+        "participants must fit in u64 masks"
+    );
     assert!(framework.faults > 0, "faults must be > 0");
     assert!(
         framework.faults < framework.participants,
@@ -997,6 +1001,23 @@ mod tests {
         let cases = cases(7, framework);
         let concrete: HashSet<_> = cases.iter().map(|case| case.scenario.clone()).collect();
         assert_eq!(concrete.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "participants must fit in u64 masks")]
+    fn cases_reject_frameworks_that_exceed_mask_width() {
+        let _ = cases(
+            0,
+            Framework {
+                participants: (u64::BITS as usize) + 1,
+                faults: 1,
+                rounds: 1,
+                max_partitions: 2,
+                max_scenarios: 1,
+                max_compromised_sets: 1,
+                relabel: false,
+            },
+        );
     }
 
     #[test]
