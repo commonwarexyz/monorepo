@@ -87,10 +87,10 @@ impl<D: Digest> Chunk<D> {
             .ok()?;
 
         Some(CheckedChunk::new(
+            *root,
             self.shard.clone(),
             self.index,
             shard_digest,
-            *root,
         ))
     }
 }
@@ -102,19 +102,19 @@ impl<D: Digest> Chunk<D> {
 /// time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedChunk<D: Digest> {
+    root: D,
     shard: Bytes,
     index: u16,
     digest: D,
-    root: D,
 }
 
 impl<D: Digest> CheckedChunk<D> {
-    const fn new(shard: Bytes, index: u16, digest: D, root: D) -> Self {
+    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
         Self {
+            root,
             shard,
             index,
             digest,
-            root,
         }
     }
 }
@@ -381,9 +381,6 @@ fn decode<H: Hasher, S: Strategy>(
     if chunks.len() < k {
         return Err(Error::NotEnoughChunks);
     }
-    if !chunks.iter().all(|c| &c.root == root) {
-        return Err(Error::CommitmentMismatch);
-    }
 
     // Process checked chunks
     let shard_len = chunks[0].shard.len();
@@ -391,6 +388,9 @@ fn decode<H: Hasher, S: Strategy>(
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     for chunk in chunks {
+        if &chunk.root != root {
+            return Err(Error::CommitmentMismatch);
+        }
         // Check for duplicate index
         let index = chunk.index;
         if index >= total {
@@ -581,11 +581,9 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
-
     type Shard = Chunk<H::Digest>;
-    type CheckedShard = CheckedChunk<H::Digest>;
     type CheckingData = ();
-
+    type CheckedShard = CheckedChunk<H::Digest>;
     type Error = Error;
 
     fn encode(
@@ -653,12 +651,12 @@ mod tests {
     const STRATEGY: Sequential = Sequential;
 
     fn checked(
-        chunk: Chunk<<Sha256 as Hasher>::Digest>,
         root: <Sha256 as Hasher>::Digest,
+        chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
         let digest = Sha256::hash(&shard);
-        CheckedChunk::new(shard, index, digest, root)
+        CheckedChunk::new(root, shard, index, digest)
     }
 
     #[test]
@@ -672,9 +670,9 @@ mod tests {
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
-            checked(chunks[0].clone(), root), // original
-            checked(chunks[4].clone(), root), // recovery
-            checked(chunks[6].clone(), root), // recovery
+            checked(root, chunks[0].clone()), // original
+            checked(root, chunks[4].clone()), // recovery
+            checked(root, chunks[6].clone()), // recovery
         ];
 
         // Try to decode with a mix of original and recovery pieces
@@ -695,7 +693,7 @@ mod tests {
         let pieces: Vec<_> = chunks
             .into_iter()
             .take(2)
-            .map(|c| checked(c, root))
+            .map(|c| checked(root, c))
             .collect();
 
         // Fail to decode
@@ -714,9 +712,9 @@ mod tests {
 
         // Include duplicate index by cloning the first chunk
         let pieces = vec![
-            checked(chunks[0].clone(), root),
-            checked(chunks[0].clone(), root),
-            checked(chunks[1].clone(), root),
+            checked(root, chunks[0].clone()),
+            checked(root, chunks[0].clone()),
+            checked(root, chunks[1].clone()),
         ];
 
         // Fail to decode
@@ -770,7 +768,7 @@ mod tests {
         let minimal = chunks
             .into_iter()
             .take(min as usize)
-            .map(|c| checked(c, root))
+            .map(|c| checked(root, c))
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
@@ -789,7 +787,7 @@ mod tests {
         let minimal = chunks
             .into_iter()
             .take(min as usize)
-            .map(|c| checked(c, root))
+            .map(|c| checked(root, c))
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
@@ -823,7 +821,7 @@ mod tests {
         let minimal = chunks
             .into_iter()
             .take(min as usize)
-            .map(|c| checked(c, _correct_root))
+            .map(|c| checked(_correct_root, c))
             .collect::<Vec<_>>();
 
         // Attempt to decode with malicious root - rejected because checked
@@ -860,7 +858,7 @@ mod tests {
 
         // Encode data
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
-        let mut pieces: Vec<_> = chunks.into_iter().map(|c| checked(c, root)).collect();
+        let mut pieces: Vec<_> = chunks.into_iter().map(|c| checked(root, c)).collect();
 
         // Tamper with one of the checked chunks by modifying the shard data.
         if !pieces[1].shard.is_empty() {
@@ -927,7 +925,7 @@ mod tests {
         }
         let pieces: Vec<_> = pieces
             .into_iter()
-            .map(|c| checked(c, malicious_root))
+            .map(|c| checked(malicious_root, c))
             .collect();
 
         // Fail to decode
@@ -977,8 +975,8 @@ mod tests {
         for (i, shard) in shards.iter().take(k).enumerate() {
             let proof = tree.proof(i as u32).unwrap();
             pieces.push(checked(
-                Chunk::new(shard.clone().into(), i as u16, proof),
                 non_canonical_root,
+                Chunk::new(shard.clone().into(), i as u16, proof),
             ));
         }
 
@@ -996,12 +994,12 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
-        let mut invalid = checked(chunks[1].clone(), root);
+        let mut invalid = checked(root, chunks[1].clone());
         invalid.index = 8;
         let pieces: Vec<_> = vec![
-            checked(chunks[0].clone(), root), // original
+            checked(root, chunks[0].clone()), // original
             invalid,                          // recovery with invalid index
-            checked(chunks[6].clone(), root), // recovery
+            checked(root, chunks[6].clone()), // recovery
         ];
 
         // Fail to decode
@@ -1022,7 +1020,7 @@ mod tests {
         let minimal = chunks
             .into_iter()
             .take(min as usize)
-            .map(|c| checked(c, root))
+            .map(|c| checked(root, c))
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);

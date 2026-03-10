@@ -580,8 +580,8 @@ impl<H> std::fmt::Debug for Zoda<H> {
 impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
     type Shard = Shard<H::Digest>;
-    type CheckedShard = CheckedShard;
     type CheckingData = CheckingData<H::Digest>;
+    type CheckedShard = CheckedShard;
     type Error = Error;
 
     fn encode(

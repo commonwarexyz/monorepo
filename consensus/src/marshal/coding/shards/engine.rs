@@ -682,6 +682,8 @@ where
             return false;
         };
 
+        // Ingest buffered shards into the active reconstruction state. Batch verification
+        // will be triggered if there are enough shards to meet the quorum threshold.
         let mut progressed = false;
         let ctx = InsertCtx::new(scheme.as_ref(), &self.strategy);
         for (peer, shard) in buffered {
@@ -1211,10 +1213,12 @@ where
             }
         }
 
+        // After validation, some may have failed; recheck threshold.
         if self.common.checked_shards.len() < minimum {
             return None;
         }
 
+        // Transition to Ready.
         let round = self.common.round;
         let leader = self.common.leader.clone();
         let common = std::mem::replace(

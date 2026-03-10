@@ -67,8 +67,8 @@ pub struct CheckedShard<D: Digest> {
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
     type Shard = Shard;
-    type CheckedShard = CheckedShard<H::Digest>;
     type CheckingData = ();
+    type CheckedShard = CheckedShard<H::Digest>;
     type Error = Error;
 
     fn encode(

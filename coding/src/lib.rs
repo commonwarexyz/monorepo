@@ -165,16 +165,16 @@ commonware_macros::stability_scope!(ALPHA {
         type Commitment: Digest;
         /// A shard of data, to be received by a participant.
         type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-        /// A shard that has been checked for inclusion in the commitment.
-        ///
-        /// This allows excluding invalid shards from the function signature of [Self::decode].
-        type CheckedShard: Clone + Send + Sync;
         /// Precomputed state derived from a commitment that can be reused across
         /// multiple calls to [Self::check] and [Self::decode].
         ///
         /// For schemes where checking is expensive, passing previously
         /// computed checking data avoids redundant work.
         type CheckingData: Clone + Send + Sync;
+        /// A shard that has been checked for inclusion in the commitment.
+        ///
+        /// This allows excluding invalid shards from the function signature of [Self::decode].
+        type CheckedShard: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
