@@ -13,12 +13,14 @@
 //!
 //! # Pool Lifecycle
 //!
-//! The pool uses reference counting internally. Buffers hold a weak reference
-//! to the pool, so:
-//! - If a buffer is returned after the pool is dropped, it is deallocated
-//!   directly instead of being returned to the freelist.
-//! - The pool can be dropped while buffers are still in use; those buffers
-//!   remain valid and will be deallocated when they are dropped.
+//! Each tracked buffer holds a strong reference to the specific size class it
+//! came from. This means:
+//! - Buffers can outlive the public [`BufferPool`] handle and still return to
+//!   their original size class.
+//! - A size class is reclaimed only after both the pool and all outstanding
+//!   tracked buffers for that class have been dropped.
+//! - Untracked fallback allocations store no class reference and deallocate
+//!   directly when dropped.
 //!
 //! # Size Classes
 //!
@@ -55,14 +57,14 @@ use prometheus_client::{
 };
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
-    cell::RefCell,
+    cell::UnsafeCell,
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
     ptr::NonNull,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
+        Arc,
     },
 };
 use thread_local::ThreadLocal;
@@ -442,8 +444,15 @@ struct SizeClass {
     /// Maximum number of buffers retained in the current thread's local bin.
     local_capacity: usize,
     /// Per-thread local free buffers for this size class.
-    local: ThreadLocal<RefCell<Vec<AlignedBuffer>>>,
+    local: ThreadLocal<UnsafeCell<Vec<AlignedBuffer>>>,
 }
+
+// SAFETY: shared state in `SizeClass` is synchronized through atomics and the
+// global queue. The `UnsafeCell<Vec<_>>` bins live inside `ThreadLocal`, so
+// each thread only mutates its own bin.
+unsafe impl Send for SizeClass {}
+// SAFETY: see above. Distinct threads access distinct local bins.
+unsafe impl Sync for SizeClass {}
 
 impl SizeClass {
     fn new(size: usize, alignment: usize, max: usize, prefill: bool) -> Self {
@@ -473,9 +482,15 @@ impl SizeClass {
         (max / (2 * effective_threads)).clamp(1, 8)
     }
 
-    fn local_bin(&self) -> &RefCell<Vec<AlignedBuffer>> {
-        self.local
-            .get_or(|| RefCell::new(Vec::with_capacity(self.local_capacity)))
+    #[inline]
+    fn local_bin_mut(&self) -> &mut Vec<AlignedBuffer> {
+        let bin = self
+            .local
+            .get_or(|| UnsafeCell::new(Vec::with_capacity(self.local_capacity)));
+
+        // SAFETY: `ThreadLocal` returns the current thread's bin. No other
+        // thread aliases this `Vec`.
+        unsafe { &mut *bin.get() }
     }
 
     fn try_reserve(&self) -> bool {
@@ -487,7 +502,7 @@ impl SizeClass {
     }
 
     fn pop(&self) -> Option<AlignedBuffer> {
-        let mut bin = self.local_bin().borrow_mut();
+        let bin = self.local_bin_mut();
 
         // Same-thread reuse should stay entirely local on the steady path.
         if let Some(buffer) = bin.pop() {
@@ -507,7 +522,7 @@ impl SizeClass {
     }
 
     fn push(&self, buffer: AlignedBuffer) {
-        let mut bin = self.local_bin().borrow_mut();
+        let bin = self.local_bin_mut();
         if bin.len() < self.local_capacity {
             bin.push(buffer);
             return;
@@ -532,12 +547,13 @@ impl SizeClass {
 struct Allocation {
     buffer: AlignedBuffer,
     is_new: bool,
+    class: Arc<SizeClass>,
 }
 
 /// Internal state of the buffer pool.
 pub(crate) struct BufferPoolInner {
     config: BufferPoolConfig,
-    classes: Vec<SizeClass>,
+    classes: Vec<Arc<SizeClass>>,
     metrics: PoolMetrics,
 }
 
@@ -558,6 +574,7 @@ impl BufferPoolInner {
             return Some(Allocation {
                 buffer,
                 is_new: false,
+                class: class.clone(),
             });
         }
 
@@ -578,20 +595,10 @@ impl BufferPoolInner {
         Some(Allocation {
             buffer,
             is_new: true,
+            class: class.clone(),
         })
     }
 
-    /// Return a buffer to the pool.
-    fn return_buffer(&self, buffer: AlignedBuffer) {
-        // Find the class for this buffer size
-        if let Some(class_index) = self.config.class_index(buffer.capacity()) {
-            // Return to the local cache, spilling to global if needed.
-            let class = &self.classes[class_index];
-            class.push(buffer);
-        }
-        // Buffers that do not map to any size class are never tracked and are
-        // dropped directly instead of being returned to the pool.
-    }
 }
 
 /// A pool of reusable, aligned buffers.
@@ -634,12 +641,12 @@ impl BufferPool {
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
-            let class = SizeClass::new(
+            let class = Arc::new(SizeClass::new(
                 size,
                 config.alignment.get(),
                 config.max_per_class.get(),
                 config.prefill,
-            );
+            ));
             classes.push(class);
         }
 
@@ -696,10 +703,9 @@ impl BufferPool {
         let buffer = self
             .inner
             .try_alloc(class_index, false)
-            .map(|allocation| allocation.buffer)
+            .map(|allocation| PooledBufMut::new(allocation.buffer, Some(allocation.class)))
             .ok_or(PoolError::Exhausted)?;
-        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
-        Ok(IoBufMut::from_pooled(pooled))
+        Ok(IoBufMut::from_pooled(buffer))
     }
 
     /// Allocates a buffer with capacity for at least `capacity` bytes.
@@ -724,8 +730,7 @@ impl BufferPool {
         self.try_alloc(capacity).unwrap_or_else(|_| {
             let size = capacity.max(self.inner.config.min_size.get());
             let buffer = AlignedBuffer::new(size, self.inner.config.alignment.get());
-            // Using Weak::new() means the buffer won't be returned to the pool on drop.
-            IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()))
+            IoBufMut::from_pooled(PooledBufMut::new(buffer, None))
         })
     }
 
@@ -769,10 +774,8 @@ impl BufferPool {
             .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
 
-        let mut buf = IoBufMut::from_pooled(PooledBufMut::new(
-            allocation.buffer,
-            Arc::downgrade(&self.inner),
-        ));
+        let mut buf =
+            IoBufMut::from_pooled(PooledBufMut::new(allocation.buffer, Some(allocation.class)));
         if allocation.is_new {
             // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
             unsafe { buf.set_len(len) };
@@ -806,7 +809,7 @@ impl BufferPool {
             // Pool exhausted or oversized: allocate untracked zeroed memory.
             let size = len.max(self.inner.config.min_size.get());
             let buffer = AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get());
-            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()));
+            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, None));
             // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
             unsafe { buf.set_len(len) };
             buf
@@ -824,14 +827,14 @@ impl BufferPool {
 /// On drop, returns the aligned buffer to the pool if tracked.
 struct PooledBufInner {
     buffer: ManuallyDrop<AlignedBuffer>,
-    pool: Weak<BufferPoolInner>,
+    class: Option<Arc<SizeClass>>,
 }
 
 impl PooledBufInner {
-    const fn new(buffer: AlignedBuffer, pool: Weak<BufferPoolInner>) -> Self {
+    const fn new(buffer: AlignedBuffer, class: Option<Arc<SizeClass>>) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),
-            pool,
+            class,
         }
     }
 
@@ -845,8 +848,8 @@ impl Drop for PooledBufInner {
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        if let Some(pool) = self.pool.upgrade() {
-            pool.return_buffer(buffer);
+        if let Some(class) = &self.class {
+            class.push(buffer);
         }
         // else: buffer is dropped here, which deallocates it
     }
@@ -904,7 +907,7 @@ impl PooledBuf {
     /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
     #[inline]
     pub fn is_tracked(&self) -> bool {
-        self.inner.pool.strong_count() > 0
+        self.inner.class.is_some()
     }
 
     /// Returns a pointer to the first readable byte.
@@ -1117,9 +1120,9 @@ impl std::fmt::Debug for PooledBufMut {
 }
 
 impl PooledBufMut {
-    const fn new(buffer: AlignedBuffer, pool: Weak<BufferPoolInner>) -> Self {
+    const fn new(buffer: AlignedBuffer, class: Option<Arc<SizeClass>>) -> Self {
         Self {
-            inner: ManuallyDrop::new(PooledBufInner::new(buffer, pool)),
+            inner: ManuallyDrop::new(PooledBufInner::new(buffer, class)),
             cursor: 0,
             len: 0,
         }
@@ -1133,7 +1136,7 @@ impl PooledBufMut {
     /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
     #[inline]
     pub fn is_tracked(&self) -> bool {
-        self.inner.pool.strong_count() > 0
+        self.inner.class.is_some()
     }
 
     /// Returns the number of readable bytes remaining in the buffer.
@@ -1366,7 +1369,10 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        class.local.get().map_or(0, |bin| bin.borrow().len())
+        class.local.get().map_or(0, |bin| {
+            // SAFETY: tests only inspect the current thread's local bin.
+            unsafe { (&*bin.get()).len() }
+        })
     }
 
     #[test]
@@ -1779,32 +1785,20 @@ mod tests {
     }
 
     #[test]
-    fn test_return_buffer_ignores_unmatched_class() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
-
-        // Size does not map to any configured class (`max_size == page`).
-        pool.inner
-            .return_buffer(AlignedBuffer::new(page * 2, page_size()));
-        assert_eq!(get_allocated(&pool, page), 0);
-    }
-
-    #[test]
     fn test_pooled_debug_and_empty_into_bytes_paths() {
         let page = page_size();
 
         let pooled_mut_debug = {
-            let pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+            let pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
             format!("{pooled_mut:?}")
         };
         assert!(pooled_mut_debug.contains("PooledBufMut"));
         assert!(pooled_mut_debug.contains("cursor"));
 
-        let empty_from_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        let empty_from_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
         assert!(empty_from_mut.into_bytes().is_empty());
 
-        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new()).into_pooled();
+        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), None).into_pooled();
         let pooled_debug = format!("{pooled:?}");
         assert!(pooled_debug.contains("PooledBuf"));
         assert!(pooled_debug.contains("capacity"));
@@ -1815,7 +1809,7 @@ mod tests {
     #[should_panic(expected = "range start overflow")]
     fn test_pooled_slice_excluded_start_overflow() {
         let page = page_size();
-        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new()).into_pooled();
+        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), None).into_pooled();
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
     }
 
@@ -2143,7 +2137,7 @@ mod tests {
     #[test]
     fn test_pool_dropped_before_buffer() {
         // What happens if the pool is dropped while buffers are still in use?
-        // The Weak reference should fail to upgrade, and the buffer should just be deallocated.
+        // The size class remains alive until the last tracked buffer is dropped.
 
         let page = page_size();
         let mut registry = test_registry();
@@ -2159,7 +2153,7 @@ mod tests {
         // Buffer should still be usable
         assert_eq!(iobuf.len(), 100);
 
-        // Dropping the buffer should not panic (Weak upgrade fails, buffer is deallocated)
+        // Dropping the buffer should not panic and should return to the retained size class.
         drop(iobuf);
         // No assertion here - we just want to make sure it doesn't panic
     }
@@ -2236,7 +2230,7 @@ mod tests {
     #[test]
     fn test_bytes_parity_iobuf_split_to() {
         let page = page_size();
-        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
         pooled_mut.put_slice(b"abcdefgh");
         let mut pooled = pooled_mut.into_pooled();
         let mut bytes = Bytes::from_static(b"abcdefgh");
@@ -2262,7 +2256,7 @@ mod tests {
     #[should_panic(expected = "split_to out of bounds")]
     fn test_iobuf_split_to_out_of_bounds() {
         let page = page_size();
-        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), None);
         pooled_mut.put_slice(b"abc");
         let mut pooled = pooled_mut.into_pooled();
         let _ = pooled.split_to(4);
