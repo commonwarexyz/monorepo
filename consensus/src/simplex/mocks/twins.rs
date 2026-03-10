@@ -196,6 +196,11 @@ where
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
         }
+
+        // After the scripted attack prefix, intentionally resume the caller's
+        // fallback elector rather than forcing an honest-only suffix. Twins
+        // campaigns should not prevent the protocol from timing out in
+        // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
 }

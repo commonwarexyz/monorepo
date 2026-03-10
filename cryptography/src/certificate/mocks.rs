@@ -57,9 +57,15 @@ struct StoredCertificate {
 }
 
 #[derive(Debug, Default)]
+struct StoredSignatures {
+    by: HashMap<u64, SignedSubject>,
+    by_subject: HashMap<SignedSubject, u64>,
+}
+
+#[derive(Debug, Default)]
 struct Inner {
     next_signature: u64,
-    signatures: HashMap<Participant, HashMap<u64, SignedSubject>>,
+    signatures: HashMap<Participant, StoredSignatures>,
     next_certificate: u64,
     certificates: HashMap<u64, StoredCertificate>,
 }
@@ -213,6 +219,9 @@ impl<
     }
 
     /// Signs a subject and returns a cheap synthetic signature ID.
+    ///
+    /// Re-signing the same subject from the same signer reuses the existing
+    /// synthetic signature so the mock behaves like deterministic schemes.
     pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = U64>,
@@ -223,17 +232,23 @@ impl<
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
-        let signature_id = inner.next_signature;
-        inner.next_signature = inner.next_signature.wrapping_add(1);
-        inner
+        let signature = inner
             .signatures
-            .entry(signer)
-            .or_default()
-            .insert(signature_id, signed_subject);
+            .get(&signer)
+            .and_then(|entries| entries.by_subject.get(&signed_subject))
+            .copied()
+            .unwrap_or_else(|| {
+                let signature = inner.next_signature;
+                inner.next_signature = inner.next_signature.wrapping_add(1);
+                let entries = inner.signatures.entry(signer).or_default();
+                entries.by.insert(signature, signed_subject.clone());
+                entries.by_subject.insert(signed_subject, signature);
+                signature
+            });
 
         Some(Attestation {
             signer,
-            signature: U64::new(signature_id).into(),
+            signature: U64::new(signature).into(),
         })
     }
 
@@ -256,12 +271,12 @@ impl<
             return Self::invalid_bool("attestation signature missing");
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
-        let signature_id = u64::from(signature);
+        let signature = u64::from(signature);
         let inner = self.shared.0.lock();
         inner
             .signatures
             .get(&attestation.signer)
-            .and_then(|entries| entries.get(&signature_id))
+            .and_then(|entries| entries.by.get(&signature))
             .is_some_and(|stored| stored == &expected_subject)
             || Self::invalid_bool("attestation not found or subject mismatched")
     }
@@ -315,12 +330,13 @@ impl<
                 .signature
                 .get()
                 .or_else(|| Self::invalid_none("attestation signature missing"))?;
-            let signature_id = u64::from(signature);
+            let signature = u64::from(signature);
             let entry = inner
                 .signatures
                 .get(&attestation.signer)
                 .or_else(|| Self::invalid_none("attestation signer not found"))?
-                .get(&signature_id)
+                .by
+                .get(&signature)
                 .or_else(|| Self::invalid_none("attestation signature not found"))?
                 .clone();
 
@@ -763,6 +779,26 @@ mod tests {
             &attestation,
             &Sequential,
         ));
+    }
+
+    #[test]
+    fn repeated_signing_reuses_same_mock_signature() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+
+        let first = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let second = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let other = fixture.schemes[0]
+            .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })
+            .expect("signer must produce an attestation");
+
+        assert_eq!(first, second);
+        assert_ne!(first, other);
     }
 
     #[test]
