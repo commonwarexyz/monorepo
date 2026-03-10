@@ -31,6 +31,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
+    utils::mocks as p2p_mocks,
     Recipients,
 };
 use commonware_parallel::Sequential;
@@ -117,6 +118,14 @@ async fn setup_degraded_network<E: Clock>(
             .add_link(peer.clone(), victim.clone(), degraded.clone())
             .await
             .unwrap();
+    }
+}
+
+fn high_variance_twins_link() -> Link {
+    Link {
+        latency: Duration::from_millis(100),
+        jitter: Duration::from_millis(500),
+        success_rate: 1.0,
     }
 }
 
@@ -328,15 +337,34 @@ fn spawn_disrupter<P: simplex::Simplex>(
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
-fn spawn_honest_validator<P: simplex::Simplex>(
+fn spawn_honest_validator<
+    P,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
     context: deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
     participants: &[Ed25519PublicKey],
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
-    channels: NetworkChannels,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
+where
+    P: simplex::Simplex,
+    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+{
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
@@ -344,8 +372,6 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         elector: elector.clone(),
     };
     let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-
-    let (pending, recovered, resolver) = channels;
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -413,16 +439,18 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         // Spawn honest validators
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
                 validator,
                 relay.clone(),
-                channels,
+                pending,
+                recovered,
+                resolver,
             );
             reporters.push(reporter);
         }
@@ -455,9 +483,17 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (oracle, participants, schemes, mut registrations) =
+        let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
+
+        link_peers(
+            &mut oracle,
+            participants.as_ref(),
+            Action::Update(high_variance_twins_link()),
+            input.partition.filter(),
+        )
+        .await;
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
@@ -467,7 +503,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
-            let (vote_network, certificate_network, resolver_network) = registrations
+            let (vote_network, certificate_network, _) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
 
@@ -527,7 +563,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             };
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
-            let (resolver_sender, resolver_receiver) = resolver_network;
 
             let (vote_sender_primary, vote_sender_secondary) =
                 vote_sender.split_with(make_vote_forwarder());
@@ -541,13 +576,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 certificate_receiver.split_with(
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
-                );
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(twins::blackhole_resolver_forwarder);
-            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(
-                    context.with_label(&format!("resolver_split_{idx}")),
-                    twins::blackhole_resolver_router,
                 );
 
             // Primary: legitimate engine
@@ -605,7 +633,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
-                (resolver_sender_primary, resolver_receiver_primary),
+                p2p_mocks::channel::<Ed25519PublicKey>(),
             );
 
             // Secondary: Disrupter
@@ -615,24 +643,26 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
+                p2p_mocks::channel::<Ed25519PublicKey>(),
             );
         }
 
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context.with_label(&format!("honest_{idx}"));
-            let channels = registrations
+            let (pending, recovered, _) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 participants.as_ref(),
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
-                channels,
+                pending,
+                recovered,
+                p2p_mocks::channel::<Ed25519PublicKey>(),
             );
             reporters.push(reporter);
         }

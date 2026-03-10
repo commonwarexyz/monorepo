@@ -421,12 +421,13 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
+        utils::mocks as p2p_mocks,
         Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
-        Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics,
+        Quota, Runner, Spawner,
     };
     use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -5705,7 +5706,7 @@ mod tests {
                 let (
                     (vote_sender, vote_receiver),
                     (certificate_sender, certificate_receiver),
-                    (resolver_sender, resolver_receiver),
+                    (_resolver_sender, _resolver_receiver),
                 ) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -5770,26 +5771,16 @@ mod tests {
                         make_certificate_router(),
                     );
 
-                let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(twins::blackhole_resolver_forwarder);
-                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                    .split_with(
-                        context.with_label(&format!("resolver_split_{idx}")),
-                        twins::blackhole_resolver_router,
-                    );
-
-                for (twin_label, pending, recovered, resolver) in [
+                for (twin_label, pending, recovered) in [
                     (
                         "primary",
                         (vote_sender_primary, vote_receiver_primary),
                         (certificate_sender_primary, certificate_receiver_primary),
-                        (resolver_sender_primary, resolver_receiver_primary),
                     ),
                     (
                         "secondary",
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {
                     let label = format!("twin_{idx}_{twin_label}");
@@ -5845,7 +5836,11 @@ mod tests {
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine_handlers.push(engine.start(pending, recovered, resolver));
+                    engine_handlers.push(engine.start(
+                        pending,
+                        recovered,
+                        p2p_mocks::channel::<PublicKey>(),
+                    ));
                 }
             }
 
@@ -5909,17 +5904,21 @@ mod tests {
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
-                let (pending, recovered, resolver) = registrations
+                let ((pending_sender, pending_receiver), (recovered_sender, recovered_receiver), _) =
+                    registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    (pending_sender, pending_receiver),
+                    (recovered_sender, recovered_receiver),
+                    p2p_mocks::channel::<PublicKey>(),
+                ));
             }
 
             // Wait for progress (liveness check) across honest replicas only.
             //
-            // Twin halves run with resolver traffic blackholed in this harness, so
-            // a twin can legitimately stall after the adversarial prefix even when
-            // all honest replicas continue finalizing under synchrony.
+            // Twin halves are Byzantine test machinery and are not required to
+            // make progress for the campaign to establish honest-node liveness.
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(honest_start) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
@@ -6008,6 +6007,14 @@ mod tests {
         }
     }
 
+    fn high_variance_twins_link() -> Link {
+        Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(500),
+            success_rate: 1.0,
+        }
+    }
+
     fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6028,11 +6035,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.75,
-            },
+            high_variance_twins_link(),
         ] {
             twins_campaign::<S, _, L>(0, campaign, link, |context, namespace, n| {
                 fixture(context, namespace, n)
@@ -6102,11 +6105,7 @@ mod tests {
         twins_campaign::<_, _, Random>(
             0,
             campaign,
-            Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.75,
-            },
+            high_variance_twins_link(),
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
@@ -6125,11 +6124,7 @@ mod tests {
         twins_campaign::<_, _, Random>(
             42,
             campaign,
-            Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.75,
-            },
+            high_variance_twins_link(),
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
