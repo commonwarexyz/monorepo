@@ -348,9 +348,10 @@ impl<
                 signed_subject = Some(entry);
             }
 
-            if unique_signers.insert(attestation.signer) {
-                signers.push(attestation.signer);
+            if !unique_signers.insert(attestation.signer) {
+                return Self::invalid_none("duplicate signer");
             }
+            signers.push(attestation.signer);
         }
 
         if signers.len() < self.participants.quorum::<M>() as usize {
@@ -868,6 +869,28 @@ mod tests {
 
         assert!(Certificate::decode_cfg(encoded.clone(), &4).is_ok());
         assert!(Certificate::decode_cfg(encoded, &2).is_err());
+    }
+
+    #[test]
+    fn certificate_assembly_rejects_duplicate_signers() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject {
+            message: b"duplicate-signer",
+        };
+        let attestation = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+
+        let certificate = fixture.verifier.assemble::<_, N3f1>(
+            [attestation.clone(), attestation, fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap()],
+            &Sequential,
+        );
+
+        assert!(
+            certificate.is_none(),
+            "duplicate signers should be rejected by mock assembly"
+        );
     }
 
     #[test]
