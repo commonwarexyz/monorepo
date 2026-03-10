@@ -5671,9 +5671,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new()
-            .with_seed(case.seed)
-            .with_timeout(Some(Duration::from_secs(900)));
+        let cfg = deterministic::Config::new().with_seed(case.seed);
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
