@@ -626,7 +626,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     fn decode(
         config: &Config,
         commitment: &Self::Commitment,
-        _checking_data: &Self::CheckingData,
+        _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {

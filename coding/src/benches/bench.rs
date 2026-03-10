@@ -161,7 +161,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            &checking_data,
+                                            checking_data,
                                             &checked_shards,
                                             &strategy,
                                         )
@@ -170,7 +170,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            &checking_data,
+                                            checking_data,
                                             &checked_shards,
                                             &Sequential,
                                         )

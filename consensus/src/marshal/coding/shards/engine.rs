@@ -543,7 +543,7 @@ where
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
         }
-        let Some(state) = self.state.get(&commitment) else {
+        let Some(state) = self.state.get_mut(&commitment) else {
             return Ok(None);
         };
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
@@ -553,7 +553,7 @@ where
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
         let checking_data = state
-            .checking_data()
+            .take_checking_data()
             .expect("checking data must be cached before decode");
         let blob = C::decode(
             &commitment.config(),
@@ -1311,8 +1311,8 @@ where
     }
 
     /// Returns the cached checking data, if available.
-    const fn checking_data(&self) -> Option<&C::CheckingData> {
-        self.common().checking_data.as_ref()
+    const fn take_checking_data(&mut self) -> Option<C::CheckingData> {
+        self.common_mut().checking_data.take()
     }
 
     /// Takes the pending action for this commitment's validated shard.

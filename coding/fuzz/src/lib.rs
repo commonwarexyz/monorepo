@@ -93,7 +93,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let decoded = S::decode(
         &config,
         &commitment,
-        &checking_data,
+        checking_data,
         &checked_shards,
         &STRATEGY,
     )

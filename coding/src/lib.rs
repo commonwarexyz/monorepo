@@ -128,13 +128,13 @@ commonware_macros::stability_scope!(ALPHA {
     /// // Decode from any minimum_shards-sized subset.
     /// let checking_data = checking_data.unwrap();
     /// let data2 = RS::decode(
-    ///     &config, &commitment, &checking_data, &checked_shards[..2], &STRATEGY,
+    ///     &config, &commitment, checking_data, &checked_shards[..2], &STRATEGY,
     /// ).unwrap();
     /// assert_eq!(&data[..], &data2[..]);
     ///
     /// // Decoding works with different shards, with a guarantee to get the same result.
     /// let data3 = RS::decode(
-    ///     &config, &commitment, &checking_data, &checked_shards[1..], &STRATEGY,
+    ///     &config, &commitment, checking_data, &checked_shards[1..], &STRATEGY,
     /// ).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
@@ -226,7 +226,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn decode(
             config: &Config,
             commitment: &Self::Commitment,
-            checking_data: &Self::CheckingData,
+            checking_data: Self::CheckingData,
             shards: &[Self::CheckedShard],
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
@@ -290,7 +290,7 @@ mod test {
         let decoded = S::decode(
             config,
             &commitment,
-            &checking_data,
+            checking_data,
             &checked_shards,
             &Sequential,
         )
@@ -337,7 +337,7 @@ mod test {
         let result = S::decode(
             config,
             &commitment_a,
-            &cd_a,
+            cd_a,
             &[checked_a, checked_b],
             &Sequential,
         );

@@ -689,7 +689,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn decode(
         _config: &Config,
         commitment: &Self::Commitment,
-        checking_data: &Self::CheckingData,
+        checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
@@ -788,7 +788,7 @@ mod tests {
             Zoda::<Sha256>::check(&config, &commitment, 0, &shards[0], None).unwrap();
         let duplicate = checked_shard0.clone();
         let shards = vec![checked_shard0, duplicate];
-        let result = Zoda::<Sha256>::decode(&config, &commitment, &cd, &shards, &STRATEGY);
+        let result = Zoda::<Sha256>::decode(&config, &commitment, cd, &shards, &STRATEGY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);

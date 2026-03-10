@@ -107,7 +107,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     fn decode(
         _config: &Config,
         commitment: &Self::Commitment,
-        _checking_data: &Self::CheckingData,
+        _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
