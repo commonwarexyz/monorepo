@@ -392,7 +392,10 @@ mod tests {
     use crate::{
         simplex::{
             elector::{Config as Elector, Random, RoundRobin},
-            mocks::twins::{self, Elector as TwinsElector},
+            mocks::{
+                scheme as scheme_mocks,
+                twins::{self, Elector as TwinsElector},
+            },
             scheme::{
                 bls12381_multisig,
                 bls12381_threshold::{
@@ -6093,14 +6096,14 @@ mod tests {
     fn test_twins_large() {
         let campaign = TwinsCampaign {
             n: 10,
-            rounds: 4,
+            rounds: 5,
             max_partitions: 3,
-            max_scenarios: 2,
-            max_compromised_sets: 1,
+            max_scenarios: 3,
+            max_compromised_sets: 3,
             required_containers: View::new(100),
             relabel: false,
         };
-        twins_campaign::<_, _, Random>(
+        twins_campaign::<_, _, RoundRobin>(
             0,
             campaign,
             Link {
@@ -6108,7 +6111,7 @@ mod tests {
                 jitter: Duration::from_secs(1),
                 success_rate: 1.0,
             },
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            scheme_mocks::fixture,
         );
     }
 }
