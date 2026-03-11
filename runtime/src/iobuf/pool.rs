@@ -71,7 +71,6 @@ use std::{
         Arc,
     },
 };
-use thread_local::ThreadLocal;
 
 /// Error returned when buffer pool allocation fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +467,13 @@ impl Drop for AlignedBuffer {
 /// and only creates a new tracked buffer when no free buffer is available and
 /// the class still has remaining capacity.
 struct SizeClass {
+    /// Ownership mode for this class.
+    #[cfg(test)]
+    mode: BufferPoolMode,
+    /// Owning pool identifier for the TLS cache registry.
+    pool_id: usize,
+    /// Dense class index within the pool.
+    class_index: usize,
     /// The buffer size for this class.
     size: usize,
     /// Buffer alignment.
@@ -480,19 +486,25 @@ struct SizeClass {
     created: AtomicUsize,
     /// Maximum number of buffers retained in the current thread's local bin.
     local_capacity: usize,
-    /// Per-thread local free buffers for this size class.
-    local: ThreadLocal<UnsafeCell<Vec<AlignedBuffer>>>,
 }
 
 // SAFETY: shared state in `SizeClass` is synchronized through atomics and the
-// global queue. The `UnsafeCell<Vec<_>>` bins live inside `ThreadLocal`, so
-// each thread only mutates its own bin.
+// global queue. Per-thread bins are stored in thread-local registries and only
+// accessed by the current thread.
 unsafe impl Send for SizeClass {}
-// SAFETY: see above. Distinct threads access distinct local bins.
+// SAFETY: see above.
 unsafe impl Sync for SizeClass {}
 
 impl SizeClass {
-    fn new(size: usize, alignment: usize, max: usize, prefill: bool) -> Self {
+    fn new(
+        _mode: BufferPoolMode,
+        pool_id: usize,
+        class_index: usize,
+        size: usize,
+        alignment: usize,
+        max: usize,
+        prefill: bool,
+    ) -> Self {
         let freelist = ArrayQueue::new(max);
         let mut created = 0;
         if prefill {
@@ -502,13 +514,16 @@ impl SizeClass {
             created = max;
         }
         Self {
+            #[cfg(test)]
+            mode: _mode,
+            pool_id,
+            class_index,
             size,
             alignment,
             max,
             global: freelist,
             created: AtomicUsize::new(created),
             local_capacity: Self::local_capacity(max),
-            local: ThreadLocal::new(),
         }
     }
 
@@ -519,16 +534,11 @@ impl SizeClass {
         (max / (2 * effective_threads)).clamp(1, 8)
     }
 
-    #[allow(clippy::mut_from_ref)]
     #[inline]
-    fn local_bin_mut(&self) -> &mut Vec<AlignedBuffer> {
-        let bin = self
-            .local
-            .get_or(|| UnsafeCell::new(Vec::with_capacity(self.local_capacity)));
-
-        // SAFETY: `ThreadLocal` returns the current thread's bin. No other
-        // thread aliases this `Vec`.
-        unsafe { &mut *bin.get() }
+    fn push_global(&self, buffer: AlignedBuffer) {
+        self.global
+            .push(buffer)
+            .unwrap_or_else(|_| unreachable!("tracked buffer should always fit in the global pool"));
     }
 
     fn try_reserve(&self) -> bool {
@@ -538,46 +548,248 @@ impl SizeClass {
             })
             .is_ok()
     }
+}
 
-    fn pop(&self) -> Option<AlignedBuffer> {
-        let bin = self.local_bin_mut();
+struct StrictLocalEntry {
+    buffer: AlignedBuffer,
+    class: Arc<SizeClass>,
+}
 
-        // Same-thread reuse should stay entirely local on the steady path.
-        if let Some(buffer) = bin.pop() {
-            return Some(buffer);
+struct StrictLocalBin {
+    entries: Vec<StrictLocalEntry>,
+    local_capacity: usize,
+}
+
+impl StrictLocalBin {
+    fn new(local_capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(local_capacity),
+            local_capacity,
         }
-
-        // Refill a small batch from the shared freelist on local miss.
-        let target = (self.local_capacity / 2).max(1);
-        let buffer = self.global.pop()?;
-        while bin.len() + 1 < target {
-            let Some(buffer) = self.global.pop() else {
-                break;
-            };
-            bin.push(buffer);
-        }
-        Some(buffer)
     }
 
-    fn push(&self, buffer: AlignedBuffer) {
-        let bin = self.local_bin_mut();
-        if bin.len() < self.local_capacity {
-            bin.push(buffer);
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn pop(&mut self) -> Option<StrictLocalEntry> {
+        self.entries.pop()
+    }
+
+    fn push(&mut self, entry: StrictLocalEntry) {
+        if self.entries.len() < self.local_capacity {
+            self.entries.push(entry);
             return;
         }
 
-        // Spill a small batch back to the global freelist before retrying the local push.
-        let spill = bin.len().min(self.local_capacity / 2).max(1);
+        let spill = self.entries.len().min(self.local_capacity / 2).max(1);
         for _ in 0..spill {
-            let Some(spilled) = bin.pop() else {
+            let Some(spilled) = self.entries.pop() else {
                 break;
             };
-            self.global
-                .push(spilled)
-                .unwrap_or_else(|_| unreachable!("tracked buffer should always spill to global"));
+            spilled.class.push_global(spilled.buffer);
         }
 
+        self.entries.push(entry);
+    }
+}
+
+impl Drop for StrictLocalBin {
+    fn drop(&mut self) {
+        for entry in self.entries.drain(..) {
+            entry.class.push_global(entry.buffer);
+        }
+    }
+}
+
+struct LeakyLocalBin {
+    class: NonNull<SizeClass>,
+    buffers: Vec<AlignedBuffer>,
+    local_capacity: usize,
+}
+
+impl LeakyLocalBin {
+    fn new(class: NonNull<SizeClass>, local_capacity: usize) -> Self {
+        Self {
+            class,
+            buffers: Vec::with_capacity(local_capacity),
+            local_capacity,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
+    fn pop(&mut self) -> Option<AlignedBuffer> {
+        self.buffers.pop()
+    }
+
+    fn push(&mut self, buffer: AlignedBuffer) {
+        if self.buffers.len() < self.local_capacity {
+            self.buffers.push(buffer);
+            return;
+        }
+
+        let spill = self.buffers.len().min(self.local_capacity / 2).max(1);
+        for _ in 0..spill {
+            let Some(spilled) = self.buffers.pop() else {
+                break;
+            };
+            // SAFETY: leaky-mode classes are intentionally leaked.
+            unsafe { self.class.as_ref().push_global(spilled) };
+        }
+
+        self.buffers.push(buffer);
+    }
+}
+
+impl Drop for LeakyLocalBin {
+    fn drop(&mut self) {
+        for buffer in self.buffers.drain(..) {
+            // SAFETY: leaky-mode classes are intentionally leaked.
+            unsafe { self.class.as_ref().push_global(buffer) };
+        }
+    }
+}
+
+thread_local! {
+    static STRICT_LOCAL_POOLS: UnsafeCell<Vec<Option<Vec<Option<StrictLocalBin>>>>> =
+        const { UnsafeCell::new(Vec::new()) };
+    static LEAKY_LOCAL_POOLS: UnsafeCell<Vec<Option<Vec<Option<LeakyLocalBin>>>>> =
+        const { UnsafeCell::new(Vec::new()) };
+}
+
+static NEXT_STRICT_POOL_ID: AtomicUsize = AtomicUsize::new(0);
+static NEXT_LEAKY_POOL_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn strict_local_pop(class: &Arc<SizeClass>) -> Option<StrictLocalEntry> {
+    STRICT_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        let bins = pools.get_mut(class.pool_id)?.as_mut()?;
+        let bin = bins.get_mut(class.class_index)?.as_mut()?;
+        bin.pop()
+    })
+}
+
+fn strict_local_push(class: Arc<SizeClass>, buffer: AlignedBuffer) {
+    STRICT_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        if class.pool_id >= pools.len() {
+            pools.resize_with(class.pool_id + 1, || None);
+        }
+        let bins = pools[class.pool_id].get_or_insert_with(Vec::new);
+        if class.class_index >= bins.len() {
+            bins.resize_with(class.class_index + 1, || None);
+        }
+        let bin = bins[class.class_index]
+            .get_or_insert_with(|| StrictLocalBin::new(class.local_capacity));
+        bin.push(StrictLocalEntry { buffer, class });
+    });
+}
+
+fn strict_local_refill(class: &Arc<SizeClass>, target: usize) {
+    STRICT_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        if class.pool_id >= pools.len() {
+            pools.resize_with(class.pool_id + 1, || None);
+        }
+        let bins = pools[class.pool_id].get_or_insert_with(Vec::new);
+        if class.class_index >= bins.len() {
+            bins.resize_with(class.class_index + 1, || None);
+        }
+        let bin = bins[class.class_index]
+            .get_or_insert_with(|| StrictLocalBin::new(class.local_capacity));
+        while bin.len() + 1 < target {
+            let Some(buffer) = class.global.pop() else {
+                break;
+            };
+            bin.push(StrictLocalEntry {
+                buffer,
+                class: class.clone(),
+            });
+        }
+    });
+}
+
+fn leaky_local_pop(class: &SizeClass) -> Option<AlignedBuffer> {
+    LEAKY_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        let bins = pools.get_mut(class.pool_id)?.as_mut()?;
+        let bin = bins.get_mut(class.class_index)?.as_mut()?;
+        bin.pop()
+    })
+}
+
+fn leaky_local_push(class: NonNull<SizeClass>, buffer: AlignedBuffer) {
+    // SAFETY: leaky-mode classes are intentionally leaked.
+    let class_ref = unsafe { class.as_ref() };
+    LEAKY_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        if class_ref.pool_id >= pools.len() {
+            pools.resize_with(class_ref.pool_id + 1, || None);
+        }
+        let bins = pools[class_ref.pool_id].get_or_insert_with(Vec::new);
+        if class_ref.class_index >= bins.len() {
+            bins.resize_with(class_ref.class_index + 1, || None);
+        }
+        let bin = bins[class_ref.class_index]
+            .get_or_insert_with(|| LeakyLocalBin::new(class, class_ref.local_capacity));
         bin.push(buffer);
+    });
+}
+
+fn leaky_local_refill(class: &SizeClass, target: usize) {
+    let class_ptr = NonNull::from(class);
+    LEAKY_LOCAL_POOLS.with(|pools| {
+        // SAFETY: this TLS value is only ever accessed by the current thread.
+        let pools = unsafe { &mut *pools.get() };
+        if class.pool_id >= pools.len() {
+            pools.resize_with(class.pool_id + 1, || None);
+        }
+        let bins = pools[class.pool_id].get_or_insert_with(Vec::new);
+        if class.class_index >= bins.len() {
+            bins.resize_with(class.class_index + 1, || None);
+        }
+        let bin = bins[class.class_index]
+            .get_or_insert_with(|| LeakyLocalBin::new(class_ptr, class.local_capacity));
+        while bin.len() + 1 < target {
+            let Some(buffer) = class.global.pop() else {
+                break;
+            };
+            bin.push(buffer);
+        }
+    });
+}
+
+#[cfg(test)]
+fn get_current_local_len(class: &SizeClass) -> usize {
+    match class.mode {
+        BufferPoolMode::Strict => STRICT_LOCAL_POOLS.with(|pools| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let pools = unsafe { &*pools.get() };
+            pools
+                .get(class.pool_id)
+                .and_then(Option::as_ref)
+                .and_then(|bins| bins.get(class.class_index))
+                .and_then(Option::as_ref)
+                .map_or(0, StrictLocalBin::len)
+        }),
+        BufferPoolMode::Leaky => LEAKY_LOCAL_POOLS.with(|pools| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let pools = unsafe { &*pools.get() };
+            pools
+                .get(class.pool_id)
+                .and_then(Option::as_ref)
+                .and_then(|bins| bins.get(class.class_index))
+                .and_then(Option::as_ref)
+                .map_or(0, LeakyLocalBin::len)
+        }),
     }
 }
 
@@ -598,13 +810,6 @@ impl PoolClasses {
         match self {
             Self::Strict(classes) => classes.len(),
             Self::Leaky(classes) => classes.len(),
-        }
-    }
-
-    fn tracked_owner(&self, index: usize) -> PooledOwner {
-        match self {
-            Self::Strict(classes) => PooledOwner::Strict(classes[index].clone()),
-            Self::Leaky(classes) => PooledOwner::Leaky(classes[index]),
         }
     }
 }
@@ -650,40 +855,90 @@ impl BufferPoolInner {
     /// If `zero_on_new` is true, newly-created buffers are allocated with
     /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
     fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
-        let class = &self.classes[class_index];
-        let label = SizeClassLabel {
-            size_class: class.size as u64,
-        };
+        match &self.classes {
+            PoolClasses::Strict(classes) => {
+                let class = &classes[class_index];
+                let label = SizeClassLabel {
+                    size_class: class.size as u64,
+                };
 
-        // Reuse an existing tracked buffer from the local/global free lists
-        // before attempting to grow the class.
-        if let Some(buffer) = class.pop() {
-            return Some(Allocation {
-                buffer,
-                is_new: false,
-                owner: self.classes.tracked_owner(class_index),
-            });
+                if let Some(entry) = strict_local_pop(class) {
+                    return Some(Allocation {
+                        buffer: entry.buffer,
+                        is_new: false,
+                        owner: PooledOwner::Strict(entry.class),
+                    });
+                }
+
+                let target = (class.local_capacity / 2).max(1);
+                if let Some(buffer) = class.global.pop() {
+                    strict_local_refill(class, target);
+                    return Some(Allocation {
+                        buffer,
+                        is_new: false,
+                        owner: PooledOwner::Strict(class.clone()),
+                    });
+                }
+
+                if !class.try_reserve() {
+                    self.metrics.exhausted_total.get_or_create(&label).inc();
+                    return None;
+                }
+
+                self.metrics.created.get_or_create(&label).inc();
+                let buffer = if zero_on_new {
+                    AlignedBuffer::new_zeroed(class.size, class.alignment)
+                } else {
+                    AlignedBuffer::new(class.size, class.alignment)
+                };
+                Some(Allocation {
+                    buffer,
+                    is_new: true,
+                    owner: PooledOwner::Strict(class.clone()),
+                })
+            }
+            PoolClasses::Leaky(classes) => {
+                let class = unsafe { classes[class_index].as_ref() };
+                let label = SizeClassLabel {
+                    size_class: class.size as u64,
+                };
+
+                if let Some(buffer) = leaky_local_pop(class) {
+                    return Some(Allocation {
+                        buffer,
+                        is_new: false,
+                        owner: PooledOwner::Leaky(classes[class_index]),
+                    });
+                }
+
+                let target = (class.local_capacity / 2).max(1);
+                if let Some(buffer) = class.global.pop() {
+                    leaky_local_refill(class, target);
+                    return Some(Allocation {
+                        buffer,
+                        is_new: false,
+                        owner: PooledOwner::Leaky(classes[class_index]),
+                    });
+                }
+
+                if !class.try_reserve() {
+                    self.metrics.exhausted_total.get_or_create(&label).inc();
+                    return None;
+                }
+
+                self.metrics.created.get_or_create(&label).inc();
+                let buffer = if zero_on_new {
+                    AlignedBuffer::new_zeroed(class.size, class.alignment)
+                } else {
+                    AlignedBuffer::new(class.size, class.alignment)
+                };
+                Some(Allocation {
+                    buffer,
+                    is_new: true,
+                    owner: PooledOwner::Leaky(classes[class_index]),
+                })
+            }
         }
-
-        // Reserve one creation slot if the class has not reached its tracked-buffer cap.
-        if !class.try_reserve() {
-            // Pool exhausted (no free buffers and no creation capacity left).
-            self.metrics.exhausted_total.get_or_create(&label).inc();
-            return None;
-        }
-
-        // Create a new buffer after successfully reserving capacity.
-        self.metrics.created.get_or_create(&label).inc();
-        let buffer = if zero_on_new {
-            AlignedBuffer::new_zeroed(class.size, class.alignment)
-        } else {
-            AlignedBuffer::new(class.size, class.alignment)
-        };
-        Some(Allocation {
-            buffer,
-            is_new: true,
-            owner: self.classes.tracked_owner(class_index),
-        })
     }
 }
 
@@ -733,6 +988,10 @@ impl BufferPool {
         config.validate();
 
         let metrics = PoolMetrics::new(registry);
+        let pool_id = match config.mode {
+            BufferPoolMode::Strict => NEXT_STRICT_POOL_ID.fetch_add(1, Ordering::Relaxed),
+            BufferPoolMode::Leaky => NEXT_LEAKY_POOL_ID.fetch_add(1, Ordering::Relaxed),
+        };
 
         let classes = match config.mode {
             BufferPoolMode::Strict => {
@@ -740,6 +999,9 @@ impl BufferPool {
                 for i in 0..config.num_classes() {
                     let size = config.class_size(i);
                     let class = Arc::new(SizeClass::new(
+                        BufferPoolMode::Strict,
+                        pool_id,
+                        i,
                         size,
                         config.alignment.get(),
                         config.max_per_class.get(),
@@ -754,6 +1016,9 @@ impl BufferPool {
                 for i in 0..config.num_classes() {
                     let size = config.class_size(i);
                     let class = Box::leak(Box::new(SizeClass::new(
+                        BufferPoolMode::Leaky,
+                        pool_id,
+                        i,
                         size,
                         config.alignment.get(),
                         config.max_per_class.get(),
@@ -997,13 +1262,10 @@ impl Drop for PooledBufInner {
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        match &self.owner {
-            PooledOwner::Strict(class) => class.push(buffer),
-            PooledOwner::Leaky(class) => {
-                // SAFETY: leaky-mode classes are leaked and remain valid for
-                // the process lifetime.
-                unsafe { class.as_ref().push(buffer) };
-            }
+        let owner = std::mem::replace(&mut self.owner, PooledOwner::Untracked);
+        match owner {
+            PooledOwner::Strict(class) => strict_local_push(class, buffer),
+            PooledOwner::Leaky(class) => leaky_local_push(class, buffer),
             PooledOwner::Untracked => {}
         }
         // else: buffer is dropped here, which deallocates it
@@ -1528,10 +1790,7 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        class.local.get().map_or(0, |bin| {
-            // SAFETY: tests only inspect the current thread's local bin.
-            unsafe { (&*bin.get()).len() }
-        })
+        get_current_local_len(class)
     }
 
     #[test]
@@ -2360,6 +2619,35 @@ mod tests {
         });
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_thread_exit_flushes_local_bin() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = Arc::new(BufferPool::new(test_config(page, page, 1), &mut registry));
+
+        let worker_pool = pool.clone();
+        thread::spawn(move || {
+            let buf = worker_pool
+                .try_alloc(100)
+                .expect("worker should allocate tracked buffer");
+            drop(buf);
+        })
+        .join()
+        .expect("worker thread should exit cleanly");
+
+        let class_index = pool
+            .inner
+            .config
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
+
+        let _buf = pool
+            .try_alloc(100)
+            .expect("thread-exited local buffer should be reusable");
     }
 
     #[test]
