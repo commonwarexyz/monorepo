@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{batch::UnmerkleizedBatch, mem::Mmr, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
@@ -30,28 +30,26 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
-                        let h = StandardHasher::<Sha256>::new();
-                        let mut mmr = Mmr::new(&h);
+                        let mut mmr = Mmr::new(StandardHasher::<Sha256>::new());
                         block_on(async {
                             let changeset = {
-                                let mut batch = UnmerkleizedBatch::new(&mmr);
+                                let mut batch = mmr.new_batch();
                                 for digest in &elements {
-                                    batch.add(&h, digest);
+                                    batch.add(digest);
                                 }
-                                batch.merkleize(&h).finalize()
+                                batch.merkleize().finalize()
                             };
                             mmr.apply(changeset).unwrap();
                         });
                         mmr
                     },
                     |mmr| {
-                        let h = StandardHasher::<Sha256>::new();
                         block_on(async {
-                            let mut batch = UnmerkleizedBatch::new(&mmr);
+                            let mut batch = mmr.new_batch();
                             for digest in &additional {
-                                batch.add(&h, digest);
+                                batch.add(digest);
                             }
-                            batch.merkleize(&h);
+                            batch.merkleize();
                         });
                     },
                     criterion::BatchSize::SmallInput,

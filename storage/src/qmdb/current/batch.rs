@@ -337,7 +337,7 @@ where
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
 
     /// Merkleized grafted MMR changes on top of the parent's state.
-    grafted_merkleized: mmr::MerkleizedBatch<'a, H::Digest, G>,
+    grafted_merkleized: mmr::MerkleizedBatch<'a, grafting::GraftedHasher<H>, G>,
 
     /// Uncommitted bitmap changes on top of the parent bitmap.
     bitmap_diff: BitmapDiff<'a, B, N>,
@@ -653,8 +653,9 @@ where
     // 6. Build grafted MMR batch from parent ref (no clone).
     let grafting_height = grafting::height::<N>();
     let grafted_merkleized = {
-        let mut grafted_batch =
-            mmr::UnmerkleizedBatch::new(grafted_parent).with_pool(current_db.thread_pool.clone());
+        let gh = grafting::GraftedHasher::<H>::new(grafting_height);
+        let mut grafted_batch = mmr::UnmerkleizedBatch::new(grafted_parent, gh)
+            .with_pool(current_db.thread_pool.clone());
         for &(ops_pos, digest) in &new_leaves {
             let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
             if grafted_pos < grafted_batch.size() {
@@ -666,8 +667,7 @@ where
                 grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<H>::new(grafting_height);
-        grafted_batch.merkleize(&gh)
+        grafted_batch.merkleize()
     };
 
     // 7. Compute canonical root using the merkleized batch directly.
@@ -723,7 +723,7 @@ where
         H,
         U,
         authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
-        mmr::MerkleizedBatch<'a, H::Digest, G>,
+        mmr::MerkleizedBatch<'a, grafting::GraftedHasher<H>, G>,
         BitmapDiff<'a, B, N>,
         N,
     > {
@@ -971,8 +971,8 @@ mod trait_impls {
             I,
             H,
             update::Unordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
+            Mmr<E, StandardHasher<H>>,
+            mmr::mem::Mmr<grafting::GraftedHasher<H>>,
             commonware_utils::bitmap::Prunable<N>,
             N,
         >
@@ -1014,8 +1014,8 @@ mod trait_impls {
             I,
             H,
             update::Ordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
+            Mmr<E, StandardHasher<H>>,
+            mmr::mem::Mmr<grafting::GraftedHasher<H>>,
             commonware_utils::bitmap::Prunable<N>,
             N,
         >

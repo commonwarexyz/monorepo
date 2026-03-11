@@ -58,7 +58,6 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &H,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<K, H::Digest, N>,
@@ -70,7 +69,7 @@ where
             next_key: proof.next_key.clone(),
         });
 
-        proof.proof.verify(hasher, op, root)
+        proof.proof.verify::<H, _>(op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -94,7 +93,6 @@ where
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &H,
         key: &K,
         proof: &super::ExclusionProof<K, V, H::Digest, N>,
         root: &H::Digest,
@@ -129,7 +127,7 @@ where
             }
         };
 
-        op_proof.verify(hasher, op, root)
+        op_proof.verify::<H, _>(op, root)
     }
 }
 
@@ -152,16 +150,12 @@ where
     /// # Errors
     ///
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
-    pub async fn key_value_proof(
-        &self,
-        hasher: &H,
-        key: K,
-    ) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
+    pub async fn key_value_proof(&self, key: K) -> Result<KeyValueProof<K, H::Digest, N>, Error> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((data, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
-        let proof = self.operation_proof(hasher, loc).await?;
+        let proof = self.operation_proof(loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -176,7 +170,6 @@ where
     /// Returns [Error::KeyExists] if the key exists in the db.
     pub async fn exclusion_proof(
         &self,
-        hasher: &H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
         match self.any.get_span(key).await? {
@@ -185,7 +178,7 @@ where
                     // Cannot prove exclusion of a key that exists in the db.
                     return Err(Error::KeyExists);
                 }
-                let op_proof = self.operation_proof(hasher, loc).await?;
+                let op_proof = self.operation_proof(loc).await?;
                 Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
@@ -207,9 +200,7 @@ where
                     "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
                     self.any.last_commit_loc, floor
                 );
-                let op_proof = self
-                    .operation_proof(hasher, self.any.last_commit_loc)
-                    .await?;
+                let op_proof = self.operation_proof(self.any.last_commit_loc).await?;
                 Ok(super::ExclusionProof::Commit(op_proof, value))
             }
         }

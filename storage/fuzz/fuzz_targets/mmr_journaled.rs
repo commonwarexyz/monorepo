@@ -93,13 +93,13 @@ fn historical_root(
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::Mmr::new(&hasher);
+    let mut mmr = mem::Mmr::new(hasher);
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch.add(&hasher, element);
+            batch.add(element);
         }
-        batch.merkleize(&hasher).finalize()
+        batch.merkleize().finalize()
     };
     mmr.apply(changeset).unwrap();
     *mmr.root()
@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
         let hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::init(
             context.clone(),
-            &hasher,
+            hasher.clone(),
             test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
@@ -139,8 +139,8 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let (pos, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let pos = batch.add(&hasher, limited_data);
-                        (pos, batch.merkleize(&hasher).finalize())
+                        let pos = batch.add(limited_data);
+                        (pos, batch.merkleize().finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     leaves.push(limited_data.to_vec());
@@ -169,9 +169,8 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let (positions, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let positions: Vec<_> =
-                            items.iter().map(|item| batch.add(&hasher, item)).collect();
-                        (positions, batch.merkleize(&hasher).finalize())
+                        let positions: Vec<_> = items.iter().map(|item| batch.add(item)).collect();
+                        (positions, batch.merkleize().finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
@@ -320,7 +319,7 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
-                        &hasher,
+                        hasher.clone(),
                         test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
@@ -356,7 +355,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("sync")
                             .with_attribute("instance", restarts),
                         sync_config,
-                        &hasher,
+                        hasher.clone(),
                     )
                     .await
                     {

@@ -44,7 +44,9 @@ pub trait BatchChain<Item> {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>);
 }
 
-impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, D> {
+impl<E: Storage + Clock + Metrics, A: crate::mmr::hasher::Hasher, Item> BatchChain<Item>
+    for Mmr<E, A>
+{
     // Recursion base case.
     fn collect(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
@@ -53,9 +55,7 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, 
 /// in contrast to [MerkleizedBatch].
 pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<H::Digest>, Item> {
     // The inner batch of MMR leaf digests.
-    inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
-    // The hasher to use for hashing the items.
-    hasher: StandardHasher<H>,
+    inner: batch::UnmerkleizedBatch<'a, StandardHasher<H>, P>,
     // The items to append.
     items: Vec<Item>,
 }
@@ -64,14 +64,14 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Encode> UnmerkleizedBatch<'a, 
     /// Add an item to the batch.
     pub fn add(&mut self, item: Item) {
         let encoded = item.encode();
-        self.inner.add(&self.hasher, &encoded);
+        self.inner.add(&encoded);
         self.items.push(item);
     }
 
     /// Merkleize the batch, computing the root digest.
     pub fn merkleize(self) -> MerkleizedBatch<'a, H, P, Item> {
         MerkleizedBatch {
-            inner: self.inner.merkleize(&self.hasher),
+            inner: self.inner.merkleize(),
             items: Arc::new(self.items),
         }
     }
@@ -81,7 +81,7 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Encode> UnmerkleizedBatch<'a, 
 /// in contrast to [UnmerkleizedBatch].
 pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<H::Digest>, Item> {
     // The inner batch of MMR leaf digests.
-    inner: batch::MerkleizedBatch<'a, H::Digest, P>,
+    inner: batch::MerkleizedBatch<'a, StandardHasher<H>, P>,
     // The items to append.
     items: Arc<Vec<Item>>,
 }
@@ -135,12 +135,12 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync + Encode>
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Self, Item> {
-        let inner = batch::UnmerkleizedBatch::new(self);
+        let hasher = self.inner.hasher().clone();
+        let inner = batch::UnmerkleizedBatch::new(self, hasher);
         #[cfg(feature = "std")]
         let inner = inner.with_pool(self.inner.pool());
         UnmerkleizedBatch {
             inner,
-            hasher: StandardHasher::new(),
             items: Vec::new(),
         }
     }
@@ -182,13 +182,11 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest>,
+    pub(crate) mmr: Mmr<E, StandardHasher<H>>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
     pub(crate) journal: C,
-
-    pub(crate) hasher: StandardHasher<H>,
 }
 
 impl<E, C, H> Journal<E, C, H>
@@ -208,10 +206,9 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Mmr<E, H::Digest>, C::Item> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Mmr<E, StandardHasher<H>>, C::Item> {
         UnmerkleizedBatch {
             inner: self.mmr.new_batch(),
-            hasher: StandardHasher::new(),
             items: Vec::new(),
         }
     }
@@ -238,31 +235,25 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mut mmr: Mmr<E, H::Digest>,
+        mut mmr: Mmr<E, StandardHasher<H>>,
         journal: C,
-        hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        Self::align(&mut mmr, &journal, &hasher, apply_batch_size).await?;
+        Self::align(&mut mmr, &journal, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
         mmr.sync().await?;
 
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
+        Ok(Self { mmr, journal })
     }
 
     /// Align `mmr` to be consistent with `journal`. Any items in `mmr` that aren't in `journal` are
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mmr: &mut Mmr<E, H::Digest>,
+        mmr: &mut Mmr<E, StandardHasher<H>>,
         journal: &C,
-        hasher: &StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<(), Error> {
         // Rewind MMR elements that are ahead of the journal.
@@ -276,7 +267,7 @@ where
                 ?rewind_count,
                 "rewinding MMR to match journal"
             );
-            mmr.rewind(*rewind_count as usize, hasher).await?;
+            mmr.rewind(*rewind_count as usize).await?;
             mmr_size = Location::new(journal_size);
         }
 
@@ -295,11 +286,11 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch.add(hasher, &op.encode());
+                        batch.add(&op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
-                    batch.merkleize(hasher).finalize()
+                    batch.merkleize().finalize()
                 };
                 mmr.apply(changeset)?;
             }
@@ -320,8 +311,8 @@ where
         let loc = self.journal.append(item).await?;
         let changeset = {
             let mut batch = self.mmr.new_batch();
-            batch.add(&self.hasher, &encoded_item);
-            batch.merkleize(&self.hasher).finalize()
+            batch.add(&encoded_item);
+            batch.merkleize().finalize()
         };
         self.mmr.apply(changeset)?;
 
@@ -513,20 +504,20 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr = Mmr::init(
+            context.with_label("mmr"),
+            StandardHasher::<H>::new(),
+            mmr_cfg,
+        )
+        .await?;
+        Self::align(&mut mmr, &journal, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
         journal.sync().await?;
         mmr.sync().await?;
 
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
+        Ok(Self { mmr, journal })
     }
 }
 
@@ -546,8 +537,12 @@ where
         journal_cfg: variable::Config<O::Cfg>,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
+        let mut mmr = Mmr::init(
+            context.with_label("mmr"),
+            StandardHasher::<H>::new(),
+            mmr_cfg,
+        )
+        .await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
@@ -555,18 +550,14 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+        Self::align(&mut mmr, &journal, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
         journal.sync().await?;
         mmr.sync().await?;
 
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
+        Ok(Self { mmr, journal })
     }
 }
 
@@ -612,7 +603,7 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .rewind((leaves - size) as usize, &self.hasher)
+                .rewind((leaves - size) as usize)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -684,7 +675,7 @@ mod tests {
         },
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{sha256, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef,
@@ -776,14 +767,14 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Mmr<deterministic::Context, sha256::Digest>,
+        Mmr<deterministic::Context, StandardHasher<Sha256>>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
         let hasher = StandardHasher::new();
         let mmr = Mmr::init(
             context.with_label("mmr"),
-            &hasher,
+            hasher.clone(),
             mmr_config(suffix, &context),
         )
         .await
@@ -828,9 +819,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "align-empty").await;
+            let (mut mmr, journal, _hasher) = create_components(context, "align-empty").await;
 
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -844,7 +835,7 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "mmr-ahead").await;
+            let (mut mmr, journal, _hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
             {
@@ -853,10 +844,10 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch.add(&hasher, &encoded);
+                        batch.add(&encoded);
                         journal.append(&op).await.unwrap();
                     }
-                    batch.merkleize(&hasher).finalize()
+                    batch.merkleize().finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
@@ -867,7 +858,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -882,7 +873,7 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "journal-ahead").await;
+            let (mut mmr, journal, _hasher) = create_components(context, "journal-ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -896,7 +887,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 

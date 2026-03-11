@@ -138,7 +138,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -147,10 +147,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
 
@@ -193,22 +193,22 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             let operations = vec![10, 11, 12];
             {
                 // Add some initial operations (that we won't prove)
                 let mut batch = mmr.new_batch();
                 for i in 0u64..5 {
-                    batch.add(&hasher, &i.encode());
+                    batch.add(&i.encode());
                 }
 
                 // Add operations we want to prove (starting at location 5)
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&hasher, &encoded);
+                    batch.add(&encoded);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let start_loc = Location::new(5u64);
             let root = mmr.root();
@@ -233,16 +233,16 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher);
 
             // Add elements
             let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..10 {
-                    positions.push(batch.add(&hasher, &i.encode()));
+                    positions.push(batch.add(&i.encode()));
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
 
             // Generate proof for a range
@@ -270,7 +270,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3, 4];
@@ -279,10 +279,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
             let range = Location::new(1)..Location::new(4);
@@ -318,7 +318,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let op_count = 15;
@@ -328,10 +328,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
             let range = Location::new(0)..Location::new(3);
@@ -370,7 +370,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -379,10 +379,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let range = Location::new(0)..Location::new(2);
             let proof = mmr.range_proof(range).unwrap();
@@ -405,7 +405,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -414,10 +414,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
             let proof = mmr.range_proof(Location::new(0)..Location::new(3)).unwrap();
@@ -457,7 +457,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..20).collect();
@@ -465,9 +465,9 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&hasher, &encoded);
+                    batch.add(&encoded);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
 
@@ -513,7 +513,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..10).collect();
@@ -522,10 +522,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
 
@@ -576,7 +576,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let empty_mmr = Mmr::new(&hasher);
+            let empty_mmr = Mmr::new(hasher.clone());
             let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.
@@ -601,7 +601,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher = test_hasher();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations = vec![1, 2, 3];
@@ -610,10 +610,10 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&hasher, &encoded);
+                    let pos = batch.add(&encoded);
                     positions.push(pos);
                 }
-                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize().finalize()).unwrap();
             }
             let root = mmr.root();
 

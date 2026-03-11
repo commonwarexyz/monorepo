@@ -150,7 +150,7 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods use the standard hashing logic.
 #[derive(Clone)]
-pub(super) struct GraftedHasher<H: CHasher> {
+pub struct GraftedHasher<H: CHasher> {
     grafting_height: u32,
     _phantom: PhantomData<H>,
 }
@@ -344,12 +344,12 @@ mod tests {
     /// MMR node at the mapped position.
     fn build_test_grafted_mmr(
         standard: &StandardHasher<Sha256>,
-        ops_mmr: &Mmr<sha256::Digest>,
+        ops_mmr: &Mmr<StandardHasher<Sha256>>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> Mmr<sha256::Digest> {
+    ) -> Mmr<GraftedHasher<Sha256>> {
         let grafted_hasher = GraftedHasher::<Sha256>::new(grafting_height);
-        let mut grafted_mmr = Mmr::new(&grafted_hasher);
+        let mut grafted_mmr = Mmr::new(grafted_hasher);
         if !chunks.is_empty() {
             let changeset = {
                 let mut batch = grafted_mmr.new_batch();
@@ -362,7 +362,7 @@ mod tests {
                         standard.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
-                batch.merkleize(&grafted_hasher).finalize()
+                batch.merkleize().finalize()
             };
             grafted_mmr.apply(changeset).unwrap();
         }
@@ -461,8 +461,8 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = Mmr::new(&standard);
-            let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
+            let mmr = Mmr::new(standard.clone());
+            let ops_mmr = build_test_mmr(mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
             let elements: Vec<_> = (0..NUM_ELEMENTS)
@@ -480,7 +480,7 @@ mod tests {
             }
 
             // Height 1 grafting (each grafted leaf covers 2 ops leaves).
-            let ops_mmr = build_test_mmr(&standard, ops_mmr, NUM_ELEMENTS);
+            let ops_mmr = build_test_mmr(ops_mmr, NUM_ELEMENTS);
             {
                 // Confirm chunk_idx_to_ops_pos mappings at height 1.
                 assert_eq!(chunk_idx_to_ops_pos(0, 1), Position::new(2));
@@ -507,13 +507,13 @@ mod tests {
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
-        let mut ops_mmr = Mmr::new(&standard);
+        let mut ops_mmr = Mmr::new(standard.clone());
         let changeset = {
             let mut batch = ops_mmr.new_batch();
             for i in 0u8..4 {
-                batch.add(&standard, &Sha256::fill(i));
+                batch.add(&Sha256::fill(i));
             }
-            batch.merkleize(&standard).finalize()
+            batch.merkleize().finalize()
         };
         ops_mmr.apply(changeset).unwrap();
 
@@ -522,7 +522,7 @@ mod tests {
 
         // Build grafted MMR with 2 leaves.
         let grafted_hasher = GraftedHasher::<Sha256>::new(grafting_height);
-        let mut grafted = Mmr::new(&grafted_hasher);
+        let mut grafted = Mmr::new(grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
@@ -534,7 +534,7 @@ mod tests {
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch.add_leaf_digest(standard.hash([c2.as_ref(), sub1.as_ref()]));
 
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize().finalize()
         };
         grafted.apply(changeset).unwrap();
 
@@ -561,14 +561,14 @@ mod tests {
             let standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Build an ops MMR with 4 leaves.
-            let mut ops_mmr = Mmr::new(&standard);
+            let mut ops_mmr = Mmr::new(standard.clone());
             let changeset = {
                 let mut batch = ops_mmr.new_batch();
-                batch.add(&standard, &b1);
-                batch.add(&standard, &b2);
-                batch.add(&standard, &b3);
-                batch.add(&standard, &b4);
-                batch.merkleize(&standard).finalize()
+                batch.add(&b1);
+                batch.add(&b2);
+                batch.add(&b3);
+                batch.add(&b4);
+                batch.merkleize().finalize()
             };
             ops_mmr.apply(changeset).unwrap();
 
@@ -696,8 +696,8 @@ mod tests {
             let b5 = Sha256::fill(0x05);
             let changeset = {
                 let mut batch = ops_mmr.new_batch();
-                batch.add(&standard, &b5);
-                batch.merkleize(&standard).finalize()
+                batch.add(&b5);
+                batch.merkleize().finalize()
             };
             ops_mmr.apply(changeset).unwrap();
 
@@ -746,12 +746,12 @@ mod tests {
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
         let grafted_hasher = GraftedHasher::<Sha256>::new(grafting_height);
-        let mut grafted = Mmr::new(&grafted_hasher);
+        let mut grafted = Mmr::new(grafted_hasher);
         let changeset = {
             let mut batch = grafted.new_batch();
             batch.add_leaf_digest(d0);
             batch.add_leaf_digest(d1);
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize().finalize()
         };
         grafted.apply(changeset).unwrap();
 
@@ -786,7 +786,7 @@ mod tests {
         let d4 = Sha256::fill(0xBB);
         let grafted_hasher = GraftedHasher::<Sha256>::new(grafting_height);
         let mut grafted = Mmr::from_components(
-            &grafted_hasher,
+            grafted_hasher,
             Vec::new(),
             grafted_pruned_to,
             vec![pinned_digest],
@@ -795,7 +795,7 @@ mod tests {
         let changeset = {
             let mut batch = grafted.new_batch();
             batch.add_leaf_digest(d4);
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize().finalize()
         };
         grafted.apply(changeset).unwrap();
 

@@ -137,9 +137,6 @@ where
     /// Resolver for fetching operations and proofs from the sync source
     resolver: R,
 
-    /// Hasher used for proof verification
-    hasher: StandardHasher<DB::Hasher>,
-
     /// Runtime context for database operations
     context: DB::Context,
 
@@ -195,7 +192,6 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: StandardHasher::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_rx,
@@ -290,7 +286,6 @@ where
             apply_batch_size: self.apply_batch_size,
             journal: self.journal,
             resolver: self.resolver,
-            hasher: self.hasher,
             context: self.context,
             config: self.config,
             update_receiver: self.update_receiver,
@@ -419,13 +414,9 @@ where
         }
 
         // Verify the proof
-        let proof_valid = qmdb::verify_proof(
-            &self.hasher,
-            &proof,
-            start_loc,
-            &operations,
-            &self.target.root,
-        );
+        let hasher = StandardHasher::<DB::Hasher>::new();
+        let proof_valid =
+            qmdb::verify_proof(&hasher, &proof, start_loc, &operations, &self.target.root);
 
         // Report success or failure to the resolver
         let _ = success_tx.send(proof_valid);

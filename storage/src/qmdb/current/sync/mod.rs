@@ -145,7 +145,6 @@ where
     Operation<U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = StandardHasher::<H>::new();
     let mmr = mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
         mmr::journaled::SyncConfig {
@@ -153,11 +152,10 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
+        StandardHasher::<H>::new(),
     )
     .await?;
-    let log =
-        authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64).await?;
+    let log = authenticated::Journal::from_components(mmr, log, apply_batch_size as u64).await?;
 
     // Initialize bitmap with pruned chunks.
     //

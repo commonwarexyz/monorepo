@@ -7,19 +7,18 @@ use crate::mmr::{
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256, Sha256};
 
-/// Build a test MMR by adding `elements` elements using the provided hasher.
-pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
-    hasher: &H,
-    mut mmr: Mmr<sha256::Digest>,
+/// Build a test MMR by adding `elements` elements.
+pub fn build_test_mmr<A: MmrHasher<Digest = sha256::Digest>>(
+    mut mmr: Mmr<A>,
     elements: u64,
-) -> Mmr<sha256::Digest> {
+) -> Mmr<A> {
     let changeset = {
         let mut batch = mmr.new_batch();
         for i in 0u64..elements {
-            let element = hasher.digest(&i.to_be_bytes());
-            batch.add(hasher, &element);
+            let element = batch.hasher().digest(&i.to_be_bytes());
+            batch.add(&element);
         }
-        batch.merkleize(hasher).finalize()
+        batch.merkleize().finalize()
     };
     mmr.apply(changeset).unwrap();
     mmr
@@ -33,9 +32,8 @@ struct MmrRootStability;
 
 impl Conformance for MmrRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
-        let hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new(&hasher);
-        let mmr = build_test_mmr(&hasher, mmr, seed);
+        let mmr = Mmr::new(Standard::<Sha256>::new());
+        let mmr = build_test_mmr(mmr, seed);
 
         mmr.root().to_vec()
     }

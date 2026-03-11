@@ -188,14 +188,14 @@ mod tests {
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(Standard::<Sha256>::new());
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&hasher, element);
+                    batch.add(element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize().finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();

@@ -701,7 +701,7 @@ mod tests {
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new(&hasher);
+        let mmr = Mmr::new(hasher.clone());
         let root = mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(&hasher, &[] as &[Digest], Location::new(0), root));
@@ -727,13 +727,13 @@ mod tests {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let element = Digest::from(*b"01234567012345670123456701234567");
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let changeset = {
             let mut batch = mmr.new_batch();
             for _ in 0..11 {
-                batch.add(&hasher, &element);
+                batch.add(&element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -821,14 +821,14 @@ mod tests {
     fn test_proving_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
         // test range proofs over all possible ranges of at least 2 elements
@@ -935,14 +935,14 @@ mod tests {
     fn test_proving_retained_nodes_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -974,14 +974,14 @@ mod tests {
     fn test_proving_ranges_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1017,9 +1017,9 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &new_elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
         elements.extend(new_elements);
@@ -1044,14 +1044,14 @@ mod tests {
     fn test_proving_proof_serialization() {
         // create a new MMR and add a non-trivial amount of elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1120,14 +1120,14 @@ mod tests {
         for num_elements in 1u64..255 {
             // Build MMR with the specified number of elements
             let hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..num_elements {
-                    batch.add(&hasher, &test_digest(i as u8));
+                    batch.add(&test_digest(i as u8));
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize().finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1203,15 +1203,15 @@ mod tests {
     fn test_proving_extract_pinned_nodes_invalid_size() {
         // Test that extract_pinned_nodes returns an error for invalid MMR size
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher);
 
         // Build MMR with 10 elements
         let changeset = {
             let mut batch = mmr.new_batch();
             for i in 0..10 {
-                batch.add(&hasher, &test_digest(i));
+                batch.add(&test_digest(i));
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1232,14 +1232,14 @@ mod tests {
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -1347,14 +1347,14 @@ mod tests {
     fn test_proving_multi_proof_generation_and_verify() {
         // Create an MMR with multiple elements
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let elements: Vec<_> = (0..20).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1479,7 +1479,7 @@ mod tests {
 
         // Empty multi-proof
         let hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = Mmr::new(&hasher);
+        let empty_mmr = Mmr::new(hasher.clone());
         let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
@@ -1492,15 +1492,15 @@ mod tests {
     #[test]
     fn test_proving_multi_proof_deduplication() {
         let hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         // Create an MMR with enough elements to have shared digests
         let elements: Vec<_> = (0..30).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&hasher, element);
+                batch.add(element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
 

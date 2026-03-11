@@ -10,7 +10,7 @@ use crate::{
     mmr::{
         journaled::Mmr,
         read::{BatchChainInfo, Readable},
-        Location,
+        Location, StandardHasher,
     },
     qmdb::{
         any::{
@@ -1069,7 +1069,7 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, E, C, I, H, U, Mmr<E, H::Digest>> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, E, C, I, H, U, Mmr<E, StandardHasher<H>>> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
@@ -1277,7 +1277,7 @@ mod trait_impls {
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>>;
         type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, Mmr<E, H::Digest>>
+            = UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, Mmr<E, StandardHasher<H>>>
         where
             Self: 'a;
 
@@ -1308,7 +1308,7 @@ mod trait_impls {
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>>;
         type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, Mmr<E, H::Digest>>
+            = UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, Mmr<E, StandardHasher<H>>>
         where
             Self: 'a;
 

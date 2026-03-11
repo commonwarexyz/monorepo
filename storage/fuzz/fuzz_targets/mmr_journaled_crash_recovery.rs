@@ -3,7 +3,7 @@
 //! Fuzz test for MMR Journaled crash recovery with fault injection.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
@@ -21,7 +21,7 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Mmr = JournaledMmr<deterministic::Context, Digest>;
+type Mmr = JournaledMmr<deterministic::Context, StandardHasher<Sha256>>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -112,11 +112,7 @@ struct ExpectedBounds {
     max_pruned: u64,
 }
 
-async fn run_operations(
-    mmr: &mut Mmr,
-    hasher: &StandardHasher<Sha256>,
-    operations: &[MmrOperation],
-) -> ExpectedBounds {
+async fn run_operations(mmr: &mut Mmr, operations: &[MmrOperation]) -> ExpectedBounds {
     let mut min_size = 0u64;
     let mut max_size = mmr.size().as_u64();
     let mut min_leaves = 0u64;
@@ -129,8 +125,8 @@ async fn run_operations(
             MmrOperation::Add { data } => {
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(hasher, data);
-                    batch.merkleize(hasher).finalize()
+                    batch.add(data);
+                    batch.merkleize().finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 max_size = max_size.max(mmr.size().as_u64());
@@ -244,10 +240,9 @@ fn fuzz(input: FuzzInput) {
         let partition_suffix = partition_suffix.clone();
         let operations = operations.clone();
         async move {
-            let hasher = StandardHasher::<Sha256>::new();
             let mut mmr = Mmr::init(
                 ctx.with_label("mmr"),
-                &hasher,
+                StandardHasher::<Sha256>::new(),
                 mmr_config(
                     &partition_suffix,
                     &ctx,
@@ -267,7 +262,7 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
 
-            run_operations(&mut mmr, &hasher, &operations).await
+            run_operations(&mut mmr, &operations).await
         }
     });
 
@@ -276,10 +271,9 @@ fn fuzz(input: FuzzInput) {
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let hasher = StandardHasher::<Sha256>::new();
         let mut mmr = Mmr::init(
             ctx.with_label("recovered"),
-            &hasher,
+            StandardHasher::<Sha256>::new(),
             mmr_config(
                 &partition_suffix,
                 &ctx,
@@ -338,8 +332,8 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let changeset = {
             let mut batch = mmr.new_batch();
-            batch.add(&hasher, &test_data);
-            batch.merkleize(&hasher).finalize()
+            batch.add(&test_data);
+            batch.merkleize().finalize()
         };
         mmr.apply(changeset).unwrap();
         mmr.destroy().await.expect("Should be able to destroy MMR");

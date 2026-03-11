@@ -254,7 +254,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod batch;
 pub mod db;
-mod grafting;
+pub(crate) mod grafting;
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;

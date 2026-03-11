@@ -124,13 +124,13 @@ fn fuzz(input: FuzzInput) {
     match input.proof {
         ProofType::Mmr => {
             let hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&hasher, digest);
+                    batch.add(digest);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize().finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -153,13 +153,13 @@ fn fuzz(input: FuzzInput) {
         }
         ProofType::MmrMulti => {
             let hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(hasher.clone());
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&hasher, digest);
+                    batch.add(digest);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize().finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();

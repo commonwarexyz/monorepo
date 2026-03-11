@@ -60,8 +60,6 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
-        let hasher = StandardHasher::new();
-
         // Initialize MMR for sync
         let mmr = Mmr::init_sync(
             context.with_label("mmr"),
@@ -77,17 +75,13 @@ where
                 range,
                 pinned_nodes,
             },
-            &hasher,
+            StandardHasher::new(),
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _>::from_components(
-            mmr,
-            log,
-            hasher,
-            apply_batch_size as u64,
-        )
-        .await?;
+        let journal =
+            authenticated::Journal::<_, _, _>::from_components(mmr, log, apply_batch_size as u64)
+                .await?;
 
         let mut snapshot: Index<T, Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());

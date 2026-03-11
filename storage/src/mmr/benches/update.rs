@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -60,20 +60,19 @@ fn bench_update(c: &mut Criterion) {
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_locations = Vec::with_capacity(leaves);
-                            let h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = Mmr::new(&h);
+                            let mut mmr = Mmr::new(StandardHasher::<Sha256>::new());
                             let changeset = {
-                                let mut batch = UnmerkleizedBatch::new(&mmr);
+                                let mut batch = mmr.new_batch();
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = batch.add(&h, &digest);
+                                    let pos = batch.add(&digest);
                                     let loc = Location::try_from(pos).expect("leaf position");
                                     leaf_locations.push(loc);
                                 }
-                                batch.merkleize(&h).finalize()
+                                batch.merkleize().finalize()
                             };
                             mmr.apply(changeset).unwrap();
 
@@ -93,7 +92,7 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        mmr.update_leaf(&h, *loc, element).unwrap();
+                                        mmr.update_leaf(*loc, element).unwrap();
                                     }
                                 }
                                 _ => {
@@ -102,12 +101,12 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let changeset = {
-                                        let mut batch = UnmerkleizedBatch::new(&mmr);
+                                        let mut batch = mmr.new_batch();
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
                                         batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&h).finalize()
+                                        batch.merkleize().finalize()
                                     };
                                     mmr.apply(changeset).unwrap();
                                 }

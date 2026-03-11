@@ -638,12 +638,12 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, Position},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, Position, StandardHasher},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest>;
+        type TestMmr = Mmr<deterministic::Context, StandardHasher<Sha256>>;
 
         impl FromSyncTestable for AnyTest {
             type Mmr = TestMmr;

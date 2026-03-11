@@ -65,8 +65,6 @@ where
     U: Send + Sync + 'static,
     C: Mutable<Item = O>,
 {
-    let hasher = StandardHasher::<H>::new();
-
     let mmr = crate::mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
         crate::mmr::journaled::SyncConfig {
@@ -74,17 +72,12 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &hasher,
+        StandardHasher::<H>::new(),
     )
     .await?;
 
-    let log = authenticated::Journal::<_, _, _>::from_components(
-        mmr,
-        log,
-        hasher,
-        apply_batch_size as u64,
-    )
-    .await?;
+    let log = authenticated::Journal::<_, _, _>::from_components(mmr, log, apply_batch_size as u64)
+        .await?;
     let db = Db::from_components(range.start, log, index).await?;
 
     Ok(db)

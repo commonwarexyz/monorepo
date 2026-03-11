@@ -35,7 +35,7 @@ fn fuzz(input: FuzzInput) {
     };
 
     let hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = Mmr::init(config, &hasher) else {
+    let Ok(mmr) = Mmr::init(config, hasher) else {
         return;
     };
 

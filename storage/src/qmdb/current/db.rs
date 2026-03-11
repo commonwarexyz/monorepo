@@ -69,7 +69,7 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<grafting::GraftedHasher<H>>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -113,14 +113,13 @@ where
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        proof.verify(hasher, start_loc, ops, chunks, root)
+        proof.verify::<H, Operation<U>, N>(start_loc, ops, chunks, root)
     }
 }
 
@@ -173,8 +172,8 @@ where
         I,
         H,
         U,
-        mmr::journaled::Mmr<E, H::Digest>,
-        mmr::mem::Mmr<H::Digest>,
+        mmr::journaled::Mmr<E, StandardHasher<H>>,
+        mmr::mem::Mmr<grafting::GraftedHasher<H>>,
         BitMap<N>,
         N,
     > {
@@ -191,12 +190,11 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &H,
         loc: Location,
     ) -> Result<OperationProof<H::Digest, N>, Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        OperationProof::new(hasher, &self.status, &storage, loc, ops_root).await
+        OperationProof::new::<H, _>(&self.status, &storage, loc, ops_root).await
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -211,14 +209,12 @@ where
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(
         &self,
-        hasher: &H,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        RangeProof::new_with_ops(
-            hasher,
+        RangeProof::new_with_ops::<H, _, _, N>(
             &self.status,
             &storage,
             &self.any.log,
@@ -660,7 +656,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
+) -> Result<mmr::mem::Mmr<grafting::GraftedHasher<H>>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -679,13 +675,13 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     let mut grafted_mmr = if pruned_chunks > 0 {
         let grafted_pruned_to = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
-            &grafted_hasher,
+            grafted_hasher,
             Vec::new(),
             grafted_pruned_to,
             pinned_nodes.to_vec(),
         )?
     } else {
-        mmr::mem::Mmr::new(&grafted_hasher)
+        mmr::mem::Mmr::new(grafted_hasher)
     };
 
     // Add each grafted leaf digest.
@@ -695,7 +691,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
             for &(_ops_pos, digest) in &leaves {
                 batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize().finalize()
         };
         grafted_mmr.apply(changeset)?;
     }

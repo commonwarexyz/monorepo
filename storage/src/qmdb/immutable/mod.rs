@@ -65,7 +65,7 @@ use crate::{
     kv,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Proof,
+        Location, Proof, StandardHasher,
     },
     qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
@@ -368,7 +368,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, K, V, H, T, Mmr<E, H::Digest>> {
+    pub fn new_batch(
+        &self,
+    ) -> batch::UnmerkleizedBatch<'_, E, K, V, H, T, Mmr<E, StandardHasher<H>>> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch {
             immutable: self,

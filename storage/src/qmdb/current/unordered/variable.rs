@@ -129,7 +129,7 @@ mod test {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics as _, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
@@ -151,7 +151,6 @@ mod test {
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Sha256::new();
             let partition = "build-small".to_string();
             let mut db = open_db(context.with_label("uncommitted_chunk"), partition.clone()).await;
 
@@ -168,19 +167,15 @@ mod test {
             db.apply_batch(finalized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
 
             // Proof should be verifiable against current root.
             let root = db.root();
-            assert!(CurrentTest::verify_key_value_proof(
-                &hasher, k, v1, &proof, &root
-            ));
+            assert!(CurrentTest::verify_key_value_proof(k, v1, &proof, &root));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
-            assert!(!CurrentTest::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
-            ));
+            assert!(!CurrentTest::verify_key_value_proof(k, v2, &proof, &root,));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let finalized = db
@@ -194,25 +189,18 @@ mod test {
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
-            assert!(!CurrentTest::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
-            ));
+            assert!(!CurrentTest::verify_key_value_proof(k, v2, &proof, &root,));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
-            assert!(CurrentTest::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
-            ));
+            let proof = db.key_value_proof(k).await.unwrap();
+            assert!(CurrentTest::verify_key_value_proof(k, v2, &proof, &root,));
 
             // Old value will not verify against new proof.
-            assert!(!CurrentTest::verify_key_value_proof(
-                &hasher, k, v1, &proof, &root,
-            ));
+            assert!(!CurrentTest::verify_key_value_proof(k, v1, &proof, &root,));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (range_proof, _, chunks) =
-                db.range_proof(&hasher, op_loc, NZU64!(1)).await.unwrap();
+            let (range_proof, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = KeyValueProof {
                 loc: op_loc,
                 chunk: chunks[0],
@@ -222,7 +210,6 @@ mod test {
             // status.
             let op = Operation::Update(crate::qmdb::any::operation::update::Unordered(k, v1));
             assert!(CurrentTest::verify_range_proof(
-                &hasher,
                 &proof_inactive.range_proof,
                 proof_inactive.loc,
                 &[op],
@@ -233,7 +220,6 @@ mod test {
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!CurrentTest::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &proof_inactive,
@@ -253,7 +239,6 @@ mod test {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.loc = active_loc;
             assert!(!CurrentTest::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -273,7 +258,6 @@ mod test {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.chunk = modified_chunk;
             assert!(!CurrentTest::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -289,7 +273,6 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let hasher = Sha256::new();
             let db = open_db(context.with_label("first"), partition.clone()).await;
             let root = db.root();
 
@@ -301,7 +284,6 @@ mod test {
                 ops_root: Digest::EMPTY,
             };
             assert!(!CurrentTest::verify_range_proof(
-                &hasher,
                 &proof,
                 Location::new(0),
                 &[],
@@ -324,17 +306,15 @@ mod test {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::new(loc);
-                let (proof, ops, chunks) =
-                    db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
+                    CurrentTest::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
                 assert!(!CurrentTest::verify_range_proof(
-                    &hasher,
                     &proof,
                     loc,
                     &ops,
@@ -352,7 +332,6 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let hasher = Sha256::new();
             let db = open_db(context.clone(), partition.clone()).await;
             let mut db = apply_random_ops::<CurrentTest>(500, true, context.next_u64(), db)
                 .await
@@ -363,7 +342,7 @@ mod test {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(&hasher, bad_key).await;
+            let res = db.key_value_proof(bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
@@ -384,27 +363,26 @@ mod test {
                     }
                 };
 
-                let proof = db.key_value_proof(&hasher, key).await.unwrap();
+                let proof = db.key_value_proof(key).await.unwrap();
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
-                    &hasher, key, value, &proof, &root
+                    key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[0xFF]);
+                let wrong_val = Sha256::fill(0xFF);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &hasher, key, wrong_val, &proof, &root
+                    key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[0xEE]);
+                let wrong_key = Sha256::fill(0xEE);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &hasher, wrong_key, value, &proof, &root
+                    wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[0xDD]);
+                let wrong_root = Sha256::fill(0xDD);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &hasher,
                     key,
                     value,
                     &proof,
@@ -422,7 +400,6 @@ mod test {
     pub fn test_current_db_proving_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Sha256::new();
             let partition = "build-small".to_string();
             let mut db = open_db(context.clone(), partition.clone()).await;
 
@@ -443,14 +420,14 @@ mod test {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
-                    CurrentTest::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    CurrentTest::verify_key_value_proof(k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(&hasher, k, old_val, &proof, &root),
+                    !CurrentTest::verify_key_value_proof(k, old_val, &proof, &root),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;

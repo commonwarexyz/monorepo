@@ -241,13 +241,12 @@ mod tests {
     fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
-        let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(Standard::<Sha256>::new());
         let digest = [1u8; 32];
         let (changeset, loc_to_pos) = {
             let mut batch = mmr.new_batch();
-            let positions: Vec<_> = (0..1000).map(|_| batch.add(&hasher, &digest)).collect();
-            (batch.merkleize(&hasher).finalize(), positions)
+            let positions: Vec<_> = (0..1000).map(|_| batch.add(&digest)).collect();
+            (batch.merkleize().finalize(), positions)
         };
         mmr.apply(changeset).unwrap();
 
@@ -273,8 +272,7 @@ mod tests {
     #[test]
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
-        let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut mmr = Mmr::new(Standard::<Sha256>::new());
         let digest = [1u8; 32];
 
         for _ in 0..1000 {
@@ -307,8 +305,8 @@ mod tests {
 
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&hasher, &digest);
-                batch.merkleize(&hasher).finalize()
+                batch.add(&digest);
+                batch.merkleize().finalize()
             };
             mmr.apply(changeset).unwrap();
         }
