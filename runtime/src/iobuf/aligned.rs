@@ -410,46 +410,8 @@ pub(crate) struct BufMut<O: Owner> {
 
 impl<O: Owner> BufMut<O> {
     #[inline]
-    const fn buf_len(&self) -> usize {
-        self.len - self.cursor
-    }
-
-    #[inline]
-    const fn buf_is_empty(&self) -> bool {
-        self.cursor == self.len
-    }
-
-    #[inline]
-    fn buf_capacity(&self) -> usize {
-        self.inner.capacity() - self.cursor
-    }
-
-    #[inline]
-    fn buf_raw_capacity(&self) -> usize {
+    fn raw_capacity(&self) -> usize {
         self.inner.capacity()
-    }
-
-    #[inline]
-    fn buf_as_mut_ptr(&mut self) -> *mut u8 {
-        // SAFETY: cursor is always <= raw capacity.
-        unsafe { self.inner.buffer.as_ptr().add(self.cursor) }
-    }
-
-    #[inline]
-    const unsafe fn buf_set_len(&mut self, len: usize) {
-        self.len = self.cursor + len;
-    }
-
-    #[inline]
-    const fn buf_clear(&mut self) {
-        self.len = self.cursor;
-    }
-
-    #[inline]
-    const fn buf_truncate(&mut self, len: usize) {
-        if len < self.buf_len() {
-            self.len = self.cursor + len;
-        }
     }
 
     fn into_shared(self) -> Buf<O> {
@@ -463,8 +425,76 @@ impl<O: Owner> BufMut<O> {
         }
     }
 
-    fn buf_into_bytes(self) -> Bytes {
-        if self.buf_is_empty() {
+    /// Returns the number of readable bytes remaining in the buffer.
+    ///
+    /// This is `len - cursor`, matching [`bytes::BytesMut`] semantics.
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len - self.cursor
+    }
+
+    /// Returns true if no readable bytes remain.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.cursor == self.len
+    }
+
+    /// Returns the number of bytes the buffer can hold without reallocating.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity() - self.cursor
+    }
+
+    /// Returns an unsafe mutable pointer to the buffer's data.
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        // SAFETY: cursor is always <= raw capacity.
+        unsafe { self.inner.buffer.as_ptr().add(self.cursor) }
+    }
+
+    /// Sets the length of the buffer (view-relative).
+    ///
+    /// This will explicitly set the size of the buffer without actually
+    /// modifying the data, so it is up to the caller to ensure that the data
+    /// has been initialized.
+    ///
+    /// The `len` parameter is relative to the current view (after any `advance`
+    /// calls), matching [`bytes::BytesMut::set_len`] semantics.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - All bytes in the range `[cursor, cursor + len)` are initialized
+    /// - `len <= capacity()` (where capacity is view-relative)
+    #[inline]
+    pub const unsafe fn set_len(&mut self, len: usize) {
+        self.len = self.cursor + len;
+    }
+
+    /// Clears the buffer, removing all data. Existing capacity is preserved.
+    #[inline]
+    pub const fn clear(&mut self) {
+        self.len = self.cursor;
+    }
+
+    /// Truncates the buffer to at most `len` readable bytes.
+    ///
+    /// If `len` is greater than the current readable length, this has no effect.
+    /// This operates on readable bytes (after cursor), matching
+    /// [`bytes::BytesMut::truncate`] semantics for buffers that have been advanced.
+    #[inline]
+    pub const fn truncate(&mut self, len: usize) {
+        if len < self.len() {
+            self.len = self.cursor + len;
+        }
+    }
+
+    /// Converts the current readable window into [`Bytes`] without copying.
+    ///
+    /// Empty buffers return detached [`Bytes::new`] so aligned memory is not
+    /// retained by an empty owner.
+    pub fn into_bytes(self) -> Bytes {
+        if self.is_empty() {
             return Bytes::new();
         }
         Bytes::from_owner(self.into_shared())
@@ -476,7 +506,7 @@ impl<O: Owner> AsRef<[u8]> for BufMut<O> {
     fn as_ref(&self) -> &[u8] {
         // SAFETY: bytes from cursor..len have been initialized.
         unsafe {
-            std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.cursor), self.buf_len())
+            std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.cursor), self.len())
         }
     }
 }
@@ -484,7 +514,7 @@ impl<O: Owner> AsRef<[u8]> for BufMut<O> {
 impl<O: Owner> AsMut<[u8]> for BufMut<O> {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
-        let len = self.buf_len();
+        let len = self.len();
         // SAFETY: bytes from cursor..len have been initialized.
         unsafe { std::slice::from_raw_parts_mut(self.inner.buffer.as_ptr().add(self.cursor), len) }
     }
@@ -522,7 +552,7 @@ impl<O: Owner> bytes::Buf for BufMut<O> {
 unsafe impl<O: Owner> bytes::BufMut for BufMut<O> {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        self.buf_raw_capacity() - self.len
+        self.raw_capacity() - self.len
     }
 
     #[inline]
@@ -536,7 +566,7 @@ unsafe impl<O: Owner> bytes::BufMut for BufMut<O> {
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        let raw_cap = self.buf_raw_capacity();
+        let raw_cap = self.raw_capacity();
         let len = self.len;
         // SAFETY: We have exclusive access and the slice is within raw capacity.
         unsafe {
@@ -596,7 +626,7 @@ impl std::fmt::Debug for BufMut<UntrackedOwner> {
         f.debug_struct("AlignedBufMut")
             .field("cursor", &self.cursor)
             .field("len", &self.len)
-            .field("capacity", &self.buf_capacity())
+            .field("capacity", &self.capacity())
             .finish()
     }
 }
@@ -610,53 +640,12 @@ impl BufMut<UntrackedOwner> {
         }
     }
 
-    #[inline]
-    #[allow(dead_code)]
-    pub const fn len(&self) -> usize {
-        self.buf_len()
-    }
-
-    #[inline]
-    pub const fn is_empty(&self) -> bool {
-        self.buf_is_empty()
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.buf_capacity()
-    }
-
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buf_as_mut_ptr()
-    }
-
-    #[inline]
-    pub const unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: forwarded to the shared aligned buffer implementation.
-        unsafe { self.buf_set_len(len) };
-    }
-
-    #[inline]
-    pub const fn clear(&mut self) {
-        self.buf_clear();
-    }
-
-    #[inline]
-    pub const fn truncate(&mut self, len: usize) {
-        self.buf_truncate(len);
-    }
-
     pub(crate) fn into_aligned(self) -> AlignedBuf {
         self.into_shared()
     }
 
     pub fn freeze(self) -> IoBuf {
         IoBuf::from_aligned(self.into_aligned())
-    }
-
-    pub fn into_bytes(self) -> Bytes {
-        self.buf_into_bytes()
     }
 }
 
@@ -665,7 +654,7 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
         f.debug_struct("PooledBufMut")
             .field("cursor", &self.cursor)
             .field("len", &self.len)
-            .field("capacity", &self.buf_capacity())
+            .field("capacity", &self.capacity())
             .finish()
     }
 }
@@ -677,69 +666,6 @@ impl BufMut<TrackedOwner> {
             cursor: 0,
             len: 0,
         }
-    }
-
-    /// Returns the number of readable bytes remaining in the buffer.
-    ///
-    /// This is `len - cursor`, matching [`bytes::BytesMut`] semantics.
-    #[inline]
-    #[allow(dead_code)]
-    pub const fn len(&self) -> usize {
-        self.buf_len()
-    }
-
-    /// Returns true if no readable bytes remain.
-    #[inline]
-    pub const fn is_empty(&self) -> bool {
-        self.buf_is_empty()
-    }
-
-    /// Returns the number of bytes the buffer can hold without reallocating.
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.buf_capacity()
-    }
-
-    /// Returns an unsafe mutable pointer to the buffer's data.
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buf_as_mut_ptr()
-    }
-
-    /// Sets the length of the buffer (view-relative).
-    ///
-    /// This will explicitly set the size of the buffer without actually
-    /// modifying the data, so it is up to the caller to ensure that the data
-    /// has been initialized.
-    ///
-    /// The `len` parameter is relative to the current view (after any `advance`
-    /// calls), matching [`bytes::BytesMut::set_len`] semantics.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure:
-    /// - All bytes in the range `[cursor, cursor + len)` are initialized
-    /// - `len <= capacity()` (where capacity is view-relative)
-    #[inline]
-    pub const unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: forwarded to the shared aligned buffer implementation.
-        unsafe { self.buf_set_len(len) };
-    }
-
-    /// Clears the buffer, removing all data. Existing capacity is preserved.
-    #[inline]
-    pub const fn clear(&mut self) {
-        self.buf_clear();
-    }
-
-    /// Truncates the buffer to at most `len` readable bytes.
-    ///
-    /// If `len` is greater than the current readable length, this has no effect.
-    /// This operates on readable bytes (after cursor), matching
-    /// [`bytes::BytesMut::truncate`] semantics for buffers that have been advanced.
-    #[inline]
-    pub const fn truncate(&mut self, len: usize) {
-        self.buf_truncate(len);
     }
 
     /// Convert into an immutable pooled view over the current readable window.
@@ -754,14 +680,6 @@ impl BufMut<TrackedOwner> {
     /// to the [`IoBuf`] (including slices) are dropped.
     pub fn freeze(self) -> IoBuf {
         IoBuf::from_pooled(self.into_pooled())
-    }
-
-    /// Converts the current readable window into [`Bytes`] without copying.
-    ///
-    /// Empty buffers return detached [`Bytes::new`] so pooled memory is not
-    /// retained by an empty owner.
-    pub fn into_bytes(self) -> Bytes {
-        self.buf_into_bytes()
     }
 }
 
@@ -784,6 +702,7 @@ mod tests {
 
     fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
         BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),

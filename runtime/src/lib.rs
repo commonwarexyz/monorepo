@@ -3959,7 +3959,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_buffer_pooler() {
-        test_buffer_pooler(deterministic::Runner::default(), 4096, 32);
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
 
         let runner = deterministic::Runner::new(
             deterministic::Config::default()
@@ -3975,7 +3975,7 @@ mod tests {
 
     #[test]
     fn test_tokio_buffer_pooler() {
-        test_buffer_pooler(tokio::Runner::default(), 4096, 32);
+        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
 
         let runner = tokio::Runner::new(
             tokio::Config::default()

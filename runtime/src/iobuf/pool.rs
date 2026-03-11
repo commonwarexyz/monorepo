@@ -18,7 +18,7 @@
 //! their original size class.
 //! - Untracked fallback allocations store no class reference and deallocate
 //!   directly when dropped.
-//! - Requests smaller than [`BufferPoolConfig::min_size`] bypass pooling
+//! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
 //!
@@ -125,6 +125,12 @@ const fn cache_line_size() -> usize {
 /// Configuration for a buffer pool.
 #[derive(Debug, Clone)]
 pub struct BufferPoolConfig {
+    /// Minimum request size that should use pooled allocation.
+    ///
+    /// Requests smaller than this bypass the pool and use direct aligned
+    /// allocation instead. A value of `0` means all eligible requests use the
+    /// pool.
+    pub pool_min_size: usize,
     /// Minimum buffer size. Must be >= alignment and a power of two.
     pub min_size: NonZeroUsize,
     /// Maximum buffer size. Must be a power of two and >= min_size.
@@ -139,7 +145,7 @@ pub struct BufferPoolConfig {
 }
 
 impl BufferPoolConfig {
-    /// Network I/O preset: cache-line aligned, cache_line_size to 64KB buffers,
+    /// Network I/O preset: cache-line aligned, 1KB to 64KB buffers,
     /// 4096 per class, not prefilled.
     ///
     /// Network operations typically need multiple concurrent buffers per connection
@@ -149,7 +155,8 @@ impl BufferPoolConfig {
     pub const fn for_network() -> Self {
         let cache_line = NZUsize!(cache_line_size());
         Self {
-            min_size: cache_line,
+            pool_min_size: 1024,
+            min_size: NZUsize!(1024),
             max_size: NZUsize!(64 * 1024),
             max_per_class: NZUsize!(4096),
             prefill: false,
@@ -164,12 +171,19 @@ impl BufferPoolConfig {
     pub fn for_storage() -> Self {
         let page = NZUsize!(page_size());
         Self {
+            pool_min_size: 1024,
             min_size: page,
             max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZUsize!(64),
             prefill: false,
             alignment: page,
         }
+    }
+
+    /// Returns a copy of this config with a new minimum request size that uses pooling.
+    pub const fn with_pool_min_size(mut self, pool_min_size: usize) -> Self {
+        self.pool_min_size = pool_min_size;
+        self
     }
 
     /// Returns a copy of this config with a new minimum buffer size.
@@ -232,6 +246,7 @@ impl BufferPoolConfig {
     /// - `max_size` is not a power of two
     /// - `min_size < alignment`
     /// - `max_size < min_size`
+    /// - `pool_min_size > min_size`
     fn validate(&self) {
         assert!(
             self.alignment.is_power_of_two(),
@@ -254,6 +269,12 @@ impl BufferPoolConfig {
         assert!(
             self.max_size >= self.min_size,
             "max_size must be >= min_size"
+        );
+        assert!(
+            self.pool_min_size <= self.min_size.get(),
+            "pool_min_size ({}) must be <= min_size ({})",
+            self.pool_min_size,
+            self.min_size
         );
     }
 
@@ -544,17 +565,6 @@ impl TlsCache {
         });
     }
 
-    #[cfg(test)]
-    fn current_len(class: &SizeClass) -> usize {
-        TLS_CLASS_CACHES.with(|bins| {
-            // SAFETY: this TLS value is only ever accessed by the current thread.
-            let bins = unsafe { &*bins.get() };
-            bins.get(class.class_id)
-                .and_then(Option::as_ref)
-                .map_or(0, TlsSizeClassCache::len)
-        })
-    }
-
     fn with_class_cache_mut<R>(
         class_id: usize,
         local_capacity: usize,
@@ -718,8 +728,8 @@ impl BufferPool {
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
     /// allocation on exhaustion or oversized requests. Requests smaller than
-    /// [`BufferPoolConfig::min_size`] intentionally bypass pooling and return
-    /// an untracked aligned allocation instead.
+    /// [`BufferPoolConfig::pool_min_size`] intentionally bypass pooling and
+    /// return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
     ///
@@ -733,7 +743,7 @@ impl BufferPool {
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
     /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
-        if capacity < self.inner.config.min_size.get() {
+        if capacity < self.inner.config.pool_min_size {
             let size = capacity.max(1);
             return Ok(IoBufMut::with_alignment(size, self.inner.config.alignment));
         }
@@ -759,7 +769,7 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Requests smaller than [`BufferPoolConfig::min_size`]
+    /// when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
     /// bypass pooling and return an untracked aligned allocation. Otherwise, oversized or
     /// exhausted requests fall back to an untracked aligned heap allocation
     /// that is deallocated when dropped.
@@ -796,7 +806,7 @@ impl BufferPool {
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
     /// untracked allocation on exhaustion or oversized requests. Requests
-    /// smaller than [`BufferPoolConfig::min_size`] intentionally bypass
+    /// smaller than [`BufferPoolConfig::pool_min_size`] intentionally bypass
     /// pooling and return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == len` and `capacity() >= len`.
@@ -811,7 +821,7 @@ impl BufferPool {
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
     /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
-        if len < self.inner.config.min_size.get() {
+        if len < self.inner.config.pool_min_size {
             let size = len.max(1);
             let mut buf = IoBufMut::zeroed_with_alignment(size, self.inner.config.alignment);
             buf.truncate(len);
@@ -843,7 +853,7 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (len within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Requests smaller than [`BufferPoolConfig::min_size`]
+    /// when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
     /// bypass pooling and return an untracked aligned allocation. Otherwise, oversized or
     /// exhausted requests fall back to an untracked aligned heap allocation
     /// that is deallocated when dropped.
@@ -897,6 +907,7 @@ mod tests {
     /// Creates a test config with page alignment.
     fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
         BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),
@@ -925,7 +936,13 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        TlsCache::current_len(class)
+        TLS_CLASS_CACHES.with(|bins| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let bins = unsafe { &*bins.get() };
+            bins.get(class.class_id)
+                .and_then(Option::as_ref)
+                .map_or(0, TlsSizeClassCache::len)
+        })
     }
 
     #[test]
@@ -946,6 +963,7 @@ mod tests {
     #[should_panic(expected = "min_size must be a power of two")]
     fn test_config_invalid_min_size() {
         let config = BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(3000),
             max_size: NZUsize!(8192),
             max_per_class: NZUsize!(10),
@@ -1064,10 +1082,11 @@ mod tests {
     }
 
     #[test]
-    fn test_requests_smaller_than_min_size_bypass_pool() {
+    fn test_requests_smaller_than_pool_min_size_bypass_pool() {
         let mut registry = test_registry();
         let pool = BufferPool::new(
             BufferPoolConfig {
+                pool_min_size: 512,
                 min_size: NZUsize!(512),
                 max_size: NZUsize!(1024),
                 max_per_class: NZUsize!(2),
@@ -1151,6 +1170,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(
             BufferPoolConfig {
+                pool_min_size: 0,
                 min_size: page,
                 max_size: page,
                 max_per_class: NZUsize!(5),
@@ -1174,7 +1194,8 @@ mod tests {
     fn test_config_for_network() {
         let config = BufferPoolConfig::for_network();
         config.validate();
-        assert_eq!(config.min_size.get(), cache_line_size());
+        assert_eq!(config.pool_min_size, 1024);
+        assert_eq!(config.min_size.get(), 1024);
         assert_eq!(config.max_size.get(), 64 * 1024);
         assert_eq!(config.max_per_class.get(), 4096);
         assert!(!config.prefill);
@@ -1185,6 +1206,7 @@ mod tests {
     fn test_config_for_storage() {
         let config = BufferPoolConfig::for_storage();
         config.validate();
+        assert_eq!(config.pool_min_size, 1024);
         assert_eq!(config.min_size.get(), page_size());
         assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
@@ -1205,12 +1227,14 @@ mod tests {
     fn test_config_builders() {
         let page = NZUsize!(page_size());
         let config = BufferPoolConfig::for_storage()
+            .with_pool_min_size(1024)
             .with_max_per_class(NZUsize!(64))
             .with_prefill(true)
             .with_min_size(page)
             .with_max_size(NZUsize!(128 * 1024));
 
         config.validate();
+        assert_eq!(config.pool_min_size, 1024);
         assert_eq!(config.min_size, page);
         assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
@@ -1220,6 +1244,7 @@ mod tests {
 
         // Alignment can be tuned explicitly as long as min_size is also adjusted.
         let aligned = BufferPoolConfig::for_network()
+            .with_pool_min_size(256)
             .with_alignment(NZUsize!(256))
             .with_min_size(NZUsize!(256));
         aligned.validate();
@@ -1231,6 +1256,7 @@ mod tests {
     fn test_config_with_budget_bytes() {
         // Classes: 4, 8, 16 (sum = 28). Budget 280 => max_per_class = 10.
         let config = BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
@@ -1242,6 +1268,7 @@ mod tests {
 
         // Budget 10 rounds up to one buffer per class.
         let small_budget = BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
@@ -1267,6 +1294,7 @@ mod tests {
     #[test]
     fn test_config_invalid_range_edge_paths() {
         let invalid_order = BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(8),
             max_size: NZUsize!(4),
             max_per_class: NZUsize!(1),
@@ -1278,6 +1306,7 @@ mod tests {
         assert_eq!(unchanged.max_per_class, invalid_order.max_per_class);
 
         let non_power_two_max = BufferPoolConfig {
+            pool_min_size: 0,
             min_size: NZUsize!(8),
             max_size: NZUsize!(12),
             max_per_class: NZUsize!(1),
