@@ -6095,7 +6095,6 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 3,
@@ -6114,7 +6113,7 @@ mod tests {
                 success_rate: 1.0,
             },
         ] {
-            twins_campaign::<S, _, L>(&mut rng, campaign, link, |context, namespace, n| {
+            twins_campaign::<S, _, L>(&mut test_rng(), campaign, link, |context, namespace, n| {
                 fixture(context, namespace, n)
             });
         }
@@ -6171,7 +6170,6 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_large() {
-        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
@@ -6179,7 +6177,7 @@ mod tests {
             required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
-            &mut rng,
+            &mut test_rng(),
             campaign,
             Link {
                 latency: Duration::from_millis(500),
@@ -6193,7 +6191,6 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sustained() {
-        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 100,
@@ -6201,7 +6198,7 @@ mod tests {
             required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
-            &mut rng,
+            &mut test_rng(),
             campaign,
             Link {
                 latency: Duration::from_millis(500),
