@@ -630,31 +630,6 @@ fn allocate_faults(
     }
 }
 
-/// Counts compromised assignments unique modulo residual symmetry cells.
-#[cfg(test)]
-fn compromised_count_for_cells(cells: &[usize], faults: usize) -> usize {
-    fn count(ranges: &[(usize, usize)], idx: usize, remaining: usize) -> usize {
-        if remaining == 0 {
-            return 1;
-        }
-        if idx >= ranges.len() {
-            return 0;
-        }
-        let (_, size) = ranges[idx];
-        let remaining_capacity: usize = ranges[idx..].iter().map(|(_, s)| *s).sum();
-        if remaining > remaining_capacity {
-            return 0;
-        }
-        let mut total = 0;
-        for take in 0..=remaining.min(size) {
-            total += count(ranges, idx + 1, remaining - take);
-        }
-        total
-    }
-    let ranges = cells_to_ranges(cells);
-    count(&ranges, 0, faults)
-}
-
 /// Counts canonical scenario suffixes reachable from a cell state.
 fn canonical_scenario_count(
     cells: &[usize],
@@ -959,19 +934,6 @@ mod tests {
         // take=1 from cell0, take=1 from cell1 -> [0, 3]
         // take=2 from cell0, take=0 from cell1 -> [0, 1]
         assert_eq!(sets, vec![vec![3, 4], vec![0, 3], vec![0, 1]]);
-    }
-
-    #[test]
-    fn compromised_count_matches_enumeration() {
-        for cells in &[vec![5], vec![3, 2], vec![2, 2, 1], vec![1, 1, 1, 1, 1]] {
-            for faults in 1..=cells.iter().sum::<usize>().min(3) {
-                assert_eq!(
-                    compromised_count_for_cells(cells, faults),
-                    compromised_sets_for_cells(cells, faults).len(),
-                    "mismatch for cells={cells:?}, faults={faults}"
-                );
-            }
-        }
     }
 
     #[test]
