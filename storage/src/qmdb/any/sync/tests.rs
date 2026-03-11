@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    mmr::{Location, Position},
+    mmr::{hasher::Standard, Location, Position},
     qmdb::{
         self,
         any::traits::DbAny,
@@ -21,7 +21,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
 use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZU64};
 use rand::RngCore as _;
@@ -46,7 +46,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
+impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Standard<Sha256>> {
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }

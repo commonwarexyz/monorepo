@@ -10,9 +10,9 @@ use commonware_cryptography::{sha256, Sha256};
 /// Build a test MMR by adding `elements` elements using the provided hasher.
 pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
     hasher: &mut H,
-    mut mmr: Mmr<sha256::Digest>,
+    mut mmr: Mmr<H>,
     elements: u64,
-) -> Mmr<sha256::Digest> {
+) -> Mmr<H> {
     let changeset = {
         let mut batch = mmr.new_batch();
         for i in 0u64..elements {
@@ -34,7 +34,7 @@ struct MmrRootStability;
 impl Conformance for MmrRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new(&mut hasher);
+        let mmr = Mmr::new(hasher.clone());
         let mmr = build_test_mmr(&mut hasher, mmr, seed);
 
         mmr.root().to_vec()

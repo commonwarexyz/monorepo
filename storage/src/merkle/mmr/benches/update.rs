@@ -63,7 +63,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = Mmr::new(&mut h);
+                            let mut mmr = Mmr::new(h.clone());
                             let changeset = {
                                 let mut batch = UnmerkleizedBatch::new(&mmr);
                                 for _ in 0..leaves {
@@ -93,7 +93,7 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        mmr.update_leaf(&mut h, *loc, element).unwrap();
+                                        mmr.update_leaf(*loc, element).unwrap();
                                     }
                                 }
                                 _ => {

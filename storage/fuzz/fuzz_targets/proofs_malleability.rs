@@ -124,7 +124,7 @@ fn fuzz(input: FuzzInput) {
     match input.proof {
         ProofType::Mmr => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
@@ -156,7 +156,7 @@ fn fuzz(input: FuzzInput) {
         }
         ProofType::MmrMulti => {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {

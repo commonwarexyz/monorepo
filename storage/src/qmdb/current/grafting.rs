@@ -150,13 +150,13 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
 #[derive(Clone)]
-pub(super) struct GraftedHasher<H: HasherTrait> {
+pub struct GraftedHasher<H: HasherTrait> {
     inner: H,
     grafting_height: u32,
 }
 
 impl<H: HasherTrait> GraftedHasher<H> {
-    pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
+    pub(crate) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
             inner,
             grafting_height,
@@ -319,17 +319,18 @@ mod tests {
     /// MMR node at the mapped position.
     fn build_test_grafted_mmr(
         standard: &mut StandardHasher<Sha256>,
-        ops_mmr: &Mmr<sha256::Digest>,
+        ops_mmr: &Mmr<StandardHasher<Sha256>>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> Mmr<sha256::Digest> {
-        let mut grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
-        let mut grafted_mmr = Mmr::new(&mut grafted_hasher);
+    ) -> Mmr<GraftedHasher<StandardHasher<Sha256>>> {
+        let grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
+        let mut grafted_mmr = Mmr::new(grafted_hasher);
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
             let mut leaf_hasher = StandardHasher::<Sha256>::new();
             let changeset = {
+                let mut hasher_for_merkleize = grafted_mmr.hasher().clone();
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
                     let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
@@ -340,7 +341,7 @@ mod tests {
                         leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
-                batch.merkleize(&mut grafted_hasher).finalize()
+                batch.merkleize(&mut hasher_for_merkleize).finalize()
             };
             grafted_mmr.apply(changeset).unwrap();
         }
@@ -439,7 +440,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = Mmr::new(&mut standard);
+            let mmr = Mmr::new(standard.clone());
             let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
@@ -485,7 +486,7 @@ mod tests {
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
-        let mut ops_mmr = Mmr::new(&mut standard);
+        let mut ops_mmr = Mmr::new(standard.clone());
         let changeset = {
             let mut batch = ops_mmr.new_batch();
             for i in 0u8..4 {
@@ -499,12 +500,13 @@ mod tests {
         let c2 = Sha256::fill(0xF2);
 
         // Build grafted MMR with 2 leaves.
-        let mut grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
-        let mut grafted = Mmr::new(&mut grafted_hasher);
+        let grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
+        let mut grafted = Mmr::new(grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let changeset = {
+            let mut hasher_for_merkleize = grafted.hasher().clone();
             let mut batch = grafted.new_batch();
             let mut leaf_hasher = StandardHasher::<Sha256>::new();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
@@ -513,7 +515,7 @@ mod tests {
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch.add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]));
 
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&mut hasher_for_merkleize).finalize()
         };
         grafted.apply(changeset).unwrap();
 
@@ -540,7 +542,7 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Build an ops MMR with 4 leaves.
-            let mut ops_mmr = Mmr::new(&mut standard);
+            let mut ops_mmr = Mmr::new(standard.clone());
             let changeset = {
                 let mut batch = ops_mmr.new_batch();
                 batch.add(&mut standard, &b1);
@@ -741,13 +743,14 @@ mod tests {
         // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
-        let mut grafted_hasher = GraftedHasher::new(standard, grafting_height);
-        let mut grafted = Mmr::new(&mut grafted_hasher);
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
+        let mut grafted = Mmr::new(grafted_hasher);
         let changeset = {
+            let mut hasher_for_merkleize = grafted.hasher().clone();
             let mut batch = grafted.new_batch();
             batch.add_leaf_digest(d0);
             batch.add_leaf_digest(d1);
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&mut hasher_for_merkleize).finalize()
         };
         grafted.apply(changeset).unwrap();
 
@@ -781,18 +784,19 @@ mod tests {
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
-        let mut grafted_hasher = GraftedHasher::new(standard, grafting_height);
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
         let mut grafted = Mmr::from_components(
-            &mut grafted_hasher,
+            grafted_hasher,
             Vec::new(),
             grafted_pruned_to,
             vec![pinned_digest],
         )
         .unwrap();
         let changeset = {
+            let mut hasher_for_merkleize = grafted.hasher().clone();
             let mut batch = grafted.new_batch();
             batch.add_leaf_digest(d4);
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&mut hasher_for_merkleize).finalize()
         };
         grafted.apply(changeset).unwrap();
 

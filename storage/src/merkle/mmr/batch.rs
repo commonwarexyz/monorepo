@@ -504,8 +504,8 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
 
     /// Build a reference MMR with `n` elements for comparison.
-    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<sha256::Digest> {
-        let mmr = Mmr::new(hasher);
+    fn build_reference(hasher: &mut Standard<Sha256>, n: u64) -> Mmr<Standard<Sha256>> {
+        let mmr = Mmr::new(hasher.clone());
         build_test_mmr(hasher, mmr, n)
     }
 
@@ -523,7 +523,7 @@ mod tests {
                 let reference = build_reference(&mut hasher, n);
 
                 // Via Batch: start from empty base, add all via batch
-                let base = Mmr::new(&mut hasher);
+                let base = Mmr::new(hasher.clone());
                 let mut batch = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
                     let element = hasher.digest(&i.to_be_bytes());
@@ -1221,9 +1221,7 @@ mod tests {
 
             // Reference: same update on Mmr.
             let mut reference = base.clone();
-            reference
-                .update_leaf(&mut hasher, Location::new(5), element)
-                .unwrap();
+            reference.update_leaf(Location::new(5), element).unwrap();
             assert_eq!(merkleized.root(), *reference.root());
         });
     }

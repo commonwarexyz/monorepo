@@ -68,7 +68,7 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -178,8 +178,8 @@ where
         I,
         H,
         U,
-        mmr::journaled::Mmr<E, H::Digest>,
-        mmr::mem::Mmr<H::Digest>,
+        mmr::journaled::Mmr<E, StandardHasher<H>>,
+        mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>,
         BitMap<N>,
         N,
     > {
@@ -599,7 +599,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
+) -> Result<mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -614,27 +614,28 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     .await?;
 
     // Build a base Mmr: either from pruned components or empty.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
+    let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
         let grafted_pruned_to = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
-            &mut grafted_hasher,
+            grafted_hasher,
             Vec::new(),
             grafted_pruned_to,
             pinned_nodes.to_vec(),
         )?
     } else {
-        mmr::mem::Mmr::new(&mut grafted_hasher)
+        mmr::mem::Mmr::new(grafted_hasher)
     };
 
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
         let changeset = {
+            let mut hasher_for_merkleize = grafted_mmr.hasher().clone();
             let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
                 batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&mut hasher_for_merkleize).finalize()
         };
         grafted_mmr.apply(changeset)?;
     }

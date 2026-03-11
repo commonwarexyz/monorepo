@@ -3,7 +3,7 @@
 //! Fuzz test for MMR Journaled crash recovery with fault injection.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
@@ -21,7 +21,7 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Mmr = JournaledMmr<deterministic::Context, Digest>;
+type Mmr = JournaledMmr<deterministic::Context, StandardHasher<Sha256>>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -247,7 +247,7 @@ fn fuzz(input: FuzzInput) {
             let mut hasher = StandardHasher::<Sha256>::new();
             let mut mmr = Mmr::init(
                 ctx.with_label("mmr"),
-                &mut hasher,
+                hasher.clone(),
                 mmr_config(
                     &partition_suffix,
                     &ctx,
@@ -279,7 +279,7 @@ fn fuzz(input: FuzzInput) {
         let mut hasher = StandardHasher::<Sha256>::new();
         let mut mmr = Mmr::init(
             ctx.with_label("recovered"),
-            &mut hasher,
+            hasher.clone(),
             mmr_config(
                 &partition_suffix,
                 &ctx,

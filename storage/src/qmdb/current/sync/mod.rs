@@ -145,7 +145,7 @@ where
     Operation<U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let mmr = mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
         mmr::journaled::SyncConfig {
@@ -153,7 +153,7 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &mut hasher,
+        hasher.clone(),
     )
     .await?;
     let log =

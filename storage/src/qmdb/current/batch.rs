@@ -845,7 +845,7 @@ mod trait_impls {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
-        mmr::journaled::Mmr,
+        mmr::{hasher::Standard, journaled::Mmr},
         qmdb::any::traits::{
             BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
             UnmerkleizedBatch as UnmerkleizedBatchTrait,
@@ -971,8 +971,8 @@ mod trait_impls {
             I,
             H,
             update::Unordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
+            Mmr<E, Standard<H>>,
+            mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>,
             commonware_utils::bitmap::Prunable<N>,
             N,
         >
@@ -1014,8 +1014,8 @@ mod trait_impls {
             I,
             H,
             update::Ordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
+            Mmr<E, Standard<H>>,
+            mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>,
             commonware_utils::bitmap::Prunable<N>,
             N,
         >

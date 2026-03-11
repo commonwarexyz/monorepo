@@ -93,7 +93,7 @@ fn historical_root(
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let mut hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::Mmr::new(&mut hasher);
+    let mut mmr = mem::Mmr::new(hasher.clone());
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
         let mut hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::init(
             context.clone(),
-            &mut hasher,
+            hasher.clone(),
             test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
@@ -326,7 +326,7 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
-                        &mut hasher,
+                        hasher.clone(),
                         test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
@@ -362,7 +362,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("sync")
                             .with_attribute("instance", restarts),
                         sync_config,
-                        &mut hasher,
+                        hasher.clone(),
                     )
                     .await
                     {

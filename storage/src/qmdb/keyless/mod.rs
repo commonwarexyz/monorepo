@@ -286,7 +286,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
 
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, H::Digest>> {
+    pub fn new_batch(
+        &self,
+    ) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, crate::mmr::hasher::Standard<H>>> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch {
             keyless: self,

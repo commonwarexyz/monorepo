@@ -111,7 +111,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|_context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let mut mmr = Mmr::new(hasher.clone());
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -177,7 +177,7 @@ fn fuzz(input: FuzzInput) {
 
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
-                        mmr.update_leaf(&mut hasher, leaf_loc, limited_data).unwrap();
+                        mmr.update_leaf(leaf_loc, limited_data).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change

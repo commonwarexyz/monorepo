@@ -12,6 +12,7 @@ use crate::{
     },
     mmr::{
         batch,
+        hasher::Hasher as MmrHasher,
         journaled::Mmr,
         read::{BatchChainInfo, Readable},
         Error as MmrError, Location, Position, Proof, StandardHasher,
@@ -44,7 +45,7 @@ pub trait BatchChain<Item> {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>);
 }
 
-impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, D> {
+impl<E: Storage + Clock + Metrics, H: MmrHasher, Item> BatchChain<Item> for Mmr<E, H> {
     // Recursion base case.
     fn collect(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
@@ -182,7 +183,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest>,
+    pub(crate) mmr: Mmr<E, StandardHasher<H>>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
@@ -208,7 +209,7 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Mmr<E, H::Digest>, C::Item> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Mmr<E, StandardHasher<H>>, C::Item> {
         UnmerkleizedBatch {
             inner: self.mmr.new_batch(),
             hasher: StandardHasher::new(),
@@ -238,7 +239,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mut mmr: Mmr<E, H::Digest>,
+        mut mmr: Mmr<E, StandardHasher<H>>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -260,7 +261,7 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mmr: &mut Mmr<E, H::Digest>,
+        mmr: &mut Mmr<E, StandardHasher<H>>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
@@ -276,7 +277,7 @@ where
                 ?rewind_count,
                 "rewinding MMR to match journal"
             );
-            mmr.rewind(*rewind_count as usize, hasher).await?;
+            mmr.rewind(*rewind_count as usize).await?;
             mmr_size = Location::new(journal_size);
         }
 
@@ -514,7 +515,7 @@ where
 
         // Align the MMR and journal.
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut mmr = Mmr::init(context.with_label("mmr"), hasher.clone(), mmr_cfg).await?;
         Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
@@ -547,7 +548,7 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut mmr = Mmr::init(context.with_label("mmr"), hasher.clone(), mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
@@ -612,7 +613,7 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .rewind((leaves - size) as usize, &mut self.hasher)
+                .rewind((leaves - size) as usize)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -684,7 +685,7 @@ mod tests {
         },
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{sha256, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef,
@@ -776,14 +777,14 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Mmr<deterministic::Context, sha256::Digest>,
+        Mmr<deterministic::Context, StandardHasher<Sha256>>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
-        let mut hasher = StandardHasher::new();
+        let hasher = StandardHasher::new();
         let mmr = Mmr::init(
             context.with_label("mmr"),
-            &mut hasher,
+            hasher.clone(),
             mmr_config(suffix, &context),
         )
         .await

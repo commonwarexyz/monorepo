@@ -138,7 +138,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -193,7 +193,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             let operations = vec![10, 11, 12];
             {
@@ -239,7 +239,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add elements
             let mut positions = Vec::new();
@@ -276,7 +276,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3, 4];
@@ -324,7 +324,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let op_count = 15;
@@ -376,7 +376,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -411,7 +411,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -463,7 +463,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..20).collect();
@@ -520,7 +520,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..10).collect();
@@ -588,7 +588,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let empty_mmr = Mmr::new(&mut hasher);
+            let empty_mmr = Mmr::new(hasher.clone());
             let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.
@@ -613,7 +613,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(hasher.clone());
 
             // Add operations to the MMR
             let operations = vec![1, 2, 3];
