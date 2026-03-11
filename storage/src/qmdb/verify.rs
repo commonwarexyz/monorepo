@@ -21,6 +21,27 @@ where
     proof.verify_range_inclusion(hasher, &elements, start_loc, target_root)
 }
 
+/// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
+///
+/// The `pinned_nodes` are the individual peak digests before the proven range (as returned by
+/// `nodes_to_pin`). When `start_loc` is 0, `pinned_nodes` must be empty.
+pub fn verify_proof_and_pinned_nodes<Op, H, D>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<D>,
+    start_loc: Location,
+    operations: &[Op],
+    pinned_nodes: &[D],
+    target_root: &D,
+) -> bool
+where
+    Op: Encode,
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
+    proof.verify_proof_and_pinned_nodes(hasher, &elements, start_loc, pinned_nodes, target_root)
+}
+
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
 /// in the range of the [Proof].
 pub fn verify_proof_and_extract_digests<Op, H, D>(

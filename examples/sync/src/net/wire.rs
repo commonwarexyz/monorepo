@@ -13,6 +13,9 @@ use std::num::NonZeroU64;
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
 
+/// Maximum number of pinned nodes (one per MMR peak, bounded by max tree height).
+pub const MAX_PINNED_NODES: usize = 64;
+
 /// Request for operations from the server.
 #[derive(Debug)]
 pub struct GetOperationsRequest {
@@ -268,7 +271,7 @@ where
         };
         let has_pinned_nodes = u8::read(buf)? != 0;
         let pinned_nodes = if has_pinned_nodes {
-            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
+            let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
             Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
         } else {
             None

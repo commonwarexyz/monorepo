@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self,
             engine::{Config, NextStep},
-            resolver::{self, Resolver},
+            resolver::{self, FetchResult, Resolver},
             Engine, Target,
         },
     },
@@ -1345,6 +1345,98 @@ where
     });
 }
 
+/// A resolver wrapper that corrupts pinned nodes on the first request, then returns correct
+/// data on subsequent requests.
+#[derive(Clone)]
+struct CorruptFirstPinnedNodesResolver<R> {
+    inner: R,
+    corrupted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<R> {
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        let mut result = self
+            .inner
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .await?;
+        // Corrupt pinned nodes only on the first request that includes them.
+        if result.pinned_nodes.is_some()
+            && !self
+                .corrupted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(ref mut nodes) = result.pinned_nodes {
+                if !nodes.is_empty() {
+                    nodes[0] = Digest::from([0xFFu8; 32]);
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Test that corrupted pinned nodes on the first attempt are rejected and the sync
+/// succeeds on retry when the resolver returns correct data.
+pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a target database with some operations and prune so that pinned nodes are needed.
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        let ops = H::create_ops(20);
+        target_db = H::apply_ops(target_db, ops).await;
+        target_db
+            .prune(target_db.inactivity_floor_loc().await)
+            .await
+            .unwrap();
+
+        let sync_root = H::sync_target_root(&target_db);
+        let lower_bound = target_db.inactivity_floor_loc().await;
+        let upper_bound = target_db.bounds().await.end;
+
+        let db_config = H::config(&context.next_u64().to_string(), &context);
+
+        let resolver = CorruptFirstPinnedNodesResolver {
+            inner: Arc::new(target_db),
+            corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let config = sync::engine::Config {
+            db_config,
+            fetch_batch_size: NZU64!(100),
+            target: Target {
+                root: sync_root,
+                range: lower_bound..upper_bound,
+            },
+            context: context.with_label("client"),
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+        };
+
+        // Sync should succeed on the second attempt after the first corrupted pinned nodes
+        // are rejected.
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        assert_eq!(synced_db.root(), sync_root);
+        synced_db.destroy().await.unwrap();
+    });
+}
+
 mod harnesses {
     use super::SyncTestHarness;
     use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
@@ -1698,6 +1790,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_resolver_fails() {
                 super::test_sync_resolver_fails::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_retries_bad_pinned_nodes() {
+                super::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
 
             #[test_traced("WARN")]

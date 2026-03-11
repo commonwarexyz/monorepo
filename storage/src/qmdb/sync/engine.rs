@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    mmr::{iterator::nodes_to_pin, Location, Position, StandardHasher},
+    mmr::{Location, StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -419,53 +419,50 @@ where
             return Ok(());
         }
 
-        // Verify the proof
-        let proof_valid = qmdb::verify_proof(
-            &mut self.hasher,
-            &proof,
-            start_loc,
-            &operations,
-            &self.target.root,
-        );
+        // Verify the proof (and pinned nodes if this is the sync boundary batch).
+        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start;
+        let valid = if need_pinned {
+            let elements: Vec<_> = operations
+                .iter()
+                .map(commonware_codec::Encode::encode)
+                .collect();
+            let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
+            proof.verify_proof_and_pinned_nodes(
+                &mut self.hasher,
+                &elements,
+                start_loc,
+                nodes,
+                &self.target.root,
+            )
+        } else {
+            qmdb::verify_proof(
+                &mut self.hasher,
+                &proof,
+                start_loc,
+                &operations,
+                &self.target.root,
+            )
+        };
 
-        // Report success or failure to the resolver
-        let _ = success_tx.send(proof_valid);
+        // Report success or failure to the resolver.
+        let _ = success_tx.send(valid);
 
-        if proof_valid {
-            // Use pinned nodes from the resolver if we don't have them yet and this
-            // is the batch at the sync boundary.
-            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                match pinned_nodes {
-                    Some(nodes) => {
-                        let expected = match Position::try_from(start_loc) {
-                            Ok(pos) => nodes_to_pin(pos).count(),
-                            Err(_) => {
-                                return Err(SyncError::Engine(EngineError::PinnedNodes(format!(
-                                    "invalid boundary location: {start_loc}"
-                                ))));
-                            }
-                        };
-                        if nodes.len() != expected {
-                            return Err(SyncError::Engine(EngineError::PinnedNodes(format!(
-                                "expected {expected} pinned nodes, got {}",
-                                nodes.len()
-                            ))));
-                        }
-                        self.pinned_nodes = Some(nodes);
-                    }
-                    None if *start_loc > 0 => {
-                        return Err(SyncError::Engine(EngineError::PinnedNodes(
-                            "resolver did not provide pinned nodes for non-zero boundary"
-                                .to_string(),
-                        )));
-                    }
-                    None => {}
-                }
+        if !valid {
+            if need_pinned {
+                tracing::warn!("boundary proof or pinned nodes failed verification, will retry");
             }
-
-            // Store operations for later application
-            self.store_operations(start_loc, operations);
+            return Ok(());
         }
+
+        // Cache pinned nodes only after successful verification.
+        if need_pinned {
+            if let Some(nodes) = pinned_nodes {
+                self.pinned_nodes = Some(nodes);
+            }
+        }
+
+        // Store operations for later application.
+        self.store_operations(start_loc, operations);
 
         Ok(())
     }
