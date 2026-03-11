@@ -5680,28 +5680,51 @@ mod tests {
         required_finalizations: usize,
     }
 
-    fn twins_case<S, F, L>(case: twins::Case, campaign: TwinsCampaign, link: Link, mut fixture: F)
-    where
+    fn twins_campaign<S, F, L>(
+        rng: &mut StdRng,
+        campaign: TwinsCampaign,
+        link: Link,
+        mut fixture: F,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let faults = N3f1::max_faults(campaign.n) as usize;
-        let scenario = case.scenario.clone();
-        let twin_indices = case.compromised.clone();
-        assert_eq!(
-            twin_indices.len(),
-            faults,
-            "unexpected twins count for n={} (expected f={faults})",
-            campaign.n
+        let n = campaign.n;
+        let faults = N3f1::max_faults(n) as usize;
+        let cases = twins::cases(
+            rng,
+            twins::Framework {
+                participants: n as usize,
+                faults,
+                rounds: campaign.rounds,
+                max_cases: campaign.max_cases,
+            },
         );
+        assert!(
+            !cases.is_empty(),
+            "twins campaign should generate at least one case"
+        );
+        for case in cases {
+            let scenario = case.scenario.clone();
+            let twin_indices = case.compromised.clone();
+            assert_eq!(
+                twin_indices.len(),
+                faults,
+                "unexpected twins count for n={n} (expected f={faults})",
+            );
 
-        let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
-        let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new().with_seed(case.seed);
-        let executor = deterministic::Runner::new(cfg);
-        executor.start(|mut context| async move {
+            let activity_timeout = ViewDelta::new(10);
+            let skip_timeout = ViewDelta::new(5);
+            let namespace = b"consensus".to_vec();
+            let link = link.clone();
+            let required_finalizations = campaign.required_finalizations;
+            let mut case_fixture = |ctx: &mut deterministic::Context, ns: &[u8], n: u32| {
+                fixture(ctx, ns, n)
+            };
+            let cfg = deterministic::Config::new().with_seed(rng.gen());
+            let executor = deterministic::Runner::new(cfg);
+            executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
@@ -5716,12 +5739,12 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, &namespace, campaign.n);
+            } = case_fixture(&mut context, &namespace, n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-            let elector = TwinsElector::new(L::default(), &scenario, campaign.n as usize);
+            let elector = TwinsElector::new(L::default(), &scenario, n as usize);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -5954,7 +5977,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(honest_start) {
                 let (_latest, mut monitor) = reporter.subscribe().await;
-                let required = campaign.required_finalizations;
+                let required = required_finalizations;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     let mut count = 0usize;
                     while count < required {
@@ -6056,32 +6079,6 @@ mod tests {
                 );
             }
         });
-    }
-
-    /// Runs a bounded paper-style twins campaign across generated scenarios.
-    fn twins_campaign<S, F, L>(seed: u64, campaign: TwinsCampaign, link: Link, mut fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
-    {
-        let cases = twins::cases(
-            seed,
-            twins::Framework {
-                participants: campaign.n as usize,
-                faults: N3f1::max_faults(campaign.n) as usize,
-                rounds: campaign.rounds,
-                max_cases: campaign.max_cases,
-            },
-        );
-        assert!(
-            !cases.is_empty(),
-            "twins campaign should generate at least one case"
-        );
-        for case in cases {
-            twins_case::<S, _, L>(case, campaign, link.clone(), |context, namespace, n| {
-                fixture(context, namespace, n)
-            });
         }
     }
 
@@ -6091,10 +6088,10 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
+        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 3,
-
             max_cases: 20,
             required_finalizations: 50,
         };
@@ -6110,7 +6107,7 @@ mod tests {
                 success_rate: 1.0,
             },
         ] {
-            twins_campaign::<S, _, L>(0, campaign, link, |context, namespace, n| {
+            twins_campaign::<S, _, L>(&mut rng, campaign, link, |context, namespace, n| {
                 fixture(context, namespace, n)
             });
         }
@@ -6167,15 +6164,15 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_large() {
+        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
-
             max_cases: 9,
             required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
-            0,
+            &mut rng,
             campaign,
             Link {
                 latency: Duration::from_millis(500),
@@ -6189,15 +6186,15 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sustained() {
+        let mut rng = test_rng();
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 100,
-
             max_cases: 9,
             required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
-            0,
+            &mut rng,
             campaign,
             Link {
                 latency: Duration::from_millis(500),

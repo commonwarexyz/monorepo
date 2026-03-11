@@ -14,10 +14,13 @@
 //! Advancing one round refines those cells by splitting each group according to
 //! the role its members take in the new round.
 //!
-//! For each canonical scenario, `cases()` computes the residual symmetry cells
-//! and generates only structurally unique compromised-node assignments --
-//! two assignments that differ only in which members of a cell are chosen are
-//! equivalent and collapsed to a single representative.
+//! The full enumeration approach guarantees that every case within a campaign
+//! is structurally distinct -- no duplicate (scenario, compromised-assignment)
+//! pairs are ever emitted. For each canonical scenario, `cases()` computes the
+//! residual symmetry cells and generates only the unique compromised-node
+//! assignments: two assignments that differ only in which members of a cell
+//! are chosen are equivalent and collapsed to a single representative. When the
+//! case space exceeds `max_cases`, scenarios are sampled without replacement.
 
 use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
@@ -25,15 +28,12 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::{ordered::Set, rng::mix64, test_rng_seeded};
-use rand::{rngs::StdRng, Rng};
+use commonware_utils::ordered::Set;
+use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
-
-/// Keeps case seeds off the raw framework seed, including the `(0, 0)` fixed point.
-const CASE_SEED_DOMAIN: u64 = 0x8f36_d01c_4ea8_9b27;
 
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -239,16 +239,16 @@ pub struct Case {
     pub compromised: Vec<usize>,
     /// Multi-round scenario for this case.
     pub scenario: Scenario,
-    /// Deterministic seed used for this case.
-    pub seed: u64,
 }
 
 /// Generate executable Twins cases from framework parameters.
 ///
-/// For each canonical scenario, the generator computes the residual symmetry
-/// cells and emits only the structurally unique compromised-node assignments.
-/// The total is capped at [`Framework::max_cases`].
-pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
+/// The full enumeration approach guarantees no duplicate cases within a
+/// campaign. For each canonical scenario, the generator computes the residual
+/// symmetry cells and emits only the structurally unique compromised-node
+/// assignments. When the total exceeds [`Framework::max_cases`], scenarios
+/// are sampled without replacement so every emitted case is distinct.
+pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
     assert!(
         framework.participants <= u64::BITS as usize,
@@ -262,20 +262,16 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
     assert!(framework.rounds > 0, "rounds must be > 0");
     assert!(framework.max_cases > 0, "max_cases must be > 0");
 
-    let scenarios = generate_scenarios(seed, framework.participants, framework.rounds, framework.max_cases);
+    let scenarios = generate_scenarios(rng, framework.participants, framework.rounds, framework.max_cases);
 
     let mut out = Vec::new();
-    let mut case_idx = 0usize;
     for (scenario, residual_cells) in &scenarios {
         let compromised_sets = compromised_sets_for_cells(residual_cells, framework.faults);
         for compromised in compromised_sets {
-            let case_seed = mix64(seed ^ (case_idx as u64) ^ CASE_SEED_DOMAIN);
             out.push(Case {
                 compromised,
                 scenario: scenario.clone(),
-                seed: case_seed,
             });
-            case_idx += 1;
             if out.len() >= framework.max_cases {
                 return out;
             }
@@ -711,7 +707,7 @@ fn canonical_scenario_from_rank(
 
 
 /// Samples unique indices without replacement from `[0, total)`.
-fn sample_unique_indices(rng: &mut StdRng, total: u128, samples: usize) -> Vec<u128> {
+fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec<u128> {
     assert!(
         (samples as u128) <= total,
         "cannot sample more unique indices than total domain size"
@@ -743,12 +739,11 @@ fn sample_unique_indices(rng: &mut StdRng, total: u128, samples: usize) -> Vec<u
 /// scenarios until the cumulative case count (scenarios x their per-scenario
 /// compromised assignments) would exceed the budget.
 fn generate_scenarios(
-    seed: u64,
+    rng: &mut impl Rng,
     n: usize,
     rounds: usize,
     max_cases: usize,
 ) -> Vec<(Scenario, Vec<usize>)> {
-    let mut rng = test_rng_seeded(seed);
     let mut memo = HashMap::new();
     let initial_cells = vec![n];
     if let Some(total) = canonical_scenario_count(&initial_cells, rounds, &mut memo) {
@@ -760,7 +755,7 @@ fn generate_scenarios(
                 .collect();
         }
 
-        return sample_unique_indices(&mut rng, total, max_cases)
+        return sample_unique_indices(rng, total, max_cases)
             .into_iter()
             .map(|idx| {
                 canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo)
@@ -769,13 +764,13 @@ fn generate_scenarios(
     }
 
     let max_attempts = max_cases.saturating_mul(1024).max(4096);
-    sample_scenarios_fallback(&mut rng, &initial_cells, rounds, max_cases, max_attempts)
+    sample_scenarios_fallback(rng, &initial_cells, rounds, max_cases, max_attempts)
 }
 
 /// Samples unique scenarios with residual cells from the canonical transition
 /// graph without using counts.
 fn sample_scenarios_fallback(
-    rng: &mut StdRng,
+    rng: &mut impl Rng,
     initial_cells: &[usize],
     rounds: usize,
     max_scenarios: usize,
@@ -812,7 +807,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::ordered::Set;
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
 
     #[test]
     fn generated_cases_are_deterministic() {
@@ -820,22 +815,20 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-
             max_cases: 50,
         };
-        let first = cases(42, framework);
-        let second = cases(42, framework);
+        let first = cases(&mut test_rng(), framework);
+        let second = cases(&mut test_rng(), framework);
         assert_eq!(first.len(), second.len());
         for (a, b) in first.iter().zip(second.iter()) {
             assert_eq!(a.compromised, b.compromised);
             assert_eq!(a.scenario, b.scenario);
-            assert_eq!(a.seed, b.seed);
         }
     }
 
     #[test]
     fn generated_scenarios_include_leaders_visible_only_to_secondary() {
-        let scenarios = generate_scenarios(0, 3, 1, usize::MAX);
+        let scenarios = generate_scenarios(&mut test_rng(), 3, 1, usize::MAX);
         assert!(scenarios.iter().any(|(scenario, _)| {
             let round = scenario.rounds[0];
             let leader_bit = 1u64 << round.leader;
@@ -902,20 +895,20 @@ mod tests {
 
     #[test]
     fn generated_scenarios_respect_max_bound() {
-        let scenarios = generate_scenarios(7, 5, 4, 3);
+        let scenarios = generate_scenarios(&mut test_rng(), 5, 4, 3);
         assert_eq!(scenarios.len(), 3);
     }
 
     #[test]
     fn generated_scenarios_fallback_sampling_is_bounded() {
-        let scenarios = generate_scenarios(5, 4, 40, 8);
+        let scenarios = generate_scenarios(&mut test_rng(), 4, 40, 8);
         assert!(!scenarios.is_empty());
         assert!(scenarios.len() <= 8);
     }
 
     #[test]
     fn fallback_sampling_returns_partial_results_when_attempt_budget_is_exhausted() {
-        let mut rng = test_rng_seeded(0);
+        let mut rng = test_rng();
         let scenarios = sample_scenarios_fallback(&mut rng, &[4], 40, 8, 1);
         assert_eq!(scenarios.len(), 1);
     }
@@ -933,7 +926,7 @@ mod tests {
 
     #[test]
     fn pruned_scenarios_vary_across_round_positions() {
-        let scenarios = generate_scenarios(11, 5, 3, 32);
+        let scenarios = generate_scenarios(&mut test_rng(), 5, 3, 32);
         for round in 0..3 {
             let unique: HashSet<_> = scenarios
                 .iter()
@@ -998,11 +991,10 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 1,
-
             max_cases: usize::MAX,
         };
-        let all_cases = cases(0, framework);
-        let scenarios = generate_scenarios(0, 5, 1, usize::MAX);
+        let all_cases = cases(&mut test_rng(), framework);
+        let scenarios = generate_scenarios(&mut test_rng(), 5, 1, usize::MAX);
         // Naive cross-product would be scenarios * C(5,1) = scenarios * 5.
         // Symmetry-aware should produce fewer.
         let naive = scenarios.len() * 5;
@@ -1022,7 +1014,7 @@ mod tests {
 
             max_cases: 10,
         };
-        let result = cases(0, framework);
+        let result = cases(&mut test_rng(), framework);
         assert!(result.len() <= 10);
     }
 
@@ -1030,12 +1022,11 @@ mod tests {
     #[should_panic(expected = "participants must fit in u64 masks")]
     fn cases_reject_frameworks_that_exceed_mask_width() {
         let _ = cases(
-            0,
+            &mut test_rng(),
             Framework {
                 participants: (u64::BITS as usize) + 1,
                 faults: 1,
                 rounds: 1,
-    
                 max_cases: 1,
             },
         );
@@ -1077,10 +1068,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-
             max_cases: 1,
         };
-        let case = cases(0, framework)
+        let case = cases(&mut test_rng(), framework)
             .into_iter()
             .next()
             .expect("expected at least one generated twins case");
