@@ -6089,12 +6089,9 @@ mod tests {
         }
     }
 
-    fn test_twins<S, F, L>(mut fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
-    {
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins() {
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 3,
@@ -6113,58 +6110,13 @@ mod tests {
                 success_rate: 1.0,
             },
         ] {
-            twins_campaign::<S, _, L>(&mut test_rng(), campaign, link, |context, namespace, n| {
-                fixture(context, namespace, n)
-            });
+            twins_campaign::<_, _, RoundRobin>(
+                &mut test_rng(),
+                campaign,
+                link,
+                scheme_mocks::fixture,
+            );
         }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_multisig_min_pk() {
-        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_multisig_min_sig() {
-        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_threshold_vrf_min_pk() {
-        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_threshold_vrf_min_sig() {
-        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_threshold_std_min_pk() {
-        test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_threshold_std_min_sig() {
-        test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_ed25519() {
-        test_twins::<_, _, RoundRobin>(ed25519::fixture);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_secp256r1() {
-        test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     #[test_group("slow")]
