@@ -45,12 +45,12 @@ pub(crate) fn partial_chunk_root<H: MmrHasher, const N: usize>(
 ) -> H::Digest {
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    let mut buf =
-        Vec::with_capacity(mmr_root.as_ref().len() + 8 + last_chunk_digest.as_ref().len());
-    buf.extend_from_slice(mmr_root.as_ref());
-    buf.extend_from_slice(&next_bit.to_be_bytes());
-    buf.extend_from_slice(last_chunk_digest.as_ref());
-    hasher.digest(&buf)
+    let next_bit = next_bit.to_be_bytes();
+    hasher.hash([
+        mmr_root.as_ref(),
+        next_bit.as_slice(),
+        last_chunk_digest.as_ref(),
+    ])
 }
 
 mod private {

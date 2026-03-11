@@ -167,8 +167,8 @@ impl<H: HasherTrait> GraftedHasher<H> {
 impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
     type Digest = H::Digest;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
-        self.inner.leaf_digest(pos, element)
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        self.inner.hash(parts)
     }
 
     fn node_digest(
@@ -179,18 +179,6 @@ impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
     ) -> Self::Digest {
         let ops_pos = grafted_to_ops_pos(pos, self.grafting_height);
         self.inner.node_digest(ops_pos, left, right)
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest {
-        self.inner.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
-        self.inner.digest(data)
     }
 }
 
@@ -233,8 +221,8 @@ impl<'a, H: CHasher> Verifier<'a, H> {
 impl<H: CHasher> HasherTrait for Verifier<'_, H> {
     type Digest = H::Digest;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        self.hasher.leaf_digest(pos, element)
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        self.hasher.hash(parts)
     }
 
     fn node_digest(
@@ -268,25 +256,10 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    let mut buf = Vec::with_capacity(chunk.len() + ops_subtree_root.as_ref().len());
-                    buf.extend_from_slice(chunk);
-                    buf.extend_from_slice(ops_subtree_root.as_ref());
-                    self.hasher.digest(&buf)
+                    self.hash([chunk, ops_subtree_root.as_ref()])
                 }
             }
         }
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest {
-        self.hasher.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hasher.digest(data)
     }
 }
 
@@ -363,11 +336,9 @@ mod tests {
                     let ops_subtree_root = ops_mmr
                         .get_node(ops_pos)
                         .expect("ops MMR missing node at mapped position");
-                    let mut buf =
-                        Vec::with_capacity(chunk.as_ref().len() + ops_subtree_root.as_ref().len());
-                    buf.extend_from_slice(chunk.as_ref());
-                    buf.extend_from_slice(ops_subtree_root.as_ref());
-                    batch.add_leaf_digest(leaf_hasher.digest(&buf));
+                    batch.add_leaf_digest(
+                        leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
+                    );
                 }
                 batch.merkleize(&mut grafted_hasher).finalize()
             };
@@ -537,16 +508,10 @@ mod tests {
             let mut batch = grafted.new_batch();
             let mut leaf_hasher = StandardHasher::<Sha256>::new();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
-            let mut buf = Vec::new();
-            buf.extend_from_slice(c1.as_ref());
-            buf.extend_from_slice(sub0.as_ref());
-            batch.add_leaf_digest(leaf_hasher.digest(&buf));
+            batch.add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
 
             let sub1 = ops_mmr.get_node(pos1).unwrap();
-            let mut buf = Vec::new();
-            buf.extend_from_slice(c2.as_ref());
-            buf.extend_from_slice(sub1.as_ref());
-            batch.add_leaf_digest(leaf_hasher.digest(&buf));
+            batch.add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]));
 
             batch.merkleize(&mut grafted_hasher).finalize()
         };

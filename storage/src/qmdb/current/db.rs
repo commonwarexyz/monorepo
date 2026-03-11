@@ -455,14 +455,18 @@ pub(super) fn combine_roots<H: Hasher>(
     grafted_mmr_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    let mut buf = alloc::vec::Vec::new();
-    buf.extend_from_slice(ops_root.as_ref());
-    buf.extend_from_slice(grafted_mmr_root.as_ref());
-    if let Some((next_bit, last_chunk_digest)) = partial {
-        buf.extend_from_slice(&next_bit.to_be_bytes());
-        buf.extend_from_slice(last_chunk_digest.as_ref());
+    match partial {
+        Some((next_bit, last_chunk_digest)) => {
+            let next_bit = next_bit.to_be_bytes();
+            hasher.hash([
+                ops_root.as_ref(),
+                grafted_mmr_root.as_ref(),
+                next_bit.as_slice(),
+                last_chunk_digest.as_ref(),
+            ])
+        }
+        None => hasher.hash([ops_root.as_ref(), grafted_mmr_root.as_ref()]),
     }
-    hasher.digest(&buf)
 }
 
 /// Compute the canonical root digest of a [Db].
@@ -560,12 +564,7 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
                         if chunk == zero_chunk {
                             (ops_pos, ops_digest)
                         } else {
-                            let mut buf = alloc::vec::Vec::with_capacity(
-                                chunk.len() + ops_digest.as_ref().len(),
-                            );
-                            buf.extend_from_slice(&chunk);
-                            buf.extend_from_slice(ops_digest.as_ref());
-                            (ops_pos, h.digest(&buf))
+                            (ops_pos, h.hash([chunk.as_slice(), ops_digest.as_ref()]))
                         }
                     },
                 )
@@ -577,11 +576,10 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
                 if chunk == zero_chunk {
                     (ops_pos, ops_digest)
                 } else {
-                    let mut buf =
-                        alloc::vec::Vec::with_capacity(chunk.len() + ops_digest.as_ref().len());
-                    buf.extend_from_slice(&chunk);
-                    buf.extend_from_slice(ops_digest.as_ref());
-                    (ops_pos, hasher.digest(&buf))
+                    (
+                        ops_pos,
+                        hasher.hash([chunk.as_slice(), ops_digest.as_ref()]),
+                    )
                 }
             })
             .collect(),

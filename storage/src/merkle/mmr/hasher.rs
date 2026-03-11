@@ -8,8 +8,11 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 pub trait Hasher: Clone + Send + Sync {
     type Digest: Digest;
 
-    /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest;
+    /// Hash an arbitrary sequence of byte slices into a single digest.
+    ///
+    /// The parts are concatenated before hashing (i.e. there is no domain separation
+    /// between parts).
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
@@ -17,18 +20,42 @@ pub trait Hasher: Clone + Send + Sync {
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
-    ) -> Self::Digest;
+    ) -> Self::Digest {
+        self.hash([
+            (*pos).to_be_bytes().as_slice(),
+            left.as_ref(),
+            right.as_ref(),
+        ])
+    }
+
+    /// Computes the digest for a leaf given its position and the element it represents.
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+        self.hash([(*pos).to_be_bytes().as_slice(), element])
+    }
+
+    /// Compute the digest of a byte slice.
+    fn digest(&mut self, data: &[u8]) -> Self::Digest {
+        self.hash(core::iter::once(data))
+    }
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
     fn root<'a>(
         &mut self,
         leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest;
-
-    /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Self::Digest;
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest {
+        #[allow(clippy::map_identity)] // The map coerces &'b to &'a; not a no-op.
+        fn compute<'a, 'b: 'a, H: Hasher>(
+            h: &mut H,
+            prefix: &'a [u8],
+            parts: impl Iterator<Item = &'b [u8]>,
+        ) -> H::Digest {
+            h.hash(core::iter::once(prefix).chain(parts.map(|p| p)))
+        }
+        let leaves = leaves.to_be_bytes();
+        compute(self, &leaves, peak_digests.into_iter().map(AsRef::as_ref))
+    }
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
@@ -43,23 +70,6 @@ impl<H: CHasher> Standard<H> {
     pub fn new() -> Self {
         Self { hasher: H::new() }
     }
-
-    pub fn update_with_pos(&mut self, pos: Position) {
-        let pos = *pos;
-        self.hasher.update(&pos.to_be_bytes());
-    }
-
-    pub fn update_with_digest(&mut self, digest: &H::Digest) {
-        self.hasher.update(digest.as_ref());
-    }
-
-    pub fn update_with_element(&mut self, element: &[u8]) {
-        self.hasher.update(element);
-    }
-
-    pub fn finalize(&mut self) -> H::Digest {
-        self.hasher.finalize()
-    }
 }
 
 impl<H: CHasher> Default for Standard<H> {
@@ -71,34 +81,11 @@ impl<H: CHasher> Default for Standard<H> {
 impl<H: CHasher> Hasher for Standard<H> {
     type Digest = H::Digest;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_element(element);
-        self.finalize()
-    }
-
-    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_digest(left);
-        self.update_with_digest(right);
-        self.finalize()
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest {
-        self.hasher.update(&leaves.to_be_bytes());
-        for digest in peak_digests {
-            self.update_with_digest(digest);
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        for part in parts {
+            self.hasher.update(part);
         }
-        self.finalize()
-    }
-
-    fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hasher.update(data);
-        self.finalize()
+        self.hasher.finalize()
     }
 }
 
