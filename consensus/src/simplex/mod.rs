@@ -6112,28 +6112,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sampled() {
-        let campaign = TwinsCampaign {
-            n: 5,
-            rounds: 3,
-            mode: twins::Mode::Sampled,
-            max_cases: 20,
-            trailing_finalizations: 10,
-        };
         for link in [
             Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(10),
                 success_rate: 1.0,
             },
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: 1.0,
-            },
+            TWINS_LINK,
         ] {
             twins_campaign::<_, _, RoundRobin>(
                 &mut test_rng(),
-                campaign,
+                TWINS_CAMPAIGN,
                 link,
                 scheme_mocks::fixture,
             );
@@ -6144,11 +6133,8 @@ mod tests {
     #[test_traced("INFO")]
     fn test_twins_sustained() {
         let campaign = TwinsCampaign {
-            n: 5,
-            rounds: 3,
             mode: twins::Mode::Sustained,
-            max_cases: 20,
-            trailing_finalizations: 10,
+            ..TWINS_CAMPAIGN
         };
         for link in [
             Link {
@@ -6156,11 +6142,7 @@ mod tests {
                 jitter: Duration::from_millis(10),
                 success_rate: 1.0,
             },
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: 1.0,
-            },
+            TWINS_LINK,
         ] {
             twins_campaign::<_, _, RoundRobin>(
                 &mut test_rng(),
@@ -6177,18 +6159,12 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
-            mode: twins::Mode::Sampled,
-            max_cases: 20,
-            trailing_finalizations: 10,
+            ..TWINS_CAMPAIGN
         };
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: 1.0,
-            },
+            TWINS_LINK,
             scheme_mocks::fixture,
         );
     }
@@ -6200,17 +6176,12 @@ mod tests {
             n: 10,
             rounds: 5,
             mode: twins::Mode::Sustained,
-            max_cases: 20,
-            trailing_finalizations: 10,
+            ..TWINS_CAMPAIGN
         };
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: 1.0,
-            },
+            TWINS_LINK,
             scheme_mocks::fixture,
         );
     }
