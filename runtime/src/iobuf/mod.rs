@@ -9,7 +9,7 @@
 mod aligned;
 mod pool;
 
-use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
+use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
@@ -72,8 +72,8 @@ impl IoBuf {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when the final reference is dropped.
     ///
-    /// Buffers backed by [`Bytes`], and untracked fallback allocations from
-    /// fallback allocations or small-size pool bypass allocations, return
+    /// Buffers backed by [`Bytes`], and untracked aligned allocations used for
+    /// fallback or requests smaller than [`BufferPoolConfig::min_size`], return
     /// `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
@@ -450,8 +450,21 @@ impl IoBufMut {
     /// Use this when the caller needs a specific alignment but does not need
     /// pooled reuse.
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
-        let buffer = aligned::AlignedBuffer::new(capacity, alignment.get());
+        let buffer = AlignedBuffer::new(capacity, alignment.get());
         Self::from_aligned(AlignedBufMut::new(buffer))
+    }
+
+    /// Create a zero-initialized untracked aligned buffer with the given
+    /// length and alignment.
+    ///
+    /// Unlike [`Self::with_alignment`], this initializes the full readable
+    /// range to zero and sets `len == capacity == len`.
+    pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
+        let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
+        let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
+        // SAFETY: the aligned allocation was zero-initialized for `len` bytes.
+        unsafe { buffer.set_len(len) };
+        buffer
     }
 
     /// Create a buffer of `len` bytes, all initialized to zero.
@@ -484,9 +497,9 @@ impl IoBufMut {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when dropped.
     ///
-    /// Buffers backed by [`BytesMut`], and untracked fallback allocations from
-    /// fallback allocations or small-size pool bypass allocations, return
-    /// `false`.
+    /// Buffers backed by [`BytesMut`], and untracked aligned allocations used
+    /// for fallback or requests smaller than [`BufferPoolConfig::min_size`],
+    /// return `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
         match &self.inner {
