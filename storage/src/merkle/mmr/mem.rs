@@ -549,7 +549,7 @@ mod tests {
             assert_eq!(mmr.leaves(), Location::new(0));
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), hasher.digest(&0u64.to_be_bytes()));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(&mut Sha256::new()));
             let mut mmr2 = Mmr::new(&mut hasher);
             mmr2.prune_all();
             assert_eq!(mmr2.size(), 0, "prune_all on empty MMR should do nothing");
