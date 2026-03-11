@@ -848,7 +848,7 @@ mod tests {
         let attestation = scheme_fixture.schemes[0]
             .sign::<Sha256Digest>(subject)
             .expect("signer must produce an attestation");
-        let mut invalid_signer = attestation.clone();
+        let mut invalid_signer = attestation;
         invalid_signer.signer = Participant::new(99);
         let mut truncated = &[0u8, 1, 2][..];
         let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
