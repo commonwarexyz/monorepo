@@ -10,7 +10,7 @@ mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
-pub use pool::{BufferPool, BufferPoolConfig, BufferPoolMode, PoolError};
+pub use pool::{BufferPool, BufferPoolConfig, PoolError};
 use pool::{PooledBuf, PooledBufMut};
 use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
 

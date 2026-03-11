@@ -1,6 +1,4 @@
-use commonware_runtime::{
-    tokio, BufferPool, BufferPoolConfig, BufferPoolMode, BufferPooler, IoBufMut, Runner as _,
-};
+use commonware_runtime::{tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::{
@@ -135,7 +133,6 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_max_size(NZUsize!(size))
         .with_max_per_class(NZUsize!(threads * 4))
         .with_prefill(true)
-        .with_mode(BufferPoolMode::Strict)
         .with_small_alloc_cutoff(Some(NZUsize!(512)));
 
     let runner_cfg = tokio::Config::default()
