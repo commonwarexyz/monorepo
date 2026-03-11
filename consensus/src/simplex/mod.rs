@@ -6095,6 +6095,19 @@ mod tests {
         }
     }
 
+    const TWINS_CAMPAIGN: TwinsCampaign = TwinsCampaign {
+        n: 5,
+        rounds: 3,
+        mode: twins::Mode::Sampled,
+        max_cases: 20,
+        trailing_finalizations: 10,
+    };
+    const TWINS_LINK: Link = Link {
+        latency: Duration::from_millis(500),
+        jitter: Duration::from_millis(500),
+        success_rate: 1.0,
+    };
+
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_twins_sampled() {
@@ -6198,6 +6211,94 @@ mod tests {
                 success_rate: 1.0,
             },
             scheme_mocks::fixture,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_multisig_min_pk() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_multisig_min_sig() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_threshold_vrf_min_pk() {
+        twins_campaign::<_, _, Random>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_threshold_vrf_min_sig() {
+        twins_campaign::<_, _, Random>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_threshold_std_min_pk() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_threshold_std_min_sig() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_ed25519() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            ed25519::fixture,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_secp256r1() {
+        twins_campaign::<_, _, RoundRobin>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            TWINS_LINK,
+            secp256r1::fixture,
         );
     }
 }

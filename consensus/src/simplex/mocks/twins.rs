@@ -286,6 +286,10 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
             framework.max_cases,
         ),
         Mode::Sustained => {
+            // Generate 1-round scenarios and repeat across all rounds.
+            // The 1-round residual cells are valid here because applying
+            // the same partition repeatedly never distinguishes participants
+            // that were indistinguishable after the first round.
             let single_round =
                 generate_scenarios(rng, framework.participants, 1, framework.max_cases);
             single_round
@@ -779,7 +783,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng};
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
     use std::collections::HashSet;
 
     #[test]
@@ -862,6 +866,20 @@ mod tests {
             None
         );
         assert_eq!(memo.get(&(initial_cells, 40)), Some(&None));
+    }
+
+    #[test]
+    fn unique_index_sampling_handles_near_full_ranges() {
+        let total = 100_000u128;
+        let samples = 99_999usize;
+        let mut rng = test_rng_seeded(9);
+        let sampled = sample_unique_indices(&mut rng, total, samples);
+        assert_eq!(sampled.len(), samples);
+        assert_eq!(
+            sampled.iter().copied().collect::<HashSet<_>>().len(),
+            samples
+        );
+        assert!(sampled.into_iter().all(|idx| idx < total));
     }
 
     #[test]
