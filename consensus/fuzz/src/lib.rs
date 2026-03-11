@@ -31,7 +31,6 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
-    utils::mocks::inert_channel,
     Recipients,
 };
 use commonware_parallel::Sequential;
@@ -504,7 +503,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
-            let (vote_network, certificate_network, _) = registrations
+            let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
 
@@ -564,6 +563,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             };
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
 
             let (vote_sender_primary, vote_sender_secondary) =
                 vote_sender.split_with(make_vote_forwarder());
@@ -578,6 +578,12 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
+            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
+                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
+            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
+                    SplitTarget::Both
+                });
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
@@ -634,7 +640,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
-                inert_channel(participants.as_ref()),
+                (resolver_sender_primary, resolver_receiver_primary),
             );
 
             // Secondary: Disrupter
@@ -644,14 +650,14 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
-                inert_channel(participants.as_ref()),
+                (resolver_sender_secondary, resolver_receiver_secondary),
             );
         }
 
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context.with_label(&format!("honest_{idx}"));
-            let (pending, recovered, _) = registrations
+            let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
@@ -665,7 +671,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 Duration::from_millis(1_500),
                 pending,
                 recovered,
-                inert_channel(participants.as_ref()),
+                resolver,
             );
             reporters.push(reporter);
         }

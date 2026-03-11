@@ -110,25 +110,26 @@ impl Read for Certificate {
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
 /// if the corresponding subject was previously recorded in shared state.
 pub struct Generic<
-    P: PublicKey,
-    N: super::Namespace,
+    P,
+    N,
     const ATTRIBUTABLE: bool = true,
     const BATCHABLE: bool = true,
     const ALLOW_INVALID: bool = true,
-> {
+> where
+    P: PublicKey,
+    N: super::Namespace,
+{
     me: Option<Participant>,
     participants: Set<P>,
     namespace: N,
     shared: Shared,
 }
 
-impl<
-        P: PublicKey,
-        N: super::Namespace,
-        const ATTRIBUTABLE: bool,
-        const BATCHABLE: bool,
-        const ALLOW_INVALID: bool,
-    > fmt::Debug for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+impl<P, N, const ATTRIBUTABLE: bool, const BATCHABLE: bool, const ALLOW_INVALID: bool> fmt::Debug
+    for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+where
+    P: PublicKey,
+    N: super::Namespace,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Generic")
@@ -138,13 +139,11 @@ impl<
     }
 }
 
-impl<
-        P: PublicKey,
-        N: super::Namespace,
-        const ATTRIBUTABLE: bool,
-        const BATCHABLE: bool,
-        const ALLOW_INVALID: bool,
-    > Clone for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+impl<P, N, const ATTRIBUTABLE: bool, const BATCHABLE: bool, const ALLOW_INVALID: bool> Clone
+    for Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+where
+    P: PublicKey,
+    N: super::Namespace,
 {
     fn clone(&self) -> Self {
         Self {
@@ -156,13 +155,11 @@ impl<
     }
 }
 
-impl<
-        P: PublicKey,
-        N: super::Namespace,
-        const ATTRIBUTABLE: bool,
-        const BATCHABLE: bool,
-        const ALLOW_INVALID: bool,
-    > Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+impl<P, N, const ATTRIBUTABLE: bool, const BATCHABLE: bool, const ALLOW_INVALID: bool>
+    Generic<P, N, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+where
+    P: PublicKey,
+    N: super::Namespace,
 {
     fn invalid_none<T>(reason: &str) -> Option<T> {
         if ALLOW_INVALID {
