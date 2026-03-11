@@ -275,12 +275,20 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::test_key;
+    use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;
+
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
 
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_VALUE_TARGET_SIZE: u64 = 10 * 1024 * 1024;

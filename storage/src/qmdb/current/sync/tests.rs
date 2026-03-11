@@ -4,7 +4,7 @@
 //! by implementing [SyncTestHarness] for current database types. The key difference from
 //! `any` harnesses is that `sync_target_root` returns the **ops root** (via
 //! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
-//! returned by [MerkleizedStore::root](crate::qmdb::store::MerkleizedStore::root).
+//! returned by `Db::root()`.
 
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},
@@ -64,26 +64,27 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let mut db = db.into_mutable();
-            for op in ops {
-                match op {
-                    Operation::Update(Update(key, value)) => {
-                        db.write_batch([(key, Some(value))]).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for op in ops {
+                    match op {
+                        Operation::Update(Update(key, value)) => {
+                            batch = batch.write(key, Some(value));
+                        }
+                        Operation::Delete(key) => {
+                            batch = batch.write(key, None);
+                        }
+                        Operation::CommitFloor(_, _) => {}
                     }
-                    Operation::Delete(key) => {
-                        db.write_batch([(key, Option::<Digest>::None)])
-                            .await
-                            .unwrap();
-                    }
-                    Operation::CommitFloor(_, _) => {}
                 }
-            }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -132,26 +133,27 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-            let mut db = db.into_mutable();
-            for op in ops {
-                match op {
-                    Operation::Update(Update(key, value)) => {
-                        db.write_batch([(key, Some(value))]).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for op in ops {
+                    match op {
+                        Operation::Update(Update(key, value)) => {
+                            batch = batch.write(key, Some(value));
+                        }
+                        Operation::Delete(key) => {
+                            batch = batch.write(key, None);
+                        }
+                        Operation::CommitFloor(_, _) => {}
                     }
-                    Operation::Delete(key) => {
-                        db.write_batch([(key, Option::<Digest>::None)])
-                            .await
-                            .unwrap();
-                    }
-                    Operation::CommitFloor(_, _) => {}
                 }
-            }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -200,26 +202,27 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let mut db = db.into_mutable();
-            for op in ops {
-                match op {
-                    Operation::Update(Update { key, value, .. }) => {
-                        db.write_batch([(key, Some(value))]).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for op in ops {
+                    match op {
+                        Operation::Update(Update { key, value, .. }) => {
+                            batch = batch.write(key, Some(value));
+                        }
+                        Operation::Delete(key) => {
+                            batch = batch.write(key, None);
+                        }
+                        Operation::CommitFloor(_, _) => {}
                     }
-                    Operation::Delete(key) => {
-                        db.write_batch([(key, Option::<Digest>::None)])
-                            .await
-                            .unwrap();
-                    }
-                    Operation::CommitFloor(_, _) => {}
                 }
-            }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -268,26 +271,27 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-            let mut db = db.into_mutable();
-            for op in ops {
-                match op {
-                    Operation::Update(Update { key, value, .. }) => {
-                        db.write_batch([(key, Some(value))]).await.unwrap();
+            let finalized = {
+                let mut batch = db.new_batch();
+                for op in ops {
+                    match op {
+                        Operation::Update(Update { key, value, .. }) => {
+                            batch = batch.write(key, Some(value));
+                        }
+                        Operation::Delete(key) => {
+                            batch = batch.write(key, None);
+                        }
+                        Operation::CommitFloor(_, _) => {}
                     }
-                    Operation::Delete(key) => {
-                        db.write_batch([(key, Option::<Digest>::None)])
-                            .await
-                            .unwrap();
-                    }
-                    Operation::CommitFloor(_, _) => {}
                 }
-            }
-            let (durable, _) = db.commit(None::<Digest>).await.unwrap();
-            durable.into_merkleized().await.unwrap()
+                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+            };
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 }

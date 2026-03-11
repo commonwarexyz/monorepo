@@ -137,6 +137,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
+        self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
 
         // If the reservation was taken by the dialer, record the failure.
@@ -164,6 +165,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_success();
         }
         record.connect();
+        let _ = self
+            .metrics
+            .connected
+            .get_or_create(&metrics::Peer::new(peer))
+            .try_set(self.context.current().epoch_millis());
 
         // We may have to update the sets.
         let want = record.want(self.dial_fail_limit);
@@ -491,8 +497,8 @@ mod tests {
     use super::*;
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, NZU32};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::{bitmap::BitMap, SystemTimeExt, NZU32};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -510,6 +516,14 @@ mod tests {
         S: commonware_cryptography::Signer,
     {
         types::Info::sign(signer, NAMESPACE, socket, timestamp)
+    }
+
+    fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
+        metrics
+            .lines()
+            .find(|line| line.starts_with(&format!("{name}{{peer=\"{peer}\"}} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<i64>().ok())
     }
 
     #[test]
@@ -641,6 +655,48 @@ mod tests {
                 directory.eligible(&unknown_pk),
                 "Peer should be eligible after unblock"
             );
+        });
+    }
+
+    #[test]
+    fn test_connected_metric_tracks_active_peers() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = PrivateKey::from_seed(1).public_key();
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+            let peer_set = [pk_1.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
+            directory.connect(&pk_1, false);
+
+            context.sleep(Duration::from_secs(5)).await;
+
+            let metrics = context.encode();
+            assert_eq!(
+                metric_value(&metrics, "connected", &pk_1.to_string()),
+                Some(connected_at)
+            );
+
+            directory.release(Metadata::Listener(pk_1.clone()));
+
+            let metrics = context.encode();
+            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
         });
     }
 

@@ -18,15 +18,11 @@ pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.
 
     use crate::{
-        kv::{Batchable as _, Gettable as _},
         mmr::Location,
         qmdb::{
-            any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
+            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             current::BitmapPrunedBits,
-            store::{
-                batch_tests::{TestKey, TestValue},
-                LogStore,
-            },
+            store::tests::{TestKey, TestValue},
         },
     };
     use commonware_runtime::{
@@ -41,9 +37,9 @@ pub mod tests {
     /// and verifies state is preserved across close/reopen cycles.
     pub fn test_build_small_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + BitmapPrunedBits,
+        C: DbAny + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as LogStore>::Value: TestValue,
+        <C as DbAny>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -51,69 +47,66 @@ pub mod tests {
         executor.start(|context| async move {
             let partition = "build-small".to_string();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new(1));
             assert_eq!(db.inactivity_floor_loc().await, Location::new(0));
             assert_eq!(db.oldest_retained().await, 0);
             let root0 = db.root();
             drop(db);
-            let db: C = open_db(context.with_label("second"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new(1));
+            let mut db: C = open_db(context.with_label("second"), partition.clone()).await;
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
 
             // Add one key.
-            let mut db = db.into_mutable();
             let k1: C::Key = TestKey::from_seed(0);
-            let v1: <C as LogStore>::Value = TestValue::from_seed(10);
+            let v1: <C as DbAny>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
-            db.write_batch([(k1, Some(v1.clone()))]).await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(k1, Some(v1.clone()))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
-            let (db, range) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(*range.start, 1);
-            assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.bounds().await.end, Location::new(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
             let root1 = db.root();
             assert_ne!(root1, root0);
             drop(db);
-            let db: C = open_db(context.with_label("third"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
+            let mut db: C = open_db(context.with_label("third"), partition.clone()).await;
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail (key already exists).
-            let mut db = db.into_mutable();
             assert!(db.get(&k1).await.unwrap().is_some());
 
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
-            db.write_batch([(k1, None)]).await.unwrap();
-            let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
-            let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(*range.start, 4);
-            assert_eq!(*range.end, 6);
-            assert_eq!(db.bounds().await.end, Location::new(6)); // 1 update, 2 commits, 1 move, 1 delete.
+            let metadata: <C as DbAny>::Value = TestValue::from_seed(1);
+            let finalized = db
+                .new_batch()
+                .write(k1, None)
+                .merkleize(Some(metadata.clone()))
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db.commit().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
 
             // Repeated delete of same key should fail (key already deleted).
-            let db = db.into_mutable();
             assert!(db.get(&k1).await.unwrap().is_none());
-            let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
+            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            db.apply_batch(finalized).await.unwrap();
             db.sync().await.unwrap();
-            // Commit adds a commit even for no-op, so op_count increases and root changes.
-            assert_eq!(db.bounds().await.end, Location::new(7));
             let root3 = db.root();
             assert_ne!(root3, root2);
 
             // Confirm re-open preserves state.
             drop(db);
-            let db: C = open_db(context.with_label("fourth"), partition.clone()).await;
-            assert_eq!(db.bounds().await.end, Location::new(7));
-            // Last commit had no metadata (passed None to commit).
+            let mut db: C = open_db(context.with_label("fourth"), partition.clone()).await;
+            // Last commit had no metadata (passed None to merkleize).
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root3);
 
@@ -125,10 +118,14 @@ pub mod tests {
             assert!(db.get_bit(*bounds.end - 1));
 
             // Test that we can get a non-durable root.
-            let mut db = db.into_mutable();
-            db.write_batch([(k1, Some(v1))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(k1, Some(v1))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
             assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();

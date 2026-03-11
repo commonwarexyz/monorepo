@@ -3,11 +3,10 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
-    kv::{Deletable as _, Updatable as _},
     qmdb::{
         any::{
             ordered::variable::Db as OVariable,
-            states::{MutableAny, UnmerkleizedDurableAny},
+            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             unordered::variable::Db as UVariable,
             VariableConfig as AConfig,
         },
@@ -15,7 +14,6 @@ use commonware_storage::{
             ordered::variable::Db as OVCurrent, unordered::variable::Db as UVCurrent,
             VariableConfig as CConfig,
         },
-        store::LogStore,
     },
     translator::EightCap,
 };
@@ -77,11 +75,11 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) db type aliases for Any databases.
+/// Db type aliases for Any databases.
 type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
-/// Clean (Merkleized, Durable) db type aliases for Current databases.
+/// Db type aliases for Current databases.
 type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
@@ -153,47 +151,42 @@ async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-///
-/// Takes a mutable database and returns it in durable state after final commit.
-async fn gen_random_kv<M>(
-    mut db: M,
-    num_elements: u64,
-    num_operations: u64,
-    commit_frequency: u32,
-) -> M::Durable
+async fn gen_random_kv<M>(db: &mut M, num_elements: u64, num_operations: u64, commit_frequency: u32)
 where
-    M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
+    M: DbAny<Key = Digest, Value = Vec<u8>>,
 {
     let mut rng = StdRng::seed_from_u64(42);
-    let mut batch = db.start_batch();
 
-    for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        assert!(batch.update(k, v).await.is_ok());
-    }
-    let iter = batch.into_iter();
-    assert!(db.write_batch(iter).await.is_ok());
-    batch = db.start_batch();
-
-    for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
-        if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            assert!(batch.delete(rand_key).await.is_ok());
-            continue;
+    // Seed the db with `num_elements` entries.
+    {
+        let mut batch = db.new_batch();
+        for i in 0u64..num_elements {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
+            batch = batch.write(k, Some(v));
         }
-        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        assert!(batch.update(rand_key, v).await.is_ok());
-        if rng.next_u32() % commit_frequency == 0 {
-            assert!(db.write_batch(batch.into_iter()).await.is_ok());
-            let (durable, _) = db.commit(None).await.unwrap();
-            db = durable.into_mutable();
-            batch = db.start_batch();
-        }
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
     }
 
-    assert!(db.write_batch(batch.into_iter()).await.is_ok());
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
+    // Perform `num_operations` random updates/deletes, committing periodically.
+    {
+        let mut batch = db.new_batch();
+        for _ in 0u64..num_operations {
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+                batch = batch.write(rand_key, None);
+                continue;
+            }
+            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
+            batch = batch.write(rand_key, Some(v));
+            if rng.next_u32() % commit_frequency == 0 {
+                let finalized = batch.merkleize(None).await.unwrap().finalize();
+                db.apply_batch(finalized).await.unwrap();
+                batch = db.new_batch();
+            }
+        }
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
+    }
 }

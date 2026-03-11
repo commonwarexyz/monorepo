@@ -1098,7 +1098,7 @@ impl<
         self.journals
             .get_mut(&node.chunk.sequencer)
             .expect("journal does not exist")
-            .append(section, node)
+            .append(section, &node)
             .await
             .expect("unable to append to journal");
     }

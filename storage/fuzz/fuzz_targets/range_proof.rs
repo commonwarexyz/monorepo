@@ -3,14 +3,14 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_storage::mmr::{
-    mem::{CleanMmr, Config},
-    Location, Position, StandardHasher,
+    mem::{Config, Mmr},
+    Location, StandardHasher,
 };
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    pruned_to_pos: u64,
+    pruned_to: u64,
     nodes: Vec<[u8; 32]>,
     pinned_nodes: Vec<[u8; 32]>,
 }
@@ -30,16 +30,16 @@ fn fuzz(input: FuzzInput) {
 
     let config = Config {
         nodes,
-        pruned_to_pos: Position::new(input.pruned_to_pos),
+        pruned_to: Location::new(input.pruned_to),
         pinned_nodes,
     };
 
     let mut hasher = StandardHasher::<Sha256>::new();
-    let Ok(mmr) = CleanMmr::init(config, &mut hasher) else {
+    let Ok(mmr) = Mmr::init(config, &mut hasher) else {
         return;
     };
 
-    if input.pruned_to_pos == u64::MAX || input.pruned_to_pos == u64::MAX - 1 {
+    if input.pruned_to == u64::MAX || input.pruned_to == u64::MAX - 1 {
         return;
     }
 

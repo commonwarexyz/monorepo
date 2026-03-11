@@ -234,7 +234,7 @@ impl<
     async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view.get(), artifact)
+                .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
         }
@@ -941,7 +941,7 @@ impl<
                         self.state.verified(view);
                     }
                     Ok(false) => {
-                        debug!(round = ?context.round, "proposal failed verification");
+                        warn!(round = ?context.round, "proposal failed verification");
                         self.state
                             .trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
                     }
@@ -958,6 +958,9 @@ impl<
                 view = round.view();
                 match certified {
                     Ok(certified) => {
+                        if !certified {
+                            warn!(?round, "proposal failed certification");
+                        }
                         let Some(notarization) = self.handle_certification(view, certified).await
                         else {
                             continue;

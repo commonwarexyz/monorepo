@@ -350,7 +350,7 @@ impl commonware_codec::Read for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
-    use crate::mmr::{mem::DirtyMmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
     use commonware_cryptography::Sha256;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
@@ -505,7 +505,7 @@ mod tests {
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
         let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = DirtyMmr::new();
+        let mut mmr = Mmr::new(&mut hasher);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {
@@ -518,7 +518,12 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_mmr_size());
-            mmr.add(&mut hasher, &digest);
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                batch.add(&mut hasher, &digest);
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
             size_to_check += 1;
         }
 

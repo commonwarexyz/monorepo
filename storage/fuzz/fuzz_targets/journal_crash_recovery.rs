@@ -254,7 +254,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
-        FixedJournal::append(self, item).await
+        FixedJournal::append(self, &item).await
     }
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
@@ -336,7 +336,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
-        VariableJournal::append(self, item).await
+        VariableJournal::append(self, &item).await
     }
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.

@@ -37,9 +37,17 @@ where
 
 impl<K: Key, V: ValueEncoding> Sealed for Update<K, V> {}
 
-impl<K: Key, V: ValueEncoding> UpdateTrait<K, V> for Update<K, V> {
+impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
+    type Key = K;
+    type Value = V::Value;
+    type ValueEncoding = V;
+
     fn key(&self) -> &K {
         &self.key
+    }
+
+    fn value(&self) -> &V::Value {
+        &self.value
     }
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,7 +65,12 @@ impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
     const SIZE: usize = K::SIZE + V::SIZE + K::SIZE;
 }
 
-impl<K: Array, V: FixedValue> Write for Update<K, FixedEncoding<V>> {
+impl<K, V> Write for Update<K, V>
+where
+    K: Key + Write,
+    V: ValueEncoding,
+    V::Value: Write,
+{
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
         self.value.write(buf);
@@ -87,18 +100,6 @@ where
 {
     fn encode_size(&self) -> usize {
         self.key.encode_size() + self.value.encode_size() + self.next_key.encode_size()
-    }
-}
-
-impl<K, V> Write for Update<K, VariableEncoding<V>>
-where
-    K: Key + Write,
-    V: VariableValue,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.write(buf);
-        self.value.write(buf);
-        self.next_key.write(buf);
     }
 }
 
