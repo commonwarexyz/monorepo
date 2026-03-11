@@ -116,12 +116,11 @@ impl Scenario {
 fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
     let in_primary = primary.contains(sender);
     let in_secondary = secondary.contains(sender);
-    assert!(in_primary || in_secondary, "sender not in any partition");
     match (in_primary, in_secondary) {
         (true, true) => SplitTarget::Both,
         (true, false) => SplitTarget::Primary,
         (false, true) => SplitTarget::Secondary,
-        (false, false) => unreachable!("assert above guarantees sender is in a partition"),
+        (false, false) => panic!("sender not in any partition"),
     }
 }
 
