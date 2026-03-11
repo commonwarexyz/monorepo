@@ -849,8 +849,7 @@ mod tests {
                     let leader = outside + both + secondary + primary;
                     let leader_bit = 1u64 << leader;
                     let shared_mask = range_mask(outside, both);
-                    let secondary_mask =
-                        shared_mask | range_mask(outside + both, secondary);
+                    let secondary_mask = shared_mask | range_mask(outside + both, secondary);
                     let primary_mask =
                         shared_mask | range_mask(outside + both + secondary, primary);
 
