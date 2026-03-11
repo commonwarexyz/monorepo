@@ -25,6 +25,18 @@ pub enum ForwardingPolicy {
     All,
 }
 
+impl ForwardingPolicy {
+    /// Returns true if the policy is disabled.
+    pub const fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    /// Returns true if the policy is enabled.
+    pub const fn is_enabled(&self) -> bool {
+        matches!(self, Self::NextLeader | Self::All)
+    }
+}
+
 /// Configuration for the consensus engine.
 pub struct Config<S, L, B, D, A, R, F, T>
 where

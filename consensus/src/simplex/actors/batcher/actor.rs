@@ -201,6 +201,61 @@ where
         }
     }
 
+    /// Returns missing voters that have been active recently enough to justify
+    /// a targeted forward.
+    fn active_missing_voters(
+        &self,
+        work: &BTreeMap<View, Round<S, B, D, Re>>,
+        candidates: Vec<Participant>,
+    ) -> Vec<Participant> {
+        let skip_timeout = self.skip_timeout.get() as usize;
+        candidates
+            .into_iter()
+            .filter(|&participant| {
+                work.iter()
+                    .rev()
+                    .take(skip_timeout)
+                    .any(|(_, round)| round.is_active(participant))
+            })
+            .collect()
+    }
+
+    /// Emits or defers block forwarding for a notarized proposal.
+    async fn forward_notarization(
+        &mut self,
+        current: &Current,
+        pending_forwards: &mut BTreeMap<View, (Proposal<D>, Vec<Participant>)>,
+        view: View,
+        proposal: Proposal<D>,
+        missing: Vec<Participant>,
+    ) {
+        if self.forwarding.is_disabled() || missing.is_empty() {
+            return;
+        }
+
+        let next_view = view.next();
+        if next_view == current.view {
+            let Some(leader) = current.leader else {
+                return;
+            };
+            let Some(peers) = self.forwarding_peers(leader, &missing) else {
+                return;
+            };
+            self.relay
+                .broadcast(
+                    proposal.payload,
+                    Dissemination::Forward {
+                        round: proposal.round,
+                        peers,
+                    },
+                )
+                .await;
+        } else if next_view > current.view {
+            pending_forwards.insert(next_view, (proposal, missing));
+        }
+        // If next_view < current.view, we've moved past; drop.
+    }
+
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
     fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, Re>>) -> bool {
@@ -394,12 +449,26 @@ where
                         }
 
                         // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round())
-                            .set_notarization(notarization.clone());
+                        let round = work.entry(view).or_insert_with(|| self.new_round());
+                        round.set_notarization(notarization.clone());
+                        let forward_candidates = self.forwarding.is_enabled().then(|| {
+                            let candidates = round.missing_notarize_voters(&notarization.proposal);
+                            (notarization.proposal.clone(), candidates)
+                        });
                         voter
                             .recovered(Certificate::Notarization(notarization))
                             .await;
+                        if let Some((proposal, candidates)) = forward_candidates {
+                            let missing = self.active_missing_voters(&work, candidates);
+                            self.forward_notarization(
+                                &current,
+                                &mut pending_forwards,
+                                view,
+                                proposal,
+                                missing,
+                            )
+                            .await;
+                        }
                     }
                     Certificate::Nullification(nullification) => {
                         // Skip if we already have a nullification for this view
@@ -592,7 +661,7 @@ where
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Collect candidates while we still hold `round`.
-                    if !matches!(self.forwarding, ForwardingPolicy::Disabled) {
+                    if !self.forwarding.is_disabled() {
                         let candidates = round.missing_notarize_voters(&notarization.proposal);
                         forward_candidates = Some((notarization.proposal.clone(), candidates));
                     }
@@ -622,39 +691,15 @@ where
 
                 // Filter candidates and emit or defer forwarding.
                 if let Some((proposal, candidates)) = forward_candidates {
-                    let skip_timeout = self.skip_timeout.get() as usize;
-                    let missing: Vec<_> = candidates
-                        .into_iter()
-                        .filter(|&p| {
-                            work.iter()
-                                .rev()
-                                .take(skip_timeout)
-                                .any(|(_, r)| r.is_active(p))
-                        })
-                        .collect();
-                    let next_view = updated_view.next();
-                    if next_view == current.view {
-                        // The voter already sent an Update for this view,
-                        // so we know the leader. Emit immediately.
-                        if let Some(leader) = current.leader {
-                            if let Some(peers) = self.forwarding_peers(leader, &missing) {
-                                self.relay
-                                    .broadcast(
-                                        proposal.payload,
-                                        Dissemination::Forward {
-                                            round: proposal.round,
-                                            peers,
-                                        },
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else if next_view > current.view {
-                        // Defer until the voter sends an Update with the
-                        // next leader.
-                        pending_forwards.insert(next_view, (proposal, missing));
-                    }
-                    // If next_view < current.view, we've moved past; drop.
+                    let missing = self.active_missing_voters(&work, candidates);
+                    self.forward_notarization(
+                        &current,
+                        &mut pending_forwards,
+                        updated_view,
+                        proposal,
+                        missing,
+                    )
+                    .await;
                 }
 
                 // Drop any rounds that are no longer interesting
