@@ -2,7 +2,6 @@
 
 use super::Position;
 use crate::mmr::Location;
-use alloc::vec::Vec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
 
@@ -16,6 +15,9 @@ pub trait Hasher: Send + Sync + Clone {
     type Digest: Digest;
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
+    ///
+    /// The parts are concatenated before hashing (i.e. there is no domain separation between
+    /// parts).
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
@@ -42,19 +44,28 @@ pub trait Hasher: Send + Sync + Clone {
         self.hash(core::iter::once(data))
     }
 
-    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
-    /// decreasing order of height.
+    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks
+    /// in decreasing order of height.
     fn root<'a>(
         &self,
         leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
-        let mut buf = Vec::with_capacity(8 + 32 * 8);
-        buf.extend_from_slice(&leaves.to_be_bytes());
-        for d in peak_digests {
-            buf.extend_from_slice(d.as_ref());
+        // We want to chain the local `leaves` bytes with the peak digest refs into a single
+        // `self.hash(...)` call, but `chain` requires a single Item type. The peak refs are
+        // `&'a [u8]` (caller lifetime) while `&leaves` is local, so they can't unify directly.
+        // The inner function separates them into two parameters with `'b: 'a`, letting the
+        // compiler coerce the longer-lived peak refs down to the local lifetime at the call site.
+        #[allow(clippy::map_identity)] // The map coerces &'b to &'a; not a no-op.
+        fn compute<'a, 'b: 'a, H: Hasher>(
+            h: &H,
+            prefix: &'a [u8],
+            parts: impl Iterator<Item = &'b [u8]>,
+        ) -> H::Digest {
+            h.hash(core::iter::once(prefix).chain(parts.map(|p| p)))
         }
-        self.digest(&buf)
+        let leaves = leaves.to_be_bytes();
+        compute(self, &leaves, peak_digests.into_iter().map(AsRef::as_ref))
     }
 }
 
@@ -96,7 +107,6 @@ impl<H: CHasher> Hasher for Standard<H> {
 mod tests {
     use super::*;
     use crate::mmr::{mem::Mmr, Location};
-    use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     #[test]
@@ -183,8 +193,7 @@ mod tests {
         let d3 = test_digest::<H>(3);
         let d4 = test_digest::<H>(4);
 
-        let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Location::new(0), empty_vec.iter());
+        let empty_out = mmr_hasher.root(Location::new(0), core::iter::empty());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
