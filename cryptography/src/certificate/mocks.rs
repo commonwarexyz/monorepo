@@ -50,10 +50,18 @@ impl SignedSubject {
 }
 
 #[derive(Debug, Default)]
-struct Signatures {
-    next: u64,
+struct SignerSignatures {
     by: HashMap<u64, SignedSubject>,
     by_subject: HashMap<SignedSubject, u64>,
+}
+
+#[derive(Debug, Default)]
+struct Signatures {
+    /// The counter is global so each signature ID is unique across all signers. A per-signer
+    /// counter would let two signers share the same ID for different subjects, making
+    /// a forged attestation (with a swapped signer field) pass verification.
+    next: u64,
+    by_signer: HashMap<Participant, SignerSignatures>,
 }
 
 impl Signatures {
@@ -81,7 +89,7 @@ impl Certificates {
 
 #[derive(Debug, Default)]
 struct Inner {
-    signatures: HashMap<Participant, Signatures>,
+    signatures: Signatures,
     certificates: Certificates,
 }
 
@@ -203,17 +211,18 @@ where
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
-        let entries = inner.signatures.entry(signer).or_default();
-        let signature = entries
+        inner.signatures.by_signer.entry(signer).or_default();
+        let existing = inner.signatures.by_signer[&signer]
             .by_subject
             .get(&signed_subject)
-            .copied()
-            .unwrap_or_else(|| {
-                let signature = entries.next();
-                entries.by.insert(signature, signed_subject.clone());
-                entries.by_subject.insert(signed_subject, signature);
-                signature
-            });
+            .copied();
+        let signature = existing.unwrap_or_else(|| {
+            let sig = inner.signatures.next();
+            let entries = inner.signatures.by_signer.get_mut(&signer).unwrap();
+            entries.by.insert(sig, signed_subject.clone());
+            entries.by_subject.insert(signed_subject, sig);
+            sig
+        });
 
         Some(Attestation {
             signer,
@@ -244,6 +253,7 @@ where
         let inner = self.shared.0.lock();
         inner
             .signatures
+            .by_signer
             .get(&attestation.signer)
             .and_then(|entries| entries.by.get(&signature))
             .is_some_and(|stored| stored == &expected_subject)
@@ -291,9 +301,9 @@ where
         let mut inner = self.shared.0.lock();
 
         for attestation in attestations {
-            self.participants.key(attestation.signer).or_else(|| {
-                Self::invalid("attestation signer missing from participant set")
-            })?;
+            self.participants
+                .key(attestation.signer)
+                .or_else(|| Self::invalid("attestation signer missing from participant set"))?;
 
             let signature = attestation
                 .signature
@@ -302,6 +312,7 @@ where
             let signature = u64::from(signature);
             let entry = inner
                 .signatures
+                .by_signer
                 .get(&attestation.signer)
                 .or_else(|| Self::invalid("attestation signer not found"))?
                 .by
@@ -860,6 +871,27 @@ mod tests {
         assert!(!scheme_fixture
             .verifier
             .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,));
+    }
+
+    #[test]
+    fn signer_swapped_attestation_is_rejected() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let mut attestation = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        attestation.signer = Participant::new(1);
+
+        assert!(
+            !fixture.verifier.verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                subject,
+                &attestation,
+                &Sequential,
+            ),
+            "swapping signer on an attestation must fail verification"
+        );
     }
 
     #[test]
