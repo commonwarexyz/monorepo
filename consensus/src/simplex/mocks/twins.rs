@@ -217,7 +217,8 @@ where
 ///
 /// The total case count is the sum, over generated scenarios, of the number of
 /// symmetry-unique compromised assignments for that scenario's residual cells.
-/// [`Framework::max_cases`] caps the total.
+/// [`Framework::max_cases`] caps both the number of sampled scenarios and the
+/// total emitted cases.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
     /// Number of participants in the network.
@@ -269,17 +270,19 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
         framework.max_cases,
     );
 
-    scenarios
-        .iter()
-        .flat_map(|(scenario, residual_cells)| {
-            compromised_sets_for_cells(residual_cells, framework.faults)
-                .into_iter()
-                .map(move |compromised| Case {
-                    compromised,
-                    scenario: scenario.clone(),
-                })
-        })
-        .collect()
+    let mut result = Vec::new();
+    for (scenario, residual_cells) in &scenarios {
+        for compromised in compromised_sets_for_cells(residual_cells, framework.faults) {
+            result.push(Case {
+                compromised,
+                scenario: scenario.clone(),
+            });
+            if result.len() >= framework.max_cases {
+                return result;
+            }
+        }
+    }
+    result
 }
 
 /// Materializes the participants selected by a bitmask.
@@ -708,35 +711,34 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
     sampled
 }
 
-/// Generates canonical scenarios with their residual symmetry cells, subject
-/// to the framework bounds.
+/// Generates canonical scenarios with their residual symmetry cells.
 ///
-/// `max_cases` is used to derive an internal scenario budget: we generate
-/// scenarios until the cumulative case count (scenarios x their per-scenario
-/// compromised assignments) would exceed the budget.
+/// Returns at most `max_scenarios` scenarios. When the full canonical space
+/// fits within the budget, all scenarios are returned in lexicographic order;
+/// otherwise, scenarios are sampled without replacement.
 fn generate_scenarios(
     rng: &mut impl Rng,
     n: usize,
     rounds: usize,
-    max_cases: usize,
+    max_scenarios: usize,
 ) -> Vec<(Scenario, Vec<usize>)> {
     let mut memo = HashMap::new();
     let initial_cells = vec![n];
     if let Some(total) = canonical_scenario_count(&initial_cells, rounds, &mut memo) {
-        if total <= max_cases as u128 {
+        if total <= max_scenarios as u128 {
             return (0..total)
                 .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
                 .collect();
         }
 
-        return sample_unique_indices(rng, total, max_cases)
+        return sample_unique_indices(rng, total, max_scenarios)
             .into_iter()
             .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
             .collect();
     }
 
-    let max_attempts = max_cases.saturating_mul(1024).max(4096);
-    sample_scenarios_fallback(rng, &initial_cells, rounds, max_cases, max_attempts)
+    let max_attempts = max_scenarios.saturating_mul(1024).max(4096);
+    sample_scenarios_fallback(rng, &initial_cells, rounds, max_scenarios, max_attempts)
 }
 
 /// Samples unique scenarios with residual cells from the canonical transition
