@@ -494,7 +494,9 @@ impl<D: Digest> Mmr<D> {
     }
 }
 
-impl<D: Digest> Readable<D> for Mmr<D> {
+impl<D: Digest> Readable for Mmr<D> {
+    type Digest = D;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -512,7 +514,9 @@ impl<D: Digest> Readable<D> for Mmr<D> {
     }
 }
 
-impl<D: Digest> BatchChainInfo<D> for Mmr<D> {
+impl<D: Digest> BatchChainInfo for Mmr<D> {
+    type Digest = D;
+
     fn base_size(&self) -> Position {
         self.size()
     }
