@@ -5648,11 +5648,8 @@ mod tests {
     struct TwinsCampaign {
         n: u32,
         rounds: usize,
-        max_partition_groups: usize,
-        max_distinct_scenarios: usize,
-        max_compromised_assignments: usize,
-        required_views: View,
-        relabel: bool,
+        max_cases: usize,
+        required_finalizations: usize,
     }
 
     fn twins_case<S, F, L>(case: twins::Case, campaign: TwinsCampaign, link: Link, mut fixture: F)
@@ -5918,14 +5915,25 @@ mod tests {
 
             // Wait for progress (liveness check) across honest replicas only.
             //
+            // Only count finalizations after the adversarial prefix so we
+            // verify the protocol actually recovers and makes progress under
+            // synchrony. Finalizations during the prefix may be artifacts of
+            // the attack setup and do not demonstrate liveness.
+            //
             // Twin halves are Byzantine test machinery and are not required to
             // make progress for the campaign to establish honest-node liveness.
+            let prefix_end = View::new(scenario.rounds().len() as u64);
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(honest_start) {
-                let (mut latest, mut monitor) = reporter.subscribe().await;
+                let (_latest, mut monitor) = reporter.subscribe().await;
+                let required = campaign.required_finalizations;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < campaign.required_views {
-                        latest = monitor.recv().await.expect("event missing");
+                    let mut count = 0usize;
+                    while count < required {
+                        let view = monitor.recv().await.expect("event missing");
+                        if view > prefix_end {
+                            count += 1;
+                        }
                     }
                 }));
             }
@@ -6035,10 +6043,7 @@ mod tests {
                 participants: campaign.n as usize,
                 faults: N3f1::max_faults(campaign.n) as usize,
                 rounds: campaign.rounds,
-                max_partition_groups: campaign.max_partition_groups,
-                max_distinct_scenarios: campaign.max_distinct_scenarios,
-                max_compromised_assignments: campaign.max_compromised_assignments,
-                relabel: campaign.relabel,
+                max_cases: campaign.max_cases,
             },
         );
         assert!(
@@ -6061,11 +6066,9 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 3,
-            max_partition_groups: 3,
-            max_distinct_scenarios: 4,
-            max_compromised_assignments: 5, // f=1 for n=5: cover each compromised identity.
-            required_views: View::new(100),
-            relabel: true,
+
+            max_cases: 20,
+            required_finalizations: 50,
         };
         for link in [
             Link {
@@ -6139,11 +6142,9 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
-            max_partition_groups: 3,
-            max_distinct_scenarios: 3,
-            max_compromised_assignments: 3,
-            required_views: View::new(100),
-            relabel: true,
+
+            max_cases: 9,
+            required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
             0,
@@ -6163,11 +6164,9 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 100,
-            max_partition_groups: 3,
-            max_distinct_scenarios: 3,
-            max_compromised_assignments: 3,
-            required_views: View::new(100),
-            relabel: true,
+
+            max_cases: 9,
+            required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
             0,
