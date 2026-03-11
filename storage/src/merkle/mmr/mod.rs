@@ -70,11 +70,18 @@
 pub mod batch;
 pub mod hasher;
 pub mod iterator;
-pub mod location;
 pub mod mem;
-pub mod position;
-pub mod proof;
 pub mod read;
+
+// Re-export the location, position, and proof modules from the parent merkle module.
+pub use super::{
+    location,
+    location::{Location, LocationError, LocationRangeExt, MAX_LOCATION},
+    position,
+    position::{Position, MAX_POSITION},
+    proof,
+    proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT},
+};
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -89,9 +96,6 @@ cfg_if::cfg_if! {
 
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use hasher::Standard as StandardHasher;
-pub use location::{Location, LocationError, MAX_LOCATION};
-pub use position::{Position, MAX_POSITION};
-pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 pub use read::Readable;
 use thiserror::Error;
 
@@ -150,11 +154,12 @@ pub enum Error {
     },
 }
 
-impl From<LocationError> for Error {
-    fn from(err: LocationError) -> Self {
+impl From<super::Error> for Error {
+    fn from(err: super::Error) -> Self {
         match err {
-            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
-            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+            super::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            super::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
+            super::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
         }
     }
 }
