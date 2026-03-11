@@ -435,7 +435,7 @@ mod tests {
     use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng as _};
+    use rand::{rngs::StdRng, Rng as _, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -5721,7 +5721,8 @@ mod tests {
             let required_finalizations = campaign.required_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new().with_seed(rng.gen());
+            let cfg = deterministic::Config::new()
+                .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let (network, mut oracle) = Network::new(
@@ -5980,10 +5981,11 @@ mod tests {
                 // make progress for the campaign to establish honest-node liveness.
                 let prefix_end = View::new(scenario.rounds().len() as u64);
                 let mut finalizers = Vec::new();
-                for reporter in reporters.iter_mut().skip(honest_start) {
+                for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
                     let required = required_finalizations;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    let label = format!("finalizer_{i}");
+                    finalizers.push(context.with_label(&label).spawn(move |_| async move {
                         let mut count = 0usize;
                         while count < required {
                             let view = monitor.recv().await.expect("event missing");
