@@ -6102,6 +6102,7 @@ mod tests {
         max_cases: 20,
         trailing_finalizations: 10,
     };
+
     const TWINS_LINK: Link = Link {
         latency: Duration::from_millis(500),
         jitter: Duration::from_millis(500),
