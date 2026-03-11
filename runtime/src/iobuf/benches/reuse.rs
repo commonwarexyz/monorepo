@@ -4,9 +4,8 @@ use commonware_runtime::{
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::{
-    alloc::{alloc, dealloc, handle_alloc_error, Layout},
     hint::spin_loop,
-    ptr::NonNull,
+    num::NonZeroUsize,
     sync::{Arc, Barrier},
     thread,
     time::Instant,
@@ -23,9 +22,9 @@ pub fn bench(c: &mut Criterion) {
         let alignment = pool.config().alignment.get();
         let single_pool = pool.clone();
 
-        c.bench_function(&bench_name("bare", size, 1, alignment), |b| {
+        c.bench_function(&bench_name("aligned", size, 1, alignment), |b| {
             b.iter(|| {
-                run_bare(size, alignment, page_size);
+                run_aligned(size, alignment, page_size);
             });
         });
 
@@ -36,8 +35,8 @@ pub fn bench(c: &mut Criterion) {
         });
 
         for pattern in ["tight_loop", "staggered"] {
-            bench_multi_thread(c, "bare", pattern, size, threads, alignment, move || {
-                run_bare(size, alignment, page_size)
+            bench_multi_thread(c, "aligned", pattern, size, threads, alignment, move || {
+                run_aligned(size, alignment, page_size)
             });
 
             bench_multi_thread(c, "pool", pattern, size, threads, alignment, {
@@ -115,8 +114,8 @@ fn bench_name(allocator: &str, size: usize, threads: usize, alignment: usize) ->
     )
 }
 
-fn run_bare(size: usize, alignment: usize, page_size: usize) -> AlignedBuffer {
-    let buffer = AlignedBuffer::new(size, alignment);
+fn run_aligned(size: usize, alignment: usize, page_size: usize) -> IoBufMut {
+    let mut buffer = IoBufMut::with_alignment(size, NonZeroUsize::new(alignment).unwrap());
     touch_pages(buffer.as_mut_ptr(), size, page_size);
     buffer
 }
@@ -170,32 +169,5 @@ fn page_size() -> usize {
     #[cfg(not(unix))]
     {
         4096
-    }
-}
-
-struct AlignedBuffer {
-    ptr: NonNull<u8>,
-    layout: Layout,
-}
-
-impl AlignedBuffer {
-    fn new(size: usize, alignment: usize) -> Self {
-        let layout = Layout::from_size_align(size, alignment).expect("invalid layout");
-        // SAFETY: layout is valid and non-zero sized.
-        let ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { ptr, layout }
-    }
-
-    #[inline]
-    const fn as_mut_ptr(&self) -> *mut u8 {
-        self.ptr.as_ptr()
-    }
-}
-
-impl Drop for AlignedBuffer {
-    fn drop(&mut self) {
-        // SAFETY: ptr was allocated with this layout.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }
