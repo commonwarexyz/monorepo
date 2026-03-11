@@ -13,7 +13,7 @@ use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
-use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
+use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
@@ -439,6 +439,19 @@ impl IoBufMut {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::with_capacity(capacity)),
         }
+    }
+
+    /// Create an untracked aligned buffer with the given capacity and alignment.
+    ///
+    /// This uses the aligned backing path directly rather than `BytesMut`.
+    /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
+    /// deallocates the aligned allocation immediately.
+    ///
+    /// Use this when the caller needs a specific alignment but does not need
+    /// pooled reuse.
+    pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
+        let buffer = aligned::AlignedBuffer::new(capacity, alignment.get());
+        Self::from_aligned(AlignedBufMut::new(buffer))
     }
 
     /// Create a buffer of `len` bytes, all initialized to zero.
