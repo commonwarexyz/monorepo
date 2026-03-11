@@ -5646,9 +5646,10 @@ mod tests {
 
     /// Configuration for a Twins testing campaign.
     ///
-    /// A campaign generates adversarial partition scenarios, splits Byzantine
-    /// participants into twin halves, and verifies that honest nodes still
-    /// finalize blocks after the adversarial prefix ends.
+    /// A campaign generates adversarial primary/secondary recipient-set
+    /// scenarios, splits Byzantine participants into twin halves, and verifies
+    /// that honest nodes still finalize blocks after the adversarial prefix
+    /// ends.
     ///
     /// # Fields
     ///
@@ -5657,14 +5658,17 @@ mod tests {
     ///   compromised-set space but also makes each case slower to execute.
     ///
     /// - `rounds`: Number of adversarial rounds that form the attack prefix.
-    ///   Each round independently partitions participants into up to 3 groups
-    ///   (outside, primary-only, secondary-only) and designates a leader.
+    ///   Each round independently places participants relative to the primary
+    ///   and secondary recipient sets: outside both, both-halves,
+    ///   primary-only, or secondary-only. The two recipient sets may overlap;
+    ///   a participant in `both-halves` is visible to both twins in that view.
     ///   After these rounds, the network becomes fully synchronous. More
     ///   rounds exponentially increase the canonical scenario space.
     ///
     /// - `mode`: How multi-round scenarios are constructed. `Sampled` picks
-    ///   an independent partition per round; `Sustained` repeats a single
-    ///   partition across all rounds (modeling a persistent adversarial split).
+    ///   independent recipient sets per round; `Sustained` repeats a single
+    ///   recipient-set pattern across all rounds (modeling a persistent
+    ///   adversarial split).
     ///
     /// - `max_cases`: Upper bound on the total emitted cases. Each case is a
     ///   (scenario, compromised-assignment) pair. Also caps scenario

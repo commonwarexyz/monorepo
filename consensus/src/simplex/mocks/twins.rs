@@ -2,8 +2,8 @@
 //!
 //! This module follows the testing architecture from
 //! [Twins: BFT Systems Made Robust](https://arxiv.org/pdf/2004.10617):
-//! 1. Generate partition scenarios.
-//! 2. Combine partitions with leader choices per round.
+//! 1. Generate primary/secondary recipient-set scenarios.
+//! 2. Combine those sets with leader choices per round.
 //! 3. Arrange those round choices into full multi-round scenarios.
 //! 4. Execute each scenario across compromised-node assignments.
 //!
@@ -21,6 +21,10 @@
 //! assignments: two assignments that differ only in which members of a cell
 //! are chosen are equivalent and collapsed to a single representative. When the
 //! case space exceeds `max_cases`, scenarios are sampled without replacement.
+//!
+//! These recipient sets are not required to be disjoint. A participant may
+//! appear in both masks for a round, meaning both twin halves can exchange
+//! messages with that participant identity in that view.
 
 use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
@@ -40,7 +44,8 @@ use std::{
 pub struct RoundScenario {
     // Participant index chosen to lead this round.
     leader: usize,
-    // Bitmasks selecting which participant indices each twin half can reach.
+    // Bitmasks selecting which participant identities each twin half can
+    // exchange messages with. The masks may overlap.
     primary_mask: u64,
     secondary_mask: u64,
 }
@@ -64,7 +69,11 @@ impl Scenario {
         &self.rounds
     }
 
-    /// Returns recipients for each twin half at a given view.
+    /// Returns recipient sets for each twin half at a given view.
+    ///
+    /// These sets are not required to be disjoint: if the same participant
+    /// appears in both, both twin halves may exchange messages with that
+    /// participant in the given view.
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
@@ -79,7 +88,8 @@ impl Scenario {
     /// Routes a message from sender to the correct twin half at a given view.
     ///
     /// Unlike [`partitions`](Self::partitions), this avoids allocating temporary
-    /// Vecs by comparing bitmasks directly for inbound twin traffic.
+    /// Vecs by comparing bitmasks directly for inbound twin traffic. When a
+    /// sender appears in both masks, this returns [`SplitTarget::Both`].
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
@@ -102,7 +112,7 @@ impl Scenario {
     }
 }
 
-/// Routes a sender according to explicit primary and secondary groups.
+/// Routes a sender according to explicit primary and secondary recipient sets.
 fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
     let in_primary = primary.contains(sender);
     let in_secondary = secondary.contains(sender);
@@ -114,7 +124,7 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
     }
 }
 
-/// Splits participants at index `view % n`.
+/// Returns the strict disjoint split at index `view % n`.
 pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
     let split = (view.get() as usize) % participants.len();
     let (primary, secondary) = participants.split_at(split);
@@ -209,10 +219,11 @@ where
 /// Controls how multi-round scenarios are constructed.
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
-    /// Each round gets an independently chosen partition and leader.
+    /// Each round gets independently chosen primary and secondary recipient
+    /// sets and a leader.
     Sampled,
-    /// A single 1-round partition is repeated across all rounds, modeling
-    /// a persistent adversarial split.
+    /// A single 1-round recipient-set pattern is repeated across all rounds,
+    /// modeling a persistent adversarial split.
     Sustained,
 }
 
@@ -288,8 +299,8 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
         Mode::Sustained => {
             // Generate 1-round scenarios and repeat across all rounds.
             // The 1-round residual cells are valid here because applying
-            // the same partition repeatedly never distinguishes participants
-            // that were indistinguishable after the first round.
+            // the same recipient-set pattern repeatedly never distinguishes
+            // participants that were indistinguishable after the first round.
             let single_round =
                 generate_scenarios(rng, framework.participants, 1, framework.max_cases);
             single_round
@@ -331,7 +342,7 @@ fn partition_for_mask<P: Clone>(mask: u64, participants: &[P]) -> Vec<P> {
     group
 }
 
-/// Converts twins routing bitmasks into concrete participant groups.
+/// Converts twins routing bitmasks into concrete recipient sets.
 fn masks_to_partitions<P: Clone>(
     primary_mask: u64,
     secondary_mask: u64,
@@ -366,20 +377,21 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 
 /// Enumerates all canonical next-round refinements from the current cell state.
 ///
-/// Each round splits participants into up to 3 groups: outside both
-/// partitions, primary-only, and secondary-only.
+/// Each round refines participants into up to 4 placements relative to the
+/// primary and secondary recipient sets: outside both, shared by both halves,
+/// primary-only, and secondary-only.
 fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
-    // Accumulated state for a round where the secondary partition differs:
-    // the masks built so far, whether any secondary members exist, and leader.
+    // Accumulated state for a round where the secondary recipient set differs:
+    // the masks built so far and leader.
     #[derive(Clone, Copy)]
     struct SecondaryState {
         primary_mask: u64,
         secondary_mask: u64,
-        secondary_total: usize,
         leader: Option<usize>,
     }
 
-    /// Refines cells for a round where primary and secondary coincide.
+    /// Refines cells for a round where both halves have identical recipient
+    /// sets.
     fn no_secondary(
         ranges: &[(usize, usize)],
         leader_cell: usize,
@@ -391,7 +403,7 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
     ) {
         if cell_idx == ranges.len() {
             // Primary and secondary coincide in this branch, so the round is
-            // fully described by a single mask.
+            // fully described by a single recipient mask.
             out.push((
                 RoundScenario {
                     leader: leader.expect("leader cell should assign a leader"),
@@ -406,7 +418,7 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
         let (start, size) = ranges[cell_idx];
         // The designated leader must be isolated into its own singleton cell,
         // so the leader's source cell can contribute at most `size - 1`
-        // non-leader members to the ordinary partition buckets.
+        // non-leader members to the ordinary recipient-set buckets.
         let max_outside = if cell_idx == leader_cell {
             size - 1
         } else {
@@ -464,7 +476,8 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
         }
     }
 
-    /// Refines cells for a round with a distinct secondary partition.
+    /// Refines cells for a round where the halves have distinct recipient
+    /// sets.
     fn with_secondary(
         ranges: &[(usize, usize)],
         leader_cell: usize,
@@ -474,9 +487,9 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
         out: &mut Vec<(RoundScenario, Vec<usize>)>,
     ) {
         if cell_idx == ranges.len() {
-            if state.secondary_total == 0 {
-                // A zero-sized secondary partition is already emitted by
-                // `no_secondary`, so skipping it here avoids duplicates.
+            if state.primary_mask == state.secondary_mask {
+                // Equal recipient masks are already emitted by
+                // `no_secondary`, so skipping them here avoids duplicates.
                 return;
             }
             out.push((
@@ -496,98 +509,112 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
         let outside_range = 0..=available;
 
         for outside in outside_range {
-            let remaining = available - outside;
-            for secondary in 0..=remaining {
-                // The canonical contiguous layout for a refined cell is:
-                // outside -> secondary-only -> primary-only -> leader.
-                let primary = remaining - secondary;
+            let remaining_after_outside = available - outside;
+            for both in 0..=remaining_after_outside {
+                let remaining = remaining_after_outside - both;
+                for secondary in 0..=remaining {
+                    // The canonical contiguous layout for a refined cell is:
+                    // outside -> both-halves -> secondary-only -> primary-only
+                    // -> leader.
+                    let primary = remaining - secondary;
 
-                if outside > 0 {
-                    next_cells.push(outside);
-                }
-                if secondary > 0 {
-                    next_cells.push(secondary);
-                }
-                if primary > 0 {
-                    next_cells.push(primary);
-                }
-
-                let next_secondary = state.secondary_mask | range_mask(start + outside, secondary);
-                let next_primary =
-                    state.primary_mask | range_mask(start + outside + secondary, primary);
-                let mut next_leader = state.leader;
-                if has_leader {
-                    // As in `no_secondary`, keep the leader as a singleton at
-                    // the tail of its source cell's refined block. Enumerate
-                    // both twin-half placements so the leader may be isolated
-                    // with either partition when the halves differ.
-                    let leader_idx = start + outside + secondary + primary;
-                    next_cells.push(1);
-                    next_leader = Some(leader_idx);
-
-                    for leader_in_primary in [true, false] {
-                        let leader_bit = 1u64 << leader_idx;
-                        with_secondary(
-                            ranges,
-                            leader_cell,
-                            cell_idx + 1,
-                            SecondaryState {
-                                primary_mask: if leader_in_primary {
-                                    next_primary | leader_bit
-                                } else {
-                                    next_primary
-                                },
-                                secondary_mask: if leader_in_primary {
-                                    next_secondary
-                                } else {
-                                    next_secondary | leader_bit
-                                },
-                                secondary_total: state.secondary_total
-                                    + secondary
-                                    + usize::from(!leader_in_primary),
-                                leader: next_leader,
-                            },
-                            next_cells,
-                            out,
-                        );
+                    if outside > 0 {
+                        next_cells.push(outside);
+                    }
+                    if both > 0 {
+                        next_cells.push(both);
+                    }
+                    if secondary > 0 {
+                        next_cells.push(secondary);
+                    }
+                    if primary > 0 {
+                        next_cells.push(primary);
                     }
 
-                    next_cells.pop();
+                    let shared_mask = range_mask(start + outside, both);
+                    let next_secondary = state.secondary_mask
+                        | shared_mask
+                        | range_mask(start + outside + both, secondary);
+                    let next_primary = state.primary_mask
+                        | shared_mask
+                        | range_mask(start + outside + both + secondary, primary);
+                    let mut next_leader = state.leader;
+                    if has_leader {
+                        // As in `no_secondary`, keep the leader as a singleton
+                        // at the tail of its source cell's refined block.
+                        // Enumerate both twin-half placements so the leader
+                        // may be isolated with either recipient set when the
+                        // halves differ.
+                        let leader_idx = start + outside + both + secondary + primary;
+                        next_cells.push(1);
+                        next_leader = Some(leader_idx);
+
+                        for leader_in_primary in [true, false] {
+                            let leader_bit = 1u64 << leader_idx;
+                            with_secondary(
+                                ranges,
+                                leader_cell,
+                                cell_idx + 1,
+                                SecondaryState {
+                                    primary_mask: if leader_in_primary {
+                                        next_primary | leader_bit
+                                    } else {
+                                        next_primary
+                                    },
+                                    secondary_mask: if leader_in_primary {
+                                        next_secondary
+                                    } else {
+                                        next_secondary | leader_bit
+                                    },
+                                    leader: next_leader,
+                                },
+                                next_cells,
+                                out,
+                            );
+                        }
+
+                        next_cells.pop();
+                        if primary > 0 {
+                            next_cells.pop();
+                        }
+                        if secondary > 0 {
+                            next_cells.pop();
+                        }
+                        if both > 0 {
+                            next_cells.pop();
+                        }
+                        if outside > 0 {
+                            next_cells.pop();
+                        }
+                        continue;
+                    }
+
+                    with_secondary(
+                        ranges,
+                        leader_cell,
+                        cell_idx + 1,
+                        SecondaryState {
+                            primary_mask: next_primary,
+                            secondary_mask: next_secondary,
+                            leader: next_leader,
+                        },
+                        next_cells,
+                        out,
+                    );
+
+                    // Undo the refined cells before trying the next allocation.
                     if primary > 0 {
                         next_cells.pop();
                     }
                     if secondary > 0 {
                         next_cells.pop();
                     }
+                    if both > 0 {
+                        next_cells.pop();
+                    }
                     if outside > 0 {
                         next_cells.pop();
                     }
-                    continue;
-                }
-
-                with_secondary(
-                    ranges,
-                    leader_cell,
-                    cell_idx + 1,
-                    SecondaryState {
-                        primary_mask: next_primary,
-                        secondary_mask: next_secondary,
-                        secondary_total: state.secondary_total + secondary,
-                        leader: next_leader,
-                    },
-                    next_cells,
-                    out,
-                );
-
-                // Undo the refined cells before trying the next allocation.
-                if primary > 0 {
-                    next_cells.pop();
-                }
-                if secondary > 0 {
-                    next_cells.pop();
-                }
-                if outside > 0 {
-                    next_cells.pop();
                 }
             }
         }
@@ -597,8 +624,8 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
     let mut out = Vec::new();
     for leader_cell in 0..cells.len() {
         // Any current symmetry cell may supply the next leader. Enumerate the
-        // no-secondary and with-secondary cases separately to keep the output
-        // canonical and duplicate-free.
+        // equal-recipient-set and split-recipient-set cases separately to keep
+        // the output canonical and duplicate-free.
         let mut next_cells = Vec::new();
         no_secondary(&ranges, leader_cell, 0, 0, None, &mut next_cells, &mut out);
         let mut next_cells = Vec::new();
@@ -609,7 +636,6 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
             SecondaryState {
                 primary_mask: 0,
                 secondary_mask: 0,
-                secondary_total: 0,
                 leader: None,
             },
             &mut next_cells,
@@ -786,6 +812,86 @@ mod tests {
     use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
     use std::collections::HashSet;
 
+    fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Vec<usize>)> {
+        let mut out = HashSet::new();
+
+        for outside in 0..n {
+            let both = n - outside - 1;
+            let leader = outside + both;
+            let leader_bit = 1u64 << leader;
+            let mask = range_mask(outside, both) | leader_bit;
+
+            let mut cells = Vec::new();
+            if outside > 0 {
+                cells.push(outside);
+            }
+            if both > 0 {
+                cells.push(both);
+            }
+            cells.push(1);
+
+            out.insert((
+                RoundScenario {
+                    leader,
+                    primary_mask: mask,
+                    secondary_mask: mask,
+                },
+                cells,
+            ));
+        }
+
+        for outside in 0..n {
+            let remaining_after_outside = n - outside - 1;
+            for both in 0..=remaining_after_outside {
+                let remaining = remaining_after_outside - both;
+                for secondary in 0..=remaining {
+                    let primary = remaining - secondary;
+                    let leader = outside + both + secondary + primary;
+                    let leader_bit = 1u64 << leader;
+                    let shared_mask = range_mask(outside, both);
+                    let secondary_mask =
+                        shared_mask | range_mask(outside + both, secondary);
+                    let primary_mask =
+                        shared_mask | range_mask(outside + both + secondary, primary);
+
+                    let mut cells = Vec::new();
+                    if outside > 0 {
+                        cells.push(outside);
+                    }
+                    if both > 0 {
+                        cells.push(both);
+                    }
+                    if secondary > 0 {
+                        cells.push(secondary);
+                    }
+                    if primary > 0 {
+                        cells.push(primary);
+                    }
+                    cells.push(1);
+
+                    out.insert((
+                        RoundScenario {
+                            leader,
+                            primary_mask: primary_mask | leader_bit,
+                            secondary_mask,
+                        },
+                        cells.clone(),
+                    ));
+                    out.insert((
+                        RoundScenario {
+                            leader,
+                            primary_mask,
+                            secondary_mask: secondary_mask | leader_bit,
+                        },
+                        cells,
+                    ));
+                }
+            }
+        }
+
+        out
+    }
+
     #[test]
     fn generated_cases_are_deterministic() {
         let framework = Framework {
@@ -812,6 +918,94 @@ mod tests {
             let leader_bit = 1u64 << round.leader;
             (round.primary_mask & leader_bit) == 0 && (round.secondary_mask & leader_bit) != 0
         }));
+    }
+
+    #[test]
+    fn generated_scenarios_include_shared_non_leaders_in_split_rounds() {
+        let scenarios = generate_scenarios(&mut test_rng(), 5, 1, usize::MAX);
+        assert!(scenarios.iter().any(|(scenario, _)| {
+            let round = scenario.rounds[0];
+            let leader_bit = 1u64 << round.leader;
+            let shared_non_leaders = (round.primary_mask & round.secondary_mask) & !leader_bit;
+            let primary_only = round.primary_mask & !round.secondary_mask;
+            let secondary_only = round.secondary_mask & !round.primary_mask;
+            shared_non_leaders != 0 && primary_only != 0 && secondary_only != 0
+        }));
+    }
+
+    #[test]
+    fn generated_scenarios_include_shared_non_leaders_when_only_leader_splits_halves() {
+        let scenarios = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX);
+        assert!(scenarios.iter().any(|(scenario, _)| {
+            let round = scenario.rounds[0];
+            let leader_bit = 1u64 << round.leader;
+            let shared_non_leaders = (round.primary_mask & round.secondary_mask) & !leader_bit;
+            let primary_only_non_leaders =
+                (round.primary_mask & !round.secondary_mask) & !leader_bit;
+            let secondary_only_non_leaders =
+                (round.secondary_mask & !round.primary_mask) & !leader_bit;
+            shared_non_leaders != 0
+                && primary_only_non_leaders == 0
+                && secondary_only_non_leaders == 0
+                && round.primary_mask != round.secondary_mask
+        }));
+    }
+
+    #[test]
+    fn generated_single_round_scenarios_match_expected_canonical_space() {
+        let generated: HashSet<_> = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX)
+            .into_iter()
+            .map(|(scenario, cells)| (scenario.rounds[0], cells))
+            .collect();
+        assert_eq!(generated, expected_single_round_transitions(4));
+    }
+
+    #[test]
+    fn route_supports_shared_non_leaders_in_split_rounds() {
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 4,
+                primary_mask: 0b11010,
+                secondary_mask: 0b00110,
+            }],
+        };
+        let participants: Vec<u32> = (0..5).collect();
+        assert_eq!(
+            scenario.route(View::new(1), &0, &participants),
+            SplitTarget::None
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &1, &participants),
+            SplitTarget::Both
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &2, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &3, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &4, &participants),
+            SplitTarget::Primary
+        );
+    }
+
+    #[test]
+    fn generated_split_round_leaders_belong_to_exactly_one_half() {
+        let scenarios = generate_scenarios(&mut test_rng(), 4, 2, usize::MAX);
+        for (scenario, _) in scenarios {
+            for round in scenario.rounds {
+                if round.primary_mask == round.secondary_mask {
+                    continue;
+                }
+                let leader_bit = 1u64 << round.leader;
+                let leader_in_primary = (round.primary_mask & leader_bit) != 0;
+                let leader_in_secondary = (round.secondary_mask & leader_bit) != 0;
+                assert_ne!(leader_in_primary, leader_in_secondary);
+            }
+        }
     }
 
     #[test]
