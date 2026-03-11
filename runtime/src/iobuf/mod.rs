@@ -73,7 +73,7 @@ impl IoBuf {
     /// returned to the pool when the final reference is dropped.
     ///
     /// Buffers backed by [`Bytes`], and untracked aligned allocations used for
-    /// fallback or requests smaller than [`BufferPoolConfig::min_size`], return
+    /// fallback or requests smaller than [`BufferPoolConfig::pool_min_size`], return
     /// `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
@@ -498,7 +498,7 @@ impl IoBufMut {
     /// returned to the pool when dropped.
     ///
     /// Buffers backed by [`BytesMut`], and untracked aligned allocations used
-    /// for fallback or requests smaller than [`BufferPoolConfig::min_size`],
+    /// for fallback or requests smaller than [`BufferPoolConfig::pool_min_size`],
     /// return `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
@@ -2191,11 +2191,12 @@ mod tests {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under miri.
                 let pool_config = BufferPoolConfig {
+                    pool_min_size: 0,
                     max_per_class: commonware_utils::NZUsize!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {
-                let pool_config = BufferPoolConfig::for_network();
+                let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
         let mut registry = prometheus_client::registry::Registry::default();
