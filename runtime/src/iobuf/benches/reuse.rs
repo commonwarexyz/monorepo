@@ -1,4 +1,6 @@
-use commonware_runtime::{tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _};
+use commonware_runtime::{
+    tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
+};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::{
