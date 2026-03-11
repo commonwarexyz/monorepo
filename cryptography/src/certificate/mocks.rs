@@ -71,7 +71,6 @@ struct Inner {
 }
 
 /// Shared state for mock schemes created by the same test fixture.
-#[doc(hidden)]
 #[derive(Clone, Default)]
 pub struct Shared(Arc<Mutex<Inner>>);
 
@@ -110,7 +109,6 @@ impl Read for Certificate {
 ///
 /// Signatures and certificates are cheap synthetic IDs. Verification succeeds only
 /// if the corresponding subject was previously recorded in shared state.
-#[doc(hidden)]
 pub struct Generic<
     P: PublicKey,
     N: super::Namespace,
