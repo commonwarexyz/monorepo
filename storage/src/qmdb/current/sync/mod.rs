@@ -212,9 +212,7 @@ where
     };
 
     // Build grafted MMR.
-    let hasher = StandardHasher::<H>::new();
     let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &hasher,
         &status,
         &grafted_pinned_nodes,
         &any.log.mmr,
@@ -225,16 +223,16 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
+    let hasher = StandardHasher::<H>::new();
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial = db::partial_chunk(&status);
-    let grafted_mmr_root = db::compute_grafted_mmr_root(&hasher, &storage).await?;
+    let grafted_mmr_root = db::compute_grafted_mmr_root::<H, _, _>(&storage).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
-    let root = db::combine_roots(
-        &hasher,
+    let root = db::combine_roots::<H>(
         &ops_root,
         &grafted_mmr_root,
         partial_digest.as_ref().map(|(nb, d)| (*nb, d)),

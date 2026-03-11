@@ -233,7 +233,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
-    mmr::{Location, StandardHasher},
+    mmr::Location,
     qmdb::{
         any::{
             self,
@@ -433,21 +433,15 @@ where
     .await?;
 
     // Build the grafted MMR from the bitmap and ops MMR.
-    let hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &hasher,
-        &status,
-        &pinned_nodes,
-        &any.log.mmr,
-        thread_pool.as_ref(),
-    )
-    .await?;
+    let grafted_mmr =
+        db::build_grafted_mmr::<H, N>(&status, &pinned_nodes, &any.log.mmr, thread_pool.as_ref())
+            .await?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root::<H, _, _, N>(&storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -517,16 +511,14 @@ where
     .await?;
 
     // Build the grafted MMR from the bitmap and ops MMR.
-    let hasher = StandardHasher::<H>::new();
     let grafted_mmr =
-        db::build_grafted_mmr::<H, N>(&hasher, &status, &pinned_nodes, &any.log.mmr, pool.as_ref())
-            .await?;
+        db::build_grafted_mmr::<H, N>(&status, &pinned_nodes, &any.log.mmr, pool.as_ref()).await?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root::<H, _, _, N>(&storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
