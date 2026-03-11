@@ -212,14 +212,16 @@ where
 
         let mut inner = self.shared.0.lock();
         let entries = inner.signatures.entry(signer).or_default();
-        let signature = if let Some(signature) = entries.by_subject.get(&signed_subject).copied() {
-            signature
-        } else {
-            let signature = entries.next();
-            entries.by.insert(signature, signed_subject.clone());
-            entries.by_subject.insert(signed_subject, signature);
-            signature
-        };
+        let signature = entries
+            .by_subject
+            .get(&signed_subject)
+            .copied()
+            .unwrap_or_else(|| {
+                let signature = entries.next();
+                entries.by.insert(signature, signed_subject.clone());
+                entries.by_subject.insert(signed_subject, signature);
+                signature
+            });
 
         Some(Attestation {
             signer,
