@@ -444,10 +444,8 @@ impl Drop for AlignedBuffer {
 /// and only creates a new tracked buffer when no free buffer is available and
 /// the class still has remaining capacity.
 struct SizeClass {
-    /// Owning pool identifier for the TLS cache registry.
-    pool_id: usize,
-    /// Dense class index within the pool.
-    class_index: usize,
+    /// Dense global identifier for the TLS cache registry.
+    class_id: usize,
     /// The buffer size for this class.
     size: usize,
     /// Buffer alignment.
@@ -471,8 +469,7 @@ unsafe impl Sync for SizeClass {}
 
 impl SizeClass {
     fn new(
-        pool_id: usize,
-        class_index: usize,
+        class_id: usize,
         size: usize,
         alignment: usize,
         max: usize,
@@ -487,8 +484,7 @@ impl SizeClass {
             created = max;
         }
         Self {
-            pool_id,
-            class_index,
+            class_id,
             size,
             alignment,
             max,
@@ -574,52 +570,41 @@ impl Drop for LocalBin {
 }
 
 thread_local! {
-    static LOCAL_POOLS: UnsafeCell<Vec<Option<Vec<Option<LocalBin>>>>> =
+    static LOCAL_CLASSES: UnsafeCell<Vec<Option<LocalBin>>> =
         const { UnsafeCell::new(Vec::new()) };
 }
 
-static NEXT_POOL_ID: AtomicUsize = AtomicUsize::new(0);
+static NEXT_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn local_pop(class: &Arc<SizeClass>) -> Option<LocalEntry> {
-    LOCAL_POOLS.with(|pools| {
+    LOCAL_CLASSES.with(|bins| {
         // SAFETY: this TLS value is only ever accessed by the current thread.
-        let pools = unsafe { &mut *pools.get() };
-        let bins = pools.get_mut(class.pool_id)?.as_mut()?;
-        let bin = bins.get_mut(class.class_index)?.as_mut()?;
+        let bins = unsafe { &mut *bins.get() };
+        let bin = bins.get_mut(class.class_id)?.as_mut()?;
         bin.pop()
     })
 }
 
 fn local_push(class: Arc<SizeClass>, buffer: AlignedBuffer) {
-    LOCAL_POOLS.with(|pools| {
+    LOCAL_CLASSES.with(|bins| {
         // SAFETY: this TLS value is only ever accessed by the current thread.
-        let pools = unsafe { &mut *pools.get() };
-        if class.pool_id >= pools.len() {
-            pools.resize_with(class.pool_id + 1, || None);
+        let bins = unsafe { &mut *bins.get() };
+        if class.class_id >= bins.len() {
+            bins.resize_with(class.class_id + 1, || None);
         }
-        let bins = pools[class.pool_id].get_or_insert_with(Vec::new);
-        if class.class_index >= bins.len() {
-            bins.resize_with(class.class_index + 1, || None);
-        }
-        let bin = bins[class.class_index]
-            .get_or_insert_with(|| LocalBin::new(class.local_capacity));
+        let bin = bins[class.class_id].get_or_insert_with(|| LocalBin::new(class.local_capacity));
         bin.push(LocalEntry { buffer, class });
     });
 }
 
 fn local_refill(class: &Arc<SizeClass>, target: usize) {
-    LOCAL_POOLS.with(|pools| {
+    LOCAL_CLASSES.with(|bins| {
         // SAFETY: this TLS value is only ever accessed by the current thread.
-        let pools = unsafe { &mut *pools.get() };
-        if class.pool_id >= pools.len() {
-            pools.resize_with(class.pool_id + 1, || None);
+        let bins = unsafe { &mut *bins.get() };
+        if class.class_id >= bins.len() {
+            bins.resize_with(class.class_id + 1, || None);
         }
-        let bins = pools[class.pool_id].get_or_insert_with(Vec::new);
-        if class.class_index >= bins.len() {
-            bins.resize_with(class.class_index + 1, || None);
-        }
-        let bin = bins[class.class_index]
-            .get_or_insert_with(|| LocalBin::new(class.local_capacity));
+        let bin = bins[class.class_id].get_or_insert_with(|| LocalBin::new(class.local_capacity));
         while bin.len() + 1 < target {
             let Some(buffer) = class.global.pop() else {
                 break;
@@ -634,13 +619,11 @@ fn local_refill(class: &Arc<SizeClass>, target: usize) {
 
 #[cfg(test)]
 fn get_current_local_len(class: &SizeClass) -> usize {
-    LOCAL_POOLS.with(|pools| {
+    LOCAL_CLASSES.with(|bins| {
         // SAFETY: this TLS value is only ever accessed by the current thread.
-        let pools = unsafe { &*pools.get() };
-        pools
-            .get(class.pool_id)
-            .and_then(Option::as_ref)
-            .and_then(|bins| bins.get(class.class_index))
+        let bins = unsafe { &*bins.get() };
+        bins
+            .get(class.class_id)
             .and_then(Option::as_ref)
             .map_or(0, LocalBin::len)
     })
@@ -760,13 +743,12 @@ impl BufferPool {
         config.validate();
 
         let metrics = PoolMetrics::new(registry);
-        let pool_id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
+            let class_id = NEXT_CLASS_ID.fetch_add(1, Ordering::Relaxed);
             let class = Arc::new(SizeClass::new(
-                pool_id,
-                i,
+                class_id,
                 size,
                 config.alignment.get(),
                 config.max_per_class.get(),
