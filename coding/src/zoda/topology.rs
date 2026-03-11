@@ -80,7 +80,28 @@ impl Topology {
     pub fn reckon(config: &Config, data_bytes: usize) -> Self {
         let n = config.minimum_shards.get() as usize;
         let k = config.extra_shards.get() as usize;
+        // The following calculations don't tolerate data_bytes = 0, so we
+        // temporarily correct that to be at least 1, then make sure to adjust
+        // it back again to 0.
         let corrected_data_bytes = data_bytes.max(1);
+        // The goal here is to try and maximize the number of columns in the
+        // data. ZODA is more efficient the more columns there are. However,
+        // we need to make sure that every shard has enough samples to guarantee
+        // correct encoding, and that the number of encoded rows can contain
+        // all of the samples in each shard, without overlap.
+        //
+        // To determine if a column configuration is good, we need to choose
+        // the number of encoded rows. To do this, we pick a number of samples
+        // `S` such that `S * n >= data_rows`. Then, our encoded rows will
+        // equal `((n + k) * S).next_power_of_two()`. If the number of required
+        // samples `R` for this configuration satisfies `(n + k) * R <= encoded_rows`,
+        // then this configuration is valid, using `R` as the necessary number
+        // of samples.
+        //
+        // We try increasing column counts, picking the configuration that's good.
+        // It's possible that the first configuration, with one column, is not good.
+        // To correct for that, we need to add extra checksum columns to guarantee
+        // security.
         let mut out = Self::with_cols(corrected_data_bytes, n, k, 1);
         loop {
             let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
@@ -121,8 +142,11 @@ mod tests {
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
-        assert_eq!(topology.data_cols, 1);
 
+        // Verify we hit the 1-column fallback and the security invariant holds.
+        // When the loop in reckon() exits without finding a multi-column config,
+        // correct_column_samples() must compensate by adding column samples.
+        assert_eq!(topology.data_cols, 1);
         let required = topology.required_samples();
         let provided = topology.samples * (topology.column_samples / 2);
         assert!(

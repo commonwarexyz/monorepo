@@ -366,6 +366,11 @@ commonware_macros::stability_scope!(ALPHA {
     }
 
     /// An adapter that exposes a [`PhasedScheme`] through the [`Scheme`] trait.
+    ///
+    /// In most cases, this is not the most optimal way to use a [`PhasedScheme`],
+    /// or to expose a [`PhasedScheme`] as a [`Scheme`] for that matter. However,
+    /// it can be useful for testing or for usecases where the phased scheme
+    /// cannot be used directly.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct PhasedAsScheme<P>(core::marker::PhantomData<P>);
 
@@ -539,10 +544,7 @@ mod test {
         fn decode_rejects_empty_checked_shards<S: Scheme>(config: &Config, data: &[u8]) {
             let (commitment, _) = S::encode(config, data, &Sequential).unwrap();
             let result = S::decode(config, &commitment, &[], &Sequential);
-            assert!(
-                result.is_err(),
-                "decode must reject empty checked shard sets"
-            );
+            assert!(result.is_err(), "decode must reject empty checked shard sets");
         }
 
         #[test]
