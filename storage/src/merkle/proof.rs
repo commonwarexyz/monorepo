@@ -4,10 +4,13 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
-use crate::mmr::{
-    hasher::Hasher,
-    iterator::{nodes_to_pin, PeakIterator},
-    Error, Location, Position,
+use crate::{
+    merkle::hasher::Hasher,
+    mmr::{
+        self,
+        iterator::{nodes_to_pin, PeakIterator},
+        Error, Location, Position,
+    },
 };
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
@@ -145,7 +148,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -161,7 +164,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         match self.reconstruct_root(hasher, elements, start_loc) {
@@ -185,7 +188,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         // Empty proof is valid for an empty MMR
@@ -276,7 +279,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<Vec<(Position, D)>, Error>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
@@ -314,7 +317,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         // Verify the proof and extract all node digests used in the reconstruction.
@@ -393,7 +396,7 @@ impl<D: Digest> Proof<D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         self.reconstruct_root_impl(hasher, elements, start_loc, None)
@@ -412,7 +415,7 @@ impl<D: Digest> Proof<D> {
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = mmr::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -570,11 +573,12 @@ fn collect_siblings_dfs(
 ///
 /// # Errors
 ///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if the range is empty.
-/// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
-/// (>= `size`).
+/// - Returns [Error::InvalidSize] if `size` is not a valid MMR size.
+/// - Returns [Error::Empty] if the range is empty.
+/// - Returns [Error::LocationOverflow] if a location in `range` >
+/// [crate::merkle::Family::MAX_LOCATION].
+/// - Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds (>=
+/// `size`).
 pub(crate) fn blueprint(leaves: Location, range: Range<Location>) -> Result<Blueprint, Error> {
     if range.is_empty() {
         return Err(Error::Empty);
@@ -643,7 +647,7 @@ pub(crate) fn build_range_proof<D, H>(
 ) -> Result<Proof<D>, Error>
 where
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: Hasher<Family = mmr::Family, Digest = D>,
 {
     let bp = blueprint(leaves, range)?;
 
@@ -676,10 +680,11 @@ where
 ///
 /// # Errors
 ///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if locations is empty.
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
+/// - Returns [Error::InvalidSize] if `size` is not a valid MMR size.
+/// - Returns [Error::Empty] if locations is empty.
+/// - Returns [Error::LocationOverflow] if any location in `locations` >
+/// [crate::merkle::Family::MAX_LOCATION].
+/// - Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     leaves: Location,
@@ -724,7 +729,7 @@ fn peak_digest_from_range<D, H, E>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: Hasher<Family = mmr::Family, Digest = D>,
     E: Iterator<Item: AsRef<[u8]>>,
 {
     assert_ne!(range_info.two_h, 0);
@@ -798,7 +803,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
+    use crate::merkle::{
+        location::LocationRangeExt as _,
+        mmr,
+        mmr::{mem::Mmr, StandardHasher as Standard},
+        Family,
+    };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -1407,7 +1417,7 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*MAX_LOCATION + 2);
+        wrong_size_proof.leaves = Location::new(*<mmr::Family as Family>::MAX_LOCATION + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -1538,16 +1548,17 @@ mod tests {
         // Test that the validation logic accepts MAX_LOCATION as a valid leaf count.
         // With MAX_LOCATION leaves, valid locations are 0..MAX_LOCATION-1.
         // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
-        let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
+        let max_loc = <mmr::Family as Family>::MAX_LOCATION;
+        let max_loc_plus_1 = Location::new(*max_loc + 1);
 
-        let result = blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
+        let result = blueprint(max_loc, max_loc - 1..max_loc);
         assert!(
             result.is_ok(),
             "Should be able to prove with MAX_LOCATION leaves"
         );
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
-        let result_overflow = blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
+        let result_overflow = blueprint(max_loc_plus_1, max_loc..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1559,15 +1570,16 @@ mod tests {
     fn test_max_location_multi_proof() {
         // Test that multi_proof can handle MAX_LOCATION
         // Should be able to generate multi-proof for MAX_LOCATION
-        let result = nodes_required_for_multi_proof(MAX_LOCATION, &[MAX_LOCATION - 1]);
+        let max_loc = <mmr::Family as Family>::MAX_LOCATION;
+        let result = nodes_required_for_multi_proof(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LOCATION"
         );
 
         // Should reject MAX_LOCATION + 1
-        let invalid_loc = MAX_LOCATION + 1;
-        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[MAX_LOCATION]);
+        let invalid_loc = max_loc + 1;
+        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION in multi-proof"
@@ -1665,7 +1677,7 @@ mod tests {
         let n_for_63_peaks = (1u128 << 63) - 1;
         let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
         assert!(
-            size_for_63_peaks > *crate::mmr::MAX_POSITION as u128,
+            size_for_63_peaks > *<mmr::Family as Family>::MAX_POSITION as u128,
             "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
         );
 

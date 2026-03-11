@@ -52,12 +52,14 @@
 
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
-use crate::mmr::{
-    hasher::Hasher,
-    iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-    mem::{Clean, Dirty, State},
-    read::{BatchChainInfo, Readable},
-    Error, Location, Position,
+use crate::{
+    merkle::hasher::Hasher,
+    mmr::{
+        iterator::{nodes_needing_parents, PathIterator, PeakIterator},
+        mem::{Clean, Dirty, State},
+        read::{BatchChainInfo, Readable},
+        Error, Location, Position,
+    },
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
@@ -179,7 +181,11 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &impl Hasher<Digest = D>, element: &[u8]) -> Self {
+    pub fn add(
+        self,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
+        element: &[u8],
+    ) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -192,7 +198,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
         mut self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<Self, Error> {
@@ -252,7 +258,10 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     /// Consume this batch and produce an immutable [MerkleizedBatch] with computed root.
-    pub fn merkleize(mut self, hasher: &impl Hasher<Digest = D>) -> MerkleizedBatch<'a, D, P> {
+    pub fn merkleize(
+        mut self,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
+    ) -> MerkleizedBatch<'a, D, P> {
         let dirty = self.state.take_sorted_by_height();
 
         #[cfg(feature = "std")]
@@ -290,7 +299,11 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     /// Compute digests for dirty internal nodes, bottom-up by height.
-    fn merkleize_serial(&mut self, hasher: &impl Hasher<Digest = D>, dirty: &[(Position, u32)]) {
+    fn merkleize_serial(
+        &mut self,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
+        dirty: &[(Position, u32)],
+    ) {
         for &(pos, height) in dirty {
             let left = pos - (1 << height);
             let right = pos - 1;
@@ -306,7 +319,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(Position, u32)],
     ) {
@@ -341,7 +354,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family = super::Family, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position],
         height: u32,
@@ -499,7 +512,9 @@ impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{conformance::build_test_mmr, hasher::Standard, mem::Mmr, read::Readable};
+    use crate::mmr::{
+        conformance::build_test_mmr, mem::Mmr, read::Readable, StandardHasher as Standard,
+    };
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 

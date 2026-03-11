@@ -68,18 +68,19 @@
 //! ```
 
 pub mod batch;
-pub mod hasher;
 pub mod iterator;
 pub mod mem;
 pub mod read;
 
-// Re-export the location, position, and proof modules from the parent merkle module.
-pub use super::{
-    location, position, proof,
+use crate::merkle;
+pub use crate::merkle::{
+    hasher, location, position, proof,
     proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT},
     LocationRangeExt,
 };
-use crate::merkle::{self, MerkleFamily};
+pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use read::Readable;
+use thiserror::Error;
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -94,26 +95,30 @@ cfg_if::cfg_if! {
 
 /// Marker type for the MMR family.
 #[derive(Copy, Clone, Debug)]
-pub struct Mmr;
+pub struct Family;
 
-impl MerkleFamily for Mmr {
+impl merkle::Family for Family {
     /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
-    const MAX_POSITION: u64 = 0x7FFFFFFFFFFFFFFF; // (1 << 63) - 1
+    const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
 
     /// Maximum valid location: the largest leaf count is `2^62`.
-    const MAX_LOCATION: u64 = 0x4000_0000_0000_0000; // 2^62
+    const MAX_LOCATION: Location = Location::new(0x4000_0000_0000_0000); // 2^62
 
-    fn location_to_position(loc: u64) -> u64 {
-        // 2*N - popcount(N) for MMR
-        loc.checked_mul(2)
-            .expect("should not overflow for valid leaf index")
-            - loc.count_ones() as u64
+    fn location_to_position(loc: Location) -> Position {
+        let loc = *loc;
+        // 2*N - popcount(N)
+        Position::new(
+            loc.checked_mul(2)
+                .expect("should not overflow for valid leaf index")
+                - loc.count_ones() as u64,
+        )
     }
 
-    fn position_to_location(pos: u64) -> Option<u64> {
+    fn position_to_location(pos: Position) -> Option<Location> {
+        let pos = *pos;
         // Position 0 is always the first leaf at location 0.
         if pos == 0 {
-            return Some(0);
+            return Some(Location::new(0));
         }
 
         // Find the height of the perfect binary tree containing this position.
@@ -145,7 +150,7 @@ impl MerkleFamily for Mmr {
             }
         }
 
-        Some(leaf_loc_floor)
+        Some(Location::new(leaf_loc_floor))
     }
 
     fn to_nearest_size(size: Position) -> Position {
@@ -157,7 +162,7 @@ impl MerkleFamily for Mmr {
     }
 
     fn is_valid_size(size: Position) -> bool {
-        let size = size.as_u64();
+        let size = *size;
         if size == 0 {
             return true;
         }
@@ -193,25 +198,14 @@ impl MerkleFamily for Mmr {
 }
 
 /// A node index or node count in an MMR.
-pub type Position = merkle::Position<Mmr>;
+pub type Position = merkle::Position<Family>;
 
 /// A leaf index or leaf count in an MMR.
-pub type Location = merkle::Location<Mmr>;
+pub type Location = merkle::Location<Family>;
 
-/// Maximum valid [Position] value: the largest node count (size) an MMR can hold.
-///
-/// An MMR with `2^62` leaves has `2^63 - 1` nodes, so `MAX_POSITION = 2^63 - 1`.
-pub const MAX_POSITION: Position = Position::MAX;
 
-/// Maximum valid [Location] value: the largest leaf count an MMR can hold.
-///
-/// `MAX_LOCATION = 2^62`.
-pub const MAX_LOCATION: Location = Location::MAX;
 
-pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
-pub use hasher::Standard as StandardHasher;
-pub use read::Readable;
-use thiserror::Error;
+pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
@@ -268,8 +262,8 @@ pub enum Error {
     },
 }
 
-impl From<merkle::Error<Mmr>> for Error {
-    fn from(err: merkle::Error<Mmr>) -> Self {
+impl From<merkle::Error<Family>> for Error {
+    fn from(err: merkle::Error<Family>) -> Self {
         match err {
             merkle::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
             merkle::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
@@ -282,6 +276,9 @@ impl From<merkle::Error<Mmr>> for Error {
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
+
+    const MAX_POSITION: Position = <Family as crate::merkle::Family>::MAX_POSITION;
+    const MAX_LOCATION: Location = <Family as crate::merkle::Family>::MAX_LOCATION;
 
     // --- Position tests ---
 

@@ -4,7 +4,10 @@
 //!
 //! [`BatchChainInfo`] is used to walk chains of batches.
 
-use crate::mmr::{hasher::Hasher, iterator::PeakIterator, proof, Error, Location, Position, Proof};
+use crate::{
+    merkle::hasher::Hasher,
+    mmr::{iterator::PeakIterator, proof, Error, Location, Position, Proof},
+};
 use alloc::collections::BTreeMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -44,7 +47,7 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for the element at `loc`.
     fn proof(
         &self,
-        hasher: &impl Hasher<Digest = Self::Digest>,
+        hasher: &impl Hasher<Family = super::Family, Digest = Self::Digest>,
         loc: Location,
     ) -> Result<Proof<Self::Digest>, Error> {
         if !loc.is_valid() {
@@ -59,7 +62,7 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for all elements in `range`.
     fn range_proof(
         &self,
-        hasher: &impl Hasher<Digest = Self::Digest>,
+        hasher: &impl Hasher<Family = super::Family, Digest = Self::Digest>,
         range: Range<Location>,
     ) -> Result<Proof<Self::Digest>, Error> {
         let leaves = self.leaves();

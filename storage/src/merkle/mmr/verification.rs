@@ -11,9 +11,9 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{
-    hasher::Hasher, iterator::PeakIterator, proof, storage::Storage, Error, Location, Position,
-    Proof,
+use crate::{
+    merkle::hasher::Hasher,
+    mmr::{iterator::PeakIterator, proof, storage::Storage, Error, Location, Position, Proof},
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -48,7 +48,7 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family = super::Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let digests =
@@ -82,7 +82,7 @@ impl<D: Digest> ProofStore<D> {
     /// The sub-range's fold prefix accumulator is derived from the stored fold accumulator
     /// (covering the original proof's fold prefix peaks) plus any additional peaks that are
     /// individually available in the store (original range peaks now preceding the sub-range).
-    pub fn range_proof<H: Hasher<Digest = D>>(
+    pub fn range_proof<H: Hasher<Family = super::Family, Digest = D>>(
         &self,
         hasher: &H,
         range: Range<Location>,
@@ -155,11 +155,15 @@ impl<D: Digest> ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LOCATION]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D>>(
+pub async fn range_proof<
+    D: Digest,
+    H: Hasher<Family = super::Family, Digest = D>,
+    S: Storage<Digest = D>,
+>(
     hasher: &H,
     mmr: &S,
     range: Range<Location>,
@@ -173,11 +177,15 @@ pub async fn range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LOCATION]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D>>(
+pub async fn historical_range_proof<
+    D: Digest,
+    H: Hasher<Family = super::Family, Digest = D>,
+    S: Storage<Digest = D>,
+>(
     hasher: &H,
     mmr: &S,
     leaves: Location,
@@ -216,7 +224,7 @@ pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::merkle::Family::MAX_LOCATION]
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
