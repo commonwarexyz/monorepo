@@ -5662,6 +5662,10 @@ mod tests {
     ///   After these rounds, the network becomes fully synchronous. More
     ///   rounds exponentially increase the canonical scenario space.
     ///
+    /// - `mode`: How multi-round scenarios are constructed. `Sampled` picks
+    ///   an independent partition per round; `Sustained` repeats a single
+    ///   partition across all rounds (modeling a persistent adversarial split).
+    ///
     /// - `max_cases`: Upper bound on the total emitted cases. Each case is a
     ///   (scenario, compromised-assignment) pair. Also caps scenario
     ///   enumeration (sampling uniformly when the space is larger). Cases
