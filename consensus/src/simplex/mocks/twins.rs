@@ -206,6 +206,16 @@ where
     }
 }
 
+/// Controls how multi-round scenarios are constructed.
+#[derive(Clone, Copy, Debug)]
+pub enum Mode {
+    /// Each round gets an independently chosen partition and leader.
+    Sampled,
+    /// A single 1-round partition is repeated across all rounds, modeling
+    /// a persistent adversarial split.
+    Sustained,
+}
+
 /// Framework configuration for generating Twins cases.
 ///
 /// Each canonical scenario tracks residual symmetry cells -- participants that
@@ -227,6 +237,8 @@ pub struct Framework {
     pub faults: usize,
     /// Number of adversarial rounds before synchronous suffix.
     pub rounds: usize,
+    /// How multi-round scenarios are constructed.
+    pub mode: Mode,
     /// Upper bound on the total number of emitted cases (scenario x
     /// compromised-assignment pairs). Also used to cap the number of
     /// scenarios enumerated (since each scenario produces >= 1 case).
@@ -266,12 +278,27 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.rounds > 0, "rounds must be > 0");
     assert!(framework.max_cases > 0, "max_cases must be > 0");
 
-    let scenarios = generate_scenarios(
-        rng,
-        framework.participants,
-        framework.rounds,
-        framework.max_cases,
-    );
+    let scenarios = match framework.mode {
+        Mode::Sampled => generate_scenarios(
+            rng,
+            framework.participants,
+            framework.rounds,
+            framework.max_cases,
+        ),
+        Mode::Sustained => {
+            let single_round =
+                generate_scenarios(rng, framework.participants, 1, framework.max_cases);
+            single_round
+                .into_iter()
+                .map(|(s, cells)| {
+                    let scenario = Scenario {
+                        rounds: vec![s.rounds[0]; framework.rounds],
+                    };
+                    (scenario, cells)
+                })
+                .collect()
+        }
+    };
 
     let mut result: Vec<Case> = scenarios
         .iter()
@@ -761,6 +788,7 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
+            mode: Mode::Sampled,
             max_cases: 50,
         };
         let first = cases(&mut test_rng(), framework);
@@ -837,6 +865,25 @@ mod tests {
     }
 
     #[test]
+    fn sustained_cases_repeat_single_round() {
+        let framework = Framework {
+            participants: 5,
+            faults: 1,
+            rounds: 3,
+            mode: Mode::Sustained,
+            max_cases: 50,
+        };
+        let all = cases(&mut test_rng(), framework);
+        assert!(!all.is_empty());
+        for case in &all {
+            let rounds = case.scenario.rounds();
+            assert_eq!(rounds.len(), 3);
+            assert_eq!(rounds[0], rounds[1]);
+            assert_eq!(rounds[1], rounds[2]);
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "scenario space overflows u128")]
     fn cases_panic_on_scenario_overflow() {
         let _ = cases(
@@ -845,6 +892,7 @@ mod tests {
                 participants: 4,
                 faults: 1,
                 rounds: 40,
+                mode: Mode::Sampled,
                 max_cases: 1,
             },
         );
@@ -896,6 +944,7 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 1,
+            mode: Mode::Sampled,
             max_cases: usize::MAX,
         };
         let all_cases = cases(&mut test_rng(), framework);
@@ -919,6 +968,7 @@ mod tests {
                 participants: (u64::BITS as usize) + 1,
                 faults: 1,
                 rounds: 1,
+                mode: Mode::Sampled,
                 max_cases: 1,
             },
         );
@@ -960,6 +1010,7 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
+            mode: Mode::Sampled,
             max_cases: 1,
         };
         let case = cases(&mut test_rng(), framework)
