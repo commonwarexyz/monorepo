@@ -5719,121 +5719,189 @@ mod tests {
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let required_finalizations = campaign.required_finalizations;
-            let mut case_fixture = |ctx: &mut deterministic::Context, ns: &[u8], n: u32| {
-                fixture(ctx, ns, n)
-            };
+            let mut case_fixture =
+                |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let cfg = deterministic::Config::new().with_seed(rng.gen());
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = case_fixture(&mut context, &namespace, n);
-            let participants: Arc<[_]> = participants.into();
-            let mut registrations = register_validators(&mut oracle, &participants).await;
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
-
-            let elector = TwinsElector::new(L::default(), &scenario, n as usize);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut reporters = Vec::new();
-            let mut engine_handlers = Vec::new();
-            let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
-
-            // Create twin engines (f Byzantine twins).
-            for idx in twin_indices.iter().copied() {
-                let validator = &participants[idx];
-                let (
-                    (vote_sender, vote_receiver),
-                    (certificate_sender, certificate_receiver),
-                    (_resolver_sender, _resolver_receiver),
-                ) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-
-                let make_vote_forwarder = || {
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
-                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                        let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
-                        match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                        }
-                    }
-                };
-                let make_certificate_forwarder = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
-                        let msg: Certificate<S, D> =
-                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
-                        match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                        }
-                    }
-                };
-                let make_vote_router = || {
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |(sender, message): &(_, IoBuf)| {
-                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                        scenario.route(msg.view(), sender, participants.as_ref())
-                    }
-                };
-                let make_certificate_router = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |(sender, message): &(_, IoBuf)| {
-                        let msg: Certificate<S, D> =
-                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        scenario.route(msg.view(), sender, participants.as_ref())
-                    }
-                };
-                let (vote_sender_primary, vote_sender_secondary) =
-                    vote_sender.split_with(make_vote_forwarder());
-                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                    context.with_label(&format!("pending_split_{idx}")),
-                    make_vote_router(),
+                let (network, mut oracle) = Network::new(
+                    context.with_label("network"),
+                    Config {
+                        max_size: 1024 * 1024,
+                        disconnect_on_block: false,
+                        tracked_peer_sets: None,
+                    },
                 );
-                let (certificate_sender_primary, certificate_sender_secondary) =
-                    certificate_sender.split_with(make_certificate_forwarder());
-                let (certificate_receiver_primary, certificate_receiver_secondary) =
-                    certificate_receiver.split_with(
-                        context.with_label(&format!("recovered_split_{idx}")),
-                        make_certificate_router(),
-                    );
+                network.start();
 
-                for (twin_label, pending, recovered) in [
-                    (
-                        "primary",
-                        (vote_sender_primary, vote_receiver_primary),
-                        (certificate_sender_primary, certificate_receiver_primary),
-                    ),
-                    (
-                        "secondary",
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                    ),
-                ] {
-                    let label = format!("twin_{idx}_{twin_label}");
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = case_fixture(&mut context, &namespace, n);
+                let participants: Arc<[_]> = participants.into();
+                let mut registrations = register_validators(&mut oracle, &participants).await;
+                link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+                let elector = TwinsElector::new(L::default(), &scenario, n as usize);
+                let relay = Arc::new(mocks::relay::Relay::new());
+                let mut reporters = Vec::new();
+                let mut engine_handlers = Vec::new();
+                let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
+
+                // Create twin engines (f Byzantine twins).
+                for idx in twin_indices.iter().copied() {
+                    let validator = &participants[idx];
+                    let (
+                        (vote_sender, vote_receiver),
+                        (certificate_sender, certificate_receiver),
+                        (_resolver_sender, _resolver_receiver),
+                    ) = registrations
+                        .remove(validator)
+                        .expect("validator should be registered");
+
+                    let make_vote_forwarder = || {
+                        let participants = participants.clone();
+                        let scenario = scenario.clone();
+                        move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
+                            let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                            let (primary, secondary) =
+                                scenario.partitions(msg.view(), participants.as_ref());
+                            match origin {
+                                SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                                SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                            }
+                        }
+                    };
+                    let make_certificate_forwarder = || {
+                        let codec = schemes[idx].certificate_codec_config();
+                        let participants = participants.clone();
+                        let scenario = scenario.clone();
+                        move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
+                            let msg: Certificate<S, D> =
+                                Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                            let (primary, secondary) =
+                                scenario.partitions(msg.view(), participants.as_ref());
+                            match origin {
+                                SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                                SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                            }
+                        }
+                    };
+                    let make_vote_router = || {
+                        let participants = participants.clone();
+                        let scenario = scenario.clone();
+                        move |(sender, message): &(_, IoBuf)| {
+                            let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                            scenario.route(msg.view(), sender, participants.as_ref())
+                        }
+                    };
+                    let make_certificate_router = || {
+                        let codec = schemes[idx].certificate_codec_config();
+                        let participants = participants.clone();
+                        let scenario = scenario.clone();
+                        move |(sender, message): &(_, IoBuf)| {
+                            let msg: Certificate<S, D> =
+                                Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                            scenario.route(msg.view(), sender, participants.as_ref())
+                        }
+                    };
+                    let (vote_sender_primary, vote_sender_secondary) =
+                        vote_sender.split_with(make_vote_forwarder());
+                    let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver
+                        .split_with(
+                            context.with_label(&format!("pending_split_{idx}")),
+                            make_vote_router(),
+                        );
+                    let (certificate_sender_primary, certificate_sender_secondary) =
+                        certificate_sender.split_with(make_certificate_forwarder());
+                    let (certificate_receiver_primary, certificate_receiver_secondary) =
+                        certificate_receiver.split_with(
+                            context.with_label(&format!("recovered_split_{idx}")),
+                            make_certificate_router(),
+                        );
+
+                    for (twin_label, pending, recovered) in [
+                        (
+                            "primary",
+                            (vote_sender_primary, vote_receiver_primary),
+                            (certificate_sender_primary, certificate_receiver_primary),
+                        ),
+                        (
+                            "secondary",
+                            (vote_sender_secondary, vote_receiver_secondary),
+                            (certificate_sender_secondary, certificate_receiver_secondary),
+                        ),
+                    ] {
+                        let label = format!("twin_{idx}_{twin_label}");
+                        let context = context.with_label(&label);
+
+                        let reporter_config = mocks::reporter::Config {
+                            participants: participants.as_ref().try_into().unwrap(),
+                            scheme: schemes[idx].clone(),
+                            elector: elector.clone(),
+                        };
+                        let reporter = mocks::reporter::Reporter::new(
+                            context.with_label("reporter"),
+                            reporter_config,
+                        );
+                        reporters.push(reporter.clone());
+
+                        let application_cfg = mocks::application::Config {
+                            hasher: Sha256::default(),
+                            relay: relay.clone(),
+                            me: validator.clone(),
+                            propose_latency: (10.0, 5.0),
+                            verify_latency: (10.0, 5.0),
+                            certify_latency: (10.0, 5.0),
+                            should_certify: mocks::application::Certifier::Sometimes,
+                        };
+                        let (actor, application) = mocks::application::Application::new(
+                            context.with_label("application"),
+                            application_cfg,
+                        );
+                        actor.start();
+
+                        let blocker = oracle.control(validator.clone());
+                        let cfg = config::Config {
+                            scheme: schemes[idx].clone(),
+                            elector: elector.clone(),
+                            blocker,
+                            automaton: application.clone(),
+                            relay: application.clone(),
+                            reporter: reporter.clone(),
+                            strategy: Sequential,
+                            partition: label,
+                            mailbox_size: 1024,
+                            epoch: Epoch::new(333),
+                            leader_timeout: Duration::from_secs(1),
+                            certification_timeout: Duration::from_millis(1_500),
+                            timeout_retry: Duration::from_secs(10),
+                            fetch_timeout: Duration::from_secs(1),
+                            activity_timeout,
+                            skip_timeout,
+                            fetch_concurrent: 4,
+                            replay_buffer: NZUsize!(1024 * 1024),
+                            write_buffer: NZUsize!(1024 * 1024),
+                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        };
+                        let engine = Engine::new(context.with_label("engine"), cfg);
+                        engine_handlers.push(engine.start(
+                            pending,
+                            recovered,
+                            inert_channel(participants.as_ref()),
+                        ));
+                    }
+                }
+
+                // Create honest engines.
+                let honest_start = reporters.len();
+                for (idx, validator) in participants.iter().enumerate() {
+                    if twin_index_set.contains(&idx) {
+                        continue;
+                    }
+
+                    let label = format!("honest_{idx}");
                     let context = context.with_label(&label);
 
                     let reporter_config = mocks::reporter::Config {
@@ -5886,199 +5954,136 @@ mod tests {
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
+
+                    let (
+                        (pending_sender, pending_receiver),
+                        (recovered_sender, recovered_receiver),
+                        _,
+                    ) = registrations
+                        .remove(validator)
+                        .expect("validator should be registered");
                     engine_handlers.push(engine.start(
-                        pending,
-                        recovered,
+                        (pending_sender, pending_receiver),
+                        (recovered_sender, recovered_receiver),
                         inert_channel(participants.as_ref()),
                     ));
                 }
-            }
 
-            // Create honest engines.
-            let honest_start = reporters.len();
-            for (idx, validator) in participants.iter().enumerate() {
-                if twin_index_set.contains(&idx) {
-                    continue;
+                // Wait for progress (liveness check) across honest replicas only.
+                //
+                // Only count finalizations after the adversarial prefix so we
+                // verify the protocol actually recovers and makes progress under
+                // synchrony. Finalizations during the prefix may be artifacts of
+                // the attack setup and do not demonstrate liveness.
+                //
+                // Twin halves are Byzantine test machinery and are not required to
+                // make progress for the campaign to establish honest-node liveness.
+                let prefix_end = View::new(scenario.rounds().len() as u64);
+                let mut finalizers = Vec::new();
+                for reporter in reporters.iter_mut().skip(honest_start) {
+                    let (_latest, mut monitor) = reporter.subscribe().await;
+                    let required = required_finalizations;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        let mut count = 0usize;
+                        while count < required {
+                            let view = monitor.recv().await.expect("event missing");
+                            if view > prefix_end {
+                                count += 1;
+                            }
+                        }
+                    }));
                 }
+                join_all(finalizers).await;
 
-                let label = format!("honest_{idx}");
-                let context = context.with_label(&label);
-
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.as_ref().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-                reporters.push(reporter.clone());
-
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Sometimes,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
-                    application_cfg,
-                );
-                actor.start();
-
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: label,
-                    mailbox_size: 1024,
-                    epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_millis(1_500),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
-                    skip_timeout,
-                    fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-                let engine = Engine::new(context.with_label("engine"), cfg);
-
-                let ((pending_sender, pending_receiver), (recovered_sender, recovered_receiver), _) =
-                    registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                engine_handlers.push(engine.start(
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
-                    inert_channel(participants.as_ref()),
-                ));
-            }
-
-            // Wait for progress (liveness check) across honest replicas only.
-            //
-            // Only count finalizations after the adversarial prefix so we
-            // verify the protocol actually recovers and makes progress under
-            // synchrony. Finalizations during the prefix may be artifacts of
-            // the attack setup and do not demonstrate liveness.
-            //
-            // Twin halves are Byzantine test machinery and are not required to
-            // make progress for the campaign to establish honest-node liveness.
-            let prefix_end = View::new(scenario.rounds().len() as u64);
-            let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut().skip(honest_start) {
-                let (_latest, mut monitor) = reporter.subscribe().await;
-                let required = required_finalizations;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    let mut count = 0usize;
-                    while count < required {
-                        let view = monitor.recv().await.expect("event missing");
-                        if view > prefix_end {
-                            count += 1;
+                // Verify safety: no conflicting finalizations across honest reporters.
+                let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
+                for reporter in reporters.iter().skip(honest_start) {
+                    let finalizations = reporter.finalizations.lock();
+                    for (view, finalization) in finalizations.iter() {
+                        let digest = finalization.proposal.payload;
+                        if let Some(existing) = finalized_at_view.get(view) {
+                            assert_eq!(
+                                existing, &digest,
+                                "safety violation: conflicting finalizations at view {view}"
+                            );
+                        } else {
+                            finalized_at_view.insert(*view, digest);
                         }
                     }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Verify safety: no conflicting finalizations across honest reporters.
-            let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
-            for reporter in reporters.iter().skip(honest_start) {
-                let finalizations = reporter.finalizations.lock();
-                for (view, finalization) in finalizations.iter() {
-                    let digest = finalization.proposal.payload;
-                    if let Some(existing) = finalized_at_view.get(view) {
-                        assert_eq!(
-                            existing, &digest,
-                            "safety violation: conflicting finalizations at view {view}"
-                        );
-                    } else {
-                        finalized_at_view.insert(*view, digest);
-                    }
                 }
-            }
 
-            // Verify no invalid signatures were observed by honest replicas.
-            for reporter in reporters.iter().skip(honest_start) {
-                let invalid = reporter.invalid.lock();
-                assert_eq!(*invalid, 0, "invalid signatures detected");
-            }
+                // Verify no invalid signatures were observed by honest replicas.
+                for reporter in reporters.iter().skip(honest_start) {
+                    let invalid = reporter.invalid.lock();
+                    assert_eq!(*invalid, 0, "invalid signatures detected");
+                }
 
-            // Ensure no honest signer appears under multiple payloads for the same view.
-            let twin_identities: HashSet<_> = twin_indices
-                .iter()
-                .map(|idx| participants[*idx].clone())
-                .collect();
-            let mut notarized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
-                BTreeMap::new();
-            let mut finalized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
-                BTreeMap::new();
-            for reporter in reporters.iter().skip(honest_start) {
-                let notarizes = reporter.notarizes.lock();
-                for (view, payloads) in notarizes.iter() {
-                    let signers = notarized_by_honest_signer.entry(*view).or_default();
-                    for (digest, payload_signers) in payloads.iter() {
-                        for signer in payload_signers.iter() {
-                            if twin_identities.contains(signer) {
-                                continue;
-                            }
-                            if let Some(existing) = signers.insert(signer.clone(), *digest) {
-                                assert_eq!(
+                // Ensure no honest signer appears under multiple payloads for the same view.
+                let twin_identities: HashSet<_> = twin_indices
+                    .iter()
+                    .map(|idx| participants[*idx].clone())
+                    .collect();
+                let mut notarized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                    BTreeMap::new();
+                let mut finalized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                    BTreeMap::new();
+                for reporter in reporters.iter().skip(honest_start) {
+                    let notarizes = reporter.notarizes.lock();
+                    for (view, payloads) in notarizes.iter() {
+                        let signers = notarized_by_honest_signer.entry(*view).or_default();
+                        for (digest, payload_signers) in payloads.iter() {
+                            for signer in payload_signers.iter() {
+                                if twin_identities.contains(signer) {
+                                    continue;
+                                }
+                                if let Some(existing) = signers.insert(signer.clone(), *digest) {
+                                    assert_eq!(
                                     existing, *digest,
                                     "honest signer produced conflicting notarizes at view {view}"
                                 );
+                                }
                             }
                         }
                     }
-                }
 
-                let finalizes = reporter.finalizes.lock();
-                for (view, payloads) in finalizes.iter() {
-                    let signers = finalized_by_honest_signer.entry(*view).or_default();
-                    for (digest, payload_signers) in payloads.iter() {
-                        for signer in payload_signers.iter() {
-                            if twin_identities.contains(signer) {
-                                continue;
-                            }
-                            if let Some(existing) = signers.insert(signer.clone(), *digest) {
-                                assert_eq!(
+                    let finalizes = reporter.finalizes.lock();
+                    for (view, payloads) in finalizes.iter() {
+                        let signers = finalized_by_honest_signer.entry(*view).or_default();
+                        for (digest, payload_signers) in payloads.iter() {
+                            for signer in payload_signers.iter() {
+                                if twin_identities.contains(signer) {
+                                    continue;
+                                }
+                                if let Some(existing) = signers.insert(signer.clone(), *digest) {
+                                    assert_eq!(
                                     existing, *digest,
                                     "honest signer produced conflicting finalizes at view {view}"
                                 );
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Ensure faults are attributable to twins.
-            for reporter in reporters.iter().skip(honest_start) {
-                let faults = reporter.faults.lock();
-                for (faulter, _) in faults.iter() {
+                // Ensure faults are attributable to twins.
+                for reporter in reporters.iter().skip(honest_start) {
+                    let faults = reporter.faults.lock();
+                    for (faulter, _) in faults.iter() {
+                        assert!(
+                            twin_identities.contains(faulter),
+                            "fault from non-twin participant"
+                        );
+                    }
+                }
+
+                let blocked = oracle.blocked().await.unwrap();
+                for (_, faulter) in blocked {
                     assert!(
-                        twin_identities.contains(faulter),
-                        "fault from non-twin participant"
+                        twin_identities.contains(&faulter),
+                        "blocked peer attributed to non-twin participant"
                     );
                 }
-            }
-
-            let blocked = oracle.blocked().await.unwrap();
-            for (_, faulter) in blocked {
-                assert!(
-                    twin_identities.contains(&faulter),
-                    "blocked peer attributed to non-twin participant"
-                );
-            }
-        });
+            });
         }
     }
 

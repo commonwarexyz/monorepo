@@ -262,7 +262,12 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.rounds > 0, "rounds must be > 0");
     assert!(framework.max_cases > 0, "max_cases must be > 0");
 
-    let scenarios = generate_scenarios(rng, framework.participants, framework.rounds, framework.max_cases);
+    let scenarios = generate_scenarios(
+        rng,
+        framework.participants,
+        framework.rounds,
+        framework.max_cases,
+    );
 
     let mut out = Vec::new();
     for (scenario, residual_cells) in &scenarios {
@@ -705,7 +710,6 @@ fn canonical_scenario_from_rank(
     unreachable!("canonical scenario rank out of bounds")
 }
 
-
 /// Samples unique indices without replacement from `[0, total)`.
 fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec<u128> {
     assert!(
@@ -749,17 +753,13 @@ fn generate_scenarios(
     if let Some(total) = canonical_scenario_count(&initial_cells, rounds, &mut memo) {
         if total <= max_cases as u128 {
             return (0..total)
-                .map(|idx| {
-                    canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo)
-                })
+                .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
                 .collect();
         }
 
         return sample_unique_indices(rng, total, max_cases)
             .into_iter()
-            .map(|idx| {
-                canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo)
-            })
+            .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
             .collect();
     }
 
@@ -961,20 +961,12 @@ mod tests {
         // take=0 from cell0, take=2 from cell1 -> [3, 4]
         // take=1 from cell0, take=1 from cell1 -> [0, 3]
         // take=2 from cell0, take=0 from cell1 -> [0, 1]
-        assert_eq!(
-            sets,
-            vec![vec![3, 4], vec![0, 3], vec![0, 1]]
-        );
+        assert_eq!(sets, vec![vec![3, 4], vec![0, 3], vec![0, 1]]);
     }
 
     #[test]
     fn compromised_count_matches_enumeration() {
-        for cells in &[
-            vec![5],
-            vec![3, 2],
-            vec![2, 2, 1],
-            vec![1, 1, 1, 1, 1],
-        ] {
+        for cells in &[vec![5], vec![3, 2], vec![2, 2, 1], vec![1, 1, 1, 1, 1]] {
             for faults in 1..=cells.iter().sum::<usize>().min(3) {
                 assert_eq!(
                     compromised_count_for_cells(cells, faults),
