@@ -603,7 +603,7 @@ impl std::fmt::Debug for BufMut<UntrackedOwner> {
 
 impl BufMut<UntrackedOwner> {
     pub(crate) const fn new(buffer: AlignedBuffer) -> Self {
-        BufMut {
+        Self {
             inner: ManuallyDrop::new(BufInner::new(buffer, UntrackedOwner)),
             cursor: 0,
             len: 0,
@@ -672,7 +672,7 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
 
 impl BufMut<TrackedOwner> {
     pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>) -> Self {
-        BufMut {
+        Self {
             inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class })),
             cursor: 0,
             len: 0,
@@ -789,7 +789,6 @@ mod tests {
             max_per_class: NZUsize!(max_per_class),
             prefill: false,
             alignment: NZUsize!(page_size()),
-            small_alloc_cutoff: None,
         }
     }
 
@@ -1110,7 +1109,7 @@ mod tests {
 
         // Allocation edges
         let buf = pool.try_alloc(0).expect("zero capacity should succeed");
-        assert_eq!(buf.capacity(), page);
+        assert_eq!(buf.capacity(), 1);
         assert_eq!(buf.len(), 0);
 
         let buf = pool.try_alloc(page).expect("exact max size should succeed");

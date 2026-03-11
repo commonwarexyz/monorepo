@@ -133,8 +133,7 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_min_size(NZUsize!(size))
         .with_max_size(NZUsize!(size))
         .with_max_per_class(NZUsize!(threads * 4))
-        .with_prefill(true)
-        .with_small_alloc_cutoff(Some(NZUsize!(512)));
+        .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()
         .with_worker_threads(1)
