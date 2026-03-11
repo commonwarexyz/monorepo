@@ -371,35 +371,6 @@ impl<D: Digest> Mmr<D> {
         self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
     }
 
-    /// Change the digest of any retained leaf. This is useful if you want to use the MMR
-    /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if the leaf has been pruned.
-    /// Returns [Error::LeafOutOfBounds] if `loc` is not an existing leaf.
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Warning
-    ///
-    /// This method will change the root and invalidate any previous inclusion proofs.
-    /// Use of this method will prevent using this structure as a base mmr for grafting.
-    pub fn update_leaf(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        loc: Location,
-        element: &[u8],
-    ) -> Result<(), Error> {
-        let changeset = {
-            let mut batch = self.new_batch();
-            batch.update_leaf(hasher, loc, element)?;
-            batch.merkleize(hasher).finalize()
-        };
-        self.apply(changeset)
-            .expect("db unmodified since batch creation");
-        Ok(())
-    }
-
     /// Get the root digest of the MMR.
     pub const fn root(&self) -> &D {
         &self.root
@@ -879,14 +850,18 @@ mod tests {
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
                 let leaf_loc = Location::new(leaf as u64);
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let mut batch = mmr.new_batch();
+                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let mut batch = mmr.new_batch();
+                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
@@ -896,7 +871,9 @@ mod tests {
             for leaf in 100u64..=190 {
                 mmr.prune(Location::new(leaf)).unwrap();
                 let leaf_loc = Location::new(leaf);
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let mut batch = mmr.new_batch();
+                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
         });
     }
@@ -909,10 +886,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, 200);
+            let mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
-            let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
-            assert!(matches!(result, Err(Error::LeafOutOfBounds(_))));
+            let mut batch = mmr.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, invalid_loc, &element),
+                Err(Error::LeafOutOfBounds(_))
+            ));
         });
     }
 
@@ -926,7 +906,8 @@ mod tests {
             let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
-            let result = mmr.update_leaf(&mut hasher, Location::new(0), &element);
+            let mut batch = mmr.new_batch();
+            let result = batch.update_leaf(&mut hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
