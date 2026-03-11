@@ -768,8 +768,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mock signature ID overflow")]
-    fn signature_id_overflow_panics() {
+    #[should_panic(expected = "signature overflow")]
+    fn signature_overflow_panics() {
         let mut signatures = Signatures {
             next: u64::MAX,
             ..Default::default()
@@ -779,8 +779,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mock certificate ID overflow")]
-    fn certificate_id_overflow_panics() {
+    #[should_panic(expected = "certificate overflow")]
+    fn certificate_overflow_panics() {
         let mut certificates = Certificates {
             next: u64::MAX,
             ..Default::default()
