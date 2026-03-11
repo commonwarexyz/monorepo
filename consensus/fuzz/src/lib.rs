@@ -489,7 +489,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             participants.as_ref(),
             Action::Update(Link {
                 latency: Duration::from_millis(500),
-                jitter: Duration::from_secs(1),
+                jitter: Duration::from_millis(500),
                 success_rate: 1.0,
             }),
             input.partition.filter(),

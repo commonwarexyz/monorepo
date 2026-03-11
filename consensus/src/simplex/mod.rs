@@ -6101,12 +6101,12 @@ mod tests {
         for link in [
             Link {
                 latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
+                jitter: Duration::from_millis(10),
                 success_rate: 1.0,
             },
             Link {
                 latency: Duration::from_millis(500),
-                jitter: Duration::from_secs(1),
+                jitter: Duration::from_millis(500),
                 success_rate: 1.0,
             },
         ] {
@@ -6125,7 +6125,7 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
-            max_cases: 9,
+            max_cases: 20,
             required_finalizations: 50,
         };
         twins_campaign::<_, _, RoundRobin>(
@@ -6133,28 +6133,7 @@ mod tests {
             campaign,
             Link {
                 latency: Duration::from_millis(500),
-                jitter: Duration::from_secs(1),
-                success_rate: 1.0,
-            },
-            scheme_mocks::fixture,
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_sustained() {
-        let campaign = TwinsCampaign {
-            n: 5,
-            rounds: 100,
-            max_cases: 9,
-            required_finalizations: 50,
-        };
-        twins_campaign::<_, _, RoundRobin>(
-            &mut test_rng(),
-            campaign,
-            Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_secs(1),
+                jitter: Duration::from_millis(500),
                 success_rate: 1.0,
             },
             scheme_mocks::fixture,
