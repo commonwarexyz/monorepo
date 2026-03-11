@@ -5644,6 +5644,34 @@ mod tests {
         );
     }
 
+    /// Configuration for a Twins testing campaign.
+    ///
+    /// A campaign generates adversarial partition scenarios, splits Byzantine
+    /// participants into twin halves, and verifies that honest nodes still
+    /// finalize blocks after the adversarial prefix ends.
+    ///
+    /// # Fields
+    ///
+    /// - `n`: Total participants. The number of faults is derived as
+    ///   `N3f1::max_faults(n)`. Larger `n` increases the per-scenario
+    ///   compromised-set space but also makes each case slower to execute.
+    ///
+    /// - `rounds`: Number of adversarial rounds that form the attack prefix.
+    ///   Each round independently partitions participants into up to 3 groups
+    ///   (outside, primary-only, secondary-only) and designates a leader.
+    ///   After these rounds, the network becomes fully synchronous. More
+    ///   rounds exponentially increase the canonical scenario space.
+    ///
+    /// - `max_cases`: Upper bound on the total emitted cases. Each case is a
+    ///   (scenario, compromised-assignment) pair. The generator produces
+    ///   canonical scenarios and, for each, the symmetry-unique compromised
+    ///   assignments. If the total exceeds this budget, scenarios are sampled.
+    ///
+    /// - `required_finalizations`: Number of finalizations each honest node
+    ///   must produce *after* the adversarial prefix before the case is
+    ///   considered successful. This is the liveness assertion -- it ensures
+    ///   the protocol actually commits blocks under synchrony, not just
+    ///   reaches a high view via nullifications.
     #[derive(Clone, Copy, Debug)]
     struct TwinsCampaign {
         n: u32,
