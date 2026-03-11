@@ -176,20 +176,20 @@ where
 
     /// Applies [`ForwardingPolicy`] to determine which peers should receive a
     /// targeted block forward. `leader` is the elected leader for the next
-    /// view and `missing` contains all active participants that did not vote.
+    /// view when that information is required, and `missing` contains all
+    /// active participants that did not vote.
     ///
     /// Returns `None` when forwarding is disabled or no peers need the block.
     fn forwarding_peers(
         &self,
-        leader: Participant,
+        leader: Option<Participant>,
         missing: &[Participant],
     ) -> Option<Vec<S::PublicKey>> {
         match self.forwarding {
             ForwardingPolicy::Disabled => None,
-            ForwardingPolicy::NextLeader => missing
-                .contains(&leader)
-                .then(|| self.participants.key(leader).cloned())
-                .flatten()
+            ForwardingPolicy::NextLeader => leader
+                .filter(|leader| missing.contains(leader))
+                .and_then(|leader| self.participants.key(leader).cloned())
                 .map(|pk| vec![pk]),
             ForwardingPolicy::All => {
                 let peers: Vec<_> = missing
@@ -199,6 +199,19 @@ where
                 (!peers.is_empty()).then_some(peers)
             }
         }
+    }
+
+    /// Broadcasts a targeted block forward to the selected peers.
+    async fn broadcast_forward(&mut self, proposal: Proposal<D>, peers: Vec<S::PublicKey>) {
+        self.relay
+            .broadcast(
+                proposal.payload,
+                Dissemination::Forward {
+                    round: proposal.round,
+                    peers,
+                },
+            )
+            .await;
     }
 
     /// Returns missing voters that have been active recently enough to justify
@@ -221,6 +234,11 @@ where
     }
 
     /// Emits or defers block forwarding for a notarized proposal.
+    ///
+    /// [`ForwardingPolicy::All`] broadcasts immediately because the recipient
+    /// set is independent of any future leader election. [`ForwardingPolicy::NextLeader`]
+    /// stays live only through the next-view handoff; once the local voter has
+    /// moved past `view + 1`, the forward is intentionally dropped as stale.
     async fn forward_notarization(
         &mut self,
         current: &Current,
@@ -234,22 +252,11 @@ where
         }
 
         let next_view = view.next();
-        if next_view == current.view {
-            let Some(leader) = current.leader else {
+        if matches!(self.forwarding, ForwardingPolicy::All) || next_view == current.view {
+            let Some(peers) = self.forwarding_peers(current.leader, &missing) else {
                 return;
             };
-            let Some(peers) = self.forwarding_peers(leader, &missing) else {
-                return;
-            };
-            self.relay
-                .broadcast(
-                    proposal.payload,
-                    Dissemination::Forward {
-                        round: proposal.round,
-                        peers,
-                    },
-                )
-                .await;
+            self.broadcast_forward(proposal, peers).await;
         } else if next_view > current.view {
             pending_forwards.insert(next_view, (proposal, missing));
         }
@@ -368,16 +375,8 @@ where
                     // Emit any pending forwards for this view now that we
                     // know the leader from the voter.
                     if let Some((proposal, missing)) = pending_forwards.remove(&new_current) {
-                        if let Some(peers) = self.forwarding_peers(leader, &missing) {
-                            self.relay
-                                .broadcast(
-                                    proposal.payload,
-                                    Dissemination::Forward {
-                                        round: proposal.round,
-                                        peers,
-                                    },
-                                )
-                                .await;
+                        if let Some(peers) = self.forwarding_peers(Some(leader), &missing) {
+                            self.broadcast_forward(proposal, peers).await;
                         }
                     }
 

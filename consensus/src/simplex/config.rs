@@ -14,14 +14,25 @@ use std::{num::NonZeroUsize, time::Duration};
 
 /// Controls whether and how the engine proactively forwards blocks to peers
 /// that did not vote in a notarization certificate.
+///
+/// Forwarding is a best-effort liveness aid for peers that are expected to
+/// participate in the next few views. The batcher keeps
+/// [`ForwardingPolicy::NextLeader`] within a next-view assistance window, but
+/// [`ForwardingPolicy::All`] broadcasts immediately to the current set of
+/// active missing peers because it does not depend on learning the next leader.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ForwardingPolicy {
     /// Do nothing when notified of missing voters.
     #[default]
     Disabled,
-    /// Forward the block to the elected leader for the next view, if they did not vote.
+    /// Forward the block to the elected leader for the next view, if they did
+    /// not vote.
     NextLeader,
     /// Forward the block to all active participants that did not vote.
+    ///
+    /// This widens the recipient set and emits immediately once the notarization
+    /// is accepted or constructed, even if the local voter has already advanced
+    /// beyond the next view.
     All,
 }
 
@@ -139,6 +150,9 @@ where
 
     /// Policy for proactively forwarding blocks to peers that did not vote
     /// in a notarization certificate.
+    ///
+    /// See [`ForwardingPolicy`] for the timeliness guarantees and the point at
+    /// which stale forwards are intentionally dropped.
     pub forwarding: ForwardingPolicy,
 }
 
