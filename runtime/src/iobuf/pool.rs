@@ -427,17 +427,29 @@ impl SizeClass {
     }
 }
 
-struct LocalEntry {
+/// Free tracked buffer cached in the current thread's TLS registry.
+///
+/// This is allocator cache state, not a checked-out buffer. The cached
+/// `Arc<SizeClass>` is moved back into a checked-out pooled buffer on a local
+/// hit, or used to flush the buffer into the shared global freelist when the
+/// thread cache spills or is dropped on thread exit.
+struct TlsSizeClassCacheEntry {
     buffer: AlignedBuffer,
     class: Arc<SizeClass>,
 }
 
-struct LocalBin {
-    entries: Vec<LocalEntry>,
+/// Per-class thread-local cache for tracked buffers.
+///
+/// The hot steady-state path allocates from and returns to this cache. When
+/// the cache is full it spills some entries back to the class-global freelist,
+/// and when the thread exits its remaining entries are flushed to that same
+/// global freelist.
+struct TlsSizeClassCache {
+    entries: Vec<TlsSizeClassCacheEntry>,
     local_capacity: usize,
 }
 
-impl LocalBin {
+impl TlsSizeClassCache {
     fn new(local_capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(local_capacity),
@@ -449,11 +461,11 @@ impl LocalBin {
         self.entries.len()
     }
 
-    fn pop(&mut self) -> Option<LocalEntry> {
+    fn pop(&mut self) -> Option<TlsSizeClassCacheEntry> {
         self.entries.pop()
     }
 
-    fn push(&mut self, entry: LocalEntry) {
+    fn push(&mut self, entry: TlsSizeClassCacheEntry) {
         if self.entries.len() < self.local_capacity {
             self.entries.push(entry);
             return;
@@ -471,7 +483,7 @@ impl LocalBin {
     }
 }
 
-impl Drop for LocalBin {
+impl Drop for TlsSizeClassCache {
     fn drop(&mut self) {
         for entry in self.entries.drain(..) {
             entry.class.push_global(entry.buffer);
@@ -479,63 +491,100 @@ impl Drop for LocalBin {
     }
 }
 
+// Each thread owns a sparse registry of per-size-class caches, indexed by the
+// global `SizeClass::class_id`.
+//
+// We intentionally use `Vec<Option<...>>` here:
+// - `class_id` values are dense enough for vector indexing to be cheap
+// - each thread typically touches only a subset of all size classes
+// - `None` represents "this thread has never initialized a cache for this id"
+//
+// This keeps the hot TLS-hit path to "index and branch" without a hash map or
+// any synchronization. The cost is that vectors can accumulate holes over time
+// because ids are not recycled.
 thread_local! {
-    static LOCAL_CLASSES: UnsafeCell<Vec<Option<LocalBin>>> =
+    static TLS_CLASS_CACHES: UnsafeCell<Vec<Option<TlsSizeClassCache>>> =
         const { UnsafeCell::new(Vec::new()) };
 }
 
-static NEXT_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
+// Global allocator for `SizeClass::class_id`.
+//
+// Ids are monotonic and never reused. This is deliberate: a reused id would
+// require generation tracking or equivalent validation on every TLS cache
+// access to distinguish a live size class from stale per-thread cache state.
+// Keeping ids monotonic makes the TLS fast path cheaper and simpler at the
+// cost of leaving holes in `TLS_CLASS_CACHES` over process lifetime.
+static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
-fn local_pop(class: &Arc<SizeClass>) -> Option<LocalEntry> {
-    LOCAL_CLASSES.with(|bins| {
-        // SAFETY: this TLS value is only ever accessed by the current thread.
-        let bins = unsafe { &mut *bins.get() };
-        let bin = bins.get_mut(class.class_id)?.as_mut()?;
-        bin.pop()
-    })
-}
+/// Facade over the thread-local cache keyed by `SizeClass::class_id`.
+///
+/// Each thread owns a sparse `Vec<Option<TlsSizeClassCache>>`, with one
+/// per-size-class cache allocated lazily on first use. Thread exit naturally
+/// flushes cached buffers back to the shared global freelist because
+/// `TlsSizeClassCache` drains itself in `Drop`.
+///
+/// This type exists to keep the unsafe TLS access localized. All steady-state
+/// cache operations (`pop`, `push`, and `refill`) go through this facade rather
+/// than free functions over the `thread_local!` static.
+pub(super) struct TlsCache;
 
-pub(super) fn local_push(class: Arc<SizeClass>, buffer: AlignedBuffer) {
-    LOCAL_CLASSES.with(|bins| {
-        // SAFETY: this TLS value is only ever accessed by the current thread.
-        let bins = unsafe { &mut *bins.get() };
-        if class.class_id >= bins.len() {
-            bins.resize_with(class.class_id + 1, || None);
-        }
-        let bin = bins[class.class_id].get_or_insert_with(|| LocalBin::new(class.local_capacity));
-        bin.push(LocalEntry { buffer, class });
-    });
-}
+impl TlsCache {
+    #[inline]
+    fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
+        Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| cache.pop())
+    }
 
-fn local_refill(class: &Arc<SizeClass>, target: usize) {
-    LOCAL_CLASSES.with(|bins| {
-        // SAFETY: this TLS value is only ever accessed by the current thread.
-        let bins = unsafe { &mut *bins.get() };
-        if class.class_id >= bins.len() {
-            bins.resize_with(class.class_id + 1, || None);
-        }
-        let bin = bins[class.class_id].get_or_insert_with(|| LocalBin::new(class.local_capacity));
-        while bin.len() + 1 < target {
-            let Some(buffer) = class.global.pop() else {
-                break;
-            };
-            bin.push(LocalEntry {
-                buffer,
-                class: class.clone(),
-            });
-        }
-    });
-}
+    #[inline]
+    pub(super) fn push(class: Arc<SizeClass>, buffer: AlignedBuffer) {
+        let class_id = class.class_id;
+        let local_capacity = class.local_capacity;
+        Self::with_class_cache_mut(class_id, local_capacity, |cache| {
+            cache.push(TlsSizeClassCacheEntry { buffer, class });
+        });
+    }
 
-#[cfg(test)]
-fn get_current_local_len(class: &SizeClass) -> usize {
-    LOCAL_CLASSES.with(|bins| {
-        // SAFETY: this TLS value is only ever accessed by the current thread.
-        let bins = unsafe { &*bins.get() };
-        bins.get(class.class_id)
-            .and_then(Option::as_ref)
-            .map_or(0, LocalBin::len)
-    })
+    #[inline]
+    fn refill(class: &Arc<SizeClass>, target: usize) {
+        Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| {
+            while cache.len() + 1 < target {
+                let Some(buffer) = class.global.pop() else {
+                    break;
+                };
+                cache.push(TlsSizeClassCacheEntry {
+                    buffer,
+                    class: class.clone(),
+                });
+            }
+        });
+    }
+
+    #[cfg(test)]
+    fn current_len(class: &SizeClass) -> usize {
+        TLS_CLASS_CACHES.with(|bins| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let bins = unsafe { &*bins.get() };
+            bins.get(class.class_id)
+                .and_then(Option::as_ref)
+                .map_or(0, TlsSizeClassCache::len)
+        })
+    }
+
+    fn with_class_cache_mut<R>(
+        class_id: usize,
+        local_capacity: usize,
+        f: impl FnOnce(&mut TlsSizeClassCache) -> R,
+    ) -> R {
+        TLS_CLASS_CACHES.with(|bins| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let bins = unsafe { &mut *bins.get() };
+            if class_id >= bins.len() {
+                bins.resize_with(class_id + 1, || None);
+            }
+            let cache =
+                bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(local_capacity));
+            f(cache)
+        })
+    }
 }
 
 /// Internal allocation result for pooled allocations.
@@ -569,7 +618,7 @@ impl BufferPoolInner {
             size_class: class.size as u64,
         };
 
-        if let Some(entry) = local_pop(class) {
+        if let Some(entry) = TlsCache::pop(class) {
             return Some(Allocation {
                 buffer: entry.buffer,
                 is_new: false,
@@ -579,7 +628,7 @@ impl BufferPoolInner {
 
         let target = (class.local_capacity / 2).max(1);
         if let Some(buffer) = class.global.pop() {
-            local_refill(class, target);
+            TlsCache::refill(class, target);
             return Some(Allocation {
                 buffer,
                 is_new: false,
@@ -655,7 +704,7 @@ impl BufferPool {
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
-            let class_id = NEXT_CLASS_ID.fetch_add(1, Ordering::Relaxed);
+            let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
             let class = Arc::new(SizeClass::new(
                 class_id,
                 size,
@@ -869,7 +918,7 @@ mod tests {
 
     fn test_size_class(size: usize, alignment: usize) -> Arc<SizeClass> {
         Arc::new(SizeClass::new(
-            NEXT_CLASS_ID.fetch_add(1, Ordering::Relaxed),
+            NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             size,
             alignment,
             8,
@@ -913,7 +962,7 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        get_current_local_len(class)
+        TlsCache::current_len(class)
     }
 
     #[test]
