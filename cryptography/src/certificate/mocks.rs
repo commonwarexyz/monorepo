@@ -145,17 +145,9 @@ where
     P: PublicKey,
     N: super::Namespace,
 {
-    fn invalid_none<T>(reason: &str) -> Option<T> {
+    fn invalid<T: Default>(reason: &str) -> T {
         if ALLOW_INVALID {
-            None
-        } else {
-            panic!("invalid mock certificate request: {reason}");
-        }
-    }
-
-    fn invalid_bool(reason: &str) -> bool {
-        if ALLOW_INVALID {
-            false
+            T::default()
         } else {
             panic!("invalid mock certificate request: {reason}");
         }
@@ -241,11 +233,11 @@ where
         D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
-            return Self::invalid_bool("attestation signer missing from participant set");
+            return Self::invalid("attestation signer missing from participant set");
         }
 
         let Some(signature) = attestation.signature.get() else {
-            return Self::invalid_bool("attestation signature missing");
+            return Self::invalid("attestation signature missing");
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let signature = u64::from(signature);
@@ -255,7 +247,7 @@ where
             .get(&attestation.signer)
             .and_then(|entries| entries.by.get(&signature))
             .is_some_and(|stored| stored == &expected_subject)
-            || Self::invalid_bool("attestation not found or subject mismatched")
+            || Self::invalid("attestation not found or subject mismatched")
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
@@ -300,33 +292,33 @@ where
 
         for attestation in attestations {
             self.participants.key(attestation.signer).or_else(|| {
-                Self::invalid_none("attestation signer missing from participant set")
+                Self::invalid("attestation signer missing from participant set")
             })?;
 
             let signature = attestation
                 .signature
                 .get()
-                .or_else(|| Self::invalid_none("attestation signature missing"))?;
+                .or_else(|| Self::invalid("attestation signature missing"))?;
             let signature = u64::from(signature);
             let entry = inner
                 .signatures
                 .get(&attestation.signer)
-                .or_else(|| Self::invalid_none("attestation signer not found"))?
+                .or_else(|| Self::invalid("attestation signer not found"))?
                 .by
                 .get(&signature)
-                .or_else(|| Self::invalid_none("attestation signature not found"))?
+                .or_else(|| Self::invalid("attestation signature not found"))?
                 .clone();
 
             if let Some(existing) = &signed_subject {
                 if existing != &entry {
-                    return Self::invalid_none("attestations signed different subjects");
+                    return Self::invalid("attestations signed different subjects");
                 }
             } else {
                 signed_subject = Some(entry);
             }
 
             if !unique_signers.insert(attestation.signer) {
-                return Self::invalid_none("duplicate signer");
+                return Self::invalid("duplicate signer");
             }
             signers.push(attestation.signer);
         }
@@ -376,7 +368,7 @@ where
             .by
             .get(&certificate)
             .is_some_and(|subject| subject == &expected_subject)
-            || Self::invalid_bool("certificate not found or subject mismatched")
+            || Self::invalid("certificate not found or subject mismatched")
     }
 
     /// Verifies a batch of certificates one-by-one.
