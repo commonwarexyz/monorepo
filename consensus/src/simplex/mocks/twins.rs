@@ -121,7 +121,7 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
         (true, true) => SplitTarget::Both,
         (true, false) => SplitTarget::Primary,
         (false, true) => SplitTarget::Secondary,
-        (false, false) => SplitTarget::None,
+        (false, false) => unreachable!("assert above guarantees sender is in a partition"),
     }
 }
 
@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn route_with_groups_covers_all_split_targets() {
+    fn route_with_groups_covers_reachable_split_targets() {
         let primary = vec![1u32, 2];
         let secondary = vec![2u32, 3];
 
