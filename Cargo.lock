@@ -1607,7 +1607,6 @@ dependencies = [
  "sha2 0.10.9",
  "sysinfo",
  "thiserror 2.0.17",
- "thread_local",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
