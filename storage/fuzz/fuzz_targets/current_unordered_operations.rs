@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
@@ -102,7 +102,6 @@ fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = Sha256::new();
         let cfg = Config {
             mmr_journal_partition: "fuzz-current-mmr-journal".into(),
             mmr_metadata_partition: "fuzz-current-mmr-metadata".into(),
@@ -219,13 +218,12 @@ fn fuzz(data: FuzzInput) {
                     let oldest_loc = db.inactivity_floor_loc();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = db
-                            .range_proof(&hasher, start_loc, *max_ops)
+                            .range_proof(start_loc, *max_ops)
                             .await
                             .expect("Range proof should not fail");
 
                         assert!(
                             Db::verify_range_proof(
-                                &hasher,
                                 &proof,
                                 start_loc,
                                 &ops,
@@ -250,7 +248,7 @@ fn fuzz(data: FuzzInput) {
                     let root = db.root();
 
                     if let Ok((range_proof, ops, chunks)) = db
-                        .range_proof(&hasher, start_loc, *max_ops)
+                        .range_proof(start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
@@ -258,7 +256,6 @@ fn fuzz(data: FuzzInput) {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
                             assert!(!Db::verify_range_proof(
-                                &hasher,
                                 &bad_proof,
                                 start_loc,
                                 &ops,
@@ -270,7 +267,6 @@ fn fuzz(data: FuzzInput) {
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
                             assert!(!Db::verify_range_proof(
-                                &hasher,
                                 &range_proof,
                                 start_loc,
                                 &ops,
@@ -288,11 +284,10 @@ fn fuzz(data: FuzzInput) {
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(&hasher, k.clone()).await {
+                    match db.key_value_proof(k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Db::verify_key_value_proof(
-                                &hasher,
                                 k,
                                 value,
                                 &proof,

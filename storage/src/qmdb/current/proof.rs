@@ -34,7 +34,6 @@ pub struct RangeProof<D: Digest> {
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>, const N: usize>(
-        _hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         range: Range<Location>,
@@ -75,7 +74,6 @@ impl<D: Digest> RangeProof<D> {
         S: Storage<D>,
         const N: usize,
     >(
-        hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         log: &C,
@@ -100,7 +98,7 @@ impl<D: Digest> RangeProof<D> {
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted storage.
-        let proof = Self::new(hasher, status, storage, start_loc..end_loc, ops_root).await?;
+        let proof = Self::new::<H, _, N>(status, storage, start_loc..end_loc, ops_root).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -127,7 +125,6 @@ impl<D: Digest> RangeProof<D> {
     /// the db with the provided root, and having the activity status described by `chunks`.
     pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
         &self,
-        _hasher: &H,
         start_loc: Location,
         ops: &[O],
         chunks: &[[u8; N]],
@@ -242,7 +239,6 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
-        hasher: &H,
         status: &BitMap<N>,
         storage: &S,
         loc: Location,
@@ -252,7 +248,8 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
-        let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1, ops_root).await?;
+        let range_proof =
+            RangeProof::new::<H, _, N>(status, storage, loc..loc + 1, ops_root).await?;
         let chunk = *status.get_chunk_containing(*loc);
         Ok(Self {
             loc,
@@ -263,12 +260,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
 
     /// Verify that the proof proves that `operation` is active in the database with the given
     /// `root`.
-    pub fn verify<H: CHasher<Digest = D>, O: Codec>(
-        &self,
-        hasher: &H,
-        operation: O,
-        root: &D,
-    ) -> bool {
+    pub fn verify<H: CHasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
         if !BitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
@@ -280,6 +272,6 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
         }
 
         self.range_proof
-            .verify(hasher, self.loc, &[operation], &[self.chunk], root)
+            .verify::<H, _, N>(self.loc, &[operation], &[self.chunk], root)
     }
 }

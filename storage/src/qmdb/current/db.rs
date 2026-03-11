@@ -113,14 +113,13 @@ where
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        proof.verify(hasher, start_loc, ops, chunks, root)
+        proof.verify::<H, _, N>(start_loc, ops, chunks, root)
     }
 }
 
@@ -191,12 +190,11 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &H,
         loc: Location,
     ) -> Result<OperationProof<H::Digest, N>, Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        OperationProof::new(hasher, &self.status, &storage, loc, ops_root).await
+        OperationProof::new::<H, _>(&self.status, &storage, loc, ops_root).await
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -211,14 +209,12 @@ where
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(
         &self,
-        hasher: &H,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        RangeProof::new_with_ops(
-            hasher,
+        RangeProof::new_with_ops::<H, _, _, N>(
             &self.status,
             &storage,
             &self.any.log,
