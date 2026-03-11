@@ -269,20 +269,17 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
         framework.max_cases,
     );
 
-    let mut out = Vec::new();
-    for (scenario, residual_cells) in &scenarios {
-        let compromised_sets = compromised_sets_for_cells(residual_cells, framework.faults);
-        for compromised in compromised_sets {
-            out.push(Case {
-                compromised,
-                scenario: scenario.clone(),
-            });
-            if out.len() >= framework.max_cases {
-                return out;
-            }
-        }
-    }
-    out
+    scenarios
+        .iter()
+        .flat_map(|(scenario, residual_cells)| {
+            compromised_sets_for_cells(residual_cells, framework.faults)
+                .into_iter()
+                .map(move |compromised| Case {
+                    compromised,
+                    scenario: scenario.clone(),
+                })
+        })
+        .collect()
 }
 
 /// Materializes the participants selected by a bitmask.
@@ -998,16 +995,9 @@ mod tests {
     }
 
     #[test]
-    fn max_cases_caps_output() {
-        let framework = Framework {
-            participants: 5,
-            faults: 1,
-            rounds: 3,
-
-            max_cases: 10,
-        };
-        let result = cases(&mut test_rng(), framework);
-        assert!(result.len() <= 10);
+    fn max_cases_caps_scenarios() {
+        let scenarios = generate_scenarios(&mut test_rng(), 5, 3, 10);
+        assert!(scenarios.len() <= 10);
     }
 
     #[test]
