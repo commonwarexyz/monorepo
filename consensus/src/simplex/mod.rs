@@ -5648,10 +5648,10 @@ mod tests {
     struct TwinsCampaign {
         n: u32,
         rounds: usize,
-        max_partitions: usize,
-        max_scenarios: usize,
-        max_compromised_sets: usize,
-        required_containers: View,
+        max_partition_groups: usize,
+        max_distinct_scenarios: usize,
+        max_compromised_assignments: usize,
+        required_views: View,
         relabel: bool,
     }
 
@@ -5924,7 +5924,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(honest_start) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < campaign.required_containers {
+                    while latest < campaign.required_views {
                         latest = monitor.recv().await.expect("event missing");
                     }
                 }));
@@ -5954,11 +5954,54 @@ mod tests {
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
-            // Ensure faults are attributable to twins.
+            // Ensure no honest signer appears under multiple payloads for the same view.
             let twin_identities: HashSet<_> = twin_indices
                 .iter()
                 .map(|idx| participants[*idx].clone())
                 .collect();
+            let mut notarized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                BTreeMap::new();
+            let mut finalized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                BTreeMap::new();
+            for reporter in reporters.iter().skip(honest_start) {
+                let notarizes = reporter.notarizes.lock();
+                for (view, payloads) in notarizes.iter() {
+                    let signers = notarized_by_honest_signer.entry(*view).or_default();
+                    for (digest, payload_signers) in payloads.iter() {
+                        for signer in payload_signers.iter() {
+                            if twin_identities.contains(signer) {
+                                continue;
+                            }
+                            if let Some(existing) = signers.insert(signer.clone(), *digest) {
+                                assert_eq!(
+                                    existing, *digest,
+                                    "honest signer produced conflicting notarizes at view {view}"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let finalizes = reporter.finalizes.lock();
+                for (view, payloads) in finalizes.iter() {
+                    let signers = finalized_by_honest_signer.entry(*view).or_default();
+                    for (digest, payload_signers) in payloads.iter() {
+                        for signer in payload_signers.iter() {
+                            if twin_identities.contains(signer) {
+                                continue;
+                            }
+                            if let Some(existing) = signers.insert(signer.clone(), *digest) {
+                                assert_eq!(
+                                    existing, *digest,
+                                    "honest signer produced conflicting finalizes at view {view}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ensure faults are attributable to twins.
             for reporter in reporters.iter().skip(honest_start) {
                 let faults = reporter.faults.lock();
                 for (faulter, _) in faults.iter() {
@@ -5992,9 +6035,9 @@ mod tests {
                 participants: campaign.n as usize,
                 faults: N3f1::max_faults(campaign.n) as usize,
                 rounds: campaign.rounds,
-                max_partitions: campaign.max_partitions,
-                max_scenarios: campaign.max_scenarios,
-                max_compromised_sets: campaign.max_compromised_sets,
+                max_partition_groups: campaign.max_partition_groups,
+                max_distinct_scenarios: campaign.max_distinct_scenarios,
+                max_compromised_assignments: campaign.max_compromised_assignments,
                 relabel: campaign.relabel,
             },
         );
@@ -6018,10 +6061,10 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 4,
-            max_compromised_sets: 5, // f=1 for n=5: cover each compromised identity.
-            required_containers: View::new(100),
+            max_partition_groups: 3,
+            max_distinct_scenarios: 4,
+            max_compromised_assignments: 5, // f=1 for n=5: cover each compromised identity.
+            required_views: View::new(100),
             relabel: true,
         };
         for link in [
@@ -6096,10 +6139,10 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 10,
             rounds: 5,
-            max_partitions: 3,
-            max_scenarios: 3,
-            max_compromised_sets: 3,
-            required_containers: View::new(100),
+            max_partition_groups: 3,
+            max_distinct_scenarios: 3,
+            max_compromised_assignments: 3,
+            required_views: View::new(100),
             relabel: true,
         };
         twins_campaign::<_, _, RoundRobin>(
@@ -6120,10 +6163,10 @@ mod tests {
         let campaign = TwinsCampaign {
             n: 5,
             rounds: 100,
-            max_partitions: 3,
-            max_scenarios: 3,
-            max_compromised_sets: 3,
-            required_containers: View::new(100),
+            max_partition_groups: 3,
+            max_distinct_scenarios: 3,
+            max_compromised_assignments: 3,
+            required_views: View::new(100),
             relabel: true,
         };
         twins_campaign::<_, _, RoundRobin>(

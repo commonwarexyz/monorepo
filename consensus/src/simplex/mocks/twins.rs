@@ -3,7 +3,7 @@
 //! This module follows the testing architecture from
 //! [Twins: BFT Systems Made Robust](https://arxiv.org/pdf/2004.10617):
 //! 1. Generate partition scenarios.
-//! 2. Combine partitions with leader assignments per round.
+//! 2. Combine partitions with leader choices per round.
 //! 3. Arrange those round choices into full multi-round scenarios.
 //! 4. Execute each scenario across compromised-node assignments.
 //!
@@ -18,8 +18,8 @@
 //! one onto a concrete participant permutation derived from the case seed,
 //! depending on [`Framework::relabel`]. In both modes, cases are cross-producted
 //! with concrete compromised-node sets. That keeps the scenario budget focused
-//! on distinct shapes while still allowing concrete player assignments to be
-//! exercised when desired.
+//! on distinct shapes while still allowing concrete participant permutations
+//! to be exercised when desired.
 
 use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
@@ -39,7 +39,7 @@ const CASE_SEED_DOMAIN: u64 = 0x8f36_d01c_4ea8_9b27;
 /// Separates compromised-set sampling from scenario generation.
 const COMPROMISED_SET_DOMAIN: u64 = 0x0000_0000_dead_beef;
 /// Separates participant relabeling from the raw case seed stream.
-const RELABEL_ASSIGNMENT_DOMAIN: u64 = 0x0000_0000_a11c_e55e;
+const RELABEL_PERMUTATION_DOMAIN: u64 = 0x0000_0000_a11c_e55e;
 
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -213,6 +213,23 @@ where
 }
 
 /// Framework configuration for generating Twins cases.
+///
+/// The generated case count is the cross-product of:
+/// 1. The canonical multi-round scenarios kept under
+///    [`Framework::max_distinct_scenarios`].
+/// 2. The concrete compromised-participant assignments kept under
+///    [`Framework::max_compromised_assignments`].
+///
+/// Example: with `participants = 5` and `faults = 1`, there are 5 concrete
+/// one-node compromised assignments (`{0}`, `{1}`, `{2}`, `{3}`, `{4}`).
+/// If the generator keeps 3 canonical scenarios and all 5 compromised
+/// assignments, [`cases`] emits `3 * 5 = 15` executable cases. If instead the
+/// compromised-assignment budget is 2, [`cases`] emits `3 * 2 = 6` cases.
+///
+/// If the underlying scenario space or compromised-assignment space is smaller
+/// than the configured caps, the emitted case count is smaller as well.
+/// [`Framework::relabel`] changes which concrete participants realize a
+/// scenario, but does not change how many cases are emitted.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
     /// Number of participants in the network.
@@ -221,12 +238,32 @@ pub struct Framework {
     pub faults: usize,
     /// Number of adversarial rounds before synchronous suffix.
     pub rounds: usize,
-    /// Maximum number of partitions to use while generating partition scenarios.
-    pub max_partitions: usize,
-    /// Maximum number of generated scenarios.
-    pub max_scenarios: usize,
-    /// Maximum number of generated compromised-node sets.
-    pub max_compromised_sets: usize,
+    /// Maximum number of communication groups allowed in a generated round partition.
+    pub max_partition_groups: usize,
+    /// Upper bound on the number of distinct canonical multi-round scenarios
+    /// to generate before combining them with compromised-participant
+    /// assignments.
+    ///
+    /// "Distinct" refers to scenario shape after collapsing participant
+    /// relabelings, so this budget limits how many unique attack patterns are
+    /// explored rather than how many concrete case permutations are emitted.
+    ///
+    /// Combined with [`Framework::max_compromised_assignments`], this
+    /// determines the total number of emitted cases. For example, 3 kept
+    /// scenarios crossed with 5 compromised assignments yields 15 cases.
+    pub max_distinct_scenarios: usize,
+    /// Upper bound on the number of concrete `faults`-sized
+    /// compromised-participant assignments to combine with each generated
+    /// scenario.
+    ///
+    /// If the full combination space fits within this budget, all assignments
+    /// are emitted. Otherwise, the framework deterministically samples a subset
+    /// of assignments and crosses only those with the generated scenarios.
+    ///
+    /// Example: with `participants = 5` and `faults = 1`, the full assignment
+    /// space is `{0}`, `{1}`, `{2}`, `{3}`, `{4}`. If this budget is 2 and the
+    /// scenario budget yields 3 scenarios, [`cases`] emits `2 * 3 = 6` cases.
+    pub max_compromised_assignments: usize,
     /// Whether to relabel canonical scenarios onto concrete participant
     /// permutations before emitting executable cases.
     pub relabel: bool,
@@ -262,29 +299,35 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
         "faults must be less than participants"
     );
     assert!(framework.rounds > 0, "rounds must be > 0");
-    assert!(framework.max_partitions > 1, "max_partitions must be > 1");
     assert!(
-        framework.max_partitions <= framework.participants,
-        "max_partitions must be <= participants"
+        framework.max_partition_groups > 1,
+        "max_partition_groups must be > 1"
     );
-    assert!(framework.max_scenarios > 0, "max_scenarios must be > 0");
     assert!(
-        framework.max_compromised_sets > 0,
-        "max_compromised_sets must be > 0"
+        framework.max_partition_groups <= framework.participants,
+        "max_partition_groups must be <= participants"
+    );
+    assert!(
+        framework.max_distinct_scenarios > 0,
+        "max_distinct_scenarios must be > 0"
+    );
+    assert!(
+        framework.max_compromised_assignments > 0,
+        "max_compromised_assignments must be > 0"
     );
 
     let scenarios = generate_scenarios(
         seed,
         framework.participants,
         framework.rounds,
-        framework.max_partitions,
-        framework.max_scenarios,
+        framework.max_partition_groups,
+        framework.max_distinct_scenarios,
     );
     let compromised = compromised_sets(
         seed ^ COMPROMISED_SET_DOMAIN,
         framework.participants,
         framework.faults,
-        framework.max_compromised_sets,
+        framework.max_compromised_assignments,
     );
 
     let mut out = Vec::new();
@@ -294,8 +337,8 @@ pub fn cases(seed: u64, framework: Framework) -> Vec<Case> {
             out.push(Case {
                 compromised: compromised.clone(),
                 scenario: if framework.relabel {
-                    let permutation = assignment_from_seed(
-                        case_seed ^ RELABEL_ASSIGNMENT_DOMAIN,
+                    let permutation = permutation_from_seed(
+                        case_seed ^ RELABEL_PERMUTATION_DOMAIN,
                         framework.participants,
                     );
                     permute_scenario(scenario, &permutation)
@@ -365,13 +408,13 @@ fn permute_scenario(scenario: &Scenario, permutation: &[usize]) -> Scenario {
 }
 
 /// Derives a deterministic participant permutation from a case seed.
-fn assignment_from_seed(seed: u64, n: usize) -> Vec<usize> {
+fn permutation_from_seed(seed: u64, n: usize) -> Vec<usize> {
     let mut rng = test_rng_seeded(seed);
-    let mut assignment: Vec<_> = (0..n).collect();
+    let mut permutation: Vec<_> = (0..n).collect();
     for idx in (1..n).rev() {
-        assignment.swap(idx, rng.gen_range(0..=idx));
+        permutation.swap(idx, rng.gen_range(0..=idx));
     }
-    assignment
+    permutation
 }
 
 /// Returns a contiguous bitmask range `[start, start + len)`.
@@ -558,7 +601,7 @@ fn next_round_transitions(
                 if has_leader {
                     // As in `no_secondary`, keep the leader as a singleton at
                     // the tail of its source cell's refined block. Enumerate
-                    // both twin-half assignments so the leader may be isolated
+                    // both twin-half placements so the leader may be isolated
                     // with either partition when the halves differ.
                     let leader_idx = start + outside + secondary + primary;
                     next_cells.push(1);
@@ -948,9 +991,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 3,
-            max_compromised_sets: 5,
+            max_partition_groups: 3,
+            max_distinct_scenarios: 3,
+            max_compromised_assignments: 5,
             relabel: true,
         };
         let cases = cases(0, framework);
@@ -964,9 +1007,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 4,
-            max_compromised_sets: 5,
+            max_partition_groups: 3,
+            max_distinct_scenarios: 4,
+            max_compromised_assignments: 5,
             relabel: true,
         };
         let first = cases(42, framework);
@@ -1113,9 +1156,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 1,
-            max_compromised_sets: 5,
+            max_partition_groups: 3,
+            max_distinct_scenarios: 1,
+            max_compromised_assignments: 5,
             relabel: true,
         };
         let cases = cases(7, framework);
@@ -1129,9 +1172,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 1,
-            max_compromised_sets: 5,
+            max_partition_groups: 3,
+            max_distinct_scenarios: 1,
+            max_compromised_assignments: 5,
             relabel: false,
         };
         let cases = cases(7, framework);
@@ -1148,9 +1191,9 @@ mod tests {
                 participants: (u64::BITS as usize) + 1,
                 faults: 1,
                 rounds: 1,
-                max_partitions: 2,
-                max_scenarios: 1,
-                max_compromised_sets: 1,
+                max_partition_groups: 2,
+                max_distinct_scenarios: 1,
+                max_compromised_assignments: 1,
                 relabel: false,
             },
         );
@@ -1164,9 +1207,9 @@ mod tests {
                 participants: 3,
                 faults: 1,
                 rounds: 1,
-                max_partitions: 2,
-                max_scenarios: usize::MAX,
-                max_compromised_sets: usize::MAX,
+                max_partition_groups: 2,
+                max_distinct_scenarios: usize::MAX,
+                max_compromised_assignments: usize::MAX,
                 relabel: true,
             },
         );
@@ -1209,9 +1252,9 @@ mod tests {
                 participants: 3,
                 faults: 1,
                 rounds: 1,
-                max_partitions: 3,
-                max_scenarios: usize::MAX,
-                max_compromised_sets: usize::MAX,
+                max_partition_groups: 3,
+                max_distinct_scenarios: usize::MAX,
+                max_compromised_assignments: usize::MAX,
                 relabel: true,
             },
         );
@@ -1294,9 +1337,9 @@ mod tests {
             participants: 5,
             faults: 1,
             rounds: 3,
-            max_partitions: 3,
-            max_scenarios: 1,
-            max_compromised_sets: 1,
+            max_partition_groups: 3,
+            max_distinct_scenarios: 1,
+            max_compromised_assignments: 1,
             relabel: true,
         };
         let case = cases(0, framework)
