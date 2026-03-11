@@ -5,8 +5,7 @@ use crate::{
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
     Digest, PublicKey,
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use bytes::Bytes;
 use commonware_utils::{
     ordered::{Quorum, Set},
     sequence::U64,
@@ -50,60 +49,53 @@ impl SignedSubject {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct StoredCertificate {
-    subject: SignedSubject,
-    signers: Signers,
-}
-
 #[derive(Debug, Default)]
-struct StoredSignatures {
+struct SignerSignatures {
     by: HashMap<u64, SignedSubject>,
     by_subject: HashMap<SignedSubject, u64>,
 }
 
 #[derive(Debug, Default)]
+struct Signatures {
+    /// The counter is global so each signature ID is unique across all signers. A per-signer
+    /// counter would let two signers share the same ID for different subjects, making
+    /// a forged attestation (with a swapped signer field) pass verification.
+    next: u64,
+    by_signer: HashMap<Participant, SignerSignatures>,
+}
+
+impl Signatures {
+    const fn next(&mut self) -> u64 {
+        let current = self.next;
+        self.next = self.next.checked_add(1).expect("signature overflow");
+        current
+    }
+}
+
+#[derive(Debug, Default)]
+struct Certificates {
+    next: u64,
+    by: HashMap<u64, SignedSubject>,
+    by_artifact: HashMap<(SignedSubject, Signers), u64>,
+}
+
+impl Certificates {
+    const fn next(&mut self) -> u64 {
+        let current = self.next;
+        self.next = self.next.checked_add(1).expect("certificate overflow");
+        current
+    }
+}
+
+#[derive(Debug, Default)]
 struct Inner {
-    next_signature: u64,
-    signatures: HashMap<Participant, StoredSignatures>,
-    next_certificate: u64,
-    certificates: HashMap<u64, StoredCertificate>,
+    signatures: Signatures,
+    certificates: Certificates,
 }
 
 /// Shared state for mock schemes created by the same test fixture.
 #[derive(Clone, Default)]
 pub struct Shared(Arc<Mutex<Inner>>);
-
-/// Cheap certificate type backed by shared in-memory state.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Certificate {
-    id: U64,
-    signers: Signers,
-}
-
-impl Write for Certificate {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.id.write(writer);
-        self.signers.write(writer);
-    }
-}
-
-impl EncodeSize for Certificate {
-    fn encode_size(&self) -> usize {
-        self.id.encode_size() + self.signers.encode_size()
-    }
-}
-
-impl Read for Certificate {
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, max_participants: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            id: U64::read_cfg(reader, &())?,
-            signers: Signers::read_cfg(reader, max_participants)?,
-        })
-    }
-}
 
 /// Generic mock certificate implementation.
 ///
@@ -161,17 +153,9 @@ where
     P: PublicKey,
     N: super::Namespace,
 {
-    fn invalid_none<T>(reason: &str) -> Option<T> {
+    fn invalid<T: Default>(reason: &str) -> T {
         if ALLOW_INVALID {
-            None
-        } else {
-            panic!("invalid mock certificate request: {reason}");
-        }
-    }
-
-    fn invalid_bool(reason: &str) -> bool {
-        if ALLOW_INVALID {
-            false
+            T::default()
         } else {
             panic!("invalid mock certificate request: {reason}");
         }
@@ -227,19 +211,18 @@ where
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
-        let signature = inner
-            .signatures
-            .get(&signer)
-            .and_then(|entries| entries.by_subject.get(&signed_subject))
-            .copied()
-            .unwrap_or_else(|| {
-                let signature = inner.next_signature;
-                inner.next_signature = inner.next_signature.wrapping_add(1);
-                let entries = inner.signatures.entry(signer).or_default();
-                entries.by.insert(signature, signed_subject.clone());
-                entries.by_subject.insert(signed_subject, signature);
-                signature
-            });
+        inner.signatures.by_signer.entry(signer).or_default();
+        let existing = inner.signatures.by_signer[&signer]
+            .by_subject
+            .get(&signed_subject)
+            .copied();
+        let signature = existing.unwrap_or_else(|| {
+            let sig = inner.signatures.next();
+            let entries = inner.signatures.by_signer.get_mut(&signer).unwrap();
+            entries.by.insert(sig, signed_subject.clone());
+            entries.by_subject.insert(signed_subject, sig);
+            sig
+        });
 
         Some(Attestation {
             signer,
@@ -259,21 +242,22 @@ where
         D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
-            return Self::invalid_bool("attestation signer missing from participant set");
+            return Self::invalid("attestation signer missing from participant set");
         }
 
         let Some(signature) = attestation.signature.get() else {
-            return Self::invalid_bool("attestation signature missing");
+            return Self::invalid("attestation signature missing");
         };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let signature = u64::from(signature);
         let inner = self.shared.0.lock();
         inner
             .signatures
+            .by_signer
             .get(&attestation.signer)
             .and_then(|entries| entries.by.get(&signature))
             .is_some_and(|stored| stored == &expected_subject)
-            || Self::invalid_bool("attestation not found or subject mismatched")
+            || Self::invalid("attestation not found or subject mismatched")
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
@@ -305,7 +289,7 @@ where
     }
 
     /// Assembles attestations into a mock certificate.
-    pub fn assemble<S, I, M>(&self, attestations: I) -> Option<Certificate>
+    pub fn assemble<S, I, M>(&self, attestations: I) -> Option<U64>
     where
         S: Scheme<Signature = U64>,
         I: IntoIterator<Item = Attestation<S>>,
@@ -317,34 +301,35 @@ where
         let mut inner = self.shared.0.lock();
 
         for attestation in attestations {
-            self.participants.key(attestation.signer).or_else(|| {
-                Self::invalid_none("attestation signer missing from participant set")
-            })?;
+            self.participants
+                .key(attestation.signer)
+                .or_else(|| Self::invalid("attestation signer missing from participant set"))?;
 
             let signature = attestation
                 .signature
                 .get()
-                .or_else(|| Self::invalid_none("attestation signature missing"))?;
+                .or_else(|| Self::invalid("attestation signature missing"))?;
             let signature = u64::from(signature);
             let entry = inner
                 .signatures
+                .by_signer
                 .get(&attestation.signer)
-                .or_else(|| Self::invalid_none("attestation signer not found"))?
+                .or_else(|| Self::invalid("attestation signer not found"))?
                 .by
                 .get(&signature)
-                .or_else(|| Self::invalid_none("attestation signature not found"))?
+                .or_else(|| Self::invalid("attestation signature not found"))?
                 .clone();
 
             if let Some(existing) = &signed_subject {
                 if existing != &entry {
-                    return Self::invalid_none("attestations signed different subjects");
+                    return Self::invalid("attestations signed different subjects");
                 }
             } else {
                 signed_subject = Some(entry);
             }
 
             if !unique_signers.insert(attestation.signer) {
-                return Self::invalid_none("duplicate signer");
+                return Self::invalid("duplicate signer");
             }
             signers.push(attestation.signer);
         }
@@ -355,20 +340,21 @@ where
 
         let subject = signed_subject?;
         let signers = Signers::from(self.participants.len(), signers);
-        let certificate_id = inner.next_certificate;
-        inner.next_certificate = inner.next_certificate.wrapping_add(1);
-        inner.certificates.insert(
-            certificate_id,
-            StoredCertificate {
-                subject,
-                signers: signers.clone(),
-            },
-        );
+        let stored_subject = subject.clone();
+        let artifact = (subject, signers);
+        let certificate = inner
+            .certificates
+            .by_artifact
+            .get(&artifact)
+            .copied()
+            .unwrap_or_else(|| {
+                let certificate = inner.certificates.next();
+                inner.certificates.by.insert(certificate, stored_subject);
+                inner.certificates.by_artifact.insert(artifact, certificate);
+                certificate
+            });
 
-        Some(Certificate {
-            id: U64::new(certificate_id),
-            signers,
-        })
+        Some(U64::new(certificate))
     }
 
     /// Verifies a mock certificate.
@@ -376,42 +362,34 @@ where
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
-        certificate: &Certificate,
+        certificate: &U64,
     ) -> bool
     where
-        S: Scheme<Certificate = Certificate>,
+        S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
         M: Faults,
     {
-        if certificate.signers.len() != self.participants.len() {
-            return Self::invalid_bool("certificate signer set length mismatched participant set");
-        }
-        if certificate.signers.count() < self.participants.quorum::<M>() as usize {
-            return Self::invalid_bool("certificate below quorum");
-        }
-
         let expected_subject = SignedSubject::new(subject, &self.namespace);
-        let certificate_id = u64::from(&certificate.id);
+        let certificate = u64::from(certificate);
         let inner = self.shared.0.lock();
         inner
             .certificates
-            .get(&certificate_id)
-            .is_some_and(|stored| {
-                stored.subject == expected_subject && stored.signers == certificate.signers
-            })
-            || Self::invalid_bool("certificate not found or subject/signers mismatched")
+            .by
+            .get(&certificate)
+            .is_some_and(|subject| subject == &expected_subject)
+            || Self::invalid("certificate not found or subject mismatched")
     }
 
     /// Verifies a batch of certificates one-by-one.
     pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, mut certificates: I) -> bool
     where
-        S: Scheme<Certificate = Certificate>,
+        S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: rand::Rng + rand::CryptoRng,
         D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
         M: Faults,
     {
         certificates.all(|(subject, certificate)| {
@@ -430,14 +408,10 @@ where
     }
 
     /// Returns the codec bound for certificates produced by this participant set.
-    pub const fn certificate_codec_config(&self) -> usize {
-        self.participants.len()
-    }
+    pub const fn certificate_codec_config(&self) {}
 
     /// Returns the unbounded codec configuration.
-    pub const fn certificate_codec_config_unbounded() -> usize {
-        usize::MAX
-    }
+    pub const fn certificate_codec_config_unbounded() {}
 }
 
 /// Implements a mock mock certificate scheme for a concrete subject and namespace.
@@ -591,7 +565,7 @@ macro_rules! impl_certificate_mock {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
             type Signature = commonware_utils::sequence::U64;
-            type Certificate = $crate::certificate::mocks::Certificate;
+            type Certificate = commonware_utils::sequence::U64;
 
             fn me(&self) -> Option<commonware_utils::Participant> {
                 self.generic.me()
@@ -725,9 +699,9 @@ macro_rules! impl_certificate_mock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Certificate, Shared};
+    use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{Attestation, Lazy, Scheme as _, Signers},
+        certificate::{Attestation, Lazy, Scheme as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
@@ -799,6 +773,28 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "signature overflow")]
+    fn signature_overflow_panics() {
+        let mut signatures = Signatures {
+            next: u64::MAX,
+            ..Default::default()
+        };
+
+        let _ = signatures.next();
+    }
+
+    #[test]
+    #[should_panic(expected = "certificate overflow")]
+    fn certificate_overflow_panics() {
+        let mut certificates = Certificates {
+            next: u64::MAX,
+            ..Default::default()
+        };
+
+        let _ = certificates.next();
+    }
+
+    #[test]
     fn configurable_properties_follow_type_flags() {
         assert!(Scheme::<Ed25519PublicKey>::is_attributable());
         assert!(Scheme::<Ed25519PublicKey>::is_batchable());
@@ -819,10 +815,10 @@ mod tests {
         assert_eq!(fixture.verifier.me(), None);
         assert_eq!(cloned.me(), Some(Participant::new(0)));
         assert_eq!(fixture.verifier.participants().len(), 4);
-        assert_eq!(fixture.verifier.certificate_codec_config(), 4);
+        assert_eq!(fixture.verifier.certificate_codec_config(), ());
         assert_eq!(
             Scheme::<Ed25519PublicKey>::certificate_codec_config_unbounded(),
-            usize::MAX
+            ()
         );
         assert!(Scheme::<Ed25519PublicKey>::signer(
             b"mock-scheme",
@@ -875,6 +871,37 @@ mod tests {
         assert!(!scheme_fixture
             .verifier
             .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,));
+    }
+
+    #[test]
+    fn signer_swapped_attestation_is_rejected() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let attestation_a = fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let attestation_b = fixture.schemes[1]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let mut forged = attestation_a.clone();
+        forged.signer = Participant::new(1);
+
+        assert_ne!(
+            attestation_a.signature.get(),
+            attestation_b.signature.get(),
+            "different signers signing the same subject must receive distinct synthetic IDs"
+        );
+
+        assert!(
+            !fixture.verifier.verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                subject,
+                &forged,
+                &Sequential,
+            ),
+            "swapping signer on an attestation must fail verification"
+        );
     }
 
     #[test]
@@ -931,7 +958,7 @@ mod tests {
             .unwrap();
         let encoded = certificate.encode();
         let decoded =
-            Certificate::decode_cfg(encoded, &fixture.verifier.participants().len()).unwrap();
+            U64::decode_cfg(encoded, &fixture.verifier.certificate_codec_config()).unwrap();
 
         assert!(
             fixture
@@ -956,7 +983,34 @@ mod tests {
     }
 
     #[test]
-    fn certificate_decode_round_trip_uses_participant_bound() {
+    fn repeated_assembly_reuses_the_same_certificate() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject {
+            message: b"certificate-subject",
+        };
+        let attestations: Vec<_> = fixture.schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
+            .collect();
+
+        let first = fixture
+            .verifier
+            .assemble::<_, N3f1>(attestations.clone(), &Sequential)
+            .unwrap();
+        let second = fixture
+            .verifier
+            .assemble::<_, N3f1>(
+                attestations.iter().cloned().rev().collect::<Vec<_>>(),
+                &Sequential,
+            )
+            .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn certificate_decode_round_trip_uses_unit_config() {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"bound" };
@@ -970,8 +1024,10 @@ mod tests {
             .unwrap();
         let encoded = certificate.encode();
 
-        assert!(Certificate::decode_cfg(encoded.clone(), &4).is_ok());
-        assert!(Certificate::decode_cfg(encoded, &2).is_err());
+        assert_eq!(
+            U64::decode_cfg(encoded, &fixture.verifier.certificate_codec_config()).unwrap(),
+            certificate
+        );
     }
 
     #[test]
@@ -1033,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn certificate_verification_rejects_structural_and_batch_failures() {
+    fn certificate_verification_rejects_mismatched_subject_and_batch_failures() {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject_a = TestSubject { message: b"vote-a" };
@@ -1054,40 +1110,14 @@ mod tests {
             .verifier
             .assemble::<_, N3f1>(attestations_b, &Sequential)
             .unwrap();
-        let wrong_length = Certificate {
-            id: certificate_a.id.clone(),
-            signers: Signers::from(
-                3,
-                [
-                    Participant::new(0),
-                    Participant::new(1),
-                    Participant::new(2),
-                ],
-            ),
-        };
-        let below_quorum = Certificate {
-            id: certificate_a.id.clone(),
-            signers: Signers::from(4, [Participant::new(0), Participant::new(1)]),
-        };
-        let missing = Certificate {
-            id: U64::new(u64::MAX),
-            signers: certificate_b.signers.clone(),
-        };
+        let missing = U64::new(u64::MAX);
 
         assert!(!fixture
             .verifier
             .verify_certificate::<_, Sha256Digest, N3f1>(
                 &mut rng,
                 subject_a,
-                &wrong_length,
-                &Sequential,
-            ));
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                subject_a,
-                &below_quorum,
+                &certificate_b,
                 &Sequential,
             ));
         assert!(!fixture
