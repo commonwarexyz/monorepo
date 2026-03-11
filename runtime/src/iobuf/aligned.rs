@@ -9,7 +9,7 @@
 //! with aligned storage ownership and view semantics.
 
 use super::IoBuf;
-use crate::iobuf::pool::{local_push, SizeClass};
+use crate::iobuf::pool::{SizeClass, TlsCache};
 use bytes::Bytes;
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
@@ -126,7 +126,7 @@ pub(crate) struct TrackedOwner {
 impl Owner for TrackedOwner {
     #[inline]
     fn release(&self, buffer: AlignedBuffer) {
-        local_push(Arc::clone(&self.class), buffer);
+        TlsCache::push(Arc::clone(&self.class), buffer);
     }
 }
 
