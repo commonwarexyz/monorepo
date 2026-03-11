@@ -1,11 +1,17 @@
-//! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
+//! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use super::Position;
-use crate::mmr::Location;
+use super::{Family, Location, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use core::marker::PhantomData;
 
-/// A trait for computing the various digests of an MMR.
+/// A trait for computing the various digests of a Merkle-family structure.
+///
+/// The [`Family`](Self::Family) associated type determines which Merkle family (MMR, MMB, etc.)
+/// this hasher targets, and consequently which [`Position`] and [`Location`] types appear in
+/// method signatures. Default implementations are provided for all methods except `hash()`.
 pub trait Hasher: Clone + Send + Sync {
+    /// The Merkle family this hasher targets.
+    type Family: Family;
     type Digest: Digest;
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
@@ -17,7 +23,7 @@ pub trait Hasher: Clone + Send + Sync {
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
         &mut self,
-        pos: Position,
+        pos: Position<Self::Family>,
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
@@ -29,7 +35,7 @@ pub trait Hasher: Clone + Send + Sync {
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+    fn leaf_digest(&mut self, pos: Position<Self::Family>, element: &[u8]) -> Self::Digest {
         self.hash([(*pos).to_be_bytes().as_slice(), element])
     }
 
@@ -38,52 +44,58 @@ pub trait Hasher: Clone + Send + Sync {
         self.hash(core::iter::once(data))
     }
 
-    /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
+    /// One step of the root fold: `Hash(acc || peak)`.
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
         self.hash([acc.as_ref(), peak.as_ref()])
     }
 
-    /// Computes the root for an MMR given its leaf count and peak digests in canonical order.
+    /// Computes the root for the structure given its leaf count and peak digests in canonical order.
     ///
     /// The root digest is computed as `Hash(leaves || fold(peak_digests))`, where `fold` is
     /// defined as `fold(acc, peak) = Hash(acc || peak)`. The `peak_digests` are assumed to be
     /// in canonical order.
     fn root<'a>(
         &mut self,
-        leaves: Location,
+        leaves: Location<Self::Family>,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
         let mut iter = peak_digests.into_iter();
         let Some(first) = iter.next() else {
-            return self.digest(&leaves.to_be_bytes());
+            return self.digest(&(*leaves).to_be_bytes());
         };
         let acc = iter.fold(*first, |acc, digest| self.fold(&acc, digest));
 
-        self.hash([leaves.to_be_bytes().as_slice(), acc.as_ref()])
+        self.hash([(*leaves).to_be_bytes().as_slice(), acc.as_ref()])
     }
 }
 
-/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
-/// external data.
+/// The standard hasher for Merkle-family structures. Leverages no external data.
+///
+/// The type parameter `F` selects the Merkle family (e.g. MMR, MMB).
 #[derive(Clone)]
-pub struct Standard<H: CHasher> {
+pub struct Standard<F: Family, H: CHasher> {
     hasher: H,
+    _family: PhantomData<F>,
 }
 
-impl<H: CHasher> Standard<H> {
+impl<F: Family, H: CHasher> Standard<F, H> {
     /// Creates a new [Standard] hasher.
     pub fn new() -> Self {
-        Self { hasher: H::new() }
+        Self {
+            hasher: H::new(),
+            _family: PhantomData,
+        }
     }
 }
 
-impl<H: CHasher> Default for Standard<H> {
+impl<F: Family, H: CHasher> Default for Standard<F, H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<H: CHasher> Hasher for Standard<H> {
+impl<F: Family, H: CHasher> Hasher for Standard<F, H> {
+    type Family = F;
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
@@ -97,9 +109,11 @@ impl<H: CHasher> Hasher for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location};
+    use crate::mmr::{self, mem::Mmr, Location, Position};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
+
+    type MmrStandard<H> = Standard<mmr::Family, H>;
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -123,8 +137,7 @@ mod tests {
     }
 
     fn test_leaf_digest<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
-        // input hashes to use
+        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
@@ -142,8 +155,7 @@ mod tests {
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
-        // input hashes to use
+        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
 
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
@@ -178,8 +190,7 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
-        // input digests to use
+        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);

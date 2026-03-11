@@ -422,15 +422,12 @@ where
         // Verify the proof (and pinned nodes if this is the sync boundary batch).
         let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start();
         let valid = if need_pinned {
-            let elements: Vec<_> = operations
-                .iter()
-                .map(commonware_codec::Encode::encode)
-                .collect();
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
-            proof.verify_proof_and_pinned_nodes(
+            qmdb::verify_proof_and_pinned_nodes(
                 &mut self.hasher,
-                &elements,
+                &proof,
                 start_loc,
+                &operations,
                 nodes,
                 &self.target.root,
             )
