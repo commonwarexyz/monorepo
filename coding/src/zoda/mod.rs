@@ -623,10 +623,6 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         checking_data.check::<H>(commitment, index, &weak_shard)
     }
 
-    fn insufficient_shards(actual: usize, expected: usize) -> Self::Error {
-        Error::InsufficientShards(actual, expected)
-    }
-
     fn decode<'a>(
         _config: &Config,
         commitment: &Self::Commitment,

@@ -15,6 +15,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
+    use thiserror::Error;
 
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
@@ -336,9 +337,6 @@ commonware_macros::stability_scope!(ALPHA {
             weak_shard: Self::WeakShard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
-        /// Construct an insufficient-shards error for this scheme.
-        fn insufficient_shards(actual: usize, expected: usize) -> Self::Error;
-
         /// Decode the data from shards received from other participants.
         ///
         /// The data must be decodeable with as few as `config.minimum_shards`,
@@ -381,6 +379,15 @@ commonware_macros::stability_scope!(ALPHA {
         checked_shard: P::CheckedShard,
     }
 
+    /// Errors returned by the [`PhasedAsScheme`] adapter.
+    #[derive(Debug, Error)]
+    pub enum PhasedAsSchemeError<E> {
+        #[error(transparent)]
+        Scheme(E),
+        #[error("insufficient shards {0} < {1}")]
+        InsufficientShards(usize, usize),
+    }
+
     impl<P: PhasedScheme> Debug for PhasedCheckedShard<P> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("PhasedCheckedShard")
@@ -392,14 +399,14 @@ commonware_macros::stability_scope!(ALPHA {
         type Commitment = P::Commitment;
         type Shard = P::StrongShard;
         type CheckedShard = PhasedCheckedShard<P>;
-        type Error = P::Error;
+        type Error = PhasedAsSchemeError<P::Error>;
 
         fn encode(
             config: &Config,
             data: impl Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-            P::encode(config, data, strategy)
+            P::encode(config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
         }
 
         fn check(
@@ -409,7 +416,8 @@ commonware_macros::stability_scope!(ALPHA {
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error> {
             let (checking_data, checked_shard, _) =
-                P::weaken(config, commitment, index, shard.clone())?;
+                P::weaken(config, commitment, index, shard.clone())
+                    .map_err(PhasedAsSchemeError::Scheme)?;
             Ok(PhasedCheckedShard {
                 checking_data,
                 checked_shard,
@@ -424,7 +432,7 @@ commonware_macros::stability_scope!(ALPHA {
         ) -> Result<Vec<u8>, Self::Error> {
             let mut shards = shards.peekable();
             let Some(first) = shards.peek() else {
-                return Err(P::insufficient_shards(
+                return Err(PhasedAsSchemeError::InsufficientShards(
                     0,
                     usize::from(config.minimum_shards.get()),
                 ));
@@ -436,6 +444,7 @@ commonware_macros::stability_scope!(ALPHA {
                 shards.map(|shard| &shard.checked_shard),
                 strategy,
             )
+            .map_err(PhasedAsSchemeError::Scheme)
         }
     }
 
