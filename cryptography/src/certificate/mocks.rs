@@ -728,15 +728,16 @@ macro_rules! impl_certificate_mock {
 
 #[cfg(test)]
 mod tests {
-    use super::Certificate;
+    use super::{Certificate, Shared};
     use crate::{
-        certificate::Scheme as _, ed25519::PublicKey as Ed25519PublicKey,
+        certificate::{Attestation, Lazy, Scheme as _, Signers},
+        ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, N3f1};
+    use commonware_utils::{sequence::U64, test_rng, N3f1, Participant};
 
     #[derive(Clone, Copy, Debug)]
     pub struct TestSubject<'a> {
@@ -810,6 +811,113 @@ mod tests {
     }
 
     #[test]
+    fn signer_and_verifier_expose_expected_metadata() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject {
+            message: b"metadata",
+        };
+        let cloned = fixture.schemes[0].clone();
+
+        assert_eq!(fixture.verifier.me(), None);
+        assert_eq!(cloned.me(), Some(Participant::new(0)));
+        assert_eq!(fixture.verifier.participants().len(), 4);
+        assert_eq!(fixture.verifier.certificate_codec_config(), 4);
+        assert_eq!(
+            Scheme::<Ed25519PublicKey>::certificate_codec_config_unbounded(),
+            usize::MAX
+        );
+        assert!(Scheme::<Ed25519PublicKey>::signer(
+            b"mock-scheme",
+            fixture.verifier.participants().clone(),
+            Participant::new(99),
+            Shared::default(),
+        )
+        .is_none());
+        assert!(fixture.verifier.sign::<Sha256Digest>(subject).is_none());
+        assert!(cloned.sign::<Sha256Digest>(subject).is_some());
+        assert!(format!("{cloned:?}").contains("participants"));
+    }
+
+    #[test]
+    fn verify_attestation_rejects_malformed_and_foreign_attestations() {
+        let mut rng = test_rng();
+        let scheme_fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let foreign_fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let attestation = scheme_fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let mut invalid_signer = attestation.clone();
+        invalid_signer.signer = Participant::new(99);
+        let mut truncated = &[0u8, 1, 2][..];
+        let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
+            signer: Participant::new(2),
+            signature: Lazy::deferred(&mut truncated, ()),
+        };
+        let foreign = foreign_fixture.schemes[3]
+            .sign::<Sha256Digest>(subject)
+            .expect("foreign signer must produce an attestation");
+
+        assert!(!scheme_fixture
+            .verifier
+            .verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                subject,
+                &invalid_signer,
+                &Sequential,
+            ));
+        assert!(!scheme_fixture
+            .verifier
+            .verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                subject,
+                &missing_signature,
+                &Sequential,
+            ));
+        assert!(!scheme_fixture
+            .verifier
+            .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,));
+    }
+
+    #[test]
+    fn verify_attestations_partitions_valid_and_invalid_inputs() {
+        let mut rng = test_rng();
+        let scheme_fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let foreign_fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let valid_a = scheme_fixture.schemes[0]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let valid_b = scheme_fixture.schemes[1]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let mut truncated = &[9u8, 9, 9][..];
+        let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
+            signer: Participant::new(2),
+            signature: Lazy::deferred(&mut truncated, ()),
+        };
+        let foreign = foreign_fixture.schemes[3]
+            .sign::<Sha256Digest>(subject)
+            .expect("foreign signer must produce an attestation");
+
+        let verification = scheme_fixture
+            .verifier
+            .verify_attestations::<_, Sha256Digest, _>(
+                &mut rng,
+                subject,
+                [valid_a.clone(), missing_signature, foreign, valid_b.clone()],
+                &Sequential,
+            );
+
+        assert_eq!(verification.verified, vec![valid_a, valid_b]);
+        assert_eq!(
+            verification.invalid,
+            vec![Participant::new(2), Participant::new(3)]
+        );
+    }
+
+    #[test]
     fn certificate_round_trip_verifies() {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
@@ -870,6 +978,38 @@ mod tests {
     }
 
     #[test]
+    fn certificate_assembly_requires_matching_subjects_and_quorum() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+
+        assert!(fixture
+            .verifier
+            .assemble::<_, N3f1>(
+                [
+                    fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                    fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+                ],
+                &Sequential,
+            )
+            .is_none());
+
+        assert!(fixture
+            .verifier
+            .assemble::<_, N3f1>(
+                [
+                    fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                    fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+                    fixture.schemes[2]
+                        .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })
+                        .unwrap(),
+                ],
+                &Sequential,
+            )
+            .is_none());
+    }
+
+    #[test]
     fn certificate_assembly_rejects_duplicate_signers() {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
@@ -896,6 +1036,88 @@ mod tests {
     }
 
     #[test]
+    fn certificate_verification_rejects_structural_and_batch_failures() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject_a = TestSubject { message: b"vote-a" };
+        let subject_b = TestSubject { message: b"vote-b" };
+        let attestations_a: Vec<_> = fixture.schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject_a).unwrap())
+            .collect();
+        let attestations_b: Vec<_> = fixture.schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject_b).unwrap())
+            .collect();
+        let certificate_a = fixture
+            .verifier
+            .assemble::<_, N3f1>(attestations_a, &Sequential)
+            .unwrap();
+        let certificate_b = fixture
+            .verifier
+            .assemble::<_, N3f1>(attestations_b, &Sequential)
+            .unwrap();
+        let wrong_length = Certificate {
+            id: certificate_a.id.clone(),
+            signers: Signers::from(
+                3,
+                [
+                    Participant::new(0),
+                    Participant::new(1),
+                    Participant::new(2),
+                ],
+            ),
+        };
+        let below_quorum = Certificate {
+            id: certificate_a.id.clone(),
+            signers: Signers::from(4, [Participant::new(0), Participant::new(1)]),
+        };
+        let missing = Certificate {
+            id: U64::new(u64::MAX),
+            signers: certificate_b.signers.clone(),
+        };
+
+        assert!(!fixture
+            .verifier
+            .verify_certificate::<_, Sha256Digest, N3f1>(
+                &mut rng,
+                subject_a,
+                &wrong_length,
+                &Sequential,
+            ));
+        assert!(!fixture
+            .verifier
+            .verify_certificate::<_, Sha256Digest, N3f1>(
+                &mut rng,
+                subject_a,
+                &below_quorum,
+                &Sequential,
+            ));
+        assert!(!fixture
+            .verifier
+            .verify_certificate::<_, Sha256Digest, N3f1>(
+                &mut rng,
+                subject_b,
+                &missing,
+                &Sequential,
+            ));
+        assert!(fixture
+            .verifier
+            .verify_certificates::<_, Sha256Digest, _, N3f1>(
+                &mut rng,
+                [(subject_a, &certificate_a), (subject_b, &certificate_b)].into_iter(),
+                &Sequential,
+            ));
+        assert!(!fixture
+            .verifier
+            .verify_certificates::<_, Sha256Digest, _, N3f1>(
+                &mut rng,
+                [(subject_a, &certificate_a), (subject_b, &missing)].into_iter(),
+                &Sequential,
+            ));
+    }
+
+    #[test]
     #[should_panic(expected = "invalid mock certificate request")]
     fn strict_invalid_requests_panic() {
         let mut rng = test_rng();
@@ -909,6 +1131,25 @@ mod tests {
             &mut rng,
             TestSubject { message: b"vote-2" },
             &attestation,
+            &Sequential,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid mock certificate request")]
+    fn strict_invalid_assembly_requests_panic() {
+        let mut rng = test_rng();
+        let fixture = fixture_with::<true, true, false, _>(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+
+        let _ = fixture.verifier.assemble::<_, N3f1>(
+            [
+                fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                fixture.schemes[1]
+                    .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })
+                    .unwrap(),
+                fixture.schemes[2].sign::<Sha256Digest>(subject).unwrap(),
+            ],
             &Sequential,
         );
     }

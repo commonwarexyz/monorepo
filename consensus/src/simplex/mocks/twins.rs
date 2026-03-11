@@ -116,6 +116,7 @@ impl Scenario {
 fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -> SplitTarget {
     let in_primary = primary.contains(sender);
     let in_secondary = secondary.contains(sender);
+    assert!(in_primary || in_secondary, "sender not in any partition");
     match (in_primary, in_secondary) {
         (true, true) => SplitTarget::Both,
         (true, false) => SplitTarget::Primary,
@@ -960,6 +961,76 @@ mod tests {
     }
 
     #[test]
+    fn scripted_partitions_preserve_participant_order_and_overlap() {
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 3,
+                primary_mask: 0b1011,
+                secondary_mask: 0b0110,
+            }],
+        };
+        let participants: Vec<u32> = (0..4).collect();
+        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+
+        assert_eq!(primary, vec![0, 1, 3]);
+        assert_eq!(secondary, vec![1, 2]);
+    }
+
+    #[test]
+    fn route_with_groups_covers_all_split_targets() {
+        let primary = vec![1u32, 2];
+        let secondary = vec![2u32, 3];
+
+        assert_eq!(
+            route_with_groups(&2, &primary, &secondary),
+            SplitTarget::Both
+        );
+        assert_eq!(
+            route_with_groups(&1, &primary, &secondary),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            route_with_groups(&3, &primary, &secondary),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sender not in any partition")]
+    fn route_with_groups_panics_when_sender_is_missing() {
+        let primary = vec![1u32, 2];
+        let secondary = vec![2u32, 3];
+
+        let _ = route_with_groups(&0, &primary, &secondary);
+    }
+
+    #[test]
+    fn view_helpers_follow_modulo_split() {
+        let participants: Vec<u32> = (0..4).collect();
+
+        assert_eq!(
+            view_partitions(View::new(1), &participants),
+            (vec![0], vec![1, 2, 3])
+        );
+        assert_eq!(
+            view_partitions(View::new(4), &participants),
+            (Vec::<u32>::new(), participants.clone())
+        );
+        assert_eq!(
+            view_route(View::new(1), &0, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            view_route(View::new(1), &3, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            view_route(View::new(4), &0, &participants),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
     fn route_supports_shared_non_leaders_in_split_rounds() {
         let scenario = Scenario {
             rounds: vec![RoundScenario {
@@ -1033,6 +1104,25 @@ mod tests {
             scenario.route(View::new(1), &3, &participants),
             SplitTarget::Secondary
         );
+    }
+
+    #[test]
+    fn route_returns_both_after_scripted_rounds() {
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 0,
+                primary_mask: 0b0011,
+                secondary_mask: 0b1100,
+            }],
+        };
+        let participants: Vec<u32> = (0..4).collect();
+
+        for participant in &participants {
+            assert_eq!(
+                scenario.route(View::new(2), participant, &participants),
+                SplitTarget::Both
+            );
+        }
     }
 
     #[test]
