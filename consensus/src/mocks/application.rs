@@ -1,10 +1,9 @@
-//! Mock application used by `simplex` tests to produce and verify payloads,
+//! Mock application used by consensus tests to produce and verify payloads,
 //! simulating proposal/verification latency and broadcasting via a mock relay.
 
 use super::relay::Relay;
 use crate::{
-    simplex::types::Context,
-    types::{Epoch, Round},
+    types::{Context, Epoch, Round},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
@@ -139,7 +138,7 @@ pub enum Certifier<D: Digest> {
     Cancel,
     /// Hold the sender alive without ever responding, simulating a certify that
     /// hangs indefinitely (e.g., block never arrives for reconstruction because
-    /// the proposer is dead and shard gossip didn't deliver enough shards).
+    /// the proposer is dead and shard gossip did not deliver enough shards).
     Pending,
 }
 
@@ -186,8 +185,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    /// Senders held alive to simulate certifications that hang indefinitely
-    /// (used by [`Certifier::Pending`]).
+    /// Senders held alive to simulate certifications that hang indefinitely.
     pending_certifications: Vec<oneshot::Sender<bool>>,
 }
 
@@ -417,11 +415,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             response.send_lossy(certified);
                         } else if matches!(self.should_certify, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.
-                            // This simulates a certify that hangs indefinitely (e.g.,
-                            // block never arrives for reconstruction).
                             self.pending_certifications.push(response);
                         }
-                        // Cancel: drop sender -> immediate RecvError on receiver.
+                        // Cancel mode drops sender so receiver resolves with cancellation.
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload);

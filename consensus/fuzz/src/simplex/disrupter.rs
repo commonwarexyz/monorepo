@@ -1,4 +1,5 @@
-use crate::{strategy::Strategy, types::Message, EPOCH};
+use super::{strategy::Strategy, types::Message};
+use crate::EPOCH;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{

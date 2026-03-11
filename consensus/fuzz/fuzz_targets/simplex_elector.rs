@@ -2,10 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_consensus::{
-    simplex::{
-        elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
-        scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
-    },
+    elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
+    simplex::scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
     types::{Round, View},
 };
 use commonware_cryptography::{

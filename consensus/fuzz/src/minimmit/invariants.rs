@@ -1,21 +1,41 @@
-use crate::{
-    bounds,
-    simplex::Simplex,
-    types::{Finalization, Notarization, Nullification, ReplicaState},
-};
+use super::Minimmit;
 use commonware_codec::{Encode, Read};
-use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
+use commonware_consensus::{
+    elector::Config as Elector,
+    minimmit::{mocks::reporter::Reporter, scheme, scheme::Scheme},
 };
 use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
+use commonware_utils::{Faults, M5f1, N5f1};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
-    let threshold = bounds::quorum(n) as usize;
+pub struct MNotarizationData {
+    pub payload: Sha256Digest,
+    pub signature_count: Option<usize>,
+}
+
+pub struct NullificationData {
+    pub signature_count: Option<usize>,
+}
+
+pub struct FinalizationData {
+    pub payload: Sha256Digest,
+    pub signature_count: Option<usize>,
+}
+
+/// Per-replica state: (m_notarizations, nullifications, finalizations) keyed by view.
+pub type MinimmitReplicaState = (
+    HashMap<u64, MNotarizationData>,
+    HashMap<u64, NullificationData>,
+    HashMap<u64, FinalizationData>,
+);
+
+pub fn check<P: Minimmit>(n: u32, replicas: Vec<MinimmitReplicaState>) {
+    let m_quorum = M5f1::quorum(n) as usize;
+    let l_quorum = N5f1::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.
@@ -57,36 +77,18 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
-    // Invariant: no_conflicting_notarization_in_finalized_view
-    // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
-    for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
-        for (&view, data) in notarizations.iter() {
+    // Invariant: no_conflicting_m_notarization_in_finalized_view
+    // If any replica finalized view v for a digest, no replica may have an M-notarization for a different digest.
+    for (idx, (m_notarizations, _, _)) in replicas.iter().enumerate() {
+        for (&view, data) in m_notarizations.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
                 assert_eq!(
                     finalized_digest, data.payload,
-                    "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_digest:?}",
+                    "Invariant violation: replica {idx} M-notarized view {view} with {:?} but finalized with {finalized_digest:?}",
                     data.payload
                 );
             }
         }
-    }
-
-    // Invariant: no_conflicting_quorum_notarizations
-    // In any view, there cannot be quorum notarizations for multiple digests.
-    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
-    for (notarizations, _, _) in replicas.iter() {
-        for (v, d) in notarizations {
-            let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
-            if is_quorum {
-                per_view.entry(*v).or_default().insert(d.payload);
-            }
-        }
-    }
-    for (v, payloads) in per_view {
-        assert!(
-            payloads.len() <= 1,
-            "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
-        );
     }
 
     // Invariant: no_finalization_for_nullified_view
@@ -104,34 +106,52 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
-    // Invariant: finalization_requires_notarization
-    // Any finalization must be backed by some notarization for the same (view, payload).
-    let notarized: HashSet<(u64, Sha256Digest)> = replicas
+    // Invariant: finalization_requires_m_notarization
+    // Any finalization must be backed by some M-notarization for the same (view, payload).
+    let m_notarized: HashSet<(u64, Sha256Digest)> = replicas
         .iter()
-        .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
+        .flat_map(|(m_notarizations, _, _)| m_notarizations.iter().map(|(&v, d)| (v, d.payload)))
         .collect();
     for (_, _, finalizations) in replicas.iter() {
         for (&v, d) in finalizations.iter() {
             assert!(
-                notarized.contains(&(v, d.payload)),
-                "Invariant violation: finalization without notarization: view {v}, payload={:?}",
+                m_notarized.contains(&(v, d.payload)),
+                "Invariant violation: finalization without M-notarization: view {v}, payload={:?}",
                 d.payload
             );
         }
     }
 
     // Enforce per-replica invariants
-    for (notarizations, nullifications, finalizations) in replicas.iter() {
+    for (m_notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid
-        // Certificates have the correct number of signatures.
+        // M-notarization certificates have >= M-quorum (2f+1) signatures.
+        for (view, data) in m_notarizations.iter() {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
+                assert!(
+                    count >= m_quorum,
+                    "Invariant violation: M-notarization in view {view} has {count} < {m_quorum} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
+                );
+            }
+        }
+
+        // Nullification certificates have >= M-quorum (2f+1) signatures.
         for (view, data) in nullifications.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
                 assert!(
-                    count >= threshold,
-                    "Invariant violation: nullification in view {view} has {count} < {threshold} signatures"
+                    count >= m_quorum,
+                    "Invariant violation: nullification in view {view} has {count} < {m_quorum} signatures"
                 );
             } else {
                 assert!(
@@ -141,31 +161,15 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             }
         }
 
-        for (view, data) in notarizations.iter() {
-            if <P::Scheme as CertificateScheme>::is_attributable() {
-                let count = data
-                    .signature_count
-                    .expect("Attributable scheme must have signature count");
-                assert!(
-                    count >= threshold,
-                    "Invariant violation: notarization in view {view} has {count} < {threshold} signatures"
-                );
-            } else {
-                assert!(
-                    data.signature_count.is_none(),
-                    "Invariant violation: non-attributable scheme should not expose signature count"
-                );
-            }
-        }
-
+        // Finalization certificates have >= L-quorum (n-f) signatures.
         for (view, data) in finalizations.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
                 assert!(
-                    count >= threshold,
-                    "Invariant violation: finalization in view {view} has {count} < {threshold} signatures"
+                    count >= l_quorum,
+                    "Invariant violation: finalization in view {view} has {count} < {l_quorum} signatures"
                 );
             } else {
                 assert!(
@@ -203,7 +207,7 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 pub fn extract<E, S, L>(
     reporters: Vec<Reporter<E, S, L, Sha256Digest>>,
     max_participants: usize,
-) -> Vec<ReplicaState>
+) -> Vec<MinimmitReplicaState>
 where
     E: CryptoRngCore,
     S: Scheme<Sha256Digest>,
@@ -212,13 +216,13 @@ where
     reporters
         .iter()
         .map(|reporter| {
-            let notarizations = reporter.notarizations.lock();
-            let notarization_data = notarizations
+            let m_notarizations = reporter.m_notarizations.lock();
+            let m_notarization_data = m_notarizations
                 .iter()
                 .map(|(view, cert)| {
                     (
                         view.get(),
-                        Notarization {
+                        MNotarizationData {
                             payload: cert.proposal.payload,
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
@@ -235,7 +239,7 @@ where
                 .map(|(view, cert)| {
                     (
                         view.get(),
-                        Nullification {
+                        NullificationData {
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
@@ -251,7 +255,7 @@ where
                 .map(|(view, cert)| {
                     (
                         view.get(),
-                        Finalization {
+                        FinalizationData {
                             payload: cert.proposal.payload,
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
@@ -262,7 +266,7 @@ where
                 })
                 .collect();
 
-            (notarization_data, nullification_data, finalization_data)
+            (m_notarization_data, nullification_data, finalization_data)
         })
         .collect()
 }
