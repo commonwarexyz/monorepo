@@ -365,11 +365,11 @@ fn encode<H: Hasher, S: Strategy>(
 /// # Returns
 ///
 /// - `data`: The decoded data.
-fn decode<H: Hasher, S: Strategy>(
+fn decode<'a, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: &[CheckedChunk<H::Digest>],
+    chunks: impl Iterator<Item = &'a CheckedChunk<H::Digest>>,
     strategy: &S,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
@@ -378,16 +378,19 @@ fn decode<H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
-    if chunks.len() < k {
+    let mut chunks = chunks.peekable();
+    let Some(first) = chunks.peek() else {
         return Err(Error::NotEnoughChunks);
-    }
+    };
 
     // Process checked chunks
-    let shard_len = chunks[0].shard.len();
+    let shard_len = first.shard.len();
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
+    let mut provided = 0usize;
     for chunk in chunks {
+        provided += 1;
         if &chunk.root != root {
             return Err(Error::CommitmentMismatch);
         }
@@ -408,6 +411,9 @@ fn decode<H: Hasher, S: Strategy>(
         } else {
             provided_recoveries.push((index as usize - k, chunk.shard.as_ref()));
         }
+    }
+    if provided < k {
+        return Err(Error::NotEnoughChunks);
     }
 
     // Decode original data
@@ -620,10 +626,10 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             .ok_or(Error::InvalidProof)
     }
 
-    fn decode(
+    fn decode<'a>(
         config: &Config,
         commitment: &Self::Commitment,
-        shards: &[Self::CheckedShard],
+        shards: impl Iterator<Item = &'a Self::CheckedShard>,
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         decode::<H, _>(
@@ -672,7 +678,7 @@ mod tests {
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -693,7 +699,7 @@ mod tests {
             .collect();
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::NotEnoughChunks)));
     }
 
@@ -707,14 +713,14 @@ mod tests {
         let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Include duplicate index by cloning the first chunk
-        let pieces = vec![
+        let pieces = [
             checked(root, chunks[0].clone()),
             checked(root, chunks[0].clone()),
             checked(root, chunks[1].clone()),
         ];
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::DuplicateIndex(0))));
     }
 
@@ -766,7 +772,7 @@ mod tests {
             .take(min as usize)
             .map(|c| checked(root, c))
             .collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -785,7 +791,7 @@ mod tests {
             .take(min as usize)
             .map(|c| checked(root, c))
             .collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -822,7 +828,7 @@ mod tests {
 
         // Attempt to decode with malicious root - rejected because checked
         // chunks are bound to a different commitment.
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &malicious_root, minimal.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::CommitmentMismatch)));
     }
 
@@ -865,7 +871,7 @@ mod tests {
         }
 
         // Try to decode with the tampered chunk
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -925,7 +931,7 @@ mod tests {
             .collect();
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &malicious_root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -976,7 +982,8 @@ mod tests {
             ));
         }
 
-        let result = decode::<Sha256, _>(total, min, &non_canonical_root, &pieces, &STRATEGY);
+        let result =
+            decode::<Sha256, _>(total, min, &non_canonical_root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -999,7 +1006,7 @@ mod tests {
         ];
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 
@@ -1018,7 +1025,7 @@ mod tests {
             .take(min as usize)
             .map(|c| checked(root, c))
             .collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 

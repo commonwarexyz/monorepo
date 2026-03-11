@@ -627,17 +627,14 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         Error::InsufficientShards(actual, expected)
     }
 
-    fn decode(
+    fn decode<'a>(
         _config: &Config,
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
-        shards: &[Self::CheckedShard],
+        shards: impl Iterator<Item = &'a Self::CheckedShard>,
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         if checking_data.commitment != *commitment {
-            return Err(Error::InvalidShard);
-        }
-        if shards.iter().any(|shard| shard.commitment != *commitment) {
             return Err(Error::InvalidShard);
         }
 
@@ -650,16 +647,21 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             min_shards,
             ..
         } = checking_data.topology;
-        if shards.len() < min_shards {
-            return Err(Error::InsufficientShards(shards.len(), min_shards));
-        }
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
+        let mut shard_count = 0usize;
         for shard in shards {
+            shard_count += 1;
+            if shard.commitment != *commitment {
+                return Err(Error::InvalidShard);
+            }
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
             for (&i, row) in indices.iter().zip(shard.shard.iter()) {
                 evaluation.fill_row(u64::from(i) as usize, row);
             }
+        }
+        if shard_count < min_shards {
+            return Err(Error::InsufficientShards(shard_count, min_shards));
         }
         // This should never happen, because we check each shard, and the shards
         // should have distinct rows. But, as a sanity check, this doesn't hurt.
@@ -712,9 +714,14 @@ mod tests {
             shard: checked_shard0.shard.clone(),
             commitment: checked_shard0.commitment,
         };
-        let shards = vec![checked_shard0, duplicate];
-        let result =
-            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, &STRATEGY);
+        let shards = [checked_shard0, duplicate];
+        let result = Zoda::<Sha256>::decode(
+            &config,
+            &commitment,
+            checking_data,
+            shards.iter(),
+            &STRATEGY,
+        );
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);

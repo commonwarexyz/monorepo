@@ -118,11 +118,11 @@ commonware_macros::stability_scope!(ALPHA {
     ///         .collect();
     ///
     /// // Decode from any minimum_shards-sized subset.
-    /// let data2 = RS::decode(&config, &commitment, &checked_shards[..2], &STRATEGY).unwrap();
+    /// let data2 = RS::decode(&config, &commitment, checked_shards[..2].iter(), &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data2[..]);
     ///
     /// // Decoding works with different shards, with a guarantee to get the same result.
-    /// let data3 = RS::decode(&config, &commitment, &checked_shards[1..], &STRATEGY).unwrap();
+    /// let data3 = RS::decode(&config, &commitment, checked_shards[1..].iter(), &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
     ///
@@ -199,10 +199,10 @@ commonware_macros::stability_scope!(ALPHA {
         /// commitment than the one passed to `decode`. Mixing checked shards from
         /// separate `encode` calls (and thus different commitments) must return an
         /// error.
-        fn decode(
+        fn decode<'a>(
             config: &Config,
             commitment: &Self::Commitment,
-            shards: &[Self::CheckedShard],
+            shards: impl Iterator<Item = &'a Self::CheckedShard>,
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
     }
@@ -246,7 +246,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///     &config,
     ///     &commitment,
     ///     checking_data,
-    ///     &[checked_0, checked_1],
+    ///     [checked_0, checked_1].iter(),
     ///     &STRATEGY,
     /// )
     /// .unwrap();
@@ -356,11 +356,11 @@ commonware_macros::stability_scope!(ALPHA {
         /// commitment than the one passed to `decode`. Mixing checked shards from
         /// separate `encode` calls (and thus different commitments) must return an
         /// error.
-        fn decode(
+        fn decode<'a>(
             config: &Config,
             commitment: &Self::Commitment,
             checking_data: Self::CheckingData,
-            shards: &[Self::CheckedShard],
+            shards: impl Iterator<Item = &'a Self::CheckedShard>,
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
     }
@@ -416,27 +416,24 @@ commonware_macros::stability_scope!(ALPHA {
             })
         }
 
-        fn decode(
+        fn decode<'a>(
             config: &Config,
             commitment: &Self::Commitment,
-            shards: &[Self::CheckedShard],
+            shards: impl Iterator<Item = &'a Self::CheckedShard>,
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error> {
-            let Some(first) = shards.first() else {
+            let mut shards = shards.peekable();
+            let Some(first) = shards.peek() else {
                 return Err(P::insufficient_shards(
                     0,
                     usize::from(config.minimum_shards.get()),
                 ));
             };
-            let checked_shards = shards
-                .iter()
-                .map(|shard| shard.checked_shard.clone())
-                .collect::<Vec<_>>();
             P::decode(
                 config,
                 commitment,
                 first.checking_data.clone(),
-                &checked_shards,
+                shards.map(|shard| &shard.checked_shard),
                 strategy,
             )
         }
@@ -519,7 +516,7 @@ mod test {
             }
 
             checked_shards.reverse();
-            let decoded = S::decode(config, &commitment, &checked_shards, &Sequential).unwrap();
+            let decoded = S::decode(config, &commitment, checked_shards.iter(), &Sequential).unwrap();
             assert_eq!(decoded, data);
         }
 
@@ -534,7 +531,12 @@ mod test {
             let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
             let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
 
-            let result = S::decode(config, &commitment_a, &[checked_a, checked_b], &Sequential);
+            let result = S::decode(
+                config,
+                &commitment_a,
+                [checked_a, checked_b].iter(),
+                &Sequential,
+            );
             assert!(
                 result.is_err(),
                 "decode must reject shards checked against different commitments"
@@ -543,7 +545,12 @@ mod test {
 
         fn decode_rejects_empty_checked_shards<S: Scheme>(config: &Config, data: &[u8]) {
             let (commitment, _) = S::encode(config, data, &Sequential).unwrap();
-            let result = S::decode(config, &commitment, &[], &Sequential);
+            let result = S::decode(
+                config,
+                &commitment,
+                core::iter::empty(),
+                &Sequential,
+            );
             assert!(result.is_err(), "decode must reject empty checked shard sets");
         }
 
@@ -658,7 +665,7 @@ mod test {
                 config,
                 &commitment,
                 checking_data,
-                &checked_shards,
+                checked_shards.iter(),
                 &Sequential,
             )
             .unwrap();
@@ -688,7 +695,7 @@ mod test {
                 config,
                 &commitment_a,
                 checking_data_a,
-                &[checked_a, checked_b],
+                [checked_a, checked_b].iter(),
                 &Sequential,
             );
             assert!(
@@ -696,7 +703,13 @@ mod test {
                 "decode must reject checked shards derived from a different commitment"
             );
 
-            let decode_result = S::decode(config, &commitment_b, checking_data_b, &[], &Sequential);
+            let decode_result = S::decode(
+                config,
+                &commitment_b,
+                checking_data_b,
+                core::iter::empty(),
+                &Sequential,
+            );
             assert!(
                 decode_result.is_err(),
                 "decode must reject insufficient checked shards"

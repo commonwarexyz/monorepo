@@ -101,13 +101,18 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
 
                                     // Decode data
                                     if conc > 1 {
-                                        S::decode(&config, &commitment, &checked_shards, &strategy)
+                                        S::decode(
+                                            &config,
+                                            &commitment,
+                                            checked_shards.iter(),
+                                            &strategy,
+                                        )
                                             .unwrap()
                                     } else {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            &checked_shards,
+                                            checked_shards.iter(),
                                             &Sequential,
                                         )
                                         .unwrap()

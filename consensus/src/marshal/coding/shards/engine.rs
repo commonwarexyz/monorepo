@@ -558,7 +558,7 @@ where
         let blob = C::decode(
             &commitment.config(),
             &commitment.root(),
-            state.checked_shards(),
+            state.checked_shards().iter(),
             &self.strategy,
         )
         .map_err(Error::Coding)?;

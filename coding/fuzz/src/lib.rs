@@ -84,7 +84,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
         .collect::<Vec<_>>();
 
-    let decoded = S::decode(&config, &commitment, &checked_shards, &STRATEGY).unwrap();
+    let decoded = S::decode(&config, &commitment, checked_shards.iter(), &STRATEGY).unwrap();
     assert_eq!(&decoded, &data);
 }
 
@@ -127,7 +127,7 @@ pub fn fuzz_phased<S: PhasedScheme>(input: FuzzInput) {
         &config,
         &commitment,
         my_checking_data,
-        &checked_shards,
+        checked_shards.iter(),
         &STRATEGY,
     )
     .unwrap();

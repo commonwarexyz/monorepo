@@ -119,7 +119,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                             &config,
                                             &commitment,
                                             checking_data,
-                                            &checked_shards,
+                                            checked_shards.iter(),
                                             &strategy,
                                         )
                                         .unwrap()
@@ -128,7 +128,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                             &config,
                                             &commitment,
                                             checking_data,
-                                            &checked_shards,
+                                            checked_shards.iter(),
                                             &Sequential,
                                         )
                                         .unwrap()
