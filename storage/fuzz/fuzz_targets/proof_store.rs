@@ -4,12 +4,13 @@ use arbitrary::Arbitrary;
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::mmr::{
-    verification::ProofStore, Location, Proof, StandardHasher as Standard,
+    verification::ProofStore, Location, Position, Proof, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
 
 const MAX_ITEMS: usize = 256;
+const MAX_PEAKS: usize = 64;
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -19,6 +20,7 @@ struct FuzzInput {
     root: Digest,
     range: Range<Location>,
     locations: Vec<Location>,
+    peaks: Vec<(u64, [u8; 32])>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -26,6 +28,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let num_digests = u.int_in_range(0..=MAX_ITEMS)?;
         let num_elements = u.int_in_range(0..=MAX_ITEMS)?;
         let num_locations = u.int_in_range(0..=MAX_ITEMS)?;
+        let num_peaks = u.int_in_range(0..=MAX_PEAKS)?;
         Ok(FuzzInput {
             proof: Proof {
                 leaves: Location::from(u.arbitrary::<u64>()?),
@@ -41,6 +44,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             range: Location::from(u.arbitrary::<u64>()?)..Location::from(u.arbitrary::<u64>()?),
             locations: (0..num_locations)
                 .map(|_| Ok(Location::from(u.arbitrary::<u64>()?)))
+                .collect::<arbitrary::Result<Vec<_>>>()?,
+            peaks: (0..num_peaks)
+                .map(|_| Ok((u.arbitrary::<u64>()?, u.arbitrary::<[u8; 32]>()?)))
                 .collect::<arbitrary::Result<Vec<_>>>()?,
         })
     }
@@ -74,7 +80,13 @@ fn fuzz(input: FuzzInput) {
         );
     }
 
-    if let Ok(proof) = proof_store.multi_proof(input.locations.as_slice(), &[]) {
+    let peaks: Vec<(Position, Digest)> = input
+        .peaks
+        .iter()
+        .map(|(pos, bytes)| (Position::from(*pos), Digest::from(*bytes)))
+        .collect();
+
+    if let Ok(proof) = proof_store.multi_proof(input.locations.as_slice(), &peaks) {
         let _ = proof.verify_multi_inclusion(
             &mut hasher,
             &input
