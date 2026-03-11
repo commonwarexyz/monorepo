@@ -129,8 +129,6 @@ stability_scope!(BETA {
         InvalidChecksum,
         #[error("offset overflow")]
         OffsetOverflow,
-        #[error("immutable blob")]
-        ImmutableBlob,
         #[error("io error: {0}")]
         Io(#[from] IoError),
         #[error("buffer pool: {0}")]

@@ -160,7 +160,8 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await {
+        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await
+        {
             Ok(a) => a,
             Err(_) => {
                 // Corruption was severe enough to fail initialization - this is acceptable.

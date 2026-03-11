@@ -6,13 +6,11 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    kv::Gettable,
     mmr::{Location, Position},
     qmdb::{
         self,
-        any::states::CleanAny,
+        any::traits::DbAny,
         operation::Operation as OperationTrait,
-        store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{
             self,
             engine::{Config, NextStep},
@@ -48,9 +46,7 @@ pub(crate) trait Destructible {
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Destructible
-    for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
-{
+impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }
@@ -75,11 +71,9 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 
 /// Harness for sync tests.
 pub(crate) trait SyncTestHarness: Sized + 'static {
-    /// The database type being tested (Clean state: Merkleized + Durable).
+    /// The database type being tested.
     type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest, Config: Clone>
-        + CleanAny<Key = Digest>
-        + MerkleizedStore<Digest = Digest>
-        + Gettable<Key = Digest>;
+        + DbAny<Key = Digest, Digest = Digest>;
 
     /// Return the root the sync engine targets.
     fn sync_target_root(db: &Self::Db) -> Digest;
@@ -103,7 +97,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         config: ConfigOf<Self>,
     ) -> impl std::future::Future<Output = Self::Db> + Send;
 
-    /// Apply operations to a database and commit (returns to Clean state)
+    /// Apply operations to a database and commit.
     fn apply_ops(
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
@@ -245,7 +239,7 @@ where
         let target_op_count = target_db.bounds().await.end;
         let target_inactivity_floor = target_db.inactivity_floor_loc().await;
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
         let lower_bound = target_db.inactivity_floor_loc().await;
 
         // Configure sync
@@ -275,10 +269,10 @@ where
             synced_db.inactivity_floor_loc().await,
             target_inactivity_floor
         );
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
 
         // Verify persistence
-        let final_root = MerkleizedStore::root(&synced_db);
+        let final_root = synced_db.root();
         let final_op_count = synced_db.bounds().await.end;
         let final_inactivity_floor = synced_db.inactivity_floor_loc().await;
 
@@ -291,7 +285,7 @@ where
             reopened_db.inactivity_floor_loc().await,
             final_inactivity_floor
         );
-        assert_eq!(MerkleizedStore::root(&reopened_db), final_root);
+        assert_eq!(reopened_db.root(), final_root);
 
         // Cleanup
         reopened_db.destroy().await.unwrap();
@@ -321,7 +315,7 @@ where
 
         let upper_bound = target_db.bounds().await.end;
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
         let lower_bound = target_db.inactivity_floor_loc().await;
 
         // Add another operation after the sync range
@@ -353,7 +347,7 @@ where
         assert_eq!(synced_db.bounds().await.end, upper_bound);
 
         // Verify the final root digest matches our target
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
 
         // Verify the synced database doesn't have any operations beyond the sync range.
         // (the final_op should not be present)
@@ -399,7 +393,7 @@ where
         // commit already done in apply_ops
 
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
         let lower_bound = target_db.inactivity_floor_loc().await;
         let upper_bound = target_db.bounds().await.end;
 
@@ -430,7 +424,7 @@ where
         assert_eq!(synced_db.inactivity_floor_loc().await, lower_bound);
         assert_eq!(bounds.end, target_db.bounds().await.end);
         // Verify the root digest matches the target
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
 
         // Verify that original operations are present and correct (by key lookup)
         for target_op in &original_ops_data {
@@ -497,7 +491,7 @@ where
 
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
         let lower_bound = target_db.inactivity_floor_loc().await;
         let upper_bound = target_db.bounds().await.end;
 
@@ -527,7 +521,7 @@ where
         assert_eq!(synced_db.inactivity_floor_loc().await, lower_bound);
 
         // Verify the root digest matches the target
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
 
         // Verify state matches for sample operations (via key lookup)
         for target_op in &target_ops {
@@ -701,7 +695,7 @@ where
             let new_lower_bound = target_db.inactivity_floor_loc().await;
             let new_upper_bound = target_db.bounds().await.end;
             let new_sync_root = H::sync_target_root(&target_db);
-            let new_verification_root = MerkleizedStore::root(&target_db);
+            let new_verification_root = target_db.root();
 
             // Create client with placeholder initial target (stale compared to final target)
             let (update_sender, update_receiver) = mpsc::channel(1);
@@ -734,7 +728,7 @@ where
             let synced_db: H::Db = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected final state
-            assert_eq!(MerkleizedStore::root(&synced_db), new_verification_root);
+            assert_eq!(synced_db.root(), new_verification_root);
             assert_eq!(synced_db.bounds().await.end, new_upper_bound);
             assert_eq!(synced_db.inactivity_floor_loc().await, new_lower_bound);
 
@@ -832,7 +826,7 @@ where
         let lower_bound = target_db.inactivity_floor_loc().await;
         let upper_bound = target_db.bounds().await.end;
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
 
         // Create client with target that will complete immediately
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -865,7 +859,7 @@ where
             .await;
 
         // Verify the synced database has the expected state
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.bounds().await.end, upper_bound);
         assert_eq!(synced_db.inactivity_floor_loc().await, lower_bound);
 
@@ -947,7 +941,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             let new_lower_bound = db.inactivity_floor_loc().await;
             let new_upper_bound = db.bounds().await.end;
             let new_sync_root = H::sync_target_root(&db);
-            let new_verification_root = MerkleizedStore::root(&db);
+            let new_verification_root = db.root();
             *db_guard = Some(db);
 
             // Send target update with new target
@@ -966,7 +960,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let synced_db = client.sync().await.unwrap();
 
         // Verify the synced database has the expected final state
-        assert_eq!(MerkleizedStore::root(&synced_db), new_verification_root);
+        assert_eq!(synced_db.root(), new_verification_root);
 
         // Verify the target database matches the synced database
         let target_db = Arc::try_unwrap(target_db).map_or_else(
@@ -981,10 +975,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 synced_db.inactivity_floor_loc().await,
                 target_db.inactivity_floor_loc().await
             );
-            assert_eq!(
-                MerkleizedStore::root(&synced_db),
-                MerkleizedStore::root(&target_db)
-            );
+            assert_eq!(synced_db.root(), target_db.root());
         }
 
         synced_db.destroy().await.unwrap();
@@ -1009,7 +1000,7 @@ where
 
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
-        let verification_root = MerkleizedStore::root(&target_db);
+        let verification_root = target_db.root();
         let lower_bound = target_db.inactivity_floor_loc().await;
         let upper_bound = target_db.bounds().await.end;
 
@@ -1033,10 +1024,10 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify initial sync worked
-        assert_eq!(MerkleizedStore::root(&synced_db), verification_root);
+        assert_eq!(synced_db.root(), verification_root);
 
         // Save state before dropping
-        let expected_root = MerkleizedStore::root(&synced_db);
+        let expected_root = synced_db.root();
         let expected_op_count = synced_db.bounds().await.end;
         let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc().await;
 
@@ -1046,7 +1037,7 @@ where
             H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
 
         // Verify the state is unchanged
-        assert_eq!(MerkleizedStore::root(&reopened_db), expected_root);
+        assert_eq!(reopened_db.root(), expected_root);
         assert_eq!(reopened_db.bounds().await.end, expected_op_count);
         assert_eq!(
             reopened_db.inactivity_floor_loc().await,
@@ -1097,14 +1088,14 @@ where
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
-        let root_after_sync = MerkleizedStore::root(&synced_db);
+        let root_after_sync = synced_db.root();
 
         // Apply additional operations after sync.
         let more_ops = H::create_ops_seeded(10, 1);
         let synced_db = H::apply_ops(synced_db, more_ops).await;
 
         // Root should change after applying more ops.
-        assert_ne!(MerkleizedStore::root(&synced_db), root_after_sync);
+        assert_ne!(synced_db.root(), root_after_sync);
         assert!(synced_db.bounds().await.end > upper_bound);
 
         synced_db.destroy().await.unwrap();
@@ -1216,7 +1207,7 @@ where
         let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc().await;
         let sync_lower_bound = target_db.inactivity_floor_loc().await;
         let sync_upper_bound = bounds.end;
-        let target_hash = MerkleizedStore::root(&target_db);
+        let target_hash = target_db.root();
 
         let (mmr, journal) = target_db.into_log_components();
 
@@ -1241,7 +1232,7 @@ where
         assert_eq!(sync_db.inactivity_floor_loc().await, sync_lower_bound);
 
         // Verify the root digest matches the target (verifies content integrity)
-        assert_eq!(MerkleizedStore::root(&sync_db), target_hash);
+        assert_eq!(sync_db.root(), target_hash);
 
         sync_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
@@ -1276,7 +1267,7 @@ where
         let pinned_nodes = source_db
             .pinned_nodes_at(Position::try_from(lower_bound).unwrap())
             .await;
-        let target_hash = MerkleizedStore::root(&source_db);
+        let target_hash = source_db.root();
         let target_op_count = source_db.bounds().await.end;
         let target_inactivity_floor = source_db.inactivity_floor_loc().await;
 
@@ -1302,7 +1293,7 @@ where
         assert_eq!(db.inactivity_floor_loc().await, lower_bound);
 
         // Verify the root digest matches the target
-        assert_eq!(MerkleizedStore::root(&db), target_hash);
+        assert_eq!(db.root(), target_hash);
 
         db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
@@ -1324,7 +1315,7 @@ where
         // An empty database has exactly 1 operation (the initial CommitFloor)
         assert_eq!(source_db.bounds().await.end, Location::new(1));
 
-        let target_hash = MerkleizedStore::root(&source_db);
+        let target_hash = source_db.root();
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
@@ -1344,7 +1335,7 @@ where
         // Verify database state
         assert_eq!(synced_db.bounds().await.end, Location::new(1));
         assert_eq!(synced_db.inactivity_floor_loc().await, Location::new(0));
-        assert_eq!(MerkleizedStore::root(&synced_db), target_hash);
+        assert_eq!(synced_db.root(), target_hash);
 
         // Test that we can perform operations on the synced database
         let ops = H::create_ops(10);
@@ -1360,10 +1351,7 @@ where
 
 mod harnesses {
     use super::SyncTestHarness;
-    use crate::{
-        qmdb::{any::value::VariableEncoding, store::MerkleizedStore},
-        translator::TwoCap,
-    };
+    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
     use commonware_cryptography::sha256::Digest;
     use commonware_runtime::{deterministic::Context, BufferPooler};
 
@@ -1372,10 +1360,10 @@ mod harnesses {
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
-        type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
+        type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            MerkleizedStore::root(db)
+            db.root()
         }
 
         fn config(
@@ -1410,12 +1398,18 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            let finalized = db
+                .new_batch()
+                .merkleize(None::<Digest>)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -1427,7 +1421,7 @@ mod harnesses {
         type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            MerkleizedStore::root(db)
+            db.root()
         }
 
         fn config(
@@ -1465,16 +1459,18 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Vec<u8>>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
+            let finalized = db
+                .new_batch()
+                .merkleize(None::<Vec<u8>>)
                 .await
                 .unwrap()
-                .0
-                .into_merkleized()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -1486,7 +1482,7 @@ mod harnesses {
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            MerkleizedStore::root(db)
+            db.root()
         }
 
         fn config(
@@ -1521,12 +1517,18 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            let finalized = db
+                .new_batch()
+                .merkleize(None::<Digest>)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 
@@ -1538,7 +1540,7 @@ mod harnesses {
         type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            MerkleizedStore::root(db)
+            db.root()
         }
 
         fn config(
@@ -1574,16 +1576,18 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            db: Self::Db,
+            mut db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
         ) -> Self::Db {
-            let mut db = db.into_mutable();
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Vec<u8>>)
+            let finalized = db
+                .new_batch()
+                .merkleize(None::<Vec<u8>>)
                 .await
                 .unwrap()
-                .0
-                .into_merkleized()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            db
         }
     }
 }

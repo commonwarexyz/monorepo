@@ -159,7 +159,7 @@ pub trait MultiArchive: Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{kv::tests::test_key, translator::TwoCap};
+    use crate::translator::TwoCap;
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
@@ -168,6 +168,14 @@ mod tests {
         Metrics, Runner,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+
+    fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
     use rand::Rng;
     use std::{
         collections::BTreeMap,

@@ -7,11 +7,10 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
-    kv::{Deletable as _, Updatable as _},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            states::{MutableAny, UnmerkleizedDurableAny},
+            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
@@ -20,7 +19,6 @@ use commonware_storage::{
             unordered::{fixed::Db as UCurrent, variable::Db as UVCurrent},
             FixedConfig as CConfig, VariableConfig as VariableCurrentConfig,
         },
-        store::LogStore,
     },
     translator::EightCap,
 };
@@ -94,7 +92,7 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) Db type aliases for Any databases.
+/// Db type aliases for Any databases.
 type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
 type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
 type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
@@ -178,25 +176,25 @@ fn variable_current_cfg(
     }
 }
 
-/// Get an unordered fixed Any QMDB instance in clean state.
+/// Get an unordered fixed Any QMDB instance instance.
 async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let any_cfg = any_cfg(&ctx);
     UFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Get an ordered fixed Any QMDB instance in clean state.
+/// Get an ordered fixed Any QMDB instance instance.
 async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let any_cfg = any_cfg(&ctx);
     OFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Get an unordered variable Any QMDB instance in clean state.
+/// Get an unordered variable Any QMDB instance instance.
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let variable_any_cfg = variable_any_cfg(&ctx);
     UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
-/// Get an ordered variable Any QMDB instance in clean state.
+/// Get an ordered variable Any QMDB instance instance.
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
     let variable_any_cfg = variable_any_cfg(&ctx);
     OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
@@ -239,60 +237,48 @@ async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations (if Some), or at the end (if None).
-///
-/// Takes a mutable database and returns it in durable state after final commit.
 async fn gen_random_kv<M>(
-    mut db: M,
+    db: &mut M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> M::Durable
-where
-    M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
+) where
+    M: DbAny<Key = Digest, Value = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
-    let mut batch = db.start_batch();
 
-    for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(k, v).await.expect("update shouldn't fail");
-    }
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
-    batch = db.start_batch();
-
-    for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
-        if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            batch.delete(rand_key).await.expect("delete shouldn't fail");
-            continue;
+    // Seed the db with `num_elements` entries.
+    {
+        let mut batch = db.new_batch();
+        for i in 0u64..num_elements {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            batch = batch.write(k, Some(v));
         }
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch
-            .update(rand_key, v)
-            .await
-            .expect("update shouldn't fail");
-        if let Some(freq) = commit_frequency {
-            if rng.next_u32() % freq == 0 {
-                let iter = batch.into_iter();
-                db.write_batch(iter)
-                    .await
-                    .expect("write_batch shouldn't fail");
-                let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-                db = durable.into_mutable();
-                batch = db.start_batch();
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
+    }
+
+    // Perform `num_operations` random updates/deletes, committing periodically.
+    {
+        let mut batch = db.new_batch();
+        for _ in 0u64..num_operations {
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+                batch = batch.write(rand_key, None);
+                continue;
+            }
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            batch = batch.write(rand_key, Some(v));
+            if let Some(freq) = commit_frequency {
+                if rng.next_u32() % freq == 0 {
+                    let finalized = batch.merkleize(None).await.unwrap().finalize();
+                    db.apply_batch(finalized).await.unwrap();
+                    batch = db.new_batch();
+                }
             }
         }
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
     }
-
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
-    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
-    durable
 }

@@ -123,6 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
+        self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
     }
@@ -136,6 +137,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
         record.connect();
+        let _ = self
+            .metrics
+            .connected
+            .get_or_create(&metrics::Peer::new(peer))
+            .try_set(self.context.current().epoch_millis());
     }
 
     /// Stores a new peer set.
@@ -438,8 +444,8 @@ mod tests {
         Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Quota, Runner};
-    use commonware_utils::{hostname, NZU32};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_utils::{hostname, SystemTimeExt, NZU32};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -447,6 +453,14 @@ mod tests {
 
     fn addr(socket: SocketAddr) -> Address {
         Address::Symmetric(socket)
+    }
+
+    fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
+        metrics
+            .lines()
+            .find(|line| line.starts_with(&format!("{name}{{peer=\"{peer}\"}} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<i64>().ok())
     }
 
     #[test]
@@ -598,6 +612,49 @@ mod tests {
                     .unwrap(),
             );
             assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn test_connected_metric_tracks_active_peers() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory
+                .add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
+                .unwrap();
+
+            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
+            directory.connect(&pk_1);
+
+            context.sleep(Duration::from_secs(5)).await;
+
+            let metrics = context.encode();
+            assert_eq!(
+                metric_value(&metrics, "connected", &pk_1.to_string()),
+                Some(connected_at)
+            );
+
+            directory.release(super::Metadata::Listener(pk_1.clone()));
+
+            let metrics = context.encode();
+            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
         });
     }
 

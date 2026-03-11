@@ -10,11 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::qmdb::{
-    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
-    store::LogStore,
-    Error,
-};
+use commonware_storage::qmdb::{any::traits::DbAny, Error};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -105,34 +101,25 @@ fn bench_fixed_generate(c: &mut Criterion) {
 
 /// Test the database generation and cleanup.
 ///
-/// Takes a clean database, converts to mutable, generates data, then prunes and destroys.
+/// Generates data, prunes, and destroys.
 async fn test_db<C>(
-    db: C,
+    mut db: C,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    C: CleanAny<Key = Digest>,
-    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    <C::Mutable as MutableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
+    C: DbAny<Key = Digest, Value = Digest>,
 {
     let start = Instant::now();
 
-    // Convert clean → mutable
-    let mutable = db.into_mutable();
-
-    // Generate random operations, returns in durable state
-    let durable = gen_random_kv(mutable, elements, operations, Some(commit_frequency)).await;
-
-    // Convert durable → provable (clean) for pruning
-    let mut clean = durable.into_merkleized().await?;
-    clean.prune(clean.inactivity_floor_loc().await).await?;
-    clean.sync().await?;
+    // Generate random operations
+    gen_random_kv(&mut db, elements, operations, Some(commit_frequency)).await;
+    db.prune(db.inactivity_floor_loc().await).await?;
+    db.sync().await?;
 
     let res = start.elapsed();
-    clean.destroy().await?; // don't time destroy
+    db.destroy().await?; // don't time destroy
 
     Ok(res)
 }

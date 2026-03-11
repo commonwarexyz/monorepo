@@ -15,10 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr::Location,
-    qmdb::{
-        current::{unordered::variable::Db as Current, VariableConfig},
-        store::LogStore as _,
-    },
+    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64};
@@ -36,7 +33,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type CleanDb = Current<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db = Current<deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -115,6 +112,66 @@ fn make_config(
     }
 }
 
+/// Remove affected keys from committed since their recovered value is unknown.
+fn forget_pending(
+    pending: &HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for key in pending.keys() {
+        committed.remove(key);
+    }
+}
+
+/// Merge pending changes into committed after a successful commit.
+fn apply_pending(
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) {
+    for (k, v) in pending.drain() {
+        match v {
+            Some(val) => {
+                committed.insert(k, val);
+            }
+            None => {
+                committed.remove(&k);
+            }
+        }
+    }
+}
+
+/// Commit pending writes. Returns `true` on success, `false` on error.
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    committed: &mut HashMap<RawKey, RawValue>,
+) -> bool {
+    let result = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        let merkleized = match batch.merkleize(None).await {
+            Ok(m) => m,
+            Err(_) => {
+                forget_pending(pending, committed);
+                return false;
+            }
+        };
+        db.apply_batch(merkleized.finalize()).await
+    };
+    if result.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    if db.commit().await.is_err() {
+        forget_pending(pending, committed);
+        return false;
+    }
+    apply_pending(pending, committed);
+    true
+}
+
 fn fuzz(input: FuzzInput) {
     if input.operations.is_empty() {
         return;
@@ -139,7 +196,7 @@ fn fuzz(input: FuzzInput) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let db = CleanDb::init(
+            let mut db = Db::init(
                 ctx.with_label("db"),
                 make_config(
                     &ctx,
@@ -163,70 +220,50 @@ fn fuzz(input: FuzzInput) {
 
             // Active KV pairs after the last successful commit.
             let mut committed: HashMap<RawKey, RawValue> = HashMap::new();
-            // Uncommitted changes since the last commit. None = delete, Some = update.
+            // Uncommitted changes since the last commit. None = delete, Some = upsert.
             let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
 
-            let mut db = Some(db.into_mutable());
+            // Accumulate writes until Commit, matching the intended
+            // pending/committed separation.
+            let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                let Some(mut current) = db.take() else {
-                    break;
-                };
-
                 match op {
                     CurrentOperation::Update { key, value } => {
-                        let k = Key::new(*key);
-                        let v = Value::new(*value);
-                        if current.write_batch([(k, Some(v))]).await.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
-                        db = Some(current);
                     }
                     CurrentOperation::Delete { key } => {
-                        let k = Key::new(*key);
-                        if current.write_batch([(k, None)]).await.is_err() {
-                            break;
-                        }
+                        pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
-                        db = Some(current);
                     }
                     CurrentOperation::Commit => {
-                        let Ok((durable_db, _)) = current.commit(None).await else {
-                            // A failed commit may have partially persisted
-                            // pending operations.
-                            // Remove affected keys from committed since their
-                            // recovered value is unknown.
-                            for key in pending.keys() {
-                                committed.remove(key);
-                            }
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
                             break;
-                        };
-                        // Data is durable. Merge pending into committed.
-                        for (k, v) in pending.drain() {
-                            match v {
-                                Some(val) => {
-                                    committed.insert(k, val);
-                                }
-                                None => {
-                                    committed.remove(&k);
-                                }
-                            }
                         }
-                        let Ok(clean_db) = durable_db.into_merkleized().await else {
-                            break;
-                        };
-                        db = Some(clean_db.into_mutable());
                     }
                     CurrentOperation::Prune => {
-                        let Ok(mut merkleized_db) = current.into_merkleized().await else {
-                            break;
-                        };
-                        let floor = merkleized_db.inactivity_floor_loc();
-                        if merkleized_db.prune(floor).await.is_err() {
+                        if !commit_pending(
+                            &mut db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
                             break;
                         }
-                        db = Some(merkleized_db.into_mutable());
+                        let floor = db.inactivity_floor_loc();
+                        if db.prune(floor).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -242,7 +279,7 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db = CleanDb::init(
+            let mut db = Db::init(
                 ctx.with_label("recovered"),
                 make_config(
                     &ctx,
@@ -277,14 +314,14 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    CleanDb::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    Db::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
 
             // Verify range proofs over the recovered DB.
             let floor = *db.inactivity_floor_loc();
-            let size = *db.size().await;
+            let size = *db.bounds().await.end;
             for i in floor..size {
                 let loc = Location::new(i);
                 let (proof, ops, chunks) = db
@@ -292,30 +329,29 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    CleanDb::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
 
             // Verify the recovered DB is usable.
-            let mut db = db.into_mutable();
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            db.write_batch([(test_key, Some(test_value))])
+            let finalized = db
+                .new_batch()
+                .write(test_key, Some(test_value))
+                .merkleize(None)
                 .await
-                .expect("write_batch after recovery should succeed");
-
-            let (durable_db, _) = db
-                .commit(None)
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized)
+                .await
+                .expect("apply_batch after recovery should succeed");
+            db.commit()
                 .await
                 .expect("commit after recovery should succeed");
-            let clean_db = durable_db
-                .into_merkleized()
-                .await
-                .expect("merkleize after recovery should succeed");
 
-            clean_db
-                .destroy()
+            db.destroy()
                 .await
                 .expect("destroy after recovery should succeed");
         }

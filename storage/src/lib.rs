@@ -28,7 +28,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod freezer;
     pub mod index;
     pub mod journal;
-    pub mod kv;
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;

@@ -1,7 +1,6 @@
 use super::{Config, Error};
 use crate::{
     journal::segmented::variable::{Config as JConfig, Journal},
-    kv,
     rmap::RMap,
 };
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
@@ -261,7 +260,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         // Store item in journal
         let record = Record::new(index, value);
         let section = self.section(index);
-        let (offset, _) = self.journal.append(section, record).await?;
+        let (offset, _) = self.journal.append(section, &record).await?;
 
         // Store index
         self.indices.insert(index, offset);
@@ -303,16 +302,6 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: CodecShared> kv::Gettable for Cache<E, V> {
-    type Key = u64;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(*key).await
-    }
-}
-
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
@@ -326,18 +315,19 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::{assert_gettable, assert_send};
     use commonware_runtime::deterministic::Context;
 
     type TestCache = Cache<Context, u64>;
 
+    fn is_send<T: Send>(_: T) {}
+
     #[allow(dead_code)]
     fn assert_cache_futures_are_send(cache: &TestCache, key: &u64) {
-        assert_gettable(cache, key);
+        is_send(cache.get(*key));
     }
 
     #[allow(dead_code)]
     fn assert_cache_destroy_is_send(cache: TestCache) {
-        assert_send(cache.destroy());
+        is_send(cache.destroy());
     }
 }

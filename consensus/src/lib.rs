@@ -106,8 +106,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify the payload is valid.
         ///
-        /// If it is possible to verify the payload, a boolean should be returned indicating whether
-        /// the payload is valid. If it is not possible to verify the payload, the channel can be dropped.
+        /// This request is single-shot for the given `(context, payload)`. Once the returned
+        /// channel resolves or closes, consensus treats verification as concluded and will not
+        /// retry the same request.
+        ///
+        /// Implementations should therefore keep the request pending while the verdict may still
+        /// change. Return `false` only when the payload is permanently invalid for this context.
+        /// For example, temporary conditions such as time skew, missing dependencies, or data
+        /// that may arrive later should not conclude verification with `false`.
+        ///
+        /// Closing the channel is also terminal for this request and should be reserved for cases
+        /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
+        /// for temporary inability to decide.
         fn verify(
             &mut self,
             context: Self::Context,
@@ -134,6 +144,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// This is particularly useful for applications that employ erasure coding, which
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        ///
+        /// Like [`Automaton::verify`], certification is single-shot for the given
+        /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
+        /// certification as concluded and will not retry the same request.
+        ///
+        /// Implementations should therefore keep the request pending while the verdict may still
+        /// change. Return `false` only when the payload is permanently uncertifiable for that
+        /// round. Temporary conditions such as waiting for more data should not conclude
+        /// certification with `false`.
+        ///
+        /// Closing the channel is also terminal for this request and should be reserved for cases
+        /// where certification can no longer produce a verdict (for example, shutdown).
         ///
         /// # Determinism Requirement
         ///
@@ -250,6 +272,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
+        ///
+        /// This future should not resolve until the implementation can produce a stable verdict.
+        /// Return `false` only when the block is permanently invalid for the supplied context and
+        /// ancestry. If validity may still change as additional information becomes available,
+        /// continue waiting instead of returning `false`.
         fn verify<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),

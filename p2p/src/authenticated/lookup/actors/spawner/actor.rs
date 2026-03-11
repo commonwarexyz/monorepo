@@ -13,7 +13,7 @@ use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
 use commonware_utils::channel::mpsc;
-use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
+use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
@@ -30,7 +30,6 @@ pub struct Actor<
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
-    connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     dropped_messages: Family<metrics::Message, Counter>,
@@ -45,16 +44,10 @@ impl<
     > Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
-        let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let dropped_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
-        context.register(
-            "connections",
-            "number of connected peers",
-            connections.clone(),
-        );
         context.register("messages_sent", "messages sent", sent_messages.clone());
         context.register(
             "messages_received",
@@ -79,7 +72,6 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
                 receiver,
-                connections,
                 sent_messages,
                 received_messages,
                 dropped_messages,
@@ -117,11 +109,7 @@ impl<
                         connection,
                         reservation,
                     } => {
-                        // Mark peer as connected
-                        self.connections.inc();
-
                         // Clone required variables
-                        let connections = self.connections.clone();
                         let sent_messages = self.sent_messages.clone();
                         let received_messages = self.received_messages.clone();
                         let dropped_messages = self.dropped_messages.clone();
@@ -151,7 +139,6 @@ impl<
                                 let Some(channels) = router.ready(peer.clone(), messenger).await
                                 else {
                                     debug!(?peer, "router shut down during peer setup");
-                                    connections.dec();
                                     return;
                                 };
 
@@ -161,7 +148,6 @@ impl<
                                 // Run peer
                                 let result =
                                     peer_actor.run(peer.clone(), connection, channels).await;
-                                connections.dec();
 
                                 // Let the router know the peer has exited
                                 match result {

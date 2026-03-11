@@ -9,7 +9,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU16;
+use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -112,34 +112,41 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_config("store-fuzz-test", &context);
         let mut db = StoreDb::init(context.clone(), cfg)
             .await
-            .expect("Failed to init db")
-            .into_dirty();
+            .expect("Failed to init db");
         let mut restarts = 0usize;
+        let mut pending: BTreeMap<Digest, Option<Vec<u8>>> = BTreeMap::new();
 
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.write_batch([(Digest(*key), Some(value_bytes.clone()))])
-                        .await
-                        .expect("Update should not fail");
+                    pending.insert(Digest(*key), Some(value_bytes.clone()));
                 }
 
                 Operation::Delete { key } => {
-                    db.write_batch([(Digest(*key), None)])
-                        .await
-                        .expect("Delete should not fail");
+                    pending.insert(Digest(*key), None);
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    let (clean_db, _) = db
-                        .commit(metadata_bytes.clone())
+                    let mut batch = db.new_batch();
+                    for (key, value) in std::mem::take(&mut pending) {
+                        batch = match value {
+                            Some(v) => batch.update(key, v),
+                            None => batch.delete(key),
+                        };
+                    }
+                    db.apply_batch(batch.finalize(metadata_bytes.clone()))
                         .await
-                        .expect("Commit should not fail");
-                    db = clean_db.into_dirty();
+                        .expect("Apply batch should not fail");
+                    db.commit().await.expect("Commit should not fail");
                 }
 
                 Operation::Get { key } => {
-                    let _ = db.get(&Digest(*key)).await;
+                    let digest = Digest(*key);
+                    if let Some(value) = pending.get(&digest) {
+                        let _ = value.clone();
+                    } else {
+                        let _ = db.get(&digest).await;
+                    }
                 }
 
                 Operation::GetMetadata => {
@@ -147,9 +154,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    clean_db.sync().await.expect("Sync should not fail");
-                    db = clean_db.into_dirty();
+                    db.sync().await.expect("Sync should not fail");
                 }
 
                 Operation::Prune => {
@@ -167,6 +172,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::SimulateFailure => {
+                    pending.clear();
                     drop(db);
 
                     let cfg = test_config("store-fuzz-test", &context);
@@ -177,15 +183,14 @@ fn fuzz(input: FuzzInput) {
                         cfg,
                     )
                     .await
-                    .expect("Failed to init db")
-                    .into_dirty();
+                    .expect("Failed to init db");
                     restarts += 1;
                 }
             }
         }
 
-        let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-        clean_db.destroy().await.expect("Destroy should not fail");
+        db.commit().await.expect("Commit should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

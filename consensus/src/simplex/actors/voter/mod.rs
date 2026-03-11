@@ -3082,6 +3082,161 @@ mod tests {
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
+    /// instead of waiting for the local timeout.
+    fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S> + Default,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"invalid_ancestry_emits_nullify_immediately".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                L::default(),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Sometimes,
+            )
+            .await;
+
+            // Advance until we are a verifier in a post-finalization view.
+            let me = Participant::new(0);
+            let (mut current_view, mut current_leader) =
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        response,
+                        ..
+                    } => {
+                        response.send(None).unwrap();
+                        (current, leader)
+                    }
+                    _ => panic!("expected initial update"),
+                };
+
+            while current_view == View::new(1) || current_leader == me {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            response,
+                            ..
+                        } if current > current_view => {
+                            response.send(None).unwrap();
+                            current_view = current;
+                            current_leader = leader;
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                }
+            }
+
+            // Inject a proposal whose parent is below the finalized floor.
+            let target_view = current_view;
+            let invalid_parent = target_view
+                .previous()
+                .expect("target view must have a finalized predecessor")
+                .previous()
+                .unwrap_or(View::zero());
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                invalid_parent,
+                Sha256::hash(b"invalid_parent_before_finalized"),
+            );
+            mailbox.proposal(proposal).await;
+
+            // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on invalid ancestry.
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!(
+                            "expected nullify for view {} within 1s (timeouts are 10s)",
+                            target_view
+                        );
+                    },
+                }
+            }
+
+            // Ensure invalid ancestry maps to the expected timeout reason metric.
+            let encoded = context.encode();
+            assert!(
+                encoded.lines().any(|line| {
+                    line.contains("_timeouts")
+                        && line.contains("reason=\"InvalidProposal\"")
+                        && !line.ends_with(" 0")
+                }),
+                "expected non-zero timeout metric with reason=InvalidProposal"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_invalid_ancestry_emits_nullify_immediately() {
+        invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
     /// Tests that a later dropped verification still yields network voting after
     /// prior successful participation.
     fn dropped_verify_still_votes_after_prior_participation<S, F>(mut fixture: F)
