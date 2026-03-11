@@ -628,9 +628,11 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage
     for MerkleizedBitMap<E, D, N>
 {
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.size()
     }

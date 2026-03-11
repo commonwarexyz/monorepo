@@ -10,15 +10,18 @@ use commonware_cryptography::Digest;
 use core::ops::Range;
 
 /// Read-only interface for a merkleized MMR.
-pub trait Readable<D: Digest>: Send + Sync {
+pub trait Readable: Send + Sync {
+    /// The digest type used by this MMR.
+    type Digest: Digest;
+
     /// Total number of nodes (retained + pruned).
     fn size(&self) -> Position;
 
     /// Digest of the node at `pos`, or `None` if pruned / out of bounds.
-    fn get_node(&self, pos: Position) -> Option<D>;
+    fn get_node(&self, pos: Position) -> Option<Self::Digest>;
 
     /// Root digest of the MMR.
-    fn root(&self) -> D;
+    fn root(&self) -> Self::Digest;
 
     /// Items before this position have been pruned.
     fn pruned_to_pos(&self) -> Position;
@@ -39,7 +42,7 @@ pub trait Readable<D: Digest>: Send + Sync {
     }
 
     /// Inclusion proof for the element at `loc`.
-    fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
+    fn proof(&self, loc: Location) -> Result<Proof<Self::Digest>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
@@ -50,7 +53,7 @@ pub trait Readable<D: Digest>: Send + Sync {
     }
 
     /// Inclusion proof for all elements in `range`.
-    fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
+    fn range_proof(&self, range: Range<Location>) -> Result<Proof<Self::Digest>, Error> {
         let leaves = self.leaves();
         let positions = proof::nodes_required_for_range_proof(leaves, range)?;
         let digests = positions
@@ -62,7 +65,10 @@ pub trait Readable<D: Digest>: Send + Sync {
 }
 
 /// Information needed to flatten a chain of batches into a single [`super::batch::Changeset`].
-pub trait BatchChainInfo<D: Digest> {
+pub trait BatchChainInfo: Send + Sync {
+    /// The digest type used by this MMR.
+    type Digest: Digest;
+
     /// Number of nodes in the original MMR that the batch chain was forked
     /// from. This is constant through the entire chain.
     fn base_size(&self) -> Position;
@@ -70,5 +76,5 @@ pub trait BatchChainInfo<D: Digest> {
     /// Collect all overwrites that target nodes in the original MMR
     /// (i.e. positions < `base_size()`), walking from the deepest
     /// ancestor to the current batch. Later batches overwrite earlier ones.
-    fn collect_overwrites(&self, into: &mut BTreeMap<Position, D>);
+    fn collect_overwrites(&self, into: &mut BTreeMap<Position, Self::Digest>);
 }

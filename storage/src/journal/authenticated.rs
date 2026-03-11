@@ -51,7 +51,7 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, 
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<H::Digest>, Item> {
+pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
     // The inner batch of MMR leaf digests.
     inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
     // The hasher to use for hashing the items.
@@ -60,7 +60,9 @@ pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<H::Digest>, Item> {
     items: Vec<Item>,
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Encode> UnmerkleizedBatch<'a, H, P, Item> {
+impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
+    UnmerkleizedBatch<'a, H, P, Item>
+{
     /// Add an item to the batch.
     pub fn add(&mut self, item: Item) {
         let encoded = item.encode();
@@ -79,23 +81,24 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Encode> UnmerkleizedBatch<'a, 
 
 /// A speculative batch whose root digest has been computed,
 /// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<H::Digest>, Item> {
+pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
     // The inner batch of MMR leaf digests.
     inner: batch::MerkleizedBatch<'a, H::Digest, P>,
     // The items to append.
     items: Arc<Vec<Item>>,
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
+impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
     /// Return the root digest of the authenticated journal after this batch is applied.
     pub fn root(&self) -> H::Digest {
         self.inner.root()
     }
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync> Readable<H::Digest>
+impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
     for MerkleizedBatch<'a, H, P, Item>
 {
+    type Digest = H::Digest;
     fn size(&self) -> Position {
         self.inner.size()
     }
@@ -110,9 +113,14 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync> Readable<H::Diges
     }
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChainInfo<H::Digest>, Item: Send + Sync>
-    BatchChainInfo<H::Digest> for MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest>,
+        Item: Send + Sync,
+    > BatchChainInfo for MerkleizedBatch<'a, H, P, Item>
 {
+    type Digest = H::Digest;
     fn base_size(&self) -> Position {
         self.inner.base_size()
     }
@@ -121,8 +129,8 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChainInfo<H::Digest>, Item: Se
     }
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChain<Item>, Item: Send + Sync> BatchChain<Item>
-    for MerkleizedBatch<'a, H, P, Item>
+impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Send + Sync>
+    BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
 {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>) {
         self.inner.parent().collect(into); // recurse to parent first
@@ -130,7 +138,7 @@ impl<'a, H: Hasher, P: Readable<H::Digest> + BatchChain<Item>, Item: Send + Sync
     }
 }
 
-impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync + Encode>
+impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
     MerkleizedBatch<'a, H, P, Item>
 {
     /// Create a new speculative batch of operations with this batch as its parent.
@@ -148,7 +156,7 @@ impl<'a, H: Hasher, P: Readable<H::Digest>, Item: Send + Sync + Encode>
 
 impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Item>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Item>,
 {
     /// Consume this batch, collecting the changes from its ancestors and itself into a
     /// [Changeset] which can be applied to the journal.
