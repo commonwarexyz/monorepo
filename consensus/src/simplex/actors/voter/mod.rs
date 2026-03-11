@@ -6173,7 +6173,9 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update { current, response, .. } => {
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
                             if current >= View::new(2) {
                                 reached_view2 = true;
                             }
@@ -6181,7 +6183,7 @@ mod tests {
                         }
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    _ = context.sleep(Duration::from_millis(10)) => {},
                 }
             }
             assert!(saw_finalize, "expected finalize for view 1");

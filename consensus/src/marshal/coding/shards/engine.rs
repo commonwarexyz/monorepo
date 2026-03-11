@@ -2380,9 +2380,7 @@ mod tests {
                 select! {
                     _ = shard_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!(
-                            "subscription did not complete after shard from original leader"
-                        );
+                        panic!("subscription did not complete after shard from original leader");
                     },
                 };
 

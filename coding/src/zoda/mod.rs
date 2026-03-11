@@ -361,7 +361,7 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
 }
 
 /// Data used to check [WeakShard]s.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CheckingData<D: Digest> {
     commitment: Summary,
     topology: Topology,
@@ -370,6 +370,8 @@ pub struct CheckingData<D: Digest> {
     encoded_checksum: Matrix<F>,
     shuffled_indices: Vec<u32>,
 }
+
+impl<D: Digest> Eq for CheckingData<D> {}
 
 impl<D: Digest> CheckingData<D> {
     /// Calculate the values of this struct, based on information received.

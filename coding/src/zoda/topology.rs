@@ -11,7 +11,7 @@ const SECURITY_BITS: usize = 126;
 const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
 
 /// Contains the sizes of various objects in the protocol.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Topology {
     /// How many bytes the data has.
     pub data_bytes: usize,

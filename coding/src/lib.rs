@@ -286,7 +286,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// the data.
         type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// Data which can assist in checking shards.
-        type CheckingData: Clone + Send + Sync;
+        type CheckingData: Clone + Eq + Send + Sync;
         /// A shard that has been checked for inclusion in the commitment.
         ///
         /// This allows excluding [`PhasedScheme::WeakShard`]s which are invalid, and shouldn't
@@ -384,14 +384,15 @@ commonware_macros::stability_scope!(ALPHA {
     pub enum PhasedAsSchemeError<E> {
         #[error(transparent)]
         Scheme(E),
+        #[error("checked shards do not agree on checking data")]
+        InconsistentCheckingData,
         #[error("insufficient shards {0} < {1}")]
         InsufficientShards(usize, usize),
     }
 
     impl<P: PhasedScheme> Debug for PhasedCheckedShard<P> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("PhasedCheckedShard")
-                .finish_non_exhaustive()
+            f.debug_struct("PhasedCheckedShard").finish_non_exhaustive()
         }
     }
 
@@ -437,11 +438,19 @@ commonware_macros::stability_scope!(ALPHA {
                     usize::from(config.minimum_shards.get()),
                 ));
             };
+            let checking_data = first.checking_data.clone();
             P::decode(
                 config,
                 commitment,
-                first.checking_data.clone(),
-                shards.map(|shard| &shard.checked_shard),
+                checking_data.clone(),
+                shards.map(|shard| {
+                    if shard.checking_data != checking_data {
+                        return Err(PhasedAsSchemeError::InconsistentCheckingData);
+                    }
+                    Ok(&shard.checked_shard)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter(),
                 strategy,
             )
             .map_err(PhasedAsSchemeError::Scheme)
