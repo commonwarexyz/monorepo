@@ -377,9 +377,11 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 
 /// Enumerates all canonical next-round refinements from the current cell state.
 ///
-/// Each round refines participants into up to 4 placements relative to the
-/// primary and secondary recipient sets: outside both, shared by both halves,
-/// primary-only, and secondary-only.
+/// Each round refines participants into up to 4 non-leader placements relative
+/// to the primary and secondary recipient sets: outside both, shared by both
+/// halves, primary-only, and secondary-only. The chosen leader is then
+/// isolated into its own singleton cell and may be visible to either half or
+/// both halves.
 fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
     // Accumulated state for a round where the secondary recipient set differs:
     // the masks built so far and leader.
@@ -542,14 +544,16 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                     if has_leader {
                         // As in `no_secondary`, keep the leader as a singleton
                         // at the tail of its source cell's refined block.
-                        // Enumerate both twin-half placements so the leader
-                        // may be isolated with either recipient set when the
-                        // halves differ.
+                        // Enumerate all distinct twin-half placements so the
+                        // leader may be isolated with either recipient set or
+                        // bridge both halves when the masks differ.
                         let leader_idx = start + outside + both + secondary + primary;
                         next_cells.push(1);
                         next_leader = Some(leader_idx);
 
-                        for leader_in_primary in [true, false] {
+                        for (leader_in_primary, leader_in_secondary) in
+                            [(true, false), (false, true), (true, true)]
+                        {
                             let leader_bit = 1u64 << leader_idx;
                             with_secondary(
                                 ranges,
@@ -561,10 +565,10 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                                     } else {
                                         next_primary
                                     },
-                                    secondary_mask: if leader_in_primary {
-                                        next_secondary
-                                    } else {
+                                    secondary_mask: if leader_in_secondary {
                                         next_secondary | leader_bit
+                                    } else {
+                                        next_secondary
                                     },
                                     leader: next_leader,
                                 },
@@ -882,6 +886,14 @@ mod tests {
                             primary_mask,
                             secondary_mask: secondary_mask | leader_bit,
                         },
+                        cells.clone(),
+                    ));
+                    out.insert((
+                        RoundScenario {
+                            leader,
+                            primary_mask: primary_mask | leader_bit,
+                            secondary_mask: secondary_mask | leader_bit,
+                        },
                         cells,
                     ));
                 }
@@ -1062,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_split_round_leaders_belong_to_exactly_one_half() {
+    fn generated_split_round_leaders_belong_to_at_least_one_half() {
         let scenarios = generate_scenarios(&mut test_rng(), 4, 2, usize::MAX);
         for (scenario, _) in scenarios {
             for round in scenario.rounds {
@@ -1072,9 +1084,22 @@ mod tests {
                 let leader_bit = 1u64 << round.leader;
                 let leader_in_primary = (round.primary_mask & leader_bit) != 0;
                 let leader_in_secondary = (round.secondary_mask & leader_bit) != 0;
-                assert_ne!(leader_in_primary, leader_in_secondary);
+                assert!(leader_in_primary || leader_in_secondary);
             }
         }
+    }
+
+    #[test]
+    fn generated_split_rounds_include_leaders_visible_to_both_halves() {
+        let scenarios = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX);
+        assert!(scenarios.iter().any(|(scenario, _)| {
+            let round = scenario.rounds[0];
+            if round.primary_mask == round.secondary_mask {
+                return false;
+            }
+            let leader_bit = 1u64 << round.leader;
+            (round.primary_mask & leader_bit) != 0 && (round.secondary_mask & leader_bit) != 0
+        }));
     }
 
     #[test]
