@@ -50,23 +50,39 @@ impl SignedSubject {
 }
 
 #[derive(Debug, Default)]
-struct StoredSignatures {
+struct Signatures {
+    next: u64,
     by: HashMap<u64, SignedSubject>,
     by_subject: HashMap<SignedSubject, u64>,
 }
 
+impl Signatures {
+    const fn next(&mut self) -> u64 {
+        let current = self.next;
+        self.next = self.next.checked_add(1).expect("signature overflow");
+        current
+    }
+}
+
 #[derive(Debug, Default)]
-struct StoredCertificates {
+struct Certificates {
+    next: u64,
     by: HashMap<u64, SignedSubject>,
     by_artifact: HashMap<(SignedSubject, Signers), u64>,
 }
 
+impl Certificates {
+    const fn next(&mut self) -> u64 {
+        let current = self.next;
+        self.next = self.next.checked_add(1).expect("certificate overflow");
+        current
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
-    next_signature: u64,
-    signatures: HashMap<Participant, StoredSignatures>,
-    next_certificate: u64,
-    certificates: StoredCertificates,
+    signatures: HashMap<Participant, Signatures>,
+    certificates: Certificates,
 }
 
 /// Shared state for mock schemes created by the same test fixture.
@@ -195,19 +211,15 @@ where
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
-        let signature = inner
-            .signatures
-            .get(&signer)
-            .and_then(|entries| entries.by_subject.get(&signed_subject))
-            .copied()
-            .unwrap_or_else(|| {
-                let signature = inner.next_signature;
-                inner.next_signature = inner.next_signature.wrapping_add(1);
-                let entries = inner.signatures.entry(signer).or_default();
-                entries.by.insert(signature, signed_subject.clone());
-                entries.by_subject.insert(signed_subject, signature);
-                signature
-            });
+        let entries = inner.signatures.entry(signer).or_default();
+        let signature = if let Some(signature) = entries.by_subject.get(&signed_subject).copied() {
+            signature
+        } else {
+            let signature = entries.next();
+            entries.by.insert(signature, signed_subject.clone());
+            entries.by_subject.insert(signed_subject, signature);
+            signature
+        };
 
         Some(Attestation {
             signer,
@@ -324,16 +336,18 @@ where
         let subject = signed_subject?;
         let signers = Signers::from(self.participants.len(), signers);
         let stored_subject = subject.clone();
-        let artifact = (subject, signers.clone());
-        let certificate = if let Some(certificate) = inner.certificates.by_artifact.get(&artifact) {
-            *certificate
-        } else {
-            let certificate = inner.next_certificate;
-            inner.next_certificate = inner.next_certificate.wrapping_add(1);
-            inner.certificates.by.insert(certificate, stored_subject);
-            inner.certificates.by_artifact.insert(artifact, certificate);
-            certificate
-        };
+        let artifact = (subject, signers);
+        let certificate = inner
+            .certificates
+            .by_artifact
+            .get(&artifact)
+            .copied()
+            .unwrap_or_else(|| {
+                let certificate = inner.certificates.next();
+                inner.certificates.by.insert(certificate, stored_subject);
+                inner.certificates.by_artifact.insert(artifact, certificate);
+                certificate
+            });
 
         Some(U64::new(certificate))
     }
@@ -680,7 +694,7 @@ macro_rules! impl_certificate_mock {
 
 #[cfg(test)]
 mod tests {
-    use super::Shared;
+    use super::{Certificates, Shared, Signatures};
     use crate::{
         certificate::{Attestation, Lazy, Scheme as _},
         ed25519::PublicKey as Ed25519PublicKey,
@@ -751,6 +765,28 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, other);
+    }
+
+    #[test]
+    #[should_panic(expected = "mock signature ID overflow")]
+    fn signature_id_overflow_panics() {
+        let mut signatures = Signatures {
+            next: u64::MAX,
+            ..Default::default()
+        };
+
+        let _ = signatures.next();
+    }
+
+    #[test]
+    #[should_panic(expected = "mock certificate ID overflow")]
+    fn certificate_id_overflow_panics() {
+        let mut certificates = Certificates {
+            next: u64::MAX,
+            ..Default::default()
+        };
+
+        let _ = certificates.next();
     }
 
     #[test]
