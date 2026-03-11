@@ -878,16 +878,26 @@ mod tests {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"vote-1" };
-        let mut attestation = fixture.schemes[0]
+        let attestation_a = fixture.schemes[0]
             .sign::<Sha256Digest>(subject)
             .expect("signer must produce an attestation");
-        attestation.signer = Participant::new(1);
+        let attestation_b = fixture.schemes[1]
+            .sign::<Sha256Digest>(subject)
+            .expect("signer must produce an attestation");
+        let mut forged = attestation_a.clone();
+        forged.signer = Participant::new(1);
+
+        assert_ne!(
+            attestation_a.signature.get(),
+            attestation_b.signature.get(),
+            "different signers signing the same subject must receive distinct synthetic IDs"
+        );
 
         assert!(
             !fixture.verifier.verify_attestation::<_, Sha256Digest>(
                 &mut rng,
                 subject,
-                &attestation,
+                &forged,
                 &Sequential,
             ),
             "swapping signer on an attestation must fail verification"
