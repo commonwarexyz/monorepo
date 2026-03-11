@@ -1,4 +1,5 @@
 use crate::{
+    merkle::Family,
     mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
@@ -62,10 +63,10 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use crate::mmr::MAX_LOCATION;
         let root = u.arbitrary()?;
-        let lower = u.int_in_range(0..=*MAX_LOCATION - 1)?;
-        let upper = u.int_in_range(lower + 1..=*MAX_LOCATION)?;
+        let max_loc = <Family as crate::merkle::Family>::MAX_LOCATION;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
             range: Location::new(lower)..Location::new(upper),

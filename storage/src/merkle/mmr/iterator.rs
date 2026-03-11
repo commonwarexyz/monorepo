@@ -3,6 +3,7 @@
 //! new MMR variants or extensions.
 
 use super::Position;
+use crate::merkle::mmr::Family;
 use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
@@ -49,10 +50,10 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
+    /// Panics if `size` exceeds [crate::merkle::Family::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
         assert!(
-            size <= crate::mmr::MAX_POSITION,
+            size <= <Family as crate::merkle::Family>::MAX_POSITION,
             "size exceeds MAX_POSITION"
         );
 
@@ -234,7 +235,7 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
+    use crate::mmr::{mem::Mmr, Location, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -267,7 +268,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "size exceeds MAX_POSITION")]
     fn test_to_nearest_size_panic() {
-        PeakIterator::to_nearest_size(crate::mmr::MAX_POSITION + 1);
+        PeakIterator::to_nearest_size(<Family as crate::merkle::Family>::MAX_POSITION + 1);
     }
 
     #[test]
@@ -337,7 +338,7 @@ mod tests {
         assert!(rounded <= large_size);
 
         // Test maximum allowed input
-        let largest_valid_size = crate::mmr::MAX_POSITION;
+        let largest_valid_size = <Family as crate::merkle::Family>::MAX_POSITION;
         let rounded = PeakIterator::to_nearest_size(largest_valid_size);
         assert!(rounded.is_valid_size());
         assert!(rounded <= largest_valid_size);

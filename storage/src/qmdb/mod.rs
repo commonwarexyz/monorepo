@@ -18,26 +18,25 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
-//!    the Merkle root that would result from applying them.
+//! 3. Merkleize the batch -- this resolves mutations against the current state and computes the
+//!    Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
 //! 5. Finalize the batch into a changeset.
 //! 6. Apply the changeset to the database.
 //!
-//! A merkleized batch can spawn child batches, forming a tree of speculative states that
-//! share a common ancestor. Only the finalized leaf needs to be applied.
+//! A merkleized batch can spawn child batches, forming a tree of speculative states that share a
+//! common ancestor. Only the finalized leaf needs to be applied.
 //!
-//! The specific mutation methods vary by variant.
-//! See each variant's module documentation for the concrete API and usage examples.
+//! The specific mutation methods vary by variant. See each variant's module documentation for the
+//! concrete API and usage examples.
 //!
-//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
-//! and `destroy()`.
+//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`, and
+//! `destroy()`.
 //!
 //! # Traits
 //!
-//! All variants implement [store::LogStore] and [store::MerkleizedStore]. Keyed mutable
-//! variants ([any] and [current]) also implement [store::PrunableStore] and
-//! [crate::Persistable]. The [immutable] variant implements [crate::kv::Gettable].
+//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
+//! [crate::Persistable].
 //!
 //! # Acknowledgments
 //!
@@ -68,7 +67,7 @@ pub mod sync;
 pub mod verify;
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests,
+    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -114,8 +113,8 @@ pub enum Error {
     StaleChangeset { expected: u64, actual: u64 },
 }
 
-impl From<crate::merkle::Error<crate::mmr::Mmr>> for Error {
-    fn from(e: crate::merkle::Error<crate::mmr::Mmr>) -> Self {
+impl From<crate::merkle::Error<crate::mmr::Family>> for Error {
+    fn from(e: crate::merkle::Error<crate::mmr::Family>) -> Self {
         Self::Mmr(e.into())
     }
 }

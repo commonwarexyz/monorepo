@@ -1,14 +1,14 @@
 //! MMR conformance tests and shared test utilities for root stability.
 
-use crate::mmr::{
-    hasher::{Hasher, Standard},
-    mem::Mmr,
+use crate::{
+    merkle::hasher::Hasher as MmrHasher,
+    mmr::{mem::Mmr, StandardHasher as Standard},
 };
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256, Sha256};
 
 /// Build a test MMR by adding `elements` elements using the provided hasher.
-pub fn build_test_mmr<H: Hasher<Digest = sha256::Digest>>(
+pub fn build_test_mmr<H: MmrHasher<Family = super::Family, Digest = sha256::Digest>>(
     hasher: &mut H,
     mut mmr: Mmr<sha256::Digest>,
     elements: u64,

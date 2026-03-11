@@ -78,7 +78,7 @@
 //!             /   \
 //!      1     2     5      9      12
 //!           / \   / \    / \    /  \
-//!      0   0   1 3   4  6   8 10  11
+//!      0   0   1 3   4  6   8  10  11
 //!
 //! Location 0   1 2   3  4   5  6   7
 //! ```
@@ -118,25 +118,27 @@
 
 pub mod iterator;
 
-use crate::merkle::{self, MerkleFamily};
+use crate::merkle;
 
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
-pub struct Mmb;
+pub struct Family;
 
-impl MerkleFamily for Mmb {
+impl merkle::Family for Family {
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
-    const MAX_POSITION: u64 = 0x7FFF_FFFF_FFFF_FFFE; // (1 << 63) - 2
+    const MAX_POSITION: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
 
     /// Maximum valid location (leaf count): `2^62 + 30`.
-    const MAX_LOCATION: u64 = 0x4000_0000_0000_001E; // 2^62 + 30
+    const MAX_LOCATION: Location = Location::new(0x4000_0000_0000_001E);
 
-    fn location_to_position(loc: u64) -> u64 {
+    fn location_to_position(loc: Location) -> Position {
+        let loc = loc.as_u64();
         // 2*N - ilog2(N+1) for MMB
-        2 * loc - (loc + 1).ilog2() as u64
+        Position::new(2 * loc - (loc + 1).ilog2() as u64)
     }
 
-    fn position_to_location(pos: u64) -> Option<u64> {
+    fn position_to_location(pos: Position) -> Option<Location> {
+        let pos = pos.as_u64();
         // Solve 2*N - ilog2(N+1) = pos for N.
         // Starting estimate: N ~ (pos + ilog2(N+1)) / 2 ~ pos/2. One refinement gives accuracy
         // within +/-1, so the loop body runs at most a few times.
@@ -145,7 +147,7 @@ impl MerkleFamily for Mmb {
         loop {
             let leaf_pos = 2 * n - (n + 1).ilog2() as u64;
             if leaf_pos == pos {
-                return Some(n);
+                return Some(Location::new(n));
             }
             if leaf_pos > pos {
                 // pos is not a leaf position (it falls between two leaf positions, so it's a
@@ -170,22 +172,12 @@ impl MerkleFamily for Mmb {
 }
 
 /// A node index or node count in an MMB.
-pub type Position = merkle::Position<Mmb>;
+pub type Position = merkle::Position<Family>;
 
 /// A leaf index or leaf count in an MMB.
-pub type Location = merkle::Location<Mmb>;
-
-/// Maximum valid [Position] value: the largest node count (size) an MMB can hold.
-///
-/// An MMB with `2^62 + 30` leaves has `2^63 - 2` nodes, so `MAX_POSITION = 2^63 - 2`.
-pub const MAX_POSITION: Position = Position::MAX;
-
-/// Maximum valid [Location] value: the largest leaf count an MMB can hold.
-///
-/// `MAX_LOCATION = 2^62 + 30`.
-pub const MAX_LOCATION: Location = Location::MAX;
+pub type Location = merkle::Location<Family>;
 
 pub use crate::merkle::LocationRangeExt;
 
 /// Errors that can occur during MMB operations.
-pub type Error = merkle::Error<Mmb>;
+pub type Error = merkle::Error<Family>;

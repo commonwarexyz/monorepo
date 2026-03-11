@@ -6,7 +6,8 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
+    merkle::hasher::Hasher as _,
+    mmr::{storage::Storage, verification, Location, Proof},
     qmdb::{current::grafting, Error},
 };
 use commonware_codec::Codec;
@@ -67,7 +68,7 @@ impl<D: Digest> RangeProof<D> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
         H: CHasher<Digest = D>,

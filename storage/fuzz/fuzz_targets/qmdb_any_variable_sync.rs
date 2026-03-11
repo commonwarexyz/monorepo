@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
-    mmr::{self, hasher::Standard, MAX_LOCATION},
+    mmr::{self, StandardHasher as Standard, MAX_LOCATION},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof,
