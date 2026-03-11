@@ -392,6 +392,16 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
         leader: Option<usize>,
     }
 
+    const LEADER_PLACEMENTS: &[(bool, bool)] = &[(true, false), (false, true), (true, true)];
+
+    fn push_nonzero_cells(next_cells: &mut Vec<usize>, sizes: [usize; 4]) {
+        for size in sizes {
+            if size > 0 {
+                next_cells.push(size);
+            }
+        }
+    }
+
     /// Refines cells for a round where both halves have identical recipient
     /// sets.
     fn no_secondary(
@@ -519,19 +529,8 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                     // outside -> both-halves -> secondary-only -> primary-only
                     // -> leader.
                     let primary = remaining - secondary;
-
-                    if outside > 0 {
-                        next_cells.push(outside);
-                    }
-                    if both > 0 {
-                        next_cells.push(both);
-                    }
-                    if secondary > 0 {
-                        next_cells.push(secondary);
-                    }
-                    if primary > 0 {
-                        next_cells.push(primary);
-                    }
+                    let checkpoint = next_cells.len();
+                    push_nonzero_cells(next_cells, [outside, both, secondary, primary]);
 
                     let shared_mask = range_mask(start + outside, both);
                     let next_secondary = state.secondary_mask
@@ -540,7 +539,6 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                     let next_primary = state.primary_mask
                         | shared_mask
                         | range_mask(start + outside + both + secondary, primary);
-                    let mut next_leader = state.leader;
                     if has_leader {
                         // As in `no_secondary`, keep the leader as a singleton
                         // at the tail of its source cell's refined block.
@@ -549,11 +547,7 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                         // bridge both halves when the masks differ.
                         let leader_idx = start + outside + both + secondary + primary;
                         next_cells.push(1);
-                        next_leader = Some(leader_idx);
-
-                        for (leader_in_primary, leader_in_secondary) in
-                            [(true, false), (false, true), (true, true)]
-                        {
+                        for &(leader_in_primary, leader_in_secondary) in LEADER_PLACEMENTS {
                             let leader_bit = 1u64 << leader_idx;
                             with_secondary(
                                 ranges,
@@ -570,55 +564,27 @@ fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
                                     } else {
                                         next_secondary
                                     },
-                                    leader: next_leader,
+                                    leader: Some(leader_idx),
                                 },
                                 next_cells,
                                 out,
                             );
                         }
-
-                        next_cells.pop();
-                        if primary > 0 {
-                            next_cells.pop();
-                        }
-                        if secondary > 0 {
-                            next_cells.pop();
-                        }
-                        if both > 0 {
-                            next_cells.pop();
-                        }
-                        if outside > 0 {
-                            next_cells.pop();
-                        }
-                        continue;
+                    } else {
+                        with_secondary(
+                            ranges,
+                            leader_cell,
+                            cell_idx + 1,
+                            SecondaryState {
+                                primary_mask: next_primary,
+                                secondary_mask: next_secondary,
+                                leader: state.leader,
+                            },
+                            next_cells,
+                            out,
+                        );
                     }
-
-                    with_secondary(
-                        ranges,
-                        leader_cell,
-                        cell_idx + 1,
-                        SecondaryState {
-                            primary_mask: next_primary,
-                            secondary_mask: next_secondary,
-                            leader: next_leader,
-                        },
-                        next_cells,
-                        out,
-                    );
-
-                    // Undo the refined cells before trying the next allocation.
-                    if primary > 0 {
-                        next_cells.pop();
-                    }
-                    if secondary > 0 {
-                        next_cells.pop();
-                    }
-                    if both > 0 {
-                        next_cells.pop();
-                    }
-                    if outside > 0 {
-                        next_cells.pop();
-                    }
+                    next_cells.truncate(checkpoint);
                 }
             }
         }
@@ -1070,6 +1036,26 @@ mod tests {
         assert_eq!(
             scenario.route(View::new(1), &4, &participants),
             SplitTarget::Primary
+        );
+    }
+
+    #[test]
+    fn leader_visible_to_both_halves_preserves_partitions_and_route() {
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 3,
+                primary_mask: 0b1010,
+                secondary_mask: 0b1100,
+            }],
+        };
+        let participants: Vec<u32> = (0..4).collect();
+        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+
+        assert_eq!(primary, vec![1, 3]);
+        assert_eq!(secondary, vec![2, 3]);
+        assert_eq!(
+            scenario.route(View::new(1), &3, &participants),
+            SplitTarget::Both
         );
     }
 
