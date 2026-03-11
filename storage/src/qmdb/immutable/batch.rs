@@ -37,7 +37,9 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
+        + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
     pub(super) immutable: &'a Immutable<E, K, V, H, T>,
@@ -71,7 +73,9 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
+        + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
     immutable: &'a Immutable<E, K, V, H, T>,
@@ -114,7 +118,9 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
+        + BatchChain<Operation<K, V>>,
 {
     /// Set a key to a value.
     ///
@@ -192,7 +198,9 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<K, V>>,
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
+        + BatchChain<Operation<K, V>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {
