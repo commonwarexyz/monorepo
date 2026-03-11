@@ -1028,7 +1028,7 @@ mod tests {
 
         // Allocation edges
         let buf = pool.try_alloc(0).expect("zero capacity should succeed");
-        assert_eq!(buf.capacity(), 1);
+        assert_eq!(buf.capacity(), page);
         assert_eq!(buf.len(), 0);
 
         let buf = pool.try_alloc(page).expect("exact max size should succeed");

@@ -131,8 +131,8 @@ fn run_pool(pool: &BufferPool, size: usize, page_size: usize) -> IoBufMut {
 fn build_pool(size: usize, threads: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(1024)
-        .with_min_size(NZUsize!(size))
-        .with_max_size(NZUsize!(size))
+        .with_min_size(NZUsize!(size.max(1024)))
+        .with_max_size(NZUsize!(size.max(1024)))
         .with_max_per_class(NZUsize!(threads * 4))
         .with_prefill(true);
 
