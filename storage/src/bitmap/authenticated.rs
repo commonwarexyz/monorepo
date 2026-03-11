@@ -24,7 +24,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
@@ -37,7 +37,7 @@ use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
+pub(crate) fn partial_chunk_root<H: MmrHasher, const N: usize>(
     hasher: &mut H,
     mmr_root: &H::Digest,
     next_bit: u64,
@@ -45,10 +45,12 @@ pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
 ) -> H::Digest {
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    hasher.update(mmr_root);
-    hasher.update(&next_bit.to_be_bytes());
-    hasher.update(last_chunk_digest);
-    hasher.finalize()
+    let mut buf =
+        Vec::with_capacity(mmr_root.as_ref().len() + 8 + last_chunk_digest.as_ref().len());
+    buf.extend_from_slice(mmr_root.as_ref());
+    buf.extend_from_slice(&next_bit.to_be_bytes());
+    buf.extend_from_slice(last_chunk_digest.as_ref());
+    hasher.digest(&buf)
 }
 
 mod private {
@@ -265,12 +267,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root = partial_chunk_root::<_, N>(
-                hasher.inner(),
-                &last_digest,
-                next_bit,
-                &last_chunk_digest,
-            );
+            let reconstructed_root =
+                partial_chunk_root::<_, N>(hasher, &last_digest, next_bit, &last_chunk_digest);
             return reconstructed_root == *root;
         };
 
@@ -286,7 +284,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }
@@ -586,7 +584,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                     updates
                         .par_iter()
                         .map_init(
-                            || hasher.fork(),
+                            || hasher.clone(),
                             |h, &(loc, chunk)| {
                                 let pos = Position::try_from(loc).unwrap();
                                 (loc, h.leaf_digest(pos, chunk.as_ref()))
@@ -616,7 +614,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_chunk_digest)
         };
 
         Ok(MerkleizedBitMap {

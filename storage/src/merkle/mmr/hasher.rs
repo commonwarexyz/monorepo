@@ -5,9 +5,8 @@ use crate::mmr::Location;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher: Send + Sync {
+pub trait Hasher: Clone + Send + Sync {
     type Digest: Digest;
-    type Inner: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest;
@@ -30,18 +29,11 @@ pub trait Hasher: Send + Sync {
 
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> Self::Digest;
-
-    /// Access the inner [CHasher] hasher.
-    fn inner(&mut self) -> &mut Self::Inner;
-
-    /// Fork the hasher to provide equivalent functionality in another thread. This is different
-    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
-    /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher<Digest = Self::Digest>;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
 /// external data.
+#[derive(Clone)]
 pub struct Standard<H: CHasher> {
     hasher: H,
 }
@@ -78,15 +70,6 @@ impl<H: CHasher> Default for Standard<H> {
 
 impl<H: CHasher> Hasher for Standard<H> {
     type Digest = H::Digest;
-    type Inner = H;
-
-    fn inner(&mut self) -> &mut H {
-        &mut self.hasher
-    }
-
-    fn fork(&self) -> impl Hasher<Digest = H::Digest> {
-        Self { hasher: H::new() }
-    }
 
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.update_with_pos(pos);
@@ -122,7 +105,7 @@ impl<H: CHasher> Hasher for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location};
+    use crate::mmr::Location;
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -218,7 +201,7 @@ mod tests {
             "root of empty MMR should be non-zero"
         );
         // Empty MMR root is the hash of size 0 bytes, not the empty hash
-        assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
+        assert_eq!(empty_out, mmr_hasher.digest(&0u64.to_be_bytes()));
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new(10), digests.iter());
