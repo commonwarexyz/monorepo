@@ -5663,11 +5663,11 @@ mod tests {
     ///   rounds exponentially increase the canonical scenario space.
     ///
     /// - `max_cases`: Upper bound on the total emitted cases. Each case is a
-    ///   (scenario, compromised-assignment) pair. The generator produces
-    ///   canonical scenarios and, for each, the symmetry-unique compromised
-    ///   assignments. If the total exceeds this budget, scenarios are sampled.
+    ///   (scenario, compromised-assignment) pair. Also caps scenario
+    ///   enumeration (sampling uniformly when the space is larger). Cases
+    ///   are shuffled and truncated to this budget.
     ///
-    /// - `required_finalizations`: Number of finalizations each honest node
+    /// - `trailing_finalizations`: Number of finalizations each honest node
     ///   must produce *after* the adversarial prefix before the case is
     ///   considered successful. This is the liveness assertion -- it ensures
     ///   the protocol actually commits blocks under synchrony, not just
@@ -5677,7 +5677,7 @@ mod tests {
         n: u32,
         rounds: usize,
         max_cases: usize,
-        required_finalizations: usize,
+        trailing_finalizations: usize,
     }
 
     fn twins_campaign<S, F, L>(
@@ -5718,7 +5718,7 @@ mod tests {
             let skip_timeout = ViewDelta::new(5);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
-            let required_finalizations = campaign.required_finalizations;
+            let trailing_finalizations = campaign.trailing_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let cfg = deterministic::Config::new()
@@ -5983,7 +5983,7 @@ mod tests {
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
-                    let required = required_finalizations;
+                    let required = trailing_finalizations;
                     let label = format!("finalizer_{i}");
                     finalizers.push(context.with_label(&label).spawn(move |_| async move {
                         let mut count = 0usize;
@@ -6096,7 +6096,7 @@ mod tests {
             n: 5,
             rounds: 3,
             max_cases: 20,
-            required_finalizations: 50,
+            trailing_finalizations: 10,
         };
         for link in [
             Link {
@@ -6126,7 +6126,7 @@ mod tests {
             n: 10,
             rounds: 5,
             max_cases: 20,
-            required_finalizations: 50,
+            trailing_finalizations: 10,
         };
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),

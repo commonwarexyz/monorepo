@@ -29,9 +29,9 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -217,8 +217,8 @@ where
 ///
 /// The total case count is the sum, over generated scenarios, of the number of
 /// symmetry-unique compromised assignments for that scenario's residual cells.
-/// [`Framework::max_cases`] caps both the number of sampled scenarios and the
-/// total emitted cases.
+/// [`Framework::max_cases`] caps the total emitted cases; the full scenario
+/// space must fit within this budget (panics otherwise).
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
     /// Number of participants in the network.
@@ -228,8 +228,11 @@ pub struct Framework {
     /// Number of adversarial rounds before synchronous suffix.
     pub rounds: usize,
     /// Upper bound on the total number of emitted cases (scenario x
-    /// compromised-assignment pairs). When the full case space exceeds this
-    /// budget, scenarios are sampled to fit.
+    /// compromised-assignment pairs). Also used to cap the number of
+    /// scenarios enumerated (since each scenario produces >= 1 case).
+    /// When the scenario space exceeds this, scenarios are sampled
+    /// uniformly without replacement; the resulting cases are then
+    /// shuffled and truncated to this budget.
     pub max_cases: usize,
 }
 
@@ -270,18 +273,19 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
         framework.max_cases,
     );
 
-    let mut result = Vec::new();
-    for (scenario, residual_cells) in &scenarios {
-        for compromised in compromised_sets_for_cells(residual_cells, framework.faults) {
-            result.push(Case {
-                compromised,
-                scenario: scenario.clone(),
-            });
-            if result.len() >= framework.max_cases {
-                return result;
-            }
-        }
-    }
+    let mut result: Vec<Case> = scenarios
+        .iter()
+        .flat_map(|(scenario, residual_cells)| {
+            compromised_sets_for_cells(residual_cells, framework.faults)
+                .into_iter()
+                .map(move |compromised| Case {
+                    compromised,
+                    scenario: scenario.clone(),
+                })
+        })
+        .collect();
+    result.shuffle(rng);
+    result.truncate(framework.max_cases);
     result
 }
 
@@ -695,7 +699,7 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
         return Vec::new();
     }
 
-    // Floyd's algorithm samples without replacement in O(samples) time with no retry loop.
+    // Floyd's algorithm: O(samples) time, no retry loop.
     let mut sampled = Vec::with_capacity(samples);
     let mut seen = HashSet::with_capacity(samples);
     for idx in (total - samples as u128)..total {
@@ -711,11 +715,11 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
     sampled
 }
 
-/// Generates canonical scenarios with their residual symmetry cells.
+/// Enumerates canonical scenarios with their residual symmetry cells.
 ///
-/// Returns at most `max_scenarios` scenarios. When the full canonical space
-/// fits within the budget, all scenarios are returned in lexicographic order;
-/// otherwise, scenarios are sampled without replacement.
+/// Returns all scenarios when the space fits within `max_scenarios`;
+/// otherwise samples `max_scenarios` without replacement. Panics if the
+/// scenario space overflows u128 and cannot be sampled.
 fn generate_scenarios(
     rng: &mut impl Rng,
     n: usize,
@@ -724,50 +728,17 @@ fn generate_scenarios(
 ) -> Vec<(Scenario, Vec<usize>)> {
     let mut memo = HashMap::new();
     let initial_cells = vec![n];
-    if let Some(total) = canonical_scenario_count(&initial_cells, rounds, &mut memo) {
-        if total <= max_scenarios as u128 {
-            return (0..total)
-                .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
-                .collect();
-        }
-
-        return sample_unique_indices(rng, total, max_scenarios)
-            .into_iter()
+    let total = canonical_scenario_count(&initial_cells, rounds, &mut memo)
+        .expect("scenario space overflows u128; reduce rounds or participants");
+    if total <= max_scenarios as u128 {
+        return (0..total)
             .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
             .collect();
     }
-
-    let max_attempts = max_scenarios.saturating_mul(1024).max(4096);
-    sample_scenarios_fallback(rng, &initial_cells, rounds, max_scenarios, max_attempts)
-}
-
-/// Samples unique scenarios with residual cells from the canonical transition
-/// graph without using counts.
-fn sample_scenarios_fallback(
-    rng: &mut impl Rng,
-    initial_cells: &[usize],
-    rounds: usize,
-    max_scenarios: usize,
-    max_attempts: usize,
-) -> Vec<(Scenario, Vec<usize>)> {
-    let mut scenarios = BTreeMap::new();
-    let mut attempts = 0usize;
-    while scenarios.len() < max_scenarios && attempts < max_attempts {
-        attempts += 1;
-        let mut cells = initial_cells.to_vec();
-        let mut scenario = Scenario {
-            rounds: Vec::with_capacity(rounds),
-        };
-        for _ in 0..rounds {
-            let transitions = next_round_transitions(&cells);
-            let idx = rng.gen_range(0..transitions.len());
-            let (round, next_cells) = transitions[idx].clone();
-            scenario.rounds.push(round);
-            cells = next_cells;
-        }
-        scenarios.entry(scenario).or_insert(cells);
-    }
-    scenarios.into_iter().collect()
+    sample_unique_indices(rng, total, max_scenarios)
+        .into_iter()
+        .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
+        .collect()
 }
 
 #[cfg(test)]
@@ -781,7 +752,8 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng};
+    use std::collections::HashSet;
 
     #[test]
     fn generated_cases_are_deterministic() {
@@ -808,20 +780,6 @@ mod tests {
             let leader_bit = 1u64 << round.leader;
             (round.primary_mask & leader_bit) == 0 && (round.secondary_mask & leader_bit) != 0
         }));
-    }
-
-    #[test]
-    fn unique_index_sampling_handles_near_full_ranges() {
-        let total = 100_000u128;
-        let samples = 99_999usize;
-        let mut rng = test_rng_seeded(9);
-        let sampled = sample_unique_indices(&mut rng, total, samples);
-        assert_eq!(sampled.len(), samples);
-        assert_eq!(
-            sampled.iter().copied().collect::<HashSet<_>>().len(),
-            samples
-        );
-        assert!(sampled.into_iter().all(|idx| idx < total));
     }
 
     #[test]
@@ -868,26 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_scenarios_respect_max_bound() {
-        let scenarios = generate_scenarios(&mut test_rng(), 5, 4, 3);
-        assert_eq!(scenarios.len(), 3);
-    }
-
-    #[test]
-    fn generated_scenarios_fallback_sampling_is_bounded() {
-        let scenarios = generate_scenarios(&mut test_rng(), 4, 40, 8);
-        assert!(!scenarios.is_empty());
-        assert!(scenarios.len() <= 8);
-    }
-
-    #[test]
-    fn fallback_sampling_returns_partial_results_when_attempt_budget_is_exhausted() {
-        let mut rng = test_rng();
-        let scenarios = sample_scenarios_fallback(&mut rng, &[4], 40, 8, 1);
-        assert_eq!(scenarios.len(), 1);
-    }
-
-    #[test]
     fn canonical_scenario_count_caches_overflow_results() {
         let initial_cells = vec![4];
         let mut memo = HashMap::new();
@@ -896,6 +834,20 @@ mod tests {
             None
         );
         assert_eq!(memo.get(&(initial_cells, 40)), Some(&None));
+    }
+
+    #[test]
+    #[should_panic(expected = "scenario space overflows u128")]
+    fn cases_panic_on_scenario_overflow() {
+        let _ = cases(
+            &mut test_rng(),
+            Framework {
+                participants: 4,
+                faults: 1,
+                rounds: 40,
+                max_cases: 1,
+            },
+        );
     }
 
     #[test]
@@ -956,12 +908,6 @@ mod tests {
             "got {} cases but naive would be {naive}",
             all_cases.len()
         );
-    }
-
-    #[test]
-    fn max_cases_caps_scenarios() {
-        let scenarios = generate_scenarios(&mut test_rng(), 5, 3, 10);
-        assert!(scenarios.len() <= 10);
     }
 
     #[test]
