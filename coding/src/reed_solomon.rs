@@ -982,8 +982,7 @@ mod tests {
             ));
         }
 
-        let result =
-            decode::<Sha256, _>(total, min, &non_canonical_root, pieces.iter(), &STRATEGY);
+        let result = decode::<Sha256, _>(total, min, &non_canonical_root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 

@@ -516,7 +516,8 @@ mod test {
             }
 
             checked_shards.reverse();
-            let decoded = S::decode(config, &commitment, checked_shards.iter(), &Sequential).unwrap();
+            let decoded =
+                S::decode(config, &commitment, checked_shards.iter(), &Sequential).unwrap();
             assert_eq!(decoded, data);
         }
 
@@ -545,13 +546,11 @@ mod test {
 
         fn decode_rejects_empty_checked_shards<S: Scheme>(config: &Config, data: &[u8]) {
             let (commitment, _) = S::encode(config, data, &Sequential).unwrap();
-            let result = S::decode(
-                config,
-                &commitment,
-                core::iter::empty(),
-                &Sequential,
+            let result = S::decode(config, &commitment, core::iter::empty(), &Sequential);
+            assert!(
+                result.is_err(),
+                "decode must reject empty checked shard sets"
             );
-            assert!(result.is_err(), "decode must reject empty checked shard sets");
         }
 
         #[test]
