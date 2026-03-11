@@ -119,7 +119,7 @@ where
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        proof.verify::<H, Operation<U>, N>(start_loc, ops, chunks, root)
+        proof.verify::<H, _, _>(start_loc, ops, chunks, root)
     }
 }
 

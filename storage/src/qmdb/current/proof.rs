@@ -98,7 +98,7 @@ impl<D: Digest> RangeProof<D> {
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted storage.
-        let proof = Self::new::<H, _, N>(status, storage, start_loc..end_loc, ops_root).await?;
+        let proof = Self::new::<H, _, _>(status, storage, start_loc..end_loc, ops_root).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -249,7 +249,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
             return Err(Error::OperationPruned(loc));
         }
         let range_proof =
-            RangeProof::new::<H, _, N>(status, storage, loc..loc + 1, ops_root).await?;
+            RangeProof::new::<H, _, _>(status, storage, loc..loc + 1, ops_root).await?;
         let chunk = *status.get_chunk_containing(*loc);
         Ok(Self {
             loc,
@@ -272,6 +272,6 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
         }
 
         self.range_proof
-            .verify::<H, _, N>(self.loc, &[operation], &[self.chunk], root)
+            .verify::<H, _, _>(self.loc, &[operation], &[self.chunk], root)
     }
 }
