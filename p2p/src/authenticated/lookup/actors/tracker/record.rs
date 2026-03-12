@@ -59,8 +59,8 @@ pub struct Record {
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
 
-    /// The last time a reservation was made for this peer (`None` if never reserved).
-    last_reserved_at: Option<SystemTime>,
+    /// The earliest time we are willing to reserve this peer again (`None` if immediately eligible).
+    next_reservable_at: Option<SystemTime>,
 
     /// The earliest time we are willing to dial this peer (`None` if immediately eligible).
     next_dial_at: Option<SystemTime>,
@@ -76,7 +76,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            last_reserved_at: None,
+            next_reservable_at: None,
             next_dial_at: None,
         }
     }
@@ -88,7 +88,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            last_reserved_at: None,
+            next_reservable_at: None,
             next_dial_at: None,
         }
     }
@@ -127,9 +127,9 @@ impl Record {
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// Checks that the peer is not ourselves, is currently inert, and that at
-    /// least `interval` has elapsed since the last reservation. On success,
-    /// records the current time and computes a jittered `next_dial_at`.
+    /// Checks that the peer is not ourselves, is currently inert, and that
+    /// `next_reservable_at` has passed. On success, computes a jittered
+    /// `next_dial_at` and sets `next_reservable_at` to `now + interval`.
     pub fn reserve(
         &mut self,
         context: &mut (impl Rng + Clock),
@@ -139,15 +139,13 @@ impl Record {
             return ReserveResult::Unavailable;
         }
         let now = context.current();
-        if let Some(last) = self.last_reserved_at {
-            let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
-            if elapsed < interval {
-                return ReserveResult::RateLimited;
-            }
+        if self.next_reservable_at.is_some_and(|t| now < t) {
+            return ReserveResult::RateLimited;
         }
         self.status = Status::Reserved;
-        self.last_reserved_at = Some(now);
-        self.next_dial_at = Some((now + interval).add_jittered(context, interval));
+        let next_reservable_at = now + interval;
+        self.next_reservable_at = Some(next_reservable_at);
+        self.next_dial_at = Some(next_reservable_at.add_jittered(context, interval));
         ReserveResult::Reserved
     }
 
