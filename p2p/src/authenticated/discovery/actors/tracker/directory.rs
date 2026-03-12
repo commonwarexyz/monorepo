@@ -283,6 +283,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         })
     }
 
+    /// Returns `true` if the peer is actively blocked (entry exists and has not expired).
+    fn is_blocked(&self, peer: &C) -> bool {
+        self.blocked
+            .get(peer)
+            .is_some_and(|t| t > self.context.current())
+    }
+
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
@@ -370,7 +377,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
     pub fn eligible(&self, peer: &C) -> bool {
-        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns dialable peers and the next time another peer may become dialable.
@@ -401,7 +408,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     pub fn acceptable(&self, peer: &C) -> bool {
-        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
+        !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     /// Unblock all peers whose block has expired and update the knowledge bitmap.
@@ -1701,6 +1708,11 @@ mod tests {
                 dialable.next_query_at, None,
                 "expired block should not contribute a stale hint"
             );
+
+            // Reservation should also succeed.
+            directory
+                .dial(&peer_pk)
+                .expect("expired block should not prevent reservation");
         });
     }
 }

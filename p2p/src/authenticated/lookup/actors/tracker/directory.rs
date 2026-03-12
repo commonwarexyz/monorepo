@@ -246,6 +246,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
+    /// Returns `true` if the peer is actively blocked (entry exists and has not expired).
+    fn is_blocked(&self, peer: &C) -> bool {
+        self.blocked
+            .get(peer)
+            .is_some_and(|t| t > self.context.current())
+    }
+
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
@@ -290,7 +297,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// This does NOT check IP validity - that is done separately for dialing (ingress)
     /// and accepting (egress).
     pub fn eligible(&self, peer: &C) -> bool {
-        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns dialable peers and the next time another peer may become dialable.
@@ -324,7 +331,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Checks eligibility (peer set membership), blocked status, egress IP match (if not bypass_ip_check),
     /// and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        !self.blocked.contains(peer)
+        !self.is_blocked(peer)
             && self
                 .peers
                 .get(peer)
@@ -339,7 +346,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .iter()
-            .filter(|(peer, r)| !self.blocked.contains(peer) && r.eligible())
+            .filter(|(peer, r)| !self.is_blocked(peer) && r.eligible())
             .filter_map(|(_, r)| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
@@ -1758,6 +1765,11 @@ mod tests {
                 dialable.next_query_at, None,
                 "expired block should not contribute a stale hint"
             );
+
+            // Reservation should also succeed.
+            directory
+                .dial(&pk_1)
+                .expect("expired block should not prevent reservation");
         });
     }
 
