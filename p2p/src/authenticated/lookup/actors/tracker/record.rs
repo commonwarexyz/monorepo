@@ -260,10 +260,7 @@ impl Record {
 mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner};
-    use std::{
-        net::SocketAddr,
-        time::Duration,
-    };
+    use std::{net::SocketAddr, time::Duration};
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -342,7 +339,10 @@ mod tests {
             let mut record = Record::known(test_address());
 
             assert_eq!(record.status, Status::Inert);
-            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
             assert_eq!(record.status, Status::Reserved);
 
             assert_eq!(
@@ -365,7 +365,10 @@ mod tests {
             record.release();
             assert_eq!(record.status, Status::Inert);
 
-            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
             assert_eq!(record.status, Status::Reserved);
             record.release();
             assert_eq!(record.status, Status::Inert);
@@ -384,7 +387,10 @@ mod tests {
     fn test_connect_when_active_panics() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
-            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
             record.connect();
             record.connect();
         });
@@ -402,7 +408,10 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
             assert_eq!(record.status, Status::Inert);
-            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
             assert_eq!(record.status, Status::Reserved);
             record.connect();
             assert_eq!(record.status, Status::Active);
@@ -424,7 +433,10 @@ mod tests {
             record.increment();
             assert!(!record.deletable());
 
-            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
             assert!(!record.deletable());
 
             record.connect();
@@ -521,10 +533,40 @@ mod tests {
 
             let interval = Duration::from_secs(1);
             let now = context.current();
-            assert_eq!(record.reserve(&mut context, interval), ReserveResult::Reserved);
+            assert_eq!(
+                record.reserve(&mut context, interval),
+                ReserveResult::Reserved
+            );
             let next_dial = record.next_dial_at().unwrap();
             assert!(next_dial >= now + interval);
             assert!(next_dial <= now + interval * 3);
+        });
+    }
+
+    #[test]
+    fn test_reserve_rate_limited() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            let interval = Duration::from_secs(5);
+
+            assert_eq!(
+                record.reserve(&mut context, interval),
+                ReserveResult::Reserved
+            );
+            record.release();
+
+            // Immediate re-reserve is rate-limited.
+            assert_eq!(
+                record.reserve(&mut context, interval),
+                ReserveResult::RateLimited
+            );
+
+            // After interval elapses, reserve succeeds again.
+            context.sleep(interval).await;
+            assert_eq!(
+                record.reserve(&mut context, interval),
+                ReserveResult::Reserved
+            );
         });
     }
 
