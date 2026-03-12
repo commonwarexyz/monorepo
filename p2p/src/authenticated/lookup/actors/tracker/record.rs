@@ -233,10 +233,6 @@ impl Record {
         }
     }
 
-    #[cfg(test)]
-    pub const fn redial_at(&self) -> SystemTime {
-        self.redial_at
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -552,7 +548,7 @@ mod tests {
         record.defer(later);
         record.defer(now);
 
-        assert_eq!(record.redial_at, later);
+        assert_eq!(record.dialable_at(true, true), Some(later));
     }
 
     #[test]

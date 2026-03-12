@@ -1676,12 +1676,14 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
             let now = context.current();
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().redial_at(),
-                SystemTime::UNIX_EPOCH
+                directory.peers.get(&pk_1).unwrap().dialable_at(true, true),
+                Some(SystemTime::UNIX_EPOCH)
             );
 
-            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
-            let redial_at = directory.peers.get(&pk_1).unwrap().redial_at();
+            let reservation = directory.listen(&pk_1).expect("peer should reserve");
+            drop(reservation);
+            directory.release(super::Metadata::Listener(pk_1.clone()));
+            let redial_at = directory.peers.get(&pk_1).unwrap().dialable_at(true, true).unwrap();
             assert!(redial_at >= now);
             assert!(redial_at <= now + quota.replenish_interval() * 2);
         });
@@ -1770,8 +1772,8 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            let redial_at = directory.peers.get(&pk_1).unwrap().redial_at();
-            assert_eq!(redial_at, SystemTime::UNIX_EPOCH);
+            let redial_at = directory.peers.get(&pk_1).unwrap().dialable_at(true, true);
+            assert_eq!(redial_at, Some(SystemTime::UNIX_EPOCH));
             assert!(directory.dialable().peers.contains(&pk_1));
 
             assert!(directory.rate_limiter.check_key(&pk_1).is_ok());
@@ -1780,7 +1782,7 @@ mod tests {
                 "reservation should fail once the token is exhausted"
             );
 
-            assert_eq!(directory.peers.get(&pk_1).unwrap().redial_at(), redial_at);
+            assert_eq!(directory.peers.get(&pk_1).unwrap().dialable_at(true, true), redial_at);
             assert!(
                 directory.dialable().peers.contains(&pk_1),
                 "rate-limit rejection should not defer future dialability"
