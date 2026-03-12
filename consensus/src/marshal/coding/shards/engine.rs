@@ -468,7 +468,7 @@ where
                         .cloned();
                     response.send_lossy(block);
                 }
-                Message::SubscribeAssignedShardReady {
+                Message::SubscribeAssignedShard {
                     commitment,
                     response,
                 } => {
@@ -1629,7 +1629,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -1680,7 +1680,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -1733,7 +1733,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -1767,7 +1767,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe on the proposer before it caches the locally proposed block.
-            let shard_sub = peers[0].mailbox.subscribe_assigned_shard_ready(commitment).await;
+            let shard_sub = peers[0].mailbox.subscribe_assigned_shard(commitment).await;
             let commitment_sub = peers[0].mailbox.subscribe(commitment).await;
             let digest_sub = peers[0].mailbox.subscribe_by_digest(digest).await;
 
@@ -1835,7 +1835,7 @@ mod tests {
                     .mailbox
                     .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
-                let mut shard_sub = peers[2].mailbox.subscribe_assigned_shard_ready(commitment).await;
+                let mut shard_sub = peers[2].mailbox.subscribe_assigned_shard(commitment).await;
 
                 // Byzantine peer sends the invalid shard.
                 let invalid_bytes = invalid_shard.encode();
@@ -2157,7 +2157,7 @@ mod tests {
                 let leader_b = peers[1].public_key.clone();
 
                 // Subscribe before shards arrive so we can verify acceptance.
-                let shard_sub = peers[2].mailbox.subscribe_assigned_shard_ready(commitment).await;
+                let shard_sub = peers[2].mailbox.subscribe_assigned_shard(commitment).await;
 
                 // First leader update should stick.
                 peers[2]
@@ -2236,7 +2236,7 @@ mod tests {
                 let non_participant_leader = PrivateKey::from_seed(10_000).public_key();
 
                 // Subscribe before shards arrive.
-                let shard_sub = peers[2].mailbox.subscribe_assigned_shard_ready(commitment).await;
+                let shard_sub = peers[2].mailbox.subscribe_assigned_shard(commitment).await;
 
                 // A non-participant leader update should be ignored.
                 peers[2]
@@ -2760,7 +2760,7 @@ mod tests {
                 // Subscribe before any shards arrive.
                 let mut shard_sub = peers[receiver_idx]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard(commitment)
                     .await;
 
                 // Send the leader's shard (for receiver's index) and three shards,
@@ -2848,7 +2848,7 @@ mod tests {
 
                 let shard_sub = peers[receiver_idx]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard(commitment)
                     .await;
                 peers[receiver_idx]
                     .mailbox
@@ -4197,7 +4197,7 @@ mod tests {
                     .expect("remove_link should succeed");
 
                 // Subscribe to the shard and block BEFORE any broadcasting.
-                let mut shard_sub = peers[1].mailbox.subscribe_assigned_shard_ready(commitment).await;
+                let mut shard_sub = peers[1].mailbox.subscribe_assigned_shard(commitment).await;
                 let block_sub = peers[1].mailbox.subscribe(commitment).await;
 
                 // Leader broadcasts.
@@ -4260,7 +4260,7 @@ mod tests {
                 // Participants should receive and validate their own shards.
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard(commitment)
                         .await
                         .await
                         .expect("participant shard subscription should complete");
@@ -4269,7 +4269,7 @@ mod tests {
                 // Non-participant should receive and validate the leader's shard.
                 for np in non_participants.iter() {
                     np.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard(commitment)
                         .await
                         .await
                         .expect("non-participant shard subscription should complete");
@@ -4460,7 +4460,7 @@ mod tests {
 
             // Announce the leader. Buffered shards from the leader should have been
             // evicted, so the shard will NOT be ingested.
-            let mut shard_sub = mailbox.subscribe_assigned_shard_ready(commitment).await;
+            let mut shard_sub = mailbox.subscribe_assigned_shard(commitment).await;
             mailbox
                 .discovered(
                     commitment,
@@ -4544,7 +4544,7 @@ mod tests {
 
                 // The shard subscription should NOT have resolved yet
                 // because the victim has not verified its own shard.
-                let mut shard_sub = peers[victim_idx].mailbox.subscribe_assigned_shard_ready(commitment).await;
+                let mut shard_sub = peers[victim_idx].mailbox.subscribe_assigned_shard(commitment).await;
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
                     "shard subscription must not resolve before own shard is verified"

@@ -60,7 +60,7 @@ where
     ///
     /// For proposers, this resolves immediately after the locally built block
     /// is cached because they trivially have all shards.
-    SubscribeAssignedShardReady {
+    SubscribeAssignedShard {
         /// The block's commitment.
         commitment: Commitment,
         /// The response channel.
@@ -163,12 +163,12 @@ where
     ///
     /// For proposers, this resolves immediately after the locally built block
     /// is cached because they trivially have all shards.
-    pub async fn subscribe_assigned_shard_ready(
+    pub async fn subscribe_assigned_shard(
         &self,
         commitment: Commitment,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeAssignedShardReady {
+        let msg = Message::SubscribeAssignedShard {
             commitment,
             response: responder,
         };
