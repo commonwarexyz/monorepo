@@ -487,8 +487,9 @@ impl Read for Private {
         let scalar = Scalar::read_blst_scalar_unchecked(buf)?;
         let mut ret = blst_fr::default();
 
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
+        // SAFETY: `blst_sk_check` validates non-zero and in-range.
+        //
+        // We use `blst_sk_check` instead of blst_scalar_fr_check because it also checks non-zero
         // per IETF BLS12-381 spec (Draft 4+).
         //
         // References:
