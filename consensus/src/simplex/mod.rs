@@ -24,7 +24,7 @@
 //!
 //! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
 //! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
-//! finalized state. At initialization, each replica invokes `enter_view(r, 1)` exactly once.
+//! finalized state. At initialization, each replica calls `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
 //! Voting begins at view 1, with the first proposal referencing genesis as its parent.
 //!
 //! ### Timer semantics
@@ -177,7 +177,12 @@
 //! - Genesis is view `0` and is implicitly finalized.
 //! - Partial synchrony: after GST, messages arrive within `Δ`.
 //! - Byzantine threshold is parameterized by `f`, with quorum threshold `Q` according to `utils/src/faults.rs`.
-//! - `lookback` is a per-replica leader-activity window used by non-leaders to fast-skip inactive leaders; activity is evaluated over the replica's most recently tracked rounds, which may be non-contiguous after view jumps.
+//! - `activity_timeout` controls how many views behind `last_finalized` are retained locally.
+//!   Rounds with view `< last_finalized - activity_timeout` may be discarded.
+//! - `skip_timeout` is the number of recent locally tracked rounds checked for leader
+//!   inactivity; activity is evaluated over the replica's most recently tracked rounds,
+//!   which may be non-contiguous after view jumps. Must satisfy
+//!   `skip_timeout <= activity_timeout`.
 //! - `T` is the retry period used by the retry timer.
 //!
 //! ## 3. Quorums and Certificates
@@ -209,6 +214,7 @@
 //! - `view` is the replica view, initially `1`.
 //! - `last_finalized` is the view of the last finalized container, initially `0` (genesis).
 //! - `round` is a map `View -> RoundState` tracking per-view state, where `RoundState` is:
+//!   - `leader`: `Option<replica>`, the elected leader for this view, initially `None`.
 //!   - `notarization`: `Option<notarization(c, v)>`, initially `None`.
 //!   - `nullification`: `Option<nullification(v)>`, initially `None`.
 //!   - `finalization`: `Option<finalization(c, v)>`, initially `None`.
@@ -227,6 +233,9 @@
 //!   - `t_r`: retry timeout.
 //! - `messages` is a map `View -> (Replica -> Set<Message>)` storing received vote messages
 //!   (`notarize`, `nullify`, `finalize`) grouped by view then sender.
+//!
+//! Pruning: entries in `round` and `messages` with view `< min_active(r)` may be discarded.
+//! Incoming messages for views that are not `interesting` are dropped on arrival.
 //!
 //! Timer semantics:
 //!
@@ -318,6 +327,25 @@
 //!     return is_certified(r, v_parent);
 //! }
 //!
+//! // The lowest view that must remain in memory.
+//! fn min_active(r) -> View {
+//!     return r.last_finalized - activity_timeout;  // saturates at 0
+//! }
+//!
+//! // Whether a message for view `pending` is relevant.
+//! fn interesting(r, pending, allow_future) -> bool {
+//!     if pending == 0 {
+//!         return false;
+//!     }
+//!     if pending < min_active(r) {
+//!         return false;
+//!     }
+//!     if !allow_future and pending > r.view + 1 {
+//!         return false;
+//!     }
+//!     return true;
+//! }
+//!
 //! // Records message `m` from replica `r'`. Returns true only on the first observation.
 //! fn record_message(r, r', m) -> bool {
 //!     if m.v ∉ r.messages {
@@ -352,17 +380,25 @@
 //!     return Some(leader(v));
 //! }
 //!
+//! // Sets the leader for view `v` if not already set.
+//! fn set_leader(r, v) {
+//!     if r.round[v].leader != None {
+//!         return;
+//!     }
+//!     r.round[v].leader = Some(leader(v));
+//! }
+//!
 //! // Replica `r` enters `next` iff `next` is ahead of the current view.
 //! fn enter_view(r, next) {
 //!     if r.view >= next {
 //!         return;
 //!     }
 //!     r.view = next;
-//!     r.leader = leader(next);
 //!     r.round[next].t_l = now + 2Δ;
 //!     r.round[next].t_r = None;
 //!     r.round[next].t_a = now + 3Δ;
-//!     if r != r.leader and r.leader has not been active in the last lookback locally tracked rounds {
+//!     let l = r.round[next].leader;
+//!     if l != None and r != l and l has not been active in the last skip_timeout locally tracked rounds {
 //!         r.round[next].t_l = 0;
 //!         r.round[next].t_a = 0;
 //!     }
@@ -372,6 +408,9 @@
 //! // Mirrors `get_best_certificate` behavior in voter state.
 //! // Priority: finalization > nullification > notarization.
 //! fn get_best_certificate(r, v) -> Option<certificate> {
+//!     if v == 0 {
+//!         return genesis;
+//!     }
 //!     if r.round[v].finalization = finalization(c, v) {
 //!         return finalization(c, v);
 //!     }
@@ -390,13 +429,13 @@
 //! ### 7.0. Initialization
 //!
 //! 1. At startup, after initializing replica state with genesis (view `0`) implicitly finalized,
-//!    invoke `enter_view(r, 1)` exactly once.
+//!    call `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
 //!
 //! ### 7.1. View Entry
 //!
 //! 1. On entering view `v`:
-//!    1. Determine leader `l = leader(v)`.
-//!    1. If `r != l` and `l` has not been active in the last `lookback` locally tracked rounds,
+//!    1. Let `l = r.round[v].leader`.
+//!    1. If `r != l` and `l` has not been active in the last `skip_timeout` locally tracked rounds,
 //!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = select_parent(r, v)`.
@@ -407,11 +446,11 @@
 //!       1. Set `r.round[v].broadcast_notarize = true`.
 //!       1. Broadcast `notarize(c, v)`.
 //!
-//! ### 7.2. First Leader Notarize
+//! ### 7.2. Leader Notarize
 //!
 //! 1. On receiving `notarize(c, v)` from replica `r' = leader(v)`:
 //!    1. If `!record_message(r, r', notarize(c, v))`, return.
-//!    1. If `r.round[v].broadcast_notarize` or `r.round[v].broadcast_nullify`, return.
+//!    1. If `r.round[v].broadcast_nullify`, return.
 //!    1. Set `r.round[v].t_l = None`.
 //!    1. Let `v_parent` be `c`'s declared parent view.
 //!    1. If `parent_payload(r, v, v_parent) = None`, return.
@@ -429,6 +468,7 @@
 //!    1. Assemble `notarization(c, v)` (even if `c` itself is not yet verified locally).
 //! 1. On constructing or receiving the first `notarization(c, v)`:
 //!    1. Set `r.round[v].notarization = notarization(c, v)`.
+//!    1. Call `set_leader(r, v + 1)`.
 //!    1. Call `record_proposal(r, v, c)`.
 //!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
 //!    1. Attempt `certify(c)`:
@@ -452,10 +492,10 @@
 //! 1. On constructing or receiving the first `nullification(v)`:
 //!    1. Set `r.round[v].nullification = nullification(v)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
+//!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
 //!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
-//!    1. If `r = leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
 //!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
-//!    1. Call `enter_view(r, v + 1)`.
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!
 //! ### 7.5. Finalization Path
 //!
@@ -466,11 +506,11 @@
 //! 1. On constructing or receiving the first `finalization(c, v)`:
 //!    1. Set `r.round[v].finalization = finalization(c, v)`.
 //!    1. Call `record_proposal(r, v, c)`.
-//!    1. Set `r.last_finalized = v`.
+//!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. Mark `c` finalized (views `<= last_finalized` are implicitly finalized).
 //!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
-//!    1. Call `enter_view(r, v + 1)`.
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!
 //! ### 7.6. Timeout Behavior
 //!
