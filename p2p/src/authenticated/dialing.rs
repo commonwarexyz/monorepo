@@ -1,7 +1,7 @@
 use commonware_cryptography::PublicKey;
 use std::time::SystemTime;
 
-/// Returns the earlier of two optional times, preferring `Some` over `None`.
+/// Merges `b` into `a`, keeping the earliest time.
 pub(crate) fn earliest(a: Option<SystemTime>, b: SystemTime) -> Option<SystemTime> {
     Some(a.map_or(b, |a| a.min(b)))
 }

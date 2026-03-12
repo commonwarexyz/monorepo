@@ -299,7 +299,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut next_query_at: Option<SystemTime> = None;
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
-            if let Some(blocked_until) = self.blocked.get(peer) {
+            if let Some(blocked_until) = self.blocked.get(peer).filter(|t| *t > now) {
                 next_query_at = earliest(next_query_at, blocked_until);
                 continue;
             }
@@ -1716,6 +1716,47 @@ mod tests {
             assert_eq!(
                 dialable.next_query_at,
                 Some(context.current() + Duration::from_secs(3600))
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialable_expired_block_without_unblock() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(200),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            directory.block(&pk_1);
+            assert!(directory.dialable().peers.is_empty());
+
+            // Advance past the block expiry but do NOT call unblock_expired().
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // The peer should still be dialable despite the stale block entry.
+            let dialable = directory.dialable();
+            assert!(
+                dialable.peers.contains(&pk_1),
+                "expired block should not prevent dialing"
+            );
+            assert_eq!(
+                dialable.next_query_at, None,
+                "expired block should not contribute a stale hint"
             );
         });
     }
