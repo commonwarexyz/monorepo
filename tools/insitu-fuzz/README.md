@@ -37,6 +37,7 @@ See [TECHNICAL.md](TECHNICAL.md) for more information
 | `task_order_fast_tests` | Task scheduling fuzzing (<100ms tests) |
 | `task_order_aggregate` | Single test: consensus aggregation |
 | `task_order_simplex` | Single test: consensus simplex |
+| `consensus_task_order` | Task order + consensus fuzz harness (Byzantine Disrupter + invariant checks) |
 
 ### AFL++ Targets (afl.sh)
 
@@ -59,6 +60,7 @@ See [TECHNICAL.md](TECHNICAL.md) for more information
 | `task_order_aggregate` | Single test: consensus aggregation |
 | `task_order_simplex` | Single test: consensus simplex |
 | `task_order_reshare` | Reshare with many forced failures (deferred fork, MSG_IDX) |
+| `consensus_task_order` | Task order + consensus fuzz harness (Byzantine Disrupter + invariant checks) |
 
 ## Usage
 

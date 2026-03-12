@@ -6,7 +6,7 @@ use commonware_codec::{Codec, Error};
 use std::{any::Any, sync::Arc, time::SystemTime};
 
 // Message tracking for fuzzing (when MSG_INFO=1 is set)
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "fuzz")]
 mod msg_tracking {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -39,7 +39,7 @@ mod msg_tracking {
 // FFI hooks for message corruption (optionally provided by commonware-fuzz crate)
 // Uses weak linkage - if commonware-fuzz is linked, it provides the implementation
 // Otherwise, None (no corruption)
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "fuzz")]
 extern "C" {
     #[linkage = "extern_weak"]
     static commonware_fuzz_corrupt_bytes: Option<unsafe extern "C" fn(*mut u8, usize) -> bool>;
@@ -51,7 +51,7 @@ extern "C" {
     static commonware_fuzz_get_fuzz_input: Option<unsafe extern "C" fn(*mut u8, usize) -> usize>;
 }
 
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "fuzz")]
 #[inline(always)]
 fn corrupt_bytes_hook(msg: &mut [u8]) {
     unsafe {
@@ -100,7 +100,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         mut message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
-        #[cfg(feature = "fuzzing")]
+        #[cfg(feature = "fuzz")]
         let encoded = {
             let mut encoded = message.encode().to_vec();
             msg_tracking::track_message(encoded.len());
@@ -109,7 +109,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
             encoded
         };
 
-        #[cfg(not(feature = "fuzzing"))]
+        #[cfg(not(feature = "fuzz"))]
         let encoded = message.encode();
 
         self.sender

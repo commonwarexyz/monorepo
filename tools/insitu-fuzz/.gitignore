@@ -27,6 +27,7 @@ Cargo.lock
 *.orig
 .env
 .env.local
+.github/
 
 # Coverage
 /coverage_html

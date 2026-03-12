@@ -14,6 +14,8 @@ mod unit {
         clear_fuzzer_input, corrupt_bytes, enable_stats, get_stats, reset_stats,
         set_expected_messages, set_fuzzer_input,
     };
+    #[cfg(feature = "fuzz")]
+    use crate::{clear_task_order_bytes, set_task_order_bytes};
 
     /// Reset all fuzzer state for clean test
     fn reset_fuzzer_state() {
@@ -234,6 +236,50 @@ mod unit {
         assert_eq!(msg[2], 0x02); // unchanged
         assert_eq!(msg[3], 0x03); // unchanged
         assert_eq!(msg[4], 0x04); // unchanged
+    }
+
+    #[cfg(feature = "fuzz")]
+    fn run_fixed_workload_with_task_order(task_bytes: &[u8]) -> String {
+        use commonware_runtime::{
+            deterministic, reschedule, Handle, Metrics as _, Runner as _, Spawner as _,
+        };
+
+        set_task_order_bytes(task_bytes);
+
+        let state = deterministic::Runner::seeded(0xDEC0DE).start(|context| async move {
+            let mut handles: Vec<Handle<()>> = Vec::new();
+            for i in 0..6 {
+                handles.push(context.with_label(&format!("worker_{i}")).spawn(
+                    move |_| async move {
+                        for _ in 0..8 {
+                            reschedule().await;
+                        }
+                    },
+                ));
+            }
+
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            context.auditor().state()
+        });
+
+        clear_task_order_bytes();
+        state
+    }
+
+    #[cfg(feature = "fuzz")]
+    #[test]
+    fn test_task_order_changes_runtime_trace() {
+        // Same fixed workload, two distinct task-order streams.
+        let state_a = run_fixed_workload_with_task_order(&vec![0x00; 8192]);
+        let state_b = run_fixed_workload_with_task_order(&vec![0xFF; 8192]);
+
+        assert_ne!(
+            state_a, state_b,
+            "Different task-order streams should produce different deterministic runtime traces"
+        );
     }
 }
 

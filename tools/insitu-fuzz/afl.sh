@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/afl"
 
 # Get test count from registry (dynamic, not hardcoded)
-# Use sed for macOS compatibility (no grep -P)
 NUM_TESTS=$(sed -n 's/.*pub const NUM_TESTS: usize = \([0-9]*\).*/\1/p' "$SCRIPT_DIR/src/test_registry.rs" 2>/dev/null || echo "0")
 MAX_TEST_IDX=$((NUM_TESTS - 1))
 
@@ -16,8 +15,8 @@ TIMEOUT="${TIMEOUT:-5000}"
 CORPUS_DIR="corpus"
 FINDINGS_DIR="findings"
 
-# Default to 50% of available CPUs (nproc on Linux, sysctl on macOS)
-TOTAL_CPUS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+# Default to 50% of available CPUs
+TOTAL_CPUS=$(nproc 2>/dev/null || echo 4)
 DEFAULT_CPUS=$((TOTAL_CPUS * 5 / 10))
 DEFAULT_CPUS=$((DEFAULT_CPUS > 0 ? DEFAULT_CPUS : 1))
 PARALLEL="${PARALLEL:-$DEFAULT_CPUS}"
@@ -108,7 +107,6 @@ ensure_corpus() {
 
 # Cleanup background jobs on exit/interrupt
 cleanup() {
-    # Note: macOS xargs doesn't support -r, but handles empty input gracefully
     jobs -p | xargs kill 2>/dev/null || true
 }
 

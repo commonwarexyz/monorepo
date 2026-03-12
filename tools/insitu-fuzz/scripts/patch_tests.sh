@@ -11,11 +11,7 @@
 
 set -e
 
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    SED_INPLACE=(-i '')
-else
-    SED_INPLACE=(-i)
-fi
+SED_INPLACE=(-i)
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT_DIR="$REPO_ROOT/scripts"
@@ -46,7 +42,7 @@ echo "Applying bulk patches..."
 for crate in $ALL_CRATES; do
   if [ -d "$MONOREPO/$crate" ]; then
     find "$MONOREPO/$crate" -name "*.rs" -type f -exec sed "${SED_INPLACE[@]}" \
-      's/#\[cfg(test)\]/#[cfg(any(test, feature = "fuzzing"))]/g' {} +
+      's/#\[cfg(test)\]/#[cfg(any(test, feature = "fuzz"))]/g' {} +
   fi
 done
 
@@ -54,7 +50,7 @@ done
 for crate in $ALL_CRATES; do
   if [ -d "$MONOREPO/$crate" ]; then
     find "$MONOREPO/$crate" -name "*.rs" -type f -exec sed "${SED_INPLACE[@]}" \
-      's/#\[cfg(feature = "mocks")\]/#[cfg(any(feature = "mocks", feature = "fuzzing"))]/g' {} +
+      's/#\[cfg(feature = "mocks")\]/#[cfg(any(feature = "mocks", feature = "fuzz"))]/g' {} +
   fi
 done
 
@@ -64,7 +60,7 @@ for crate in $ALL_CRATES; do
     find "$MONOREPO/$crate" -name "*.rs" -type f | while read -r file; do
       # Use sed with two separate passes
       sed "${SED_INPLACE[@]}" -e '
-        /cfg(any(test, feature = "fuzzing"))/{
+        /cfg(any(test, feature = "fuzz"))/{
           n
           s/^[[:space:]]*mod tests[[:space:]]/    pub mod tests /
           s/^[[:space:]]*mod test[[:space:]]/    pub mod test /
@@ -75,30 +71,30 @@ for crate in $ALL_CRATES; do
   fi
 done
 
-# Add fuzzing feature to Cargo.toml files
+# Add fuzz feature to Cargo.toml files
 # Automatically propagate to p2p if the crate depends on it (for monorepo runs)
 for crate in $ALL_CRATES_NO_MACROS; do
   toml="$MONOREPO/$crate/Cargo.toml"
   if [ -f "$toml" ]; then
-    if ! grep -q "fuzzing" "$toml"; then
+    if ! grep -q "^fuzz " "$toml" && ! grep -q "^fuzz=" "$toml"; then
       # Check if this crate depends on commonware-p2p
       if [ "$crate" != "p2p" ] && grep -q "commonware-p2p" "$toml"; then
-        # Propagate to p2p so hooks work when running tests from monorepo
+        # Propagate to p2p/runtime so hooks and test deps are available
         if grep -q "\[features\]" "$toml"; then
           sed "${SED_INPLACE[@]}" '/\[features\]/a\
-fuzzing = ["commonware-p2p/fuzzing", "commonware-runtime/fuzzing"]
+fuzz = ["commonware-p2p/fuzzing", "commonware-runtime/fuzzing"]
 ' "$toml"
         else
-          echo -e "\n[features]\nfuzzing = [\"commonware-p2p/fuzzing\", \"commonware-runtime/fuzzing\"]" >> "$toml"
+          echo -e "\n[features]\nfuzz = [\"commonware-p2p/fuzzing\", \"commonware-runtime/fuzzing\"]" >> "$toml"
         fi
       else
         # No p2p dependency, just add empty feature
         if grep -q "\[features\]" "$toml"; then
           sed "${SED_INPLACE[@]}" '/\[features\]/a\
-fuzzing = []
+fuzz = []
 ' "$toml"
         else
-          echo -e "\n[features]\nfuzzing = []" >> "$toml"
+          echo -e "\n[features]\nfuzz = []" >> "$toml"
         fi
       fi
     fi
@@ -120,11 +116,11 @@ for crate in $ALL_CRATES_NO_MACROS; do
 rstest = { workspace = true, optional = true }\\
 " "$toml"
 
-  # Add dep:rstest to fuzzing feature
-  if grep -q "^fuzzing = \[\]" "$toml"; then
-    sed "${SED_INPLACE[@]}" 's/^fuzzing = \[\]/fuzzing = ["dep:rstest"]/' "$toml"
-  elif grep -q "^fuzzing = \[" "$toml"; then
-    sed "${SED_INPLACE[@]}" 's/^\(fuzzing = \[.*\)\(\]\)/\1, "dep:rstest"\2/' "$toml"
+  # Add dep:rstest to fuzz feature
+  if grep -q "^fuzz = \[\]" "$toml"; then
+    sed "${SED_INPLACE[@]}" 's/^fuzz = \[\]/fuzz = ["dep:rstest"]/' "$toml"
+  elif grep -q "^fuzz = \[" "$toml"; then
+    sed "${SED_INPLACE[@]}" 's/^\(fuzz = \[.*\)\(\]\)/\1, "dep:rstest"\2/' "$toml"
   fi
 done
 
@@ -146,16 +142,6 @@ if [ -f "$runtime_network_mod" ]; then
   sed "${SED_INPLACE[@]}" 's/^pub(crate) mod audited;/pub mod audited;/' "$runtime_network_mod"
   sed "${SED_INPLACE[@]}" 's/^pub(crate) mod deterministic;/pub mod deterministic;/' "$runtime_network_mod"
   sed "${SED_INPLACE[@]}" 's/^pub(crate) mod metered;/pub mod metered;/' "$runtime_network_mod"
-fi
-
-# Remove cdylib crate-type from all crates on macOS (causes linker errors with fuzzing symbols)
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  for crate in consensus cryptography runtime storage utils; do
-    toml="$MONOREPO/$crate/Cargo.toml"
-    if [ -f "$toml" ]; then
-      sed "${SED_INPLACE[@]}" 's/crate-type = \["rlib", "cdylib"\]/crate-type = ["rlib"]/' "$toml"
-    fi
-  done
 fi
 
 # Add [lib] section to binary-only example crates that have a lib.rs from patches/raw

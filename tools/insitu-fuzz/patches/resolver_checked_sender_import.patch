@@ -15,7 +15,7 @@ index 8c30053d..6f27ea8a 100644
  
      /// Returns true if the fetch is in progress.
 -    #[cfg(test)]
-+    #[cfg(any(test, feature = "fuzzing"))]
++    #[cfg(any(test, feature = "fuzz"))]
      pub fn contains(&self, key: &Key) -> bool {
          self.key_to_id.contains_key(key) || self.pending.contains(key)
      }
@@ -23,7 +23,7 @@ index 8c30053d..6f27ea8a 100644
  
 -#[cfg(test)]
 -mod tests {
-+#[cfg(any(test, feature = "fuzzing"))]
++#[cfg(any(test, feature = "fuzz"))]
 +    pub mod tests {
      use super::*;
      use crate::p2p::mocks::Key as MockKey;

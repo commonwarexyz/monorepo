@@ -12,7 +12,7 @@ show_help() {
     cat << EOF
 Usage: ./setup.sh [OPTIONS]
 
-Apply fuzzing patches to Commonware submodule.
+Apply fuzzing patches to Commonware monorepo.
 
 OPTIONS:
     pull            Clean monorepo and pull latest from origin/main
@@ -70,7 +70,8 @@ fi
 
 # Apply patches
 echo "Applying patches..."
-if ! git -C "$COMMONWARE_PATH" diff --quiet --exit-code 2>/dev/null && [[ -e "$COMMONWARE_PATH/.git" ]]; then
+TOOL_PATH=${TOOL_PATH:-$(realpath --relative-to="$COMMONWARE_PATH" "$REPO_DIR")}
+if [[ -e "$COMMONWARE_PATH/.git" ]] && ! git -C "$COMMONWARE_PATH" diff --quiet --exit-code -- . ":!$TOOL_PATH" 2>/dev/null; then
     echo "❌ Error: Monorepo has uncommitted changes - patches may fail or create duplicates. Run './setup.sh clean' to reset."
     exit
 fi
@@ -98,6 +99,10 @@ for p in "$REPO_DIR/patches"/*.patch; do
     fi
 done
 
+# Relax deny(warnings) to warn for fuzzing builds (upstream's deny(warnings) + dead_code
+# from conditional test compilation causes errors in our non-test fuzzer builds)
+sed -i 's/^warnings = "deny"/warnings = "warn"/' "$COMMONWARE_PATH/Cargo.toml"
+
 # Delete any redundant .rej or .orig files leftover from failed patch attempts.
 find "$COMMONWARE_PATH/" -name "*.orig" -delete 2>/dev/null
 find "$COMMONWARE_PATH/" -name "*.rej" -delete 2>/dev/null
@@ -117,6 +122,11 @@ if ! bash "$REPO_DIR/scripts/patch_tests.sh"; then
     echo "Error: Test patching failed"
     exit 1
 fi
+
+# Generate test oracle (must happen under normal rustc, not AFL's compiler wrapper)
+echo "Generating test oracle..."
+cargo build --release 2>&1 | tail -1
+echo "✓ test_oracle.txt generated"
 
 # Test
 [[ $RUN_TESTS -eq 0 ]] && echo "Tests skipped" && exit 0

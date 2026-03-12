@@ -46,7 +46,7 @@ fi
 echo "Measuring message counts for $MODE_DESC..." >&2
 
 # Detect available CPU cores and set test threads
-NCPU=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo "8")
+NCPU=$(nproc 2>/dev/null || echo "8")
 TEST_THREADS_PER_SEED=${TEST_THREADS:-$((NCPU * 2))}
 
 # Run all tests in PARALLEL with final output (buffered per-test)
@@ -55,7 +55,7 @@ TEST_THREADS_PER_SEED=${TEST_THREADS:-$((NCPU * 2))}
 # Filter out utility packages that don't use network mocks to avoid rare misattribution
 
 # Build and display the command
-CARGO_CMD="cargo +nightly nextest run $CRATE_SCOPE $RUN_IGNORED --features fuzzing --test-threads=$TEST_THREADS_PER_SEED --success-output final --failure-output final"
+CARGO_CMD="cargo +nightly nextest run $CRATE_SCOPE $RUN_IGNORED --features fuzz --test-threads=$TEST_THREADS_PER_SEED --success-output final --failure-output final"
 echo "" >&2
 echo "Executing: MSG_INFO=1 $CARGO_CMD" >&2
 echo "" >&2
@@ -70,7 +70,7 @@ echo "{\"_metadata\":{\"commit\":\"$COMMIT_HASH\",\"timestamp\":\"$(date -u +%Y-
 # Run tests and generate JUnit XML (continue even if tests fail)
 # Our config includes merged test-groups/filters from monorepo + JUnit settings
 MSG_INFO=1 cargo +nightly nextest run \
-    $CRATE_SCOPE $RUN_IGNORED --features fuzzing \
+    $CRATE_SCOPE $RUN_IGNORED --features fuzz \
     --test-threads=$TEST_THREADS_PER_SEED \
     --profile "$NEXTEST_PROFILE" \
     --config-file "$FUZZ_DIR/.config/nextest.toml" 2>&1 >/dev/null || true

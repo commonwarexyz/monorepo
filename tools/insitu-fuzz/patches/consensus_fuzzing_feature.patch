@@ -1,15 +1,16 @@
 diff --git a/consensus/Cargo.toml b/consensus/Cargo.toml
-index 7e4a78d6..170e9b70 100644
+index de02c1e17..3079f4534 100644
 --- a/consensus/Cargo.toml
 +++ b/consensus/Cargo.toml
-@@ -20,12 +20,14 @@ cfg-if.workspace = true
+@@ -20,6 +20,7 @@ cfg-if.workspace = true
  commonware-broadcast.workspace = true
  commonware-codec.workspace = true
- commonware-cryptography.workspace = true
+ commonware-coding.workspace = true
 +commonware-conformance = { workspace = true, optional = true }
- commonware-math = { workspace = true, optional = true }
- commonware-parallel.workspace = true
- commonware-resolver.workspace = true
+ commonware-cryptography.workspace = true
+ commonware-macros.workspace = true
+ commonware-math.workspace = true
+@@ -28,6 +29,7 @@ commonware-resolver.workspace = true
  commonware-utils.workspace = true
  futures.workspace = true
  rand.workspace = true
@@ -17,8 +18,8 @@ index 7e4a78d6..170e9b70 100644
  rand_core.workspace = true
  thiserror.workspace = true
  
-@@ -40,6 +42,8 @@ prometheus-client.workspace = true
- rand_distr.workspace = true
+@@ -43,6 +45,8 @@ rand_distr.workspace = true
+ rayon.workspace = true
  tracing.workspace = true
  
 +rstest = { workspace = true, optional = true }
@@ -26,7 +27,7 @@ index 7e4a78d6..170e9b70 100644
  [dev-dependencies]
  commonware-conformance.workspace = true
  commonware-consensus = { path = ".", features = ["mocks"] }
-@@ -58,6 +62,14 @@ bench = false
+@@ -60,6 +64,15 @@ bench = false
  crate-type = ["rlib", "cdylib"]
  
  [features]
@@ -38,6 +39,7 @@ index 7e4a78d6..170e9b70 100644
 +    "dep:rand_chacha",
 +    "fuzz",
 +]
++fuzz = [ "mocks" ]
  mocks = [ "commonware-cryptography/mocks" ]
- fuzz = [ "dep:commonware-math", "mocks" ]
  arbitrary = [
+ 	"commonware-codec/arbitrary",

@@ -398,7 +398,7 @@ pub fn corrupt_bytes(encoded: &mut [u8]) -> bool {
 /// Also handles clean exit when the range upper bound is exceeded (AFL only).
 ///
 /// Enabled only when built with the afl-fuzz feature.
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "fuzz")]
 #[no_mangle]
 pub extern "C" fn insitu_fuzz_checkpoint() {
     #[cfg(feature = "afl-fuzz")]
@@ -475,7 +475,7 @@ pub extern "C" fn insitu_fuzz_checkpoint() {
     }
 }
 
-#[cfg(not(feature = "fuzzing"))]
+#[cfg(not(feature = "fuzz"))]
 #[no_mangle]
 pub extern "C" fn insitu_fuzz_checkpoint() {
     // No-op when fuzzing is disabled

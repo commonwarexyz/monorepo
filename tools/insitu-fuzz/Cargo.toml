@@ -28,15 +28,15 @@ serde_json = "1.0"
 serial_test = "3.2"
 
 [features]
-fuzzing = ["dep:commonware-broadcast", "commonware-broadcast?/fuzzing", "dep:commonware-runtime", "commonware-runtime?/fuzzing"]
-afl-fuzz = ["fuzzing"]
+fuzz = ["dep:commonware-broadcast", "commonware-broadcast?/fuzz", "dep:commonware-runtime", "commonware-runtime?/fuzzing"]
+afl-fuzz = ["fuzz"]
 # Test registry feature - enables centralized test list for harnesses
 test-registry = [
-    "dep:commonware-broadcast", "commonware-broadcast?/fuzzing",
-    "dep:commonware-collector", "commonware-collector?/fuzzing",
-    "dep:commonware-consensus", "commonware-consensus?/fuzzing",
-    "dep:commonware-resolver", "commonware-resolver?/fuzzing",
-    "dep:commonware-reshare", "commonware-reshare?/fuzzing",
+    "dep:commonware-broadcast", "commonware-broadcast?/fuzz",
+    "dep:commonware-collector", "commonware-collector?/fuzz",
+    "dep:commonware-consensus", "commonware-consensus?/fuzz",
+    "dep:commonware-resolver", "commonware-resolver?/fuzz",
+    "dep:commonware-reshare", "commonware-reshare?/fuzz",
 ]
 
 [profile.release]

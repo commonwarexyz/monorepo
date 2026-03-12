@@ -1,7 +1,7 @@
 //! Commonware fuzzing infrastructure
 //!
 //! Provides message corruption testing for Commonware consensus protocols.
-//! Requires `fuzzing` feature enabled in commonware-runtime.
+//! Requires `fuzz` feature enabled in commonware-runtime.
 
 use std::collections::HashMap;
 use std::panic;

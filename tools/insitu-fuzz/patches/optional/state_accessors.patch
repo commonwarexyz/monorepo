@@ -7,13 +7,13 @@ index 385feeeb..da07bd89 100644
      }
  
 +    /// Returns a reference to the signing scheme.
-+    #[cfg(feature = "fuzzing")]
++    #[cfg(feature = "fuzz")]
 +    pub fn scheme(&self) -> &S {
 +        &self.scheme
 +    }
 +
 +    /// Returns a reference to the namespace bytes.
-+    #[cfg(feature = "fuzzing")]
++    #[cfg(feature = "fuzz")]
 +    pub fn namespace(&self) -> &[u8] {
 +        &self.namespace
 +    }

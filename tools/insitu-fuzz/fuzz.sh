@@ -30,13 +30,12 @@ DEV_DIR="$HOME/insitu-fuzz"
 
 # Run cron job: update, setup, fuzz
 run_cron() {
-    # Fast setup: copy .git from dev, checkout, update submodules
+    # Fast setup: copy .git from dev, checkout
     rm -rf "$PROD_DIR"
     mkdir -p "$PROD_DIR"
     cp -r "$DEV_DIR/.git" "$PROD_DIR/"
     cd "$PROD_DIR"
     git checkout .
-    git submodule update --init --recursive
     ./setup.sh clean
     # Clean .git to save space (after setup since it uses git commands)
     rm -rf .git
