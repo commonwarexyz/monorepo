@@ -4,9 +4,9 @@
 //!
 //! [`BatchChainInfo`] is used to walk chains of batches.
 
-use crate::{
-    merkle::hasher::Hasher,
-    mmr::{iterator::PeakIterator, proof, Error, Location, Position, Proof},
+use crate::merkle::{
+    hasher::Hasher,
+    mmr::{iterator::PeakIterator, proof, Error, Family, Location, Position, Proof},
 };
 use alloc::collections::BTreeMap;
 use commonware_cryptography::Digest;
@@ -47,7 +47,7 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for the element at `loc`.
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = Self::Digest>,
+        hasher: &mut impl Hasher<Family = Family, Digest = Self::Digest>,
         loc: Location,
     ) -> Result<Proof<Self::Digest>, Error> {
         if !loc.is_valid() {

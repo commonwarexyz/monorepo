@@ -11,9 +11,11 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::{
-    merkle::hasher::Hasher,
-    mmr::{iterator::PeakIterator, proof, storage::Storage, Error, Location, Position, Proof},
+use crate::merkle::{
+    hasher::Hasher,
+    mmr::{
+        iterator::PeakIterator, proof, storage::Storage, Error, Family, Location, Position, Proof,
+    },
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -48,7 +50,7 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        H: Hasher<Family = super::Family, Digest = D>,
+        H: Hasher<Family = Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let digests =
@@ -82,7 +84,7 @@ impl<D: Digest> ProofStore<D> {
     /// The sub-range's fold prefix accumulator is derived from the stored fold accumulator
     /// (covering the original proof's fold prefix peaks) plus any additional peaks that are
     /// individually available in the store (original range peaks now preceding the sub-range).
-    pub fn range_proof<H: Hasher<Family = super::Family, Digest = D>>(
+    pub fn range_proof<H: Hasher<Family = Family, Digest = D>>(
         &self,
         hasher: &mut H,
         range: Range<Location>,
@@ -161,7 +163,7 @@ impl<D: Digest> ProofStore<D> {
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<
     D: Digest,
-    H: Hasher<Family = super::Family, Digest = D>,
+    H: Hasher<Family = Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
     hasher: &mut H,
@@ -183,7 +185,7 @@ pub async fn range_proof<
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<
     D: Digest,
-    H: Hasher<Family = super::Family, Digest = D>,
+    H: Hasher<Family = Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
     hasher: &mut H,

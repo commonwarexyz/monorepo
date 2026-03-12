@@ -70,17 +70,18 @@
 pub mod batch;
 pub mod iterator;
 pub mod mem;
+pub mod proof;
 pub mod read;
 
 use crate::merkle;
-pub use crate::merkle::{
-    hasher, location, position, proof,
-    proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT},
-    LocationRangeExt,
-};
+pub use crate::merkle::{hasher, location, position, LocationRangeExt};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 pub use read::Readable;
 use thiserror::Error;
+
+/// MMR-specific type alias for [merkle::proof::Proof].
+pub type Proof<D> = merkle::proof::Proof<Family, D>;
 
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -94,7 +95,7 @@ cfg_if::cfg_if! {
 }
 
 /// Marker type for the MMR family.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Family;
 
 impl merkle::Family for Family {
@@ -202,8 +203,6 @@ pub type Position = merkle::Position<Family>;
 
 /// A leaf index or leaf count in an MMR.
 pub type Location = merkle::Location<Family>;
-
-
 
 pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
 

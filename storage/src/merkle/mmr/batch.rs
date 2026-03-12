@@ -59,7 +59,7 @@ use crate::{
         iterator::{nodes_needing_parents, PathIterator, PeakIterator},
         mem::{Clean, Dirty, State},
         read::{BatchChainInfo, Readable},
-        Error, Location, Position,
+        Error, Family, Location, Position,
     },
 };
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -185,7 +185,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Hash `element` and add it as a leaf. Returns the leaf's position.
     pub fn add(
         &mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         element: &[u8],
     ) -> Position {
         let digest = hasher.leaf_digest(self.size(), element);
@@ -200,7 +200,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -262,7 +262,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Consume this batch and produce an immutable [MerkleizedBatch] with computed root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) -> MerkleizedBatch<'a, D, P> {
         let dirty = self.state.take_sorted_by_height();
 
@@ -303,7 +303,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         dirty: &[(Position, u32)],
     ) {
         for &(pos, height) in dirty {
@@ -321,7 +321,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(Position, u32)],
     ) {
@@ -356,7 +356,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position],
         height: u32,

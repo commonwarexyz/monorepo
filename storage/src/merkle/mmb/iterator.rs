@@ -1,7 +1,7 @@
 //! Iterators for traversing MMBs of a given size, and functions for computing various MMB
 //! properties from their output.
 
-use super::{Family, Location, Position};
+use crate::merkle::mmb::{Family, Location, Position};
 
 /// Compute the MMB size required to hold `n` leaves.
 const fn size_for_leaves(n: Location) -> Position {
@@ -106,7 +106,7 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [MAX_POSITION].
+    /// Panics if `size` exceeds [crate::merkle::Family::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
         assert!(
             size <= <Family as crate::merkle::Family>::MAX_POSITION,

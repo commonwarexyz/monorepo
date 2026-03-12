@@ -1,12 +1,12 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
-use crate::{
-    merkle::hasher::Hasher,
+use crate::merkle::{
+    hasher::Hasher,
     mmr::{
         iterator::{nodes_to_pin, PeakIterator},
         proof,
         read::{BatchChainInfo, Readable},
-        Error, Location, Position, Proof,
+        Error, Family, Location, Position, Proof,
     },
 };
 use alloc::{
@@ -121,7 +121,7 @@ pub struct Mmr<D: Digest> {
 
 impl<D: Digest> Mmr<D> {
     /// Create a new, empty MMR.
-    pub fn new(hasher: &mut impl Hasher<Family = super::Family, Digest = D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<Family = Family, Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
             nodes: VecDeque::new(),
@@ -141,7 +141,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
     pub fn init(
         config: Config<D>,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) -> Result<Self, Error> {
         let pruned_to_pos = Position::try_from(config.pruned_to)?;
 
@@ -188,7 +188,7 @@ impl<D: Digest> Mmr<D> {
     ///
     /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::merkle::Family::MAX_LOCATION].
     pub fn from_components(
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location,
         pinned_nodes_vec: Vec<D>,
@@ -214,7 +214,7 @@ impl<D: Digest> Mmr<D> {
 
     /// Compute the root digest from the current peaks.
     fn compute_root(
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position, D>,
         pruned_to_pos: Position,
@@ -371,7 +371,7 @@ impl<D: Digest> Mmr<D> {
     pub(crate) fn truncate(
         &mut self,
         new_size: Position,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) {
         debug_assert!(new_size.is_valid_size());
         debug_assert!(new_size >= self.pruned_to_pos);
@@ -394,7 +394,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
     pub fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -417,7 +417,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = super::Family, Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
