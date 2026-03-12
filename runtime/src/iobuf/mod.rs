@@ -54,6 +54,7 @@ impl IoBuf {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBuf) -> Self {
         Self {
             inner: IoBufInner::Pooled(pooled),
@@ -61,6 +62,7 @@ impl IoBuf {
     }
 
     /// Create a buffer from an untracked aligned allocation.
+    #[inline]
     const fn from_aligned(aligned: AlignedBuf) -> Self {
         Self {
             inner: IoBufInner::Aligned(aligned),
@@ -449,6 +451,7 @@ impl IoBufMut {
     ///
     /// Use this when the caller needs a specific alignment but does not need
     /// pooled reuse.
+    #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
         let buffer = AlignedBuffer::new(capacity, alignment.get());
         Self::from_aligned(AlignedBufMut::new(buffer))
@@ -459,6 +462,7 @@ impl IoBufMut {
     ///
     /// Unlike [`Self::with_alignment`], this initializes the full readable
     /// range to zero and sets `len == capacity == len`.
+    #[inline]
     pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
         let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
         let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
@@ -479,6 +483,7 @@ impl IoBufMut {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBufMut) -> Self {
         Self {
             inner: IoBufMutInner::Pooled(pooled),
@@ -486,6 +491,7 @@ impl IoBufMut {
     }
 
     /// Create a buffer from an untracked aligned allocation.
+    #[inline]
     const fn from_aligned(aligned: AlignedBufMut) -> Self {
         Self {
             inner: IoBufMutInner::Aligned(aligned),
