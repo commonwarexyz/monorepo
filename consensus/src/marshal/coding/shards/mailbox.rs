@@ -50,7 +50,7 @@ where
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
-    /// A request to open a subscription for local shard readiness.
+    /// A request to open a subscription for assigned shard readiness.
     ///
     /// For participants, this resolves once the leader-delivered shard for
     /// the local participant index has been verified. Reconstructing the full
@@ -60,7 +60,7 @@ where
     ///
     /// For proposers, this resolves immediately after the locally built block
     /// is cached because they trivially have all shards.
-    SubscribeShard {
+    SubscribeAssignedShardReady {
         /// The block's commitment.
         commitment: Commitment,
         /// The response channel.
@@ -153,7 +153,7 @@ where
             .flatten()
     }
 
-    /// Subscribe to local shard readiness for a commitment.
+    /// Subscribe to assigned shard readiness for a commitment.
     ///
     /// For participants, this resolves once the leader-delivered shard for
     /// the local participant index has been verified. Reconstructing the full
@@ -163,9 +163,12 @@ where
     ///
     /// For proposers, this resolves immediately after the locally built block
     /// is cached because they trivially have all shards.
-    pub async fn subscribe_shard(&self, commitment: Commitment) -> oneshot::Receiver<()> {
+    pub async fn subscribe_assigned_shard_ready(
+        &self,
+        commitment: Commitment,
+    ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeShard {
+        let msg = Message::SubscribeAssignedShardReady {
             commitment,
             response: responder,
         };

@@ -781,7 +781,7 @@ where
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_shard(payload).await;
+                let validity_rx = self.shards.subscribe_assigned_shard_ready(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context
                     .with_label("shard_validity_wait")
