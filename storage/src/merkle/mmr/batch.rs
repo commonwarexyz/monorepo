@@ -1227,8 +1227,12 @@ mod tests {
 
             // Reference: same update on Mmr.
             let mut reference = base.clone();
-            reference
+            let mut batch = reference.new_batch();
+            batch
                 .update_leaf(&mut hasher, Location::new(5), element)
+                .unwrap();
+            reference
+                .apply(batch.merkleize(&mut hasher).finalize())
                 .unwrap();
             assert_eq!(merkleized.root(), *reference.root());
         });
