@@ -1,6 +1,11 @@
 use commonware_cryptography::PublicKey;
 use std::time::SystemTime;
 
+/// Returns the earlier of two optional times, preferring `Some` over `None`.
+pub(crate) fn earliest(a: Option<SystemTime>, b: SystemTime) -> Option<SystemTime> {
+    Some(a.map_or(b, |a| a.min(b)))
+}
+
 /// Result of checking whether a peer is dialable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DialStatus {

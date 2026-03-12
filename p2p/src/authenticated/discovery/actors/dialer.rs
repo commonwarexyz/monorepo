@@ -305,4 +305,179 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_dialer_uses_tracker_next_query_deadline() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(500);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    peer_connection_cooldown: dial_frequency,
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            // Tracker reports next_query_at=100ms, which is shorter than
+            // dial_frequency=500ms. The dialer should clamp to dial_frequency,
+            // so we only get 1 refresh in 350ms instead of 3-4.
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
+                        refresh_count += 1;
+                        let _ = responder.send(Dialable {
+                            peers: Vec::new(),
+                            next_query_at: Some(context.current() + Duration::from_millis(100)),
+                        });
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(
+                refresh_count, 1,
+                "expected 1 refresh (clamped to dial_frequency), got {}",
+                refresh_count
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialer_drains_queue_at_dial_frequency() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(100);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    peer_connection_cooldown: Duration::from_secs(60),
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            let (releaser_mailbox, _releaser_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let releaser = Releaser::new(releaser_mailbox);
+
+            let peers: Vec<PublicKey> = (0..3)
+                .map(|i| PrivateKey::from_seed(i).public_key())
+                .collect();
+
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            let mut dial_count = 0;
+            let deadline = context.current() + Duration::from_millis(250);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(Dialable {
+                                peers: peers.clone(),
+                                next_query_at: None,
+                            });
+                        }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let metadata = Metadata::Dialer(public_key, ingress);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let _ = reservation.send(Some(res));
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(
+                dial_count, 3,
+                "expected queued peers to drain at dial_frequency, got {} dials",
+                dial_count
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialer_does_not_panic_when_dial_frequency_exceeds_peer_connection_cooldown() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(200);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    peer_connection_cooldown: Duration::from_millis(50),
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
+                        refresh_count += 1;
+                        let _ = responder.send(Dialable {
+                            peers: Vec::new(),
+                            next_query_at: None,
+                        });
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(
+                refresh_count, 2,
+                "expected 2 refreshes at dial_frequency without panicking, got {}",
+                refresh_count
+            );
+        });
+    }
 }

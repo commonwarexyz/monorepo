@@ -63,11 +63,11 @@ pub struct Record<C: PublicKey> {
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
 
-    /// The earliest time we are willing to reserve this peer again (`None` if immediately eligible).
-    next_reservable_at: Option<SystemTime>,
+    /// The earliest time we are willing to reserve this peer again.
+    next_reservable_at: SystemTime,
 
-    /// The earliest time we are willing to dial this peer (`None` if immediately eligible).
-    next_dial_at: Option<SystemTime>,
+    /// The earliest time we are willing to dial this peer.
+    next_dial_at: SystemTime,
 }
 
 impl<C: PublicKey> Record<C> {
@@ -80,8 +80,8 @@ impl<C: PublicKey> Record<C> {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            next_reservable_at: None,
-            next_dial_at: None,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -92,8 +92,8 @@ impl<C: PublicKey> Record<C> {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            next_reservable_at: None,
-            next_dial_at: None,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -104,8 +104,8 @@ impl<C: PublicKey> Record<C> {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            next_reservable_at: None,
-            next_dial_at: None,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -169,13 +169,12 @@ impl<C: PublicKey> Record<C> {
             return ReserveResult::Unavailable;
         }
         let now = context.current();
-        if self.next_reservable_at.is_some_and(|t| now < t) {
+        if now < self.next_reservable_at {
             return ReserveResult::RateLimited;
         }
         self.status = Status::Reserved;
-        let next_reservable_at = now + interval;
-        self.next_reservable_at = Some(next_reservable_at);
-        self.next_dial_at = Some(next_reservable_at.add_jittered(context, interval / 2));
+        self.next_reservable_at = now.saturating_add_ext(interval);
+        self.next_dial_at = self.next_reservable_at.add_jittered(context, interval / 2);
         ReserveResult::Reserved
     }
 
@@ -251,9 +250,10 @@ impl<C: PublicKey> Record<C> {
         if !ingress.is_valid(allow_private_ips, allow_dns) {
             return DialStatus::Unavailable;
         }
-        match self.next_dial_at {
-            Some(t) if t > now => DialStatus::After(t),
-            _ => DialStatus::Now,
+        if self.next_dial_at > now {
+            DialStatus::After(self.next_dial_at)
+        } else {
+            DialStatus::Now
         }
     }
 
