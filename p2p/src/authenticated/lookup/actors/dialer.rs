@@ -21,7 +21,6 @@ use commonware_runtime::{
     Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::SystemTimeExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
@@ -166,25 +165,33 @@ impl<
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                // Update the deadline.
-                dial_deadline = dial_deadline.add_jittered(&mut self.context, self.dial_frequency);
+                loop {
+                    if self.queue.is_empty() {
+                        // Only re-query once we have exhausted the current queue. When the tracker
+                        // knows the next time a peer may become dialable, sleep until then instead
+                        // of polling every dial tick.
+                        let dialable = tracker.dialable().await;
+                        self.queue = dialable.peers;
+                        self.queue.shuffle(&mut self.context);
+                        if self.queue.is_empty() {
+                            let now = self.context.current();
+                            dial_deadline = if dialable.next_query_at > now {
+                                dialable.next_query_at
+                            } else {
+                                now + self.dial_frequency
+                            };
+                            break;
+                        }
+                    }
 
-                if self.queue.is_empty() {
-                    // Only re-query once we have exhausted the current queue. The tracker enforces
-                    // when individual peers become dialable again, so queue refresh itself does not
-                    // need additional jitter.
-                    self.queue = tracker.dialable().await;
-                    self.queue.shuffle(&mut self.context);
-                }
-
-                // Pop the queue until we can reserve a peer.
-                // If a peer is reserved, attempt to dial it.
-                while let Some(peer) = self.queue.pop() {
-                    // Attempt to reserve peer.
+                    let Some(peer) = self.queue.pop() else {
+                        continue;
+                    };
                     let Some((reservation, ingress)) = tracker.dial(peer).await else {
                         continue;
                     };
                     self.dial_peer(reservation, ingress, &mut supervisor);
+                    dial_deadline = self.context.current() + self.dial_frequency;
                     break;
                 }
             },
@@ -261,7 +268,10 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(peers.clone());
+                            let _ = responder.send(tracker::Dialable {
+                                peers: peers.clone(),
+                                next_query_at: context.current(),
+                            });
                         }
                         Some(tracker::Message::Dial {
                             public_key,
@@ -290,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dialer_refreshes_empty_queue_each_tick() {
+    fn test_dialer_uses_tracker_next_query_deadline() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
@@ -322,7 +332,10 @@ mod tests {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
                             refresh_count += 1;
-                            let _ = responder.send(Vec::new());
+                            let _ = responder.send(tracker::Dialable {
+                                peers: Vec::new(),
+                                next_query_at: context.current() + Duration::from_millis(250),
+                            });
                         }
                         _ => {}
                     },
@@ -330,7 +343,7 @@ mod tests {
                 }
             }
 
-            assert_eq!(refresh_count, 4, "expected one queue refresh per dial tick");
+            assert_eq!(refresh_count, 2, "expected queue refresh to follow tracker deadline");
         });
     }
 }

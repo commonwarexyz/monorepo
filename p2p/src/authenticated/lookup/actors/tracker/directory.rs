@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{ingress::Dialable, metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
     types::Address,
@@ -310,22 +310,37 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
-    pub fn dialable(&self) -> Vec<C> {
+    /// Returns dialable peers and the next time another peer may become dialable.
+    pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
+        let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
         // Collect peers with known addresses (excluding blocked peers)
-        let mut result: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|&(peer, r)| {
-                !self.blocked.contains(peer)
-                    && r.dialable(now, self.allow_private_ips, self.allow_dns)
-            })
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        result.sort();
-        result
+        let mut peers = Vec::new();
+        for (peer, record) in &self.peers {
+            if self.blocked.contains(peer) {
+                continue;
+            }
+            if record.dialable(now, self.allow_private_ips, self.allow_dns) {
+                peers.push(peer.clone());
+                continue;
+            }
+            let Some(record_next_query_at) =
+                record.next_dialable_at(now, self.allow_private_ips, self.allow_dns)
+            else {
+                continue;
+            };
+            next_query_at = Some(match next_query_at {
+                Some(current) => current.min(record_next_query_at),
+                None => record_next_query_at,
+            });
+        }
+        peers.sort();
+        Dialable {
+            peers,
+            next_query_at: next_query_at
+                .unwrap_or(now + self.rate_limit.replenish_interval()),
+        }
     }
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
@@ -422,7 +437,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
         if record.reserve() {
-            record.defer_until(now.add_jittered(&mut self.context, jitter));
+            record.defer_until_at_least(now.add_jittered(&mut self.context, jitter));
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -902,8 +917,8 @@ mod tests {
 
             // Only socket peer should be dialable (DNS ingress invalid when disabled)
             let dialable = directory.dialable();
-            assert_eq!(dialable.len(), 1);
-            assert_eq!(dialable[0], pk_socket);
+            assert_eq!(dialable.peers.len(), 1);
+            assert_eq!(dialable.peers[0], pk_socket);
         });
     }
 
@@ -965,8 +980,8 @@ mod tests {
 
             // Only public peer should be dialable (private ingress IP not allowed)
             let dialable = directory.dialable();
-            assert_eq!(dialable.len(), 1);
-            assert_eq!(dialable[0], pk_public);
+            assert_eq!(dialable.peers.len(), 1);
+            assert_eq!(dialable.peers[0], pk_public);
 
             // Verify listenable() only returns public IP (private IP excluded from filter)
             let listenable = directory.listenable();
@@ -1566,7 +1581,7 @@ mod tests {
 
             // Peer should be dialable before blocking
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "Peer should be dialable before blocking"
             );
 
@@ -1575,7 +1590,7 @@ mod tests {
 
             // Peer should NOT be dialable while blocked
             assert!(
-                !directory.dialable().contains(&pk_1),
+                !directory.dialable().peers.contains(&pk_1),
                 "Blocked peer should not be dialable"
             );
 
@@ -1585,7 +1600,7 @@ mod tests {
 
             // Peer should be dialable again after unblock
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "Peer should be dialable after unblock"
             );
         });
@@ -1620,7 +1635,7 @@ mod tests {
                 .defer_until(redial_at);
 
             assert!(
-                !directory.dialable().contains(&pk_1),
+                !directory.dialable().peers.contains(&pk_1),
                 "Peer should not be dialable before redial deadline"
             );
             assert!(
@@ -1631,7 +1646,7 @@ mod tests {
             context.sleep(Duration::from_secs(10)).await;
 
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "Peer should become dialable once the deadline expires"
             );
             let (_reservation, ingress) =
@@ -1677,6 +1692,68 @@ mod tests {
     }
 
     #[test]
+    fn test_dialable_reports_next_query_at_from_redial_deadline() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            let redial_at = context.current() + Duration::from_secs(10);
+            directory
+                .peers
+                .get_mut(&pk_1)
+                .expect("peer should be tracked")
+                .defer_until(redial_at);
+
+            let dialable = directory.dialable();
+            assert!(!dialable.peers.contains(&pk_1));
+            assert_eq!(dialable.next_query_at, redial_at);
+        });
+    }
+
+    #[test]
+    fn test_dialable_defaults_next_query_at_to_rate_limit_interval() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let quota = Quota::per_second(NZU32!(5));
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: quota,
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            let dialable = directory.dialable();
+            assert!(dialable.peers.is_empty());
+            assert_eq!(
+                dialable.next_query_at,
+                context.current() + quota.replenish_interval()
+            );
+        });
+    }
+
+    #[test]
     fn test_rate_limit_rejection_does_not_update_redial_deadline() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
@@ -1699,7 +1776,7 @@ mod tests {
 
             let redial_at = directory.peers.get(&pk_1).unwrap().redial_at();
             assert_eq!(redial_at, SystemTime::UNIX_EPOCH);
-            assert!(directory.dialable().contains(&pk_1));
+            assert!(directory.dialable().peers.contains(&pk_1));
 
             assert!(directory.rate_limiter.check_key(&pk_1).is_ok());
             assert!(
@@ -1709,7 +1786,7 @@ mod tests {
 
             assert_eq!(directory.peers.get(&pk_1).unwrap().redial_at(), redial_at);
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "rate-limit rejection should not defer future dialability"
             );
         });
@@ -2004,7 +2081,7 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(addr_2))
             );
-            assert!(directory.dialable().contains(&pk_1));
+            assert!(directory.dialable().peers.contains(&pk_1));
         });
     }
 

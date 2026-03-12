@@ -371,14 +371,14 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable_peers = mailbox.dialable().await;
-            assert!(dialable_peers.iter().any(|peer| peer == &pk));
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.iter().any(|peer| peer == &pk));
 
             crate::block_peer(&mut oracle, pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable_peers = mailbox.dialable().await;
-            assert!(!dialable_peers.iter().any(|peer| peer == &pk));
+            let dialable = mailbox.dialable().await;
+            assert!(!dialable.peers.iter().any(|peer| peer == &pk));
         });
     }
 
@@ -403,14 +403,14 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable_peers = mailbox.dialable().await;
-            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
+            let dialable = mailbox.dialable().await;
+            assert!(!dialable.peers.iter().any(|peer| peer == &pk1));
 
             crate::block_peer(&mut oracle, pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable_peers = mailbox.dialable().await;
-            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
+            let dialable = mailbox.dialable().await;
+            assert!(!dialable.peers.iter().any(|peer| peer == &pk1));
         });
     }
 
@@ -591,9 +591,9 @@ mod tests {
                 .track(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
                 .await;
 
-            let dialable_peers = mailbox.dialable().await;
-            assert_eq!(dialable_peers.len(), 1);
-            assert_eq!(dialable_peers[0], boot_pk);
+            let dialable = mailbox.dialable().await;
+            assert_eq!(dialable.peers.len(), 1);
+            assert_eq!(dialable.peers[0], boot_pk);
         });
     }
 
