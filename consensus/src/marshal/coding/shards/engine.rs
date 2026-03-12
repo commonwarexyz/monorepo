@@ -1138,24 +1138,23 @@ where
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
-        let index = shard.index;
-
         // Store data for equivocation detection first (move), then clone
         // once for check. This avoids a second clone compared to cloning
         // for both check and storage.
-        self.received_shards.insert(index, shard.data);
-        let data = self.received_shards.get(&index).unwrap();
-        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data) else {
-            self.received_shards.remove(&index);
+        self.received_shards.insert(shard.index, shard.data);
+        let data = self.received_shards.get(&shard.index).unwrap();
+        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), shard.index, data)
+        else {
+            self.received_shards.remove(&shard.index);
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
         };
 
-        self.contributed.set(u64::from(index), true);
+        self.contributed.set(u64::from(shard.index), true);
         self.checked_shards.push(checked);
         self.own_shard_verified = true;
         self.pending_action = Some(if is_participant {
-            ValidatedShardAction::Broadcast(Shard::new(commitment, index, data.clone()))
+            ValidatedShardAction::Broadcast(Shard::new(commitment, shard.index, data.clone()))
         } else {
             ValidatedShardAction::NotifyOnly
         });
@@ -1386,7 +1385,6 @@ where
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-
         if indexed.index != expected_index {
             commonware_p2p::block!(
                 blocker,
@@ -1451,7 +1449,6 @@ where
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
-
         if let Some(ready) = state
             .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
             .await
