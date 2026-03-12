@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-storage"
 workspace = true
 
 [dependencies]
+ahash = { version = "0.8.12", default-features = false }
 anyhow.workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes = { workspace = true, default-features = false }
@@ -44,6 +45,8 @@ tracing-subscriber.workspace = true
 [features]
 default = [ "std" ]
 std = [
+	"ahash/runtime-rng",
+	"ahash/std",
 	"anyhow/std",
 	"bytes/std",
 	"commonware-codec/std",
@@ -73,7 +76,6 @@ test-traits = []
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "qmdb_generate"
@@ -115,7 +117,7 @@ path = "src/journal/benches/bench.rs"
 [[bench]]
 name="mmr"
 harness = false
-path = "src/mmr/benches/bench.rs"
+path = "src/merkle/mmr/benches/bench.rs"
 
 [[bench]]
 name="ordinal"

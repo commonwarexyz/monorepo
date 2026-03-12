@@ -5,6 +5,10 @@ publish = false
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["mocks"]
+mocks = []
+
 [package.metadata]
 cargo-fuzz = true
 
@@ -13,10 +17,10 @@ arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
-commonware-cryptography.workspace = true
+commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-macros.workspace = true
 commonware-math.workspace = true
-commonware-p2p.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-runtime.workspace = true
@@ -210,6 +214,20 @@ bench = false
 [[bin]]
 name = "simplex_bls12381_threshold_minsig_node"
 path = "fuzz_targets/simplex_bls12381_threshold_minsig_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_node"
+path = "fuzz_targets/simplex_cert_mock_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_node_recovery"
+path = "fuzz_targets/simplex_cert_mock_node_recovery.rs"
 test = false
 doc = false
 bench = false

@@ -28,6 +28,16 @@ impl Blob {
             pool,
         }
     }
+
+    async fn write_single_at(file: &mut fs::File, buf: &[u8]) -> Result<(), Error> {
+        file.write_all(buf).await.map_err(|_| Error::WriteFailed)
+    }
+
+    async fn write_vectored_at(file: &mut fs::File, bufs: &mut IoBufs) -> Result<(), Error> {
+        file.write_all_buf(bufs)
+            .await
+            .map_err(|_| Error::WriteFailed)
+    }
 }
 
 impl crate::Blob for Blob {
@@ -71,6 +81,7 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut bufs = bufs.into();
         let mut file = self.file.lock().await;
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -78,10 +89,12 @@ impl crate::Blob for Blob {
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        file.write_all_buf(&mut bufs.into())
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        Ok(())
+
+        if let Some(buf) = bufs.as_single() {
+            Self::write_single_at(&mut file, buf.as_ref()).await
+        } else {
+            Self::write_vectored_at(&mut file, &mut bufs).await
+        }
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

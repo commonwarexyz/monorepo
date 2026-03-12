@@ -1,4 +1,4 @@
-use crate::scheme as id;
+use crate::{certificate_mock as cert_mock, id_mock};
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, Random, RoundRobin},
@@ -91,7 +91,8 @@ impl Simplex for SimplexEd25519 {
 pub struct SimplexId;
 
 impl Simplex for SimplexId {
-    type Scheme = id::Scheme;
+    type Scheme = id_mock::Scheme;
+
     type Elector = RoundRobin;
 
     fn setup(
@@ -102,7 +103,27 @@ impl Simplex for SimplexId {
         Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
-        id::fixture(context, namespace, n)
+        id_mock::fixture(context, namespace, n)
+    }
+}
+
+pub struct SimplexCertificateMock;
+
+impl Simplex for SimplexCertificateMock {
+    type Scheme = cert_mock::Scheme<Ed25519PublicKey>;
+
+    type Elector = RoundRobin;
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = cert_mock::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 

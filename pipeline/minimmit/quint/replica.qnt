@@ -635,12 +635,11 @@ module replica {
             nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.union(Set(DUMMY_BLOCK)).oneOf()
-            nondet sig = oneOf(BYZANTINE)
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
-            val votes = senders.map(s => {
+            val votes = senders.map(sender => {
                 view: view,
                 block: block,
-                sig: sig,
+                sig: sender,
                 kind: k
             })
             sent_vote' = sent_vote.union(votes),

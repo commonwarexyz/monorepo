@@ -13,34 +13,30 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
-//! # Database States
+//! # Database Lifecycle
 //!
-//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
-//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//! All variants are modified through a batch API that follows a common pattern:
+//! 1. Create a batch from the database.
+//! 2. Stage mutations on the batch.
+//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//!    the Merkle root that would result from applying them.
+//! 4. Inspect the root or create child batches.
+//! 5. Finalize the batch into a changeset.
+//! 6. Apply the changeset to the database.
 //!
-//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//! A merkleized batch can spawn child batches, forming a tree of speculative states that
+//! share a common ancestor. Only the finalized leaf needs to be applied.
 //!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
+//! The specific mutation methods vary by variant.
+//! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
-//! - `init()`                                      → `Clean`
-//! - `Clean.into_mutable()`                        → `Mutable`
-//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
-//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
-//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
-//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
+//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
+//! and `destroy()`.
 //!
-//! An authenticated database implements [store::LogStore] in every state, and keyed databases
-//! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
+//! # Traits
 //!
-//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
-//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
-//!
-//! Keyed databases additionally implement:
-//! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
+//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
+//! [crate::Persistable].
 //!
 //! # Acknowledgments
 //!
@@ -53,10 +49,9 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
-    mmr::{journaled::State as MerkleizationState, Location},
-    qmdb::{operation::Operation, store::State as DurabilityState},
+    mmr::Location,
+    qmdb::operation::Operation,
 };
-use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -104,11 +99,6 @@ pub enum Error {
     #[error("key exists")]
     KeyExists,
 
-    /// The db is not empty at the last commit, so an empty exclusion proof
-    /// cannot be generated.
-    #[error("db not empty at last commit")]
-    NotEmpty,
-
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
 
@@ -117,6 +107,16 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
+
+    /// The changeset was created from a different database state than the current one.
+    #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
+    StaleChangeset { expected: u64, actual: u64 },
+}
+
+impl From<crate::merkle::Error> for Error {
+    fn from(e: crate::merkle::Error) -> Self {
+        Self::Mmr(e.into())
+    }
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
@@ -127,15 +127,6 @@ impl From<crate::journal::authenticated::Error> for Error {
         }
     }
 }
-
-/// Type alias for merkleized state of a QMDB.
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state of a QMDB.
-pub type Unmerkleized = crate::mmr::mem::Dirty;
-/// Type alias for durable state of a QMDB.
-pub type Durable = store::Durable;
-/// Type alias for non-durable state of a QMDB.
-pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -174,7 +165,7 @@ where
                     active_keys -= 1;
                 }
             } else if op.is_update() {
-                let new_loc = Location::new_unchecked(loc);
+                let new_loc = Location::new(loc);
                 let old_loc = update_key(snapshot, reader, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
@@ -336,11 +327,11 @@ where
             }
 
             // Update the operation's snapshot location to point to tip.
-            cursor.update(Location::new_unchecked(self.log.size().await));
+            cursor.update(Location::new(self.log.size().await));
         }
 
         // Apply the operation at tip.
-        self.log.append(op).await?;
+        self.log.append(&op).await?;
 
         Ok(true)
     }
@@ -358,7 +349,7 @@ where
     where
         I: Index<Value = Location>,
     {
-        let tip_loc = Location::new_unchecked(self.log.size().await);
+        let tip_loc = Location::new(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

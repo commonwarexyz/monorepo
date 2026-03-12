@@ -13,7 +13,8 @@
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
-    pub mod mmr;
+    pub mod merkle;
+    pub use merkle::mmr;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
@@ -28,11 +29,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod freezer;
     pub mod index;
     pub mod journal;
-    pub mod kv;
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
-    pub mod translator;
 
     /// A storage structure with capabilities to persist and recover state across restarts.
     pub trait Persistable {
@@ -58,4 +57,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// artifacts. This can be used to clean up disk resources in tests.
         fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
+});
+commonware_macros::stability_scope!(BETA {
+    pub mod translator;
 });

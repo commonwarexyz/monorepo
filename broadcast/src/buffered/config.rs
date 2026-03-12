@@ -1,7 +1,8 @@
 use commonware_cryptography::PublicKey;
+use commonware_p2p::Provider;
 
 /// Configuration for the [super::Engine].
-pub struct Config<P: PublicKey, MCfg> {
+pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     /// The public key of the participant.
     pub public_key: P,
 
@@ -16,4 +17,8 @@ pub struct Config<P: PublicKey, MCfg> {
 
     /// The configuration for the codec item.
     pub codec_config: MCfg,
+
+    /// Provider for peer set changes. Per-peer caches are freed when a
+    /// peer leaves all tracked peer sets.
+    pub peer_provider: D,
 }

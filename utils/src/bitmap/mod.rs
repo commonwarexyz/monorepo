@@ -236,8 +236,7 @@ impl<const N: usize> BitMap<N> {
 
         // Clear the bit we just popped to maintain invariant (if it was 1)
         if bit {
-            let pos_in_chunk = last_bit_pos % Self::CHUNK_SIZE_BITS;
-            let chunk_byte = (pos_in_chunk / 8) as usize;
+            let chunk_byte = Self::chunk_byte_offset(last_bit_pos);
             let mask = Self::chunk_byte_bitmask(last_bit_pos);
             self.chunks.back_mut().unwrap()[chunk_byte] &= !mask;
         }

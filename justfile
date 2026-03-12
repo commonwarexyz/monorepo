@@ -45,8 +45,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, toml, benchmark names, and stability)
-lint: check-fmt check-toml-fmt clippy check-docs check-features check-benchmark-names check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, publish order, benchmark names, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-publish-order check-benchmark-names check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -71,6 +71,10 @@ check-docs *args='':
 check-benchmark-names:
     python3 .github/scripts/lint_benchmark_names.py
 
+# Check publish workflow ordering against workspace dependencies
+check-publish-order:
+    python3 .github/scripts/check_publish_order.py
+
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
@@ -78,6 +82,10 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target
     done
+
+# Run cargo-hack with feature powerset
+hack *args='':
+    cargo hack --feature-powerset --no-dev-deps $@
 
 # Check for unused dependencies
 udeps:

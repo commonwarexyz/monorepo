@@ -25,7 +25,10 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use commonware_utils::channel::mpsc::Receiver;
 use futures::FutureExt;
 use rand::Rng;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
 
 const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 50;
@@ -1225,14 +1228,19 @@ where
     let honest_channels = registrations
         .remove(&honest)
         .expect("honest participant must exist");
-    let mut reporter = crate::spawn_honest_validator::<P>(
+    let (pending, recovered, resolver) = honest_channels;
+    let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _>(
         context.with_label("honest_validator"),
         &oracle,
         &participants,
         honest_scheme,
         honest.clone(),
         relay.clone(),
-        honest_channels,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        pending,
+        recovered,
+        resolver,
     )
     .with_strict(false);
 
@@ -1289,14 +1297,19 @@ pub(crate) fn run_recovery<P: simplex_protocol::Simplex>(
         let honest_channels = registrations
             .remove(&honest)
             .expect("honest participant must exist in recovery");
-        let mut reporter = crate::spawn_honest_validator::<P>(
+        let (pending, recovered, resolver) = honest_channels;
+        let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _>(
             context.with_label("honest_validator_recovery"),
             &oracle,
             &participants,
             schemes[HONEST_ID].clone(),
             honest,
             relay,
-            honest_channels,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            pending,
+            recovered,
+            resolver,
         )
         .with_strict(false);
 

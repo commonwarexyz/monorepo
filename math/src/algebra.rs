@@ -7,6 +7,7 @@
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
@@ -59,6 +60,13 @@ fn monoid_exp<T: Clone>(
     acc
 }
 
+/// Return `shift, shift * base, shift * base^2, ...`.
+///
+/// Use `powers(R::one(), base)` if you just want the standard powers.
+pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
+    iter::successors(Some(shift), move |state: &R| Some(state.clone() * base))
+}
+
 /// A basic trait we expect algebraic data structures to implement.
 ///
 /// Types implementing this trait need to support:
@@ -85,6 +93,17 @@ pub trait Object: Clone + Debug + PartialEq + Eq + Send + Sync {}
 /// There are other combinations of borrowing that could be chosen, but these
 /// should be efficiently implementable, even for a "heavier" struct, e.g.
 /// a vector of values.
+///
+/// # Properties
+///
+/// Implementations are expected to form a commutative group under addition:
+///
+/// - `+=` and `-=` agree with `+` and `-`,
+/// - addition satisfies `a + b = b + a` and `(a + b) + c = a + (b + c)`,
+/// - [`Additive::zero`] satisfies `0 + a = a`,
+/// - negation satisfies `a + (-a) = 0` and `a - b = a + (-b)`,
+/// - [`Additive::scale`] satisfies `a.scale(&[]) = 0`,
+///   `a.scale(&[1]) = a`, and `a.scale(m + n) = a.scale(m) + a.scale(n)`.
 ///
 /// # Usage
 ///
@@ -145,6 +164,14 @@ pub trait Additive:
 /// As with [`Additive`], the borrowing scheme is chosen to keep implementations
 /// efficient even for heavier structures.
 ///
+/// # Properties
+///
+/// Implementations are expected to have a commutative, associative
+/// multiplication:
+///
+/// - `*=` agrees with `*`,
+/// - multiplication satisfies `a * b = b * a` and `(a * b) * c = a * (b * c)`.
+///
 /// # Usage
 ///
 /// ```
@@ -176,6 +203,16 @@ pub trait Multiplicative:
 /// The following operations must be supported (in addition to [`Additive`]):
 /// 1. `T *= &R`,
 /// 2. `T * &R`
+///
+/// # Properties
+///
+/// Implementations are expected to behave like a right `R`-module action:
+///
+/// - `*=` agrees with `*`,
+/// - scalar multiplication satisfies `(a + b) * x = a * x + b * x`,
+/// - [`Space::msm`] satisfies `msm(points, scalars) = sum_i points[i] * scalars[i]`,
+/// - when `R: Multiplicative`, `((a * x) * y) = a * (x * y)`,
+/// - when `R: Ring`, `a * 1 = a` and `a * 0 = 0`.
 ///
 ///
 /// # Usage
@@ -227,6 +264,16 @@ impl<R: Additive + Multiplicative> Space<R> for R {}
 ///
 /// This combines [`Additive`] and [`Multiplicative`], and introduces a
 /// neutral element for multiplication, [`Ring::one`].
+///
+/// # Properties
+///
+/// Implementations are expected to be commutative rings:
+///
+/// - [`Additive`] and [`Multiplicative`] laws both hold,
+/// - [`Ring::one`] satisfies `1 * a = a`,
+/// - multiplication satisfies `(a + b) * c = a * c + b * c`,
+/// - [`Ring::exp`] satisfies `a.exp(&[]) = 1`,
+///   `a.exp(&[1]) = a`, and `a.exp(m + n) = a.exp(m) * a.exp(n)`.
 pub trait Ring: Additive + Multiplicative {
     /// The neutral element for multiplication.
     ///
@@ -249,6 +296,14 @@ pub trait Ring: Additive + Multiplicative {
 ///
 /// This inherits from [`Ring`], and requires the existence of multiplicative
 /// inverses as well.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the usual field inverse laws:
+///
+/// - all [`Ring`] laws hold,
+/// - `0.inv() = 0`,
+/// - for any nonzero `a`, `a * a.inv() = 1`.
 pub trait Field: Ring {
     /// The multiplicative inverse of an element.
     ///
@@ -257,6 +312,52 @@ pub trait Field: Ring {
     /// For any other element `x`, this should return an element `y` such that
     /// `x * y` is equal to [`Ring::one`].
     fn inv(&self) -> Self;
+}
+
+/// A [`Field`] which supports operations allowing for efficient NTTs.
+///
+/// Fields implementing this trait must have characteristic not equal to 2
+/// (so that 2 is invertible), and must have a multiplicative group with
+/// sufficiently large 2-adic order.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the NTT-specific laws checked by
+/// the property tests:
+///
+/// - `root_of_unity(lg)` returns `None` only when `lg > MAX_LG_ROOT_ORDER`,
+/// - otherwise, `root_of_unity(lg)^(2^lg) = 1` and, for `lg > 0`, `root_of_unity(lg)^(2^lg - 1) != 1`,
+/// - `coset_shift()` and `coset_shift_inv()` satisfy `coset_shift() * coset_shift_inv() = 1`,
+/// - `div_2(a)` satisfies `div_2(a) * (1 + 1) = a`.
+pub trait FieldNTT: Field {
+    /// The maximum (lg) of the power of two root of unity this fields supports.
+    const MAX_LG_ROOT_ORDER: u8;
+
+    /// A root of unity of order `2^lg`.
+    ///
+    /// In other words, for `r = root_of_unity(lg)`, `k = 2^lg` should be the
+    /// smallest power such that `r^k = 1`.
+    ///
+    /// This function should return `None` only for `lg > MAX_LG_ROOT_ORDER`.
+    fn root_of_unity(lg: u8) -> Option<Self>;
+
+    /// An element which is not a power of a root of unity.
+    ///
+    /// In other words, for any `lg`, `k`, this element should not equal
+    /// `Self::root_of_unity(lg)^k`.
+    fn coset_shift() -> Self;
+
+    fn coset_shift_inv() -> Self {
+        Self::coset_shift().inv()
+    }
+
+    /// Return the result of dividing this element by `2`.
+    ///
+    /// This is equivalent to `self * (1 + 1)^-1`, but is usually implementable
+    /// in a more efficient way.
+    fn div_2(&self) -> Self {
+        (Self::one() + &Self::one()).inv() * self
+    }
 }
 
 /// A group suitable for use in cryptography.
@@ -281,6 +382,12 @@ pub trait CryptoGroup: Space<Self::Scalar> {
 ///
 /// Advanced protocols use this capability to create new generator elements
 /// whose discrete logarithm relative to other points is unknown.
+///
+/// # Properties
+///
+/// - equal `(domain_separator, message)` pairs satisfy
+///   `hash_to_group(dst0, m0) = hash_to_group(dst1, m1)` whenever
+///   `(dst0, m0) = (dst1, m1)`.
 pub trait HashToGroup: CryptoGroup {
     /// Hash a domain separator, and a message, returning a group element.
     ///
@@ -340,7 +447,7 @@ pub mod test_suites {
     //! commonware_invariants::minifuzz::test(|u| fuzz_field::<F>(u));
     //! ```
     use super::*;
-    use arbitrary::Unstructured;
+    use arbitrary::{Arbitrary, Unstructured};
 
     fn check_add_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
@@ -378,7 +485,7 @@ pub mod test_suites {
     /// Fuzz the [`Additive`] trait properties.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
-    pub fn fuzz_additive<T: Additive + for<'a> arbitrary::Arbitrary<'a>>(
+    pub fn fuzz_additive<T: Additive + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         let a: T = u.arbitrary()?;
@@ -411,7 +518,7 @@ pub mod test_suites {
     /// Fuzz the [`Multiplicative`] trait properties.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
-    pub fn fuzz_multiplicative<T: Multiplicative + for<'a> arbitrary::Arbitrary<'a>>(
+    pub fn fuzz_multiplicative<T: Multiplicative + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         let a: T = u.arbitrary()?;
@@ -439,7 +546,7 @@ pub mod test_suites {
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
     /// This also checks [`Additive`] and [`Multiplicative`] properties.
-    pub fn fuzz_ring<T: Ring + for<'a> arbitrary::Arbitrary<'a>>(
+    pub fn fuzz_ring<T: Ring + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         fuzz_additive::<T>(u)?;
@@ -464,7 +571,7 @@ pub mod test_suites {
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
     /// This also checks [`Ring`] properties.
-    pub fn fuzz_field<T: Field + for<'a> arbitrary::Arbitrary<'a>>(
+    pub fn fuzz_field<T: Field + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         fuzz_ring::<T>(u)?;
@@ -494,10 +601,7 @@ pub mod test_suites {
     /// Fuzz the [`Space`] trait properties, assuming nothing about the scalar `R`.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
-    pub fn fuzz_space<
-        R: Debug + for<'a> arbitrary::Arbitrary<'a>,
-        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
-    >(
+    pub fn fuzz_space<R: Debug + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         let a: K = u.arbitrary()?;
@@ -526,8 +630,8 @@ pub mod test_suites {
     /// Takes arbitrary data and checks that algebraic laws hold.
     /// This also checks base [`Space`] properties plus compatibility with multiplication.
     pub fn fuzz_space_multiplicative<
-        R: Multiplicative + for<'a> arbitrary::Arbitrary<'a>,
-        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
+        R: Multiplicative + for<'a> Arbitrary<'a>,
+        K: Space<R> + for<'a> Arbitrary<'a>,
     >(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
@@ -552,10 +656,7 @@ pub mod test_suites {
     /// Takes arbitrary data and checks that algebraic laws hold.
     /// This also checks [`fuzz_space_multiplicative`] properties plus compatibility
     /// with [`Ring::one()`] and [`Additive::zero()`].
-    pub fn fuzz_space_ring<
-        R: Ring + for<'a> arbitrary::Arbitrary<'a>,
-        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
-    >(
+    pub fn fuzz_space_ring<R: Ring + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         fuzz_space_multiplicative::<R, K>(u)?;
@@ -582,6 +683,78 @@ pub mod test_suites {
         check_hash_to_group::<G>(data);
         Ok(())
     }
+
+    fn check_root_of_unity_order<T: FieldNTT>(lg: u8) {
+        if lg > T::MAX_LG_ROOT_ORDER {
+            assert!(
+                T::root_of_unity(lg).is_none(),
+                "root_of_unity should be None for lg > MAX"
+            );
+            return;
+        }
+        let root = T::root_of_unity(lg).expect("root_of_unity should be Some for lg <= MAX");
+
+        let mut order = Vec::new();
+        let mut remaining = lg;
+        while remaining >= 64 {
+            order.push(0u64);
+            remaining -= 64;
+        }
+        order.push(1u64 << remaining);
+
+        assert_eq!(root.exp(&order), T::one(), "root^(2^lg) should equal 1");
+        if lg > 0 {
+            let last = order.len() - 1;
+            order[0] = order[0].wrapping_sub(1);
+            for i in 0..last {
+                if order[i] == u64::MAX {
+                    order[i + 1] = order[i + 1].wrapping_sub(1);
+                }
+            }
+            assert_ne!(
+                root.exp(&order),
+                T::one(),
+                "root^(2^lg - 1) should not equal 1"
+            );
+        }
+    }
+
+    fn check_div_2<T: FieldNTT>(a: T) {
+        let two = T::one() + &T::one();
+        assert_eq!(a.div_2() * &two, a, "div_2(a) * 2 should equal a");
+    }
+
+    fn check_coset_shift_inv<T: FieldNTT>() {
+        assert_eq!(
+            T::coset_shift() * &T::coset_shift_inv(),
+            T::one(),
+            "coset_shift * coset_shift_inv should equal 1"
+        );
+    }
+
+    /// Run the test suite for the [`FieldNTT`] trait.
+    ///
+    /// This will also run [`fuzz_field`].
+    pub fn fuzz_field_ntt<T: FieldNTT + for<'a> Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_field::<T>(u)?;
+
+        // Biased choice towards div_2 checks
+        match u.int_in_range(0u8..=9)? {
+            0 => {
+                check_coset_shift_inv::<T>();
+            }
+            1 => {
+                let lg = u.int_in_range(0..=T::MAX_LG_ROOT_ORDER + 1)?;
+                check_root_of_unity_order::<T>(lg);
+            }
+            _ => {
+                check_div_2(T::arbitrary(u)?);
+            }
+        }
+        Ok(())
+    }
 }
 
 commonware_macros::stability_scope!(ALPHA {
@@ -597,6 +770,7 @@ commonware_macros::stability_scope!(ALPHA {
             ExpOne(F),
             ExpZero(F),
             Exp(F, u32, u32),
+            PowersMatchesExp(F, F, u16),
             ScaleOne(F),
             ScaleZero(F),
             Scale(F, u32, u32),
@@ -616,6 +790,13 @@ commonware_macros::stability_scope!(ALPHA {
                         let a = u64::from(a);
                         let b = u64::from(b);
                         assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
+                    }
+                    Self::PowersMatchesExp(shift, base, index) => {
+                        let pow_i = powers(shift, &base)
+                            .take(usize::from(index) + 1)
+                            .last()
+                            .expect("len=index+1 guarantees at least one item");
+                        assert_eq!(pow_i, shift * base.exp(&[u64::from(index)]));
                     }
                     Self::ScaleOne(x) => {
                         assert_eq!(x.scale(&[1]), x);

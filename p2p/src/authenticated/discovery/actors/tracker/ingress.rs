@@ -1,11 +1,14 @@
 use super::Reservation;
-use crate::authenticated::{
-    discovery::{
-        actors::{peer, tracker::Metadata},
-        types,
+use crate::{
+    authenticated::{
+        discovery::{
+            actors::{peer, tracker::Metadata},
+            types,
+        },
+        mailbox::UnboundedMailbox,
+        Mailbox,
     },
-    mailbox::UnboundedMailbox,
-    Mailbox,
+    PeerSetSubscription,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
@@ -31,8 +34,7 @@ pub enum Message<C: PublicKey> {
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
-        #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Set<C>, Set<C>)>>,
+        responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -265,9 +267,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
             .flatten()
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.sender
             .0
             .request(|responder| Message::Subscribe { responder })

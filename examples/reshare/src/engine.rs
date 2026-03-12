@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Application, Block, EpochProvider, Provider},
-    dkg::{self, UpdateCallBack},
+    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
@@ -96,7 +96,7 @@ where
     config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
+    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>, P>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     #[allow(clippy::type_complexity)]
     marshal: MarshalActor<
@@ -149,6 +149,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                max_supported_mode: MAX_SUPPORTED_MODE,
             },
         );
 
@@ -160,6 +161,7 @@ where
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
+                peer_provider: config.manager.clone(),
             },
         );
 

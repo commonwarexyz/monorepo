@@ -109,7 +109,11 @@ where
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
-    /// Operations that have been fetched but not yet applied to the log
+    /// Operations that have been fetched but not yet applied to the log.
+    ///
+    /// # Invariant
+    ///
+    /// The vectors in the map are non-empty.
     fetched_operations: BTreeMap<Location, Vec<DB::Op>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
@@ -237,7 +241,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new_unchecked(log_size)..self.target.range.end,
+                Location::new(log_size)..self.target.range.end,
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -293,8 +297,11 @@ where
         })
     }
 
-    /// Store a batch of fetched operations
-    pub fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
+    /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
+    pub(crate) fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
+        if operations.is_empty() {
+            return;
+        }
         self.fetched_operations.insert(start_loc, operations);
     }
 
@@ -303,12 +310,13 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
+    pub(crate) async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
         let mut next_loc = self.journal.size().await;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
+            assert!(!operations.is_empty());
             let end_loc = start_loc.checked_add(operations.len() as u64 - 1).unwrap();
             end_loc >= next_loc
         });
@@ -320,6 +328,7 @@ where
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
+                        assert!(!range_ops.is_empty());
                         let range_end =
                             range_start.checked_add(range_ops.len() as u64 - 1).unwrap();
                         if *range_start <= next_loc && next_loc <= range_end {
@@ -336,6 +345,7 @@ where
 
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
+            assert!(!operations.is_empty());
             // Skip operations that are before the next location.
             let skip_count = (next_loc - *range_start_loc) as usize;
             let operations_count = operations.len() - skip_count;
@@ -541,10 +551,10 @@ mod tests {
         // Test adding requests
         let fut = Box::pin(async {
             IndexedFetchResult {
-                start_loc: Location::new_unchecked(0),
+                start_loc: Location::new(0),
                 result: Ok(FetchResult {
                     proof: Proof {
-                        leaves: Location::new_unchecked(0),
+                        leaves: Location::new(0),
                         digests: vec![],
                     },
                     operations: vec![],
@@ -552,12 +562,12 @@ mod tests {
                 }),
             }
         });
-        requests.add(Location::new_unchecked(10), fut);
+        requests.add(Location::new(10), fut);
         assert_eq!(requests.len(), 1);
-        assert!(requests.locations().contains(&Location::new_unchecked(10)));
+        assert!(requests.locations().contains(&Location::new(10)));
 
         // Test removing requests
-        requests.remove(Location::new_unchecked(10));
-        assert!(!requests.locations().contains(&Location::new_unchecked(10)));
+        requests.remove(Location::new(10));
+        assert!(!requests.locations().contains(&Location::new(10)));
     }
 }

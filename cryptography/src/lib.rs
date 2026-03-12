@@ -63,7 +63,9 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::sha256::{CoreSha256, Sha256};
     pub mod blake3;
     pub use crate::blake3::{Blake3, CoreBlake3};
+    #[cfg(feature = "std")]
     pub mod crc32;
+    #[cfg(feature = "std")]
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
@@ -142,7 +144,10 @@ commonware_macros::stability_scope!(BETA {
     }
 
     /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
-    pub trait BatchVerifier<K: PublicKey> {
+    pub trait BatchVerifier {
+        /// The type of public keys that this verifier can accept.
+        type PublicKey: PublicKey;
+
         /// Create a new batch verifier.
         fn new() -> Self;
 
@@ -159,8 +164,8 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             namespace: &[u8],
             message: &[u8],
-            public_key: &K,
-            signature: &K::Signature,
+            public_key: &Self::PublicKey,
+            signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool;
 
         /// Verify all items added to the batch.

@@ -5,14 +5,17 @@ use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    ordered::Set,
+};
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
@@ -29,11 +32,12 @@ struct Waiter<M> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E, P, M>
+pub struct Engine<E, P, M, D>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
 {
     ////////////////////////////////////////
     // Interfaces
@@ -64,6 +68,9 @@ where
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
 
+    /// Provider for peer set changes.
+    peer_provider: D,
+
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
@@ -90,15 +97,16 @@ where
     metrics: metrics::Metrics,
 }
 
-impl<E, P, M> Engine<E, P, M>
+impl<E, P, M, D> Engine<E, P, M, D>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
@@ -116,6 +124,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            peer_provider: cfg.peer_provider,
             metrics,
         };
 
@@ -138,6 +147,7 @@ where
             network.0,
             network.1,
         );
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -199,6 +209,12 @@ where
                     .get_or_create(&SequencerLabel::from(&peer))
                     .inc();
                 self.handle_network(peer, msg);
+            },
+            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                self.evict_untracked_peers(&tracked_peers);
             },
         }
     }
@@ -317,19 +333,23 @@ where
             // Decrement the item count
             // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
-            let count = self
-                .counts
-                .entry(stale)
-                .and_modify(|c| *c = c.checked_sub(1).unwrap())
-                .or_insert_with(|| unreachable!());
-            if *count == 0 {
-                let existing = self.counts.remove(&stale);
-                assert!(existing == Some(0));
-                self.items.remove(&stale);
-            }
+            decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
         true
+    }
+
+    fn evict_untracked_peers(&mut self, tracked_peers: &Set<P>) {
+        let tracked = tracked_peers.as_ref();
+        for (peer, deque) in self
+            .deques
+            .extract_if(.., |peer, _| !tracked.contains(peer))
+        {
+            debug!(?peer, digests = deque.len(), "evicting disconnected peer");
+            for digest in deque {
+                decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
+            }
+        }
     }
 
     ////////////////////////////////////////
@@ -375,5 +395,23 @@ where
         } else {
             Status::Dropped
         });
+    }
+}
+
+/// Decrement a digest refcount and evict it from cache when no references remain.
+fn decrement_digest_refcount<D: Ord, M>(
+    counts: &mut BTreeMap<D, usize>,
+    items: &mut BTreeMap<D, M>,
+    digest: &D,
+) {
+    let should_remove = {
+        let count = counts.get_mut(digest).expect("count must exist");
+        *count = count.checked_sub(1).expect("count must be > 0");
+        *count == 0
+    };
+    if should_remove {
+        let existing = counts.remove(digest);
+        assert!(existing == Some(0));
+        items.remove(digest);
     }
 }

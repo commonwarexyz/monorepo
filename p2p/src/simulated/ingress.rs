@@ -1,5 +1,5 @@
 use super::{Error, Receiver, Sender};
-use crate::{authenticated::UnboundedMailbox, Address, Channel};
+use crate::{authenticated::UnboundedMailbox, Address, Channel, PeerSetSubscription};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
@@ -26,7 +26,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         response: oneshot::Sender<Option<Set<P>>>,
     },
     Subscribe {
-        sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+        response: oneshot::Sender<PeerSetSubscription<P>>,
     },
     SubscribeConnected {
         response: oneshot::Sender<ring::Receiver<Vec<P>>>,
@@ -257,10 +257,15 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.sender.0.send_lossy(Message::Subscribe { sender });
-        receiver
+    async fn subscribe(&self) -> PeerSetSubscription<P> {
+        self.sender
+            .0
+            .request(|response| Message::Subscribe { response })
+            .await
+            .unwrap_or_else(|| {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            })
     }
 }
 
@@ -293,10 +298,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        self.oracle.subscribe().await
     }
 }
 
@@ -341,10 +344,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    async fn subscribe(
-        &mut self,
-    ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<P> {
+        self.oracle.subscribe().await
     }
 }
 

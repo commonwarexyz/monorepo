@@ -72,7 +72,6 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
-crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "buffer_paged"

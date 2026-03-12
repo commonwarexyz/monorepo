@@ -3,11 +3,11 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::{Inbound, Peer},
+        metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
-    types::{Epoch, View, ViewDelta},
+    types::{Epoch, Participant, View, ViewDelta},
     Epochable, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
@@ -31,7 +31,15 @@ use prometheus_client::metrics::{
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
+
+/// Tracks the current view, its leader, and whether the voter has
+/// already been told to timeout this view.
+struct Current {
+    view: View,
+    leader: Option<Participant>,
+    timed_out: bool,
+}
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + CryptoRngCore,
@@ -158,6 +166,19 @@ impl<
         )
     }
 
+    /// Returns true if the leader has nullified the current view
+    /// and we have not yet notified the voter.
+    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
+        if current.timed_out {
+            return false;
+        }
+        let Some(leader) = current.leader else {
+            return false;
+        };
+        work.get(&current.view)
+            .is_some_and(|round| round.has_nullify(leader))
+    }
+
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
@@ -183,7 +204,11 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
-        let mut current = View::zero();
+        let mut current = Current {
+            view: View::zero(),
+            leader: None,
+            timed_out: false,
+        };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
         select_loop! {
@@ -200,32 +225,62 @@ impl<
                     current: new_current,
                     leader,
                     finalized: new_finalized,
-                    active,
+                    response,
                 } => {
-                    current = new_current;
+                    let am_leader = self.scheme.me().is_some_and(|me| me == leader);
+                    current = Current {
+                        view: new_current,
+                        leader: Some(leader),
+                        timed_out: false,
+                    };
                     finalized = new_finalized;
-                    work.entry(current)
+                    work.entry(current.view)
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
-                    // Check if the leader has been active recently
-                    let skip_timeout = self.skip_timeout.get() as usize;
-                    let is_active =
+                    // If the leader nullified this view or has not been active
+                    // recently, tell the voter to reduce the leader timeout to now
+                    let timeout_reason = if Self::leader_nullified(&current, &work) {
+                        // Leader already buffered a nullify for this now-current view
+                        // (allowed because we accept votes up to `current+1`).
+                        Some(TimeoutReason::LeaderNullify)
+                    } else {
+                        let skip_timeout = self.skip_timeout.get() as usize;
+                        if
                         // Ensure we have enough data to judge activity (none of this
                         // data may be in the last skip_timeout views if we jumped ahead
                         // to a new view)
-                        work.len() < skip_timeout
-                        // Leader active in at least one recent round
-                        || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
-                    active.send_lossy(is_active);
+                        work.len() >= skip_timeout
+                            // Leader not active in any recent round
+                            && !work
+                                .iter()
+                                .rev()
+                                .take(skip_timeout)
+                                .any(|(_, round)| round.is_active(leader))
+                        {
+                            // If we are the leader, we should attempt to build even if we haven't
+                            // been active recently
+                            if am_leader {
+                                None
+                            } else {
+                                Some(TimeoutReason::Inactivity)
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if timeout_reason.is_some() {
+                        current.timed_out = true;
+                    }
+                    response.send_lossy(timeout_reason);
 
                     // Setting leader may enable batch verification
-                    updated_view = current;
+                    updated_view = current.view;
                 }
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current, view, false) {
+                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                         continue;
                     }
 
@@ -242,8 +297,7 @@ impl<
             Ok((sender, message)) = certificate_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
-                    warn!(?sender, "blocking peer for decoding error");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "decoding error");
                     continue;
                 };
 
@@ -257,8 +311,7 @@ impl<
 
                 // If the epoch is not the current epoch, block
                 if message.epoch() != self.epoch {
-                    warn!(?sender, "blocking peer for epoch mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch");
                     continue;
                 }
 
@@ -267,7 +320,7 @@ impl<
                 if !interesting(
                     self.activity_timeout,
                     finalized,
-                    current,
+                    current.view,
                     view,
                     true, // allow future
                 ) {
@@ -284,8 +337,7 @@ impl<
 
                         // Verify the certificate
                         if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
-                            warn!(?sender, %view, "blocking peer for invalid notarization");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
 
@@ -310,8 +362,7 @@ impl<
                             &self.scheme,
                             &self.strategy,
                         ) {
-                            warn!(?sender, %view, "blocking peer for invalid nullification");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
                             continue;
                         }
 
@@ -332,8 +383,7 @@ impl<
 
                         // Verify the certificate
                         if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
-                            warn!(?sender, %view, "blocking peer for invalid finalization");
-                            self.blocker.block(sender).await;
+                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
 
@@ -354,8 +404,7 @@ impl<
             Ok((sender, message)) = vote_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
-                    warn!(?sender, "blocking peer for decoding error");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "decoding error");
                     continue;
                 };
 
@@ -369,14 +418,13 @@ impl<
 
                 // If the epoch is not the current epoch, block
                 if message.epoch() != self.epoch {
-                    warn!(?sender, "blocking peer for epoch mismatch");
-                    self.blocker.block(sender).await;
+                    commonware_p2p::block!(self.blocker, sender, "epoch mismatch");
                     continue;
                 }
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current, view, false) {
+                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
 
@@ -395,6 +443,16 @@ impl<
                         .latest_vote
                         .get_or_create(&peer)
                         .try_set_max(view.get());
+
+                    // If the current leader explicitly nullifies the current view, signal
+                    // the voter so it can fast-path timeout without waiting for its local
+                    // timer. We check after adding because duplicate votes are rejected.
+                    if Self::leader_nullified(&current, &work) {
+                        current.timed_out = true;
+                        voter
+                            .timeout(current.view, TimeoutReason::LeaderNullify)
+                            .await;
+                    }
                 }
                 updated_view = view;
             },
@@ -405,7 +463,7 @@ impl<
                 );
 
                 // Forward leader's proposal to voter (if we're not the leader and haven't already)
-                if let Some(round) = work.get_mut(&current) {
+                if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
                             voter.proposal(proposal).await;
@@ -452,8 +510,11 @@ impl<
                     // Block invalid signers
                     for invalid in failed {
                         if let Some(signer) = self.participants.key(invalid) {
-                            warn!(?signer, "blocking peer for invalid signature");
-                            self.blocker.block(signer.clone()).await;
+                            commonware_p2p::block!(
+                                self.blocker,
+                                signer.clone(),
+                                "invalid signature"
+                            );
                         }
                     }
 
@@ -464,7 +525,7 @@ impl<
                 } else {
                     timer.cancel();
                     trace!(
-                        %current,
+                        current = %current.view,
                         %finalized,
                         "no verifier ready"
                     );
@@ -501,7 +562,7 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current, view, false)
+                    !interesting(self.activity_timeout, finalized, current.view, view, false)
                 }) {
                     work.pop_first();
                 }

@@ -351,6 +351,10 @@ impl Config {
             self.cycle >= SYSTEM_TIME_PRECISION,
             "cycle duration must be greater than or equal to system time precision"
         );
+        assert!(
+            self.start_time >= UNIX_EPOCH,
+            "start time must be greater than or equal to unix epoch"
+        );
     }
 }
 
@@ -1985,6 +1989,13 @@ mod tests {
             // Check that the time matches the custom start time
             assert_eq!(context.current(), start_time);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "start time must be greater than or equal to unix epoch")]
+    fn test_bad_start_time() {
+        let cfg = Config::default().with_start_time(UNIX_EPOCH - Duration::from_secs(1));
+        deterministic::Runner::new(cfg);
     }
 
     #[cfg(not(feature = "external"))]

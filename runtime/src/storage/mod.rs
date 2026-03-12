@@ -205,7 +205,7 @@ impl arbitrary::Arbitrary<'_> for Header {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Header, HeaderError};
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
     use futures::FutureExt;
 
@@ -292,6 +292,8 @@ pub(crate) mod tests {
         test_read_beyond_bound(&storage).await;
         test_write_at_large_offset(&storage).await;
         test_append_data(&storage).await;
+        test_vectored_write_at(&storage).await;
+        test_vectored_write_at_large_offset(&storage).await;
         test_sequential_read_write(&storage).await;
         test_sequential_chunk_read_write(&storage).await;
         test_read_empty_blob(&storage).await;
@@ -512,6 +514,102 @@ pub(crate) mod tests {
         // Read back the data
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read, b"firstsecond", "Appended data is incorrect");
+    }
+
+    /// Test vectored writes at offset 0.
+    async fn test_vectored_write_at<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let test = |partition, bufs: Vec<IoBuf>, context| async move {
+            // Coalesce the input to test later when reading
+            let expected = IoBufs::from(bufs.clone()).coalesce();
+            let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
+
+            // Write data
+            blob.write_at(0, bufs).await.unwrap();
+
+            // Read back the data
+            let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), expected.as_ref(), "{context}");
+        };
+
+        test(
+            "test_vectored_write_basic",
+            vec![
+                IoBuf::from(b"hello"),
+                IoBuf::from(b" "),
+                IoBuf::from(b"world"),
+            ],
+            "Vectored write content is incorrect",
+        )
+        .await;
+
+        test(
+            "test_vectored_write_empty_chunks",
+            vec![
+                IoBuf::default(),
+                IoBuf::from(b"abc"),
+                IoBuf::default(),
+                IoBuf::from(b"def"),
+                IoBuf::default(),
+            ],
+            "Vectored write with empties is incorrect",
+        )
+        .await;
+
+        let chunk_count = 128;
+        let mut bufs = Vec::with_capacity(chunk_count);
+        for i in 0..chunk_count {
+            bufs.push(IoBuf::from(vec![i as u8; i]));
+        }
+
+        test(
+            "test_vectored_write_many_chunks",
+            bufs,
+            "Vectored write over batch size is incorrect",
+        )
+        .await;
+    }
+
+    /// Test vectored writes at large offset with many chunks.
+    async fn test_vectored_write_at_large_offset<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_vectored_write_at_large_offset", b"test_blob")
+            .await
+            .unwrap();
+
+        let chunk_count = 128;
+        let mut bufs = Vec::with_capacity(chunk_count);
+        for i in 0..chunk_count {
+            bufs.push(IoBuf::from(vec![i as u8; i]));
+        }
+        let expected = IoBufs::from(bufs.clone()).coalesce();
+
+        // Write vectored data at a large offset
+        blob.write_at(5_000, bufs).await.unwrap();
+
+        // Read back the data
+        let read = blob
+            .read_at(5_000, expected.len())
+            .await
+            .unwrap()
+            .coalesce();
+
+        assert_eq!(
+            read.as_ref(),
+            expected.as_ref(),
+            "Vectored write at offset content is incorrect"
+        );
+
+        // Prefix gap should be zero-filled.
+        let prefix = blob.read_at(0, 5_000).await.unwrap().coalesce();
+        assert_eq!(prefix.as_ref(), [0u8; 5_000]);
     }
 
     /// Test reading and writing with interleaved offsets.

@@ -206,12 +206,13 @@ fn fuzz(input: FuzzInput) {
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
             };
 
             // Create engine
             let engine_context = context.with_label("peer").with_attribute("index", i);
             let (engine, mailbox) =
-                Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
+                Engine::<_, PublicKey, FuzzMessage, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
             engine.start((sender, receiver));
         }

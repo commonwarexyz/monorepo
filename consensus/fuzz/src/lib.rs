@@ -1,14 +1,14 @@
 pub mod bounds;
+pub mod certificate_mock;
 pub mod disrupter;
+pub mod id_mock;
 pub mod invariants;
 pub mod network;
-pub mod scheme;
 pub mod simplex_node;
 pub mod simplex_protocol;
 pub mod strategy;
 pub mod types;
 pub mod utils;
-
 use crate::{
     disrupter::Disrupter,
     network::ByzantineFirstReceiver,
@@ -21,7 +21,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{application, relay, reporter, twins::Strategy},
+        mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
         Engine,
     },
@@ -43,8 +43,8 @@ use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
 pub use simplex_protocol::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
-    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-    SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
+    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexCertificateMock,
+    SimplexEd25519, SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
 use std::{
     collections::HashMap,
@@ -335,50 +335,38 @@ fn spawn_disrupter<P: simplex_protocol::Simplex>(
     );
 }
 
-fn spawn_honest_validator<P: simplex_protocol::Simplex>(
-    context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
-    participants: &[PublicKeyOf<P>],
-    scheme: P::Scheme,
-    validator: PublicKeyOf<P>,
-    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
-    channels: NetworkChannels<PublicKeyOf<P>>,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
-    let (vote_network, certificate_network, resolver_network) = channels;
-    spawn_honest_validator_with_network::<P>(
-        context,
-        oracle,
-        participants,
-        scheme,
-        validator,
-        relay,
-        vote_network,
-        certificate_network,
-        resolver_network,
-    )
-}
-
+/// Spawn an honest validator with application, reporter, and engine.
 #[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator_with_network<P: simplex_protocol::Simplex>(
+fn spawn_honest_validator<
+    P,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
-    vote_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-    certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-    resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
+where
+    P: simplex_protocol::Simplex,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
@@ -387,9 +375,9 @@ fn spawn_honest_validator_with_network<P: simplex_protocol::Simplex>(
     };
     let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
 
-    let (vote_sender, vote_receiver) = vote_network;
-    let (certificate_sender, certificate_receiver) = certificate_network;
-    let (resolver_sender, resolver_receiver) = resolver_network;
+    let (vote_sender, vote_receiver) = pending;
+    let (certificate_sender, certificate_receiver) = recovered;
+    let (resolver_sender, resolver_receiver) = resolver;
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -415,9 +403,9 @@ fn spawn_honest_validator_with_network<P: simplex_protocol::Simplex>(
         partition: validator.to_string(),
         mailbox_size: 1024,
         epoch: Epoch::new(EPOCH),
-        leader_timeout: Duration::from_secs(1),
-        notarization_timeout: Duration::from_secs(2),
-        nullify_retry: Duration::from_secs(10),
+        leader_timeout,
+        certification_timeout,
+        timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
         activity_timeout: Delta::new(10),
         skip_timeout: Delta::new(5),
@@ -446,6 +434,8 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex_protocol::Simplex>(
     validator: PublicKeyOf<P>,
     byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
     channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
@@ -475,13 +465,15 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex_protocol::Simplex>(
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
 
-    spawn_honest_validator_with_network::<P>(
+    spawn_honest_validator::<P, _, _, _, _, _, _>(
         context,
         oracle,
         participants,
         scheme,
         validator,
         relay,
+        leader_timeout,
+        certification_timeout,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
@@ -512,16 +504,20 @@ fn run<P: simplex_protocol::Simplex>(input: FuzzInput) {
         // Spawn honest validators
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
                 validator,
                 relay.clone(),
-                channels,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                pending,
+                recovered,
+                resolver,
             );
             reporters.push(reporter);
         }
@@ -594,6 +590,8 @@ fn run_with_adversarial_network<P: simplex_protocol::Simplex>(mut input: FuzzInp
                 validator,
                 byzantine_router.clone(),
                 relay.clone(),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
                 channels,
             );
             reporters.push(reporter);
@@ -627,11 +625,22 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (oracle, participants, schemes, mut registrations) =
+        let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
 
-        let strategy = Strategy::View;
+        link_peers(
+            &mut oracle,
+            participants.as_ref(),
+            Action::Update(Link {
+                latency: Duration::from_millis(500),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            }),
+            input.partition.filter(),
+        )
+        .await;
+
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
@@ -651,7 +660,7 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -669,26 +678,20 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                     }
                 }
             };
-            let make_resolver_forwarder = || {
-                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
-                    Some(recipients.clone())
-                }
-            };
-
             let make_vote_router = || {
                 let participants = participants.clone();
                 move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
@@ -701,11 +704,9 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                     ) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
-
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -723,13 +724,12 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(make_resolver_forwarder());
+            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
+                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(
-                    context.with_label(&format!("resolver_split_{idx}")),
-                    make_resolver_router(),
-                );
+                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
+                    SplitTarget::Both
+                });
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
@@ -771,8 +771,8 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_millis(1_500),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
@@ -803,17 +803,21 @@ fn run_with_twin_mutator<P: simplex_protocol::Simplex>(input: FuzzInput) {
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context.with_label(&format!("honest_{idx}"));
-            let channels = registrations
+            let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 participants.as_ref(),
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
-                channels,
+                Duration::from_secs(1),
+                Duration::from_millis(1_500),
+                pending,
+                recovered,
+                resolver,
             );
             reporters.push(reporter);
         }

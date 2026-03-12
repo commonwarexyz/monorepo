@@ -13,9 +13,10 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        hasher::Hasher as MmrHasher,
+        batch::UnmerkleizedBatch,
+        hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State as MmrState},
+        mem::{Config, Mmr, MIN_TO_PARALLELIZE},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -23,13 +24,14 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
     sequence::prefixed_u64::U64,
 };
+use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
 
@@ -43,10 +45,12 @@ pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
 ) -> H::Digest {
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    hasher.update(mmr_root);
-    hasher.update(&next_bit.to_be_bytes());
-    hasher.update(last_chunk_digest);
-    hasher.finalize()
+    let next_bit = next_bit.to_be_bytes();
+    hasher.hash([
+        mmr_root.as_ref(),
+        next_bit.as_slice(),
+        last_chunk_digest.as_ref(),
+    ])
 }
 
 mod private {
@@ -54,10 +58,7 @@ mod private {
 }
 
 /// Trait for valid [BitMap] type states.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
-    /// The merkleization type state for the inner [Mmr].
-    type MmrState: MmrState<D>;
-}
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
 
 /// Merkleized state: the bitmap has been merkleized and the root is cached.
 pub struct Merkleized<D: Digest> {
@@ -66,9 +67,7 @@ pub struct Merkleized<D: Digest> {
 }
 
 impl<D: Digest> private::Sealed for Merkleized<D> {}
-impl<D: Digest> State<D> for Merkleized<D> {
-    type MmrState = Clean<D>;
-}
+impl<D: Digest> State<D> for Merkleized<D> {}
 
 /// Unmerkleized state: the bitmap has pending changes not yet merkleized.
 pub struct Unmerkleized {
@@ -82,9 +81,7 @@ pub struct Unmerkleized {
 }
 
 impl private::Sealed for Unmerkleized {}
-impl<D: Digest> State<D> for Unmerkleized {
-    type MmrState = Dirty;
-}
+impl<D: Digest> State<D> for Unmerkleized {}
 
 /// A merkleized bitmap whose root digest has been computed and cached.
 pub type MerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
@@ -131,7 +128,7 @@ pub struct BitMap<
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<D, S::MmrState>,
+    mmr: Mmr<D>,
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
@@ -227,7 +224,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -239,15 +236,14 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             return false;
         }
 
-        // The chunk index should always be < MAX_LOCATION so we can use new_unchecked.
-        let chunked_leaves =
-            Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
+        // The chunk index should always be < MAX_LOCATION.
+        let chunked_leaves = Location::new(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
             digests: proof.digests.clone(),
         };
 
-        let loc = Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
+        let loc = Location::new(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
@@ -271,12 +267,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root = partial_chunk_root::<_, N>(
-                hasher.inner(),
-                &last_digest,
-                next_bit,
-                &last_chunk_digest,
-            );
+            let reconstructed_root =
+                partial_chunk_root::<_, N>(hasher, &last_digest, next_bit, &last_chunk_digest);
             return reconstructed_root == *root;
         };
 
@@ -292,7 +284,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }
@@ -309,7 +301,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -330,7 +322,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             }
         } as usize;
         if pruned_chunks == 0 {
-            let mmr = CleanMmr::new(hasher);
+            let mmr = Mmr::new(hasher);
             let cached_root = *mmr.root();
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
@@ -341,7 +333,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
                 state: Merkleized { root: cached_root },
             });
         }
-        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
+        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -357,10 +349,10 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             pinned_nodes.push(digest);
         }
 
-        let mmr = CleanMmr::init(
+        let mmr = Mmr::init(
             Config {
                 nodes: Vec::new(),
-                pruned_to_pos: mmr_size,
+                pruned_to: Location::new(pruned_chunks as u64),
                 pinned_nodes,
             },
             hasher,
@@ -397,8 +389,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         // Write the pinned nodes.
         // This will never panic because pruned_chunks is always less than MAX_LOCATION.
-        let mmr_size =
-            Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
+        let mmr_size = Position::try_from(Location::new(self.bitmap.pruned_chunks() as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -432,9 +423,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         // Update authenticated length
         self.authenticated_len = self.complete_chunks();
 
-        // This will never panic because chunk is always less than MAX_LOCATION.
-        let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
-        self.mmr.prune_to_pos(mmr_pos);
+        self.mmr.prune(Location::new(chunk as u64))?;
         Ok(())
     }
 
@@ -466,7 +455,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -483,7 +472,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    leaves: Location::new_unchecked(self.len()),
+                    leaves: Location::new(self.len()),
                     digests: vec![*self.mmr.root()],
                 },
                 chunk,
@@ -492,7 +481,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
 
         let range = chunk_loc..chunk_loc + 1;
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.leaves = Location::new_unchecked(self.len());
+        proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -511,7 +500,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         UnmerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
-            mmr: self.mmr.into_dirty(),
+            mmr: self.mmr,
             pool: self.pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
@@ -553,12 +542,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
             .state
             .dirty_chunks
             .iter()
-            .map(|&chunk| Location::new_unchecked(chunk as u64))
+            .map(|&chunk| Location::new(chunk as u64))
             .collect();
 
         // Include complete chunks that haven't been authenticated yet
         for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new_unchecked(i as u64));
+            chunks.push(Location::new(i as u64));
         }
 
         chunks
@@ -567,44 +556,71 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
-        // Add newly pushed complete chunks to the MMR.
+        // Add newly pushed complete chunks to the batch.
+        let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            self.mmr.add(hasher, self.bitmap.get_chunk(i));
+            batch.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
-        // Inform the MMR of modified chunks.
-        let updates = self
-            .state
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| {
-                let loc = Location::new_unchecked(chunk as u64);
-                (loc, self.bitmap.get_chunk(chunk))
-            })
-            .collect::<Vec<_>>();
-        self.mmr
-            .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
-        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
+        // Pre-hash dirty chunks into digests and update in the batch.
+        let dirty: Vec<(Location, D)> = {
+            let updates: Vec<(Location, &[u8; N])> = self
+                .state
+                .dirty_chunks
+                .iter()
+                .map(|&chunk| {
+                    let loc = Location::new(chunk as u64);
+                    (loc, self.bitmap.get_chunk(chunk))
+                })
+                .collect();
 
-        // Compute the bitmap root
-        let mmr_root = *mmr.root();
+            match self.pool.as_ref() {
+                Some(pool) if updates.len() >= MIN_TO_PARALLELIZE => pool.install(|| {
+                    updates
+                        .par_iter()
+                        .map_init(
+                            || hasher.clone(),
+                            |h, &(loc, chunk)| {
+                                let pos = Position::try_from(loc).unwrap();
+                                (loc, h.leaf_digest(pos, chunk.as_ref()))
+                            },
+                        )
+                        .collect()
+                }),
+                _ => updates
+                    .iter()
+                    .map(|&(loc, chunk)| {
+                        let pos = Position::try_from(loc).unwrap();
+                        (loc, hasher.leaf_digest(pos, chunk.as_ref()))
+                    })
+                    .collect(),
+            }
+        };
+        batch.update_leaf_batched(&dirty)?;
+
+        // Merkleize and apply.
+        let changeset = batch.merkleize(hasher).finalize();
+        self.mmr.apply(changeset)?;
+
+        // Compute the bitmap root.
+        let mmr_root = *self.mmr.root();
         let cached_root = if self.bitmap.is_chunk_aligned() {
             mmr_root
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_chunk_digest)
         };
 
         Ok(MerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
-            mmr,
+            mmr: self.mmr,
             pool: self.pool,
             metadata: self.metadata,
             state: Merkleized { root: cached_root },
@@ -612,9 +628,11 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage
     for MerkleizedBitMap<E, D, N>
 {
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.size()
     }
@@ -678,7 +696,7 @@ mod tests {
         executor.start(|_context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let proof = Proof {
-                leaves: Location::new_unchecked(100),
+                leaves: Location::new(100),
                 digests: Vec::new(),
             };
             assert!(

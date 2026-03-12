@@ -178,6 +178,8 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     certify_latency: Normal<f64>,
 
     fail_verification: bool,
+    drop_proposals: bool,
+    drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
@@ -217,6 +219,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 certify_latency,
 
                 fail_verification: false,
+                drop_proposals: false,
+                drop_verifications: false,
                 should_certify: cfg.should_certify,
 
                 pending: HashMap::new(),
@@ -229,6 +233,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     pub const fn set_fail_verification(&mut self, fail: bool) {
         self.fail_verification = fail;
+    }
+
+    pub const fn set_drop_proposals(&mut self, drop: bool) {
+        self.drop_proposals = drop;
+    }
+
+    pub const fn set_drop_verifications(&mut self, drop: bool) {
+        self.drop_verifications = drop;
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -371,6 +383,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
+                        if self.drop_proposals {
+                            continue;
+                        }
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
@@ -379,6 +394,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
+                        if self.drop_verifications {
+                            continue;
+                        }
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);

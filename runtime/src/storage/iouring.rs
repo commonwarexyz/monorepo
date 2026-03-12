@@ -19,19 +19,16 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
+//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd},
-    BufferPool, Error, IoBufs, IoBufsMut,
+    iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
+    Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    from_hex, hex,
-};
-use futures::executor::block_on;
-use io_uring::{opcode, types};
+use commonware_utils::{channel::oneshot, from_hex, hex};
+use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
@@ -41,6 +38,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Cap iovec batch size: larger iovecs reduce syscall count but increase
+/// per-write kernel setup overhead.
+const IOVEC_BATCH_SIZE: usize = 32;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
@@ -73,29 +74,28 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_submitter: iouring::Submitter,
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
-
-        let storage = Self {
-            storage_directory: cfg.storage_directory.clone(),
-            io_sender,
-            pool,
-        };
-        let metrics = Arc::new(iouring::Metrics::new(registry));
-
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
 
-        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, receiver)));
+        let (io_submitter, iouring_loop) = iouring::IoUringLoop::new(cfg.iouring_config, registry);
+
+        let storage = Self {
+            storage_directory: cfg.storage_directory,
+            io_submitter,
+            pool,
+        };
+
+        std::thread::spawn(move || iouring_loop.run());
         storage
     }
 }
@@ -173,7 +173,7 @@ impl crate::Storage for Storage {
             partition.into(),
             name,
             file,
-            self.io_sender.clone(),
+            self.io_submitter.clone(),
             self.pool.clone(),
         );
         Ok((blob, logical_len, blob_version))
@@ -234,7 +234,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_submitter: iouring::Submitter,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -245,7 +245,7 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             file: self.file.clone(),
-            io_sender: self.io_sender.clone(),
+            io_submitter: self.io_submitter.clone(),
             pool: self.pool.clone(),
         }
     }
@@ -256,16 +256,157 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<iouring::Op>,
+        io_submitter: iouring::Submitter,
         pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
-            io_sender,
+            io_submitter,
             pool,
         }
+    }
+
+    fn as_raw_fd(&self) -> Fd {
+        Fd(self.file.as_raw_fd())
+    }
+
+    async fn write_single_at(&self, mut offset: u64, mut buf: IoBuf) -> Result<(), Error> {
+        let mut bytes_written = 0;
+        let buf_len = buf.len();
+        while bytes_written < buf_len {
+            // Figure out how much is left to write and where to write from.
+            //
+            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
+            // `bytes_written` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
+            // correctly represents the remaining valid bytes.
+            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
+            let remaining_len = buf_len - bytes_written;
+
+            // Create an operation to do the write
+            let op = opcode::Write::new(self.as_raw_fd(), ptr, remaining_len as _)
+                .offset(offset as _)
+                .build();
+
+            // Submit the operation
+            let (sender, receiver) = oneshot::channel();
+            self.io_submitter
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::File(self.file.clone())),
+                    iovecs: None,
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?;
+
+            // Wait for the result
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = match return_buf {
+                Some(OpBuffer::Write(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
+            };
+            if should_retry(return_value) {
+                continue;
+            }
+
+            // A negative or zero return value indicates an error.
+            let op_bytes_written: usize =
+                return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            if op_bytes_written == 0 {
+                return Err(Error::WriteFailed);
+            }
+
+            bytes_written += op_bytes_written;
+            offset += op_bytes_written as u64;
+        }
+
+        Ok(())
+    }
+
+    async fn write_vectored_at(&self, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
+        while bufs.has_remaining() {
+            let (iovecs, iovecs_len) = {
+                // Figure out how much is left to write and where to write from.
+                //
+                // Use one pre-initialized `libc::iovec` array as scratch space and
+                // view it as `IoSlice` to fill via `chunks_vectored`, since
+                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
+                assert!(
+                    max_iovecs > 0,
+                    "chunk_count should be > 0 if bufs.has_remaining() is true"
+                );
+                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
+                    libc::iovec {
+                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+                        iov_len: 0,
+                    },
+                    max_iovecs,
+                )
+                .collect();
+
+                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                // `raw_iovecs` is initialized with valid empty entries, so `io_slices`
+                // starts in a valid state for `chunks_vectored` to overwrite.
+                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                        iovecs.len(),
+                    )
+                };
+                let io_slices_len = bufs.chunks_vectored(io_slices);
+                assert!(
+                    io_slices_len > 0,
+                    "chunks_vectored should produce at least one slice when bufs has remaining"
+                );
+
+                (OpIovecs::new(iovecs), io_slices_len)
+            };
+
+            // Create an operation to do the write
+            let op = opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _)
+                .offset(offset as _)
+                .build();
+
+            // Submit the operation
+            let (sender, receiver) = oneshot::channel();
+            self.io_submitter
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(OpBuffer::WriteVectored(bufs)),
+                    fd: Some(OpFd::File(self.file.clone())),
+                    iovecs: Some(iovecs),
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?;
+
+            // Wait for the result
+            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            bufs = match return_bufs {
+                Some(OpBuffer::WriteVectored(b)) => b,
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
+            };
+            if should_retry(return_value) {
+                continue;
+            }
+
+            // A negative or zero return value indicates an error.
+            let op_bytes_written: usize =
+                return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            if op_bytes_written == 0 {
+                return Err(Error::WriteFailed);
+            }
+
+            bufs.advance(op_bytes_written);
+            offset += op_bytes_written as u64;
+        }
+
+        Ok(())
     }
 }
 
@@ -294,9 +435,7 @@ impl crate::Blob for Blob {
             (tmp, Some(input_bufs))
         };
 
-        let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -312,34 +451,35 @@ impl crate::Blob for Blob {
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, ptr, remaining_len as _)
+            let op = opcode::Read::new(self.as_raw_fd(), ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
-            io_sender
+            self.io_submitter
                 .send(iouring::Op {
                     work: op,
                     sender,
                     buffer: Some(OpBuffer::Read(io_buf)),
                     fd: Some(OpFd::File(self.file.clone())),
+                    iovecs: None,
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            io_buf = match got_buf {
+            let (return_value, return_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            io_buf = match return_buf {
                 Some(OpBuffer::Read(b)) => b,
-                _ => return Err(Error::ReadFailed),
+                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
             };
-            if should_retry(result) {
+            if should_retry(return_value) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            let op_bytes_read: usize = return_value.try_into().map_err(|_| Error::ReadFailed)?;
             if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
@@ -360,61 +500,15 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        // Convert to contiguous IoBuf for io_uring write
-        // (zero-copy if single buffer, copies if multiple)
-        let mut buf = bufs.into().coalesce_with_pool(&self.pool);
-        let fd = types::Fd(self.file.as_raw_fd());
-        let mut bytes_written = 0;
-        let buf_len = buf.len();
-        let io_sender = self.io_sender.clone();
+        let bufs = bufs.into();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_written < buf_len {
-            // Figure out how much is left to write and where to write from.
-            //
-            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
-            // `bytes_written` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
-            let remaining_len = buf_len - bytes_written;
-            let offset = offset + bytes_written as u64;
 
-            // Create an operation to do the write
-            let op = opcode::Write::new(fd, ptr, remaining_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            io_sender
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Write(buf)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-
-            // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = match got_buf {
-                Some(OpBuffer::Write(b)) => b,
-                _ => return Err(Error::WriteFailed),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // A negative return value indicates an error.
-            let op_bytes_written: usize =
-                return_value.try_into().map_err(|_| Error::WriteFailed)?;
-
-            bytes_written += op_bytes_written;
+        match bufs.try_into_single() {
+            Ok(buf) => self.write_single_at(offset, buf).await,
+            Err(bufs) => self.write_vectored_at(offset, bufs).await,
         }
-        Ok(())
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -430,17 +524,17 @@ impl crate::Blob for Blob {
     async fn sync(&self) -> Result<(), Error> {
         loop {
             // Create an operation to do the sync
-            let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
+            let op = opcode::Fsync::new(self.as_raw_fd()).build();
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
-            self.io_sender
-                .clone()
+            self.io_submitter
                 .send(iouring::Op {
                     work: op,
                     sender,
                     buffer: None,
                     fd: Some(OpFd::File(self.file.clone())),
+                    iovecs: None,
                 })
                 .await
                 .map_err(|_| {

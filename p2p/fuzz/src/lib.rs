@@ -637,9 +637,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let blocker_idx = (peer_idx as usize) % peers.len();
                     let blocked_idx = (target_idx as usize) % peers.len();
 
-                    // Block the target peer on the blocker's oracle
                     let blocked_pk = peers[blocked_idx].info.public_key.clone();
-                    let _ = peers[blocker_idx].network.oracle.block(blocked_pk).await;
+                    #[allow(clippy::disallowed_methods, reason = "fuzz harness without tracing")]
+                    peers[blocker_idx].network.oracle.block(blocked_pk).await;
                 }
             }
         }

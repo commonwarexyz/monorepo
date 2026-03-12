@@ -1047,7 +1047,7 @@ mod tests {
         let mut rng = test_rng();
         let (n, t) = (NZU32!(5), N3f1::quorum(5));
         let (public, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
-        let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
+        let scalars = public.mode().all_scalars(n);
 
         let namespace = b"test";
         let msg = b"hello";

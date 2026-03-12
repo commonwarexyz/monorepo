@@ -11,25 +11,27 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{init_variable, ordered, value::VariableEncoding, VariableConfig, VariableValue},
-        Durable, Error, Merkleized,
+        operation::Key,
+        Error,
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
+pub type Db<E, K, V, H, T> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
+    Db<E, K, V, H, T>
+where
+    Operation<K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -72,14 +74,14 @@ pub mod partitioned {
         mmr::Location,
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
-            Durable, Error, Merkleized,
+            operation::Key,
+            Error,
         },
         translator::Translator,
     };
-    use commonware_codec::Read;
+    use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
-    use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -90,27 +92,24 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize, S = Merkleized<H>, D = Durable> =
-        crate::qmdb::any::ordered::Db<
-            E,
-            Journal<E, Operation<K, V>>,
-            Index<T, Location, P>,
-            H,
-            Update<K, V>,
-            S,
-            D,
-        >;
+    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        Index<T, Location, P>,
+        H,
+        Update<K, V>,
+    >;
 
     impl<
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: Key,
             V: VariableValue,
             H: Hasher,
             T: Translator,
             const P: usize,
-        > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
+        > Db<E, K, V, H, T, P>
     where
-        Operation<K, V>: Read,
+        Operation<K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -143,15 +142,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 1, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
-            super::Db<E, K, V, H, T, 2, S, D>;
+        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
     }
 }
 
@@ -159,22 +156,13 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        kv::{
-            tests::{assert_batchable, assert_gettable, assert_send},
-            Batchable as _, Deletable as _, Updatable as _,
-        },
-        mmr::{Location, Position},
-        qmdb::{
-            any::{
-                ordered::test::{
-                    test_digest_ordered_any_db_basic, test_digest_ordered_any_db_empty,
-                    test_ordered_any_db_basic, test_ordered_any_db_empty,
-                    test_ordered_any_update_collision_edge_case,
-                },
-                test::variable_db_config,
+        mmr::Position,
+        qmdb::any::{
+            ordered::test::{
+                test_ordered_any_db_basic, test_ordered_any_db_empty,
+                test_ordered_any_update_collision_edge_case,
             },
-            store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-            Durable, Merkleized, NonDurable, Unmerkleized,
+            test::variable_db_config,
         },
         translator::TwoCap,
     };
@@ -193,13 +181,11 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+    pub(crate) type VarConfig =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
-    /// Type aliases for concrete [Db] types used in these unit tests.
-    pub(crate) type AnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    type MutableAnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    /// Type alias for the concrete [Db] type used in these unit tests.
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
@@ -211,7 +197,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: ((), ((0..=10000).into(), ())),
             translator: TwoCap,
             thread_pool: None,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -263,16 +249,15 @@ pub(crate) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Vec<u8>>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Vec<u8>>>) {
+        let mut batch = db.new_batch();
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.write_batch([(data.key, Some(data.value))])
-                        .await
-                        .unwrap();
+                    batch = batch.write(data.key, Some(data.value));
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)]).await.unwrap();
+                    batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -281,41 +266,8 @@ pub(crate) mod test {
                 }
             }
         }
-    }
-
-    // Tests calling generic helpers with Digest-key and Digest-value DB (non-partitioned variant)
-
-    /// Type alias for a variable db with Digest keys AND Digest values (for generic tests).
-    type DigestVariableDb = Db<Context, Digest, Digest, Sha256, TwoCap>;
-
-    /// Return a variable db with Digest keys and values for generic tests.
-    async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        let cfg = variable_db_config("digest-partition", &context);
-        DigestVariableDb::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_variable_db_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_variable_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_empty(context, db, |ctx| {
-                Box::pin(open_digest_variable_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_digest_ordered_any_variable_db_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_digest_variable_db(context.with_label("initial")).await;
-            test_digest_ordered_any_db_basic(context, db, |ctx| {
-                Box::pin(open_digest_variable_db(ctx))
-            })
-            .await;
-        });
+        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
@@ -362,7 +314,7 @@ pub(crate) mod test {
     fn test_ordered_any_update_batch_create_between_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_variable_db(context.clone()).await.into_mutable();
+            let mut db = open_variable_db(context.clone()).await;
 
             // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
             // collisions.
@@ -371,20 +323,29 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
             let val = Sha256::fill(1u8);
 
-            db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(key1.clone(), Some(val))
+                .write(key3.clone(), Some(val))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert!(db.get(&key2).await.unwrap().is_none());
             assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
             // Batch-insert the middle key.
-            let mut db = db.into_mutable();
-            let mut batch = db.start_batch();
-            batch.update(key2.clone(), val).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(key2.clone(), Some(val))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
@@ -397,8 +358,7 @@ pub(crate) mod test {
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key1);
 
-            let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.destroy().await.unwrap();
         });
     }
 
@@ -416,17 +376,26 @@ pub(crate) mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.with_label("first"))
+            let mut db = open_variable_db(context.with_label("first")).await;
+            let finalized = db
+                .new_batch()
+                .write(key1.clone(), Some(val1))
+                .write(key3.clone(), Some(val3))
+                .merkleize(None)
                 .await
-                .into_mutable();
-            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
-            let mut db = db.commit(None).await.unwrap().0.into_mutable();
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
-            let mut batch = db.start_batch();
-            batch.delete(key1.clone()).await.unwrap();
-            batch.create(key2.clone(), val2).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(key1.clone(), None)
+                .write(key2.clone(), Some(val2))
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
             assert!(db.get(&key1).await.unwrap().is_none());
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -435,21 +404,29 @@ pub(crate) mod test {
             assert_eq!(span2.1.next_key, key3);
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key2);
-            let db = db.commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.with_label("second"))
+            let mut db = open_variable_db(context.with_label("second")).await;
+            let finalized = db
+                .new_batch()
+                .write(key1.clone(), Some(val1))
+                .write(key3.clone(), Some(val3))
+                .merkleize(None)
                 .await
-                .into_mutable();
-            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
-            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
-            let mut db = db.commit(None).await.unwrap().0.into_mutable();
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
-            let mut batch = db.start_batch();
-            batch.create(key2.clone(), val2).await.unwrap();
-            batch.delete(key3.clone()).await.unwrap();
-            db.write_batch(batch.into_iter()).await.unwrap();
+            let finalized = db
+                .new_batch()
+                .write(key2.clone(), Some(val2))
+                .write(key3.clone(), None)
+                .merkleize(None)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -458,83 +435,29 @@ pub(crate) mod test {
             assert_eq!(span1.1.next_key, key2);
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
-            let db = db.commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.destroy().await.unwrap();
         });
     }
 
-    // Partitioned variant tests
-
-    type PartitionedAnyTest =
-        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
-
-    async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let cfg = variable_db_config("ordered-partitioned-var-p1", &context);
-        PartitionedAnyTest::init(context, cfg).await.unwrap()
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_empty(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_partitioned_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_partitioned_db(db_context.clone()).await;
-            test_digest_ordered_any_db_basic(db_context, db, |ctx| {
-                Box::pin(open_partitioned_db(ctx))
-            })
-            .await;
-        });
-    }
+    fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
-        assert_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Vec<u8>) {
-        assert_gettable(db, &key);
-        assert_log_store(db);
-        assert_send(db.write_batch([(key, Some(value.clone()))]));
-        assert_send(db.write_batch([(key, None)]));
-        assert_batchable(db, key, value);
-        assert_send(db.get_all(&key));
-        assert_send(db.get_with_loc(&key));
-        assert_send(db.get_span(&key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_mutable_db_commit_is_send(db: MutableAnyTest) {
-        assert_send(db.commit(None));
+    fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
+        is_send(db.get_all(&key));
+        is_send(db.get_with_loc(&key));
+        is_send(db.get_span(&key));
     }
 
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+        type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Mmr = TestMmr;

@@ -146,7 +146,7 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Storage I/O preset: page-aligned, page_size to 64KB buffers, 32 per class,
+    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 32 per class,
     /// not prefilled.
     ///
     /// Page alignment is required for direct I/O and efficient DMA transfers.
@@ -154,7 +154,7 @@ impl BufferPoolConfig {
         let page = NZUsize!(page_size());
         Self {
             min_size: page,
-            max_size: NZUsize!(64 * 1024),
+            max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZUsize!(32),
             prefill: false,
             alignment: page,
@@ -888,10 +888,40 @@ impl PooledBuf {
         }
 
         Some(Self {
-            inner: Arc::clone(&self.inner),
+            inner: self.inner.clone(),
             offset: self.offset + start,
             len: end - start,
         })
+    }
+
+    /// Splits the buffer into two at the given index.
+    ///
+    /// Afterwards `self` contains bytes `[at, len)`, and the returned [`PooledBuf`]
+    /// contains bytes `[0, at)`.
+    ///
+    /// This is an `O(1)` zero-copy operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    #[inline]
+    pub fn split_to(&mut self, at: usize) -> Self {
+        assert!(
+            at <= self.len,
+            "split_to out of bounds: {:?} <= {:?}",
+            at,
+            self.len,
+        );
+
+        let prefix = Self {
+            inner: self.inner.clone(),
+            offset: self.offset,
+            len: at,
+        };
+
+        self.offset += at;
+        self.len -= at;
+        prefix
     }
 
     /// Try to recover mutable ownership without copying.
@@ -965,7 +995,7 @@ impl Buf for PooledBuf {
             return Bytes::new();
         }
         let slice = Self {
-            inner: Arc::clone(&self.inner),
+            inner: self.inner.clone(),
             offset: self.offset,
             len,
         };
@@ -1532,10 +1562,19 @@ mod tests {
         let config = BufferPoolConfig::for_storage();
         config.validate();
         assert_eq!(config.min_size.get(), page_size());
-        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 32);
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
+    }
+
+    #[test]
+    fn test_storage_config_supports_default_allocations() {
+        let mut registry = test_registry();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+
+        let buf = pool.try_alloc(8 * 1024 * 1024).unwrap();
+        assert_eq!(buf.capacity(), 8 * 1024 * 1024);
     }
 
     #[test]
@@ -2125,6 +2164,41 @@ mod tests {
         assert_eq!(pooled.slice(3..8).as_ref(), bytes.slice(3..8).as_ref());
         assert_eq!(pooled.slice(..=7).as_ref(), bytes.slice(..=7).as_ref());
         assert_eq!(pooled.slice(10..10).as_ref(), bytes.slice(10..10).as_ref());
+    }
+
+    #[test]
+    fn test_bytes_parity_iobuf_split_to() {
+        let page = page_size();
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        pooled_mut.put_slice(b"abcdefgh");
+        let mut pooled = pooled_mut.into_pooled();
+        let mut bytes = Bytes::from_static(b"abcdefgh");
+
+        // split_to(0)
+        assert_eq!(pooled.split_to(0).as_ref(), bytes.split_to(0).as_ref());
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+
+        // split_to(n)
+        assert_eq!(pooled.split_to(3).as_ref(), bytes.split_to(3).as_ref());
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+
+        // split_to(remaining)
+        let remaining = bytes.remaining();
+        assert_eq!(
+            pooled.split_to(remaining).as_ref(),
+            bytes.split_to(remaining).as_ref()
+        );
+        assert_eq!(pooled.as_ref(), bytes.as_ref());
+    }
+
+    #[test]
+    #[should_panic(expected = "split_to out of bounds")]
+    fn test_iobuf_split_to_out_of_bounds() {
+        let page = page_size();
+        let mut pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        pooled_mut.put_slice(b"abc");
+        let mut pooled = pooled_mut.into_pooled();
+        let _ = pooled.split_to(4);
     }
 
     /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
