@@ -308,20 +308,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             if !record.dialable(self.allow_private_ips, self.allow_dns) {
                 continue;
             }
-            match record.last_reserved_at() {
-                None => peers.push(peer.clone()),
-                Some(last) => {
-                    let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
-                    if elapsed >= interval {
-                        peers.push(peer.clone());
-                    } else {
-                        let eligible_at = last + interval;
-                        next_query_at = Some(match next_query_at {
-                            Some(current) => current.min(eligible_at),
-                            None => eligible_at,
-                        });
-                    }
-                }
+            if let Some(t) = record.next_dial_at().filter(|&t| t > now) {
+                next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
+            } else {
+                peers.push(peer.clone());
             }
         }
         peers.sort();
@@ -425,8 +415,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
+        let next_dial_at = now.add_jittered(&mut self.context, interval);
         let record = self.peers.get_mut(peer).unwrap();
-        if record.reserve(now) {
+        if record.reserve(now, next_dial_at) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -1636,10 +1627,12 @@ mod tests {
                 "should not appear in dialable list during rate-limit window"
             );
 
-            // After the interval, peer becomes dialable again.
-            context.sleep(quota.replenish_interval()).await;
+            // After the jitter window (up to 2x interval), peer becomes dialable again.
+            context.sleep(quota.replenish_interval() * 2).await;
             assert!(directory.dialable().peers.contains(&pk_1));
-            let (_reservation, ingress) = directory.dial(&pk_1).expect("should succeed after interval");
+            let (_reservation, ingress) = directory
+                .dial(&pk_1)
+                .expect("should succeed after interval");
             assert_eq!(ingress, Ingress::Socket(addr_1));
         });
     }
@@ -1672,10 +1665,12 @@ mod tests {
             drop(reservation);
             directory.release(super::Metadata::Dialer(pk_1.clone()));
 
-            // next_query_at should reflect when the peer becomes eligible again.
+            // next_query_at should reflect the jittered next dial time.
+            let interval = quota.replenish_interval();
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
-            assert_eq!(dialable.next_query_at, reserved_at + quota.replenish_interval());
+            assert!(dialable.next_query_at >= reserved_at);
+            assert!(dialable.next_query_at <= reserved_at + interval * 2);
         });
     }
 

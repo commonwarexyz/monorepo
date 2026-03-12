@@ -44,6 +44,9 @@ pub struct Record {
 
     /// The last time a reservation was made for this peer (`None` if never reserved).
     last_reserved_at: Option<SystemTime>,
+
+    /// The earliest time we are willing to dial this peer (`None` if immediately eligible).
+    next_dial_at: Option<SystemTime>,
 }
 
 impl Record {
@@ -57,6 +60,7 @@ impl Record {
             sets: 0,
             persistent: false,
             last_reserved_at: None,
+            next_dial_at: None,
         }
     }
 
@@ -68,6 +72,7 @@ impl Record {
             sets: 0,
             persistent: true,
             last_reserved_at: None,
+            next_dial_at: None,
         }
     }
 
@@ -105,15 +110,17 @@ impl Record {
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// `now` is recorded as the last reservation time. Returns `true` if the
-    /// reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self, now: SystemTime) -> bool {
+    /// `now` is recorded as the last reservation time and `next_dial_at` is
+    /// set to the earliest time we are willing to dial this peer again.
+    /// Returns `true` if the reservation was successful.
+    pub const fn reserve(&mut self, now: SystemTime, next_dial_at: SystemTime) -> bool {
         if matches!(self.address, Address::Myself) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
             self.status = Status::Reserved;
             self.last_reserved_at = Some(now);
+            self.next_dial_at = Some(next_dial_at);
             return true;
         }
         false
@@ -170,6 +177,11 @@ impl Record {
     /// Returns the last time a reservation was made for this peer.
     pub const fn last_reserved_at(&self) -> Option<SystemTime> {
         self.last_reserved_at
+    }
+
+    /// Returns the earliest time we are willing to dial this peer.
+    pub const fn next_dial_at(&self) -> Option<SystemTime> {
+        self.next_dial_at
     }
 
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
@@ -229,12 +241,14 @@ impl Record {
             Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
-
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{net::SocketAddr, time::{Duration, SystemTime}};
+    use std::{
+        net::SocketAddr,
+        time::{Duration, SystemTime},
+    };
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -251,7 +265,7 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.last_reserved_at, None);
+        assert!(record.last_reserved_at().is_none());
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
         assert!(!record.reserved());
@@ -266,7 +280,7 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
-        assert_eq!(record.last_reserved_at, None);
+        assert!(record.last_reserved_at().is_none());
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
         assert!(!record.reserved());
@@ -315,25 +329,31 @@ mod tests {
         let mut record = Record::known(test_address());
 
         assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve(SystemTime::UNIX_EPOCH));
+        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
         assert_eq!(record.status, Status::Reserved);
         assert!(record.reserved());
 
-        assert!(!record.reserve(SystemTime::UNIX_EPOCH), "Cannot re-reserve when Reserved");
+        assert!(
+            !record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH),
+            "Cannot re-reserve when Reserved"
+        );
         assert_eq!(record.status, Status::Reserved);
 
         record.connect();
         assert_eq!(record.status, Status::Active);
         assert!(record.reserved());
 
-        assert!(!record.reserve(SystemTime::UNIX_EPOCH), "Cannot reserve when Active");
+        assert!(
+            !record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH),
+            "Cannot reserve when Active"
+        );
         assert_eq!(record.status, Status::Active);
 
         record.release();
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
 
-        assert!(record.reserve(SystemTime::UNIX_EPOCH));
+        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
         assert_eq!(record.status, Status::Reserved);
         record.release();
         assert_eq!(record.status, Status::Inert);
@@ -350,7 +370,7 @@ mod tests {
     #[should_panic]
     fn test_connect_when_active_panics() {
         let mut record = Record::known(test_address());
-        assert!(record.reserve(SystemTime::UNIX_EPOCH));
+        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
         record.connect();
         record.connect();
     }
@@ -366,7 +386,7 @@ mod tests {
     fn test_reserved_status_check() {
         let mut record = Record::known(test_address());
         assert!(!record.reserved());
-        assert!(record.reserve(SystemTime::UNIX_EPOCH));
+        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
         assert!(record.reserved());
         record.connect();
         assert!(record.reserved());
@@ -386,7 +406,7 @@ mod tests {
         record.increment();
         assert!(!record.deletable());
 
-        assert!(record.reserve(SystemTime::UNIX_EPOCH));
+        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
         assert!(!record.deletable());
 
         record.connect();
@@ -445,7 +465,7 @@ mod tests {
         // Already reserved - not acceptable
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
-        record_reserved.reserve(SystemTime::UNIX_EPOCH);
+        record_reserved.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
         assert!(
             !record_reserved.acceptable(egress_ip, false),
             "Not acceptable when reserved"
@@ -454,7 +474,7 @@ mod tests {
         // Already connected - not acceptable
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
-        record_connected.reserve(SystemTime::UNIX_EPOCH);
+        record_connected.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
         record_connected.connect();
         assert!(
             !record_connected.acceptable(egress_ip, false),
@@ -486,7 +506,7 @@ mod tests {
         // Still not acceptable when reserved
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
-        record_reserved.reserve(SystemTime::UNIX_EPOCH);
+        record_reserved.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
         assert!(
             !record_reserved.acceptable(egress_ip, true),
             "Not acceptable when reserved"
@@ -495,7 +515,7 @@ mod tests {
         // Still not acceptable when connected
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
-        record_connected.reserve(SystemTime::UNIX_EPOCH);
+        record_connected.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
         record_connected.connect();
         assert!(
             !record_connected.acceptable(egress_ip, true),
@@ -516,8 +536,10 @@ mod tests {
         assert_eq!(record.last_reserved_at(), None);
 
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        assert!(record.reserve(now));
+        let next_dial = now + Duration::from_secs(5);
+        assert!(record.reserve(now, next_dial));
         assert_eq!(record.last_reserved_at(), Some(now));
+        assert_eq!(record.next_dial_at(), Some(next_dial));
     }
 
     #[test]

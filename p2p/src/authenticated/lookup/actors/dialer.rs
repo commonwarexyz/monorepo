@@ -324,21 +324,21 @@ mod tests {
             let deadline = context.current() + Duration::from_millis(350);
             loop {
                 select! {
-                    msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
-                            refresh_count += 1;
-                            let _ = responder.send(tracker::Dialable {
-                                peers: Vec::new(),
-                                next_query_at: context.current() + Duration::from_millis(250),
-                            });
-                        }
-                        _ => {}
+                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
+                        refresh_count += 1;
+                        let _ = responder.send(tracker::Dialable {
+                            peers: Vec::new(),
+                            next_query_at: context.current() + Duration::from_millis(250),
+                        });
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
             }
 
-            assert_eq!(refresh_count, 2, "expected queue refresh to follow tracker deadline");
+            assert_eq!(
+                refresh_count, 2,
+                "expected queue refresh to follow tracker deadline"
+            );
         });
     }
 }
