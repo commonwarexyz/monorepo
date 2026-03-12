@@ -7,6 +7,17 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// Result of attempting to reserve a peer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReserveResult {
+    /// Reservation succeeded.
+    Reserved,
+    /// Reservation denied because not enough time has elapsed since the last reservation.
+    RateLimited,
+    /// Reservation denied for any other reason (already reserved, is self, etc.).
+    Unavailable,
+}
+
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
 pub enum Address {
@@ -116,20 +127,28 @@ impl Record {
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// Records the current time as the last reservation time and computes
-    /// `next_dial_at` by adding jitter over `interval`. Returns `true` if successful.
-    pub fn reserve(&mut self, context: &mut (impl Rng + Clock), interval: Duration) -> bool {
-        if matches!(self.address, Address::Myself) {
-            return false;
+    /// Checks that the peer is not ourselves, is currently inert, and that at
+    /// least `interval` has elapsed since the last reservation. On success,
+    /// records the current time and computes a jittered `next_dial_at`.
+    pub fn reserve(
+        &mut self,
+        context: &mut (impl Rng + Clock),
+        interval: Duration,
+    ) -> ReserveResult {
+        if matches!(self.address, Address::Myself) || !matches!(self.status, Status::Inert) {
+            return ReserveResult::Unavailable;
         }
-        if matches!(self.status, Status::Inert) {
-            let now = context.current();
-            self.status = Status::Reserved;
-            self.last_reserved_at = Some(now);
-            self.next_dial_at = Some((now + interval).add_jittered(context, interval));
-            return true;
+        let now = context.current();
+        if let Some(last) = self.last_reserved_at {
+            let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
+            if elapsed < interval {
+                return ReserveResult::RateLimited;
+            }
         }
-        false
+        self.status = Status::Reserved;
+        self.last_reserved_at = Some(now);
+        self.next_dial_at = Some((now + interval).add_jittered(context, interval));
+        ReserveResult::Reserved
     }
 
     /// Marks the peer as connected.
@@ -180,11 +199,6 @@ impl Record {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns the last time a reservation was made for this peer.
-    pub const fn last_reserved_at(&self) -> Option<SystemTime> {
-        self.last_reserved_at
-    }
-
     /// Returns the earliest time we are willing to dial this peer.
     pub const fn next_dial_at(&self) -> Option<SystemTime> {
         self.next_dial_at
@@ -223,12 +237,6 @@ impl Record {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.egress_ip()),
         }
-    }
-
-    /// Returns `true` if the peer is reserved (or active).
-    /// This is used to determine if we should attempt to reserve the peer again.
-    pub const fn reserved(&self) -> bool {
-        matches!(self.status, Status::Reserved | Status::Active)
     }
 
     /// Returns `true` if the record can safely be deleted.
@@ -272,10 +280,9 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert!(record.last_reserved_at().is_none());
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
-        assert!(!record.reserved());
+        assert_eq!(record.status, Status::Inert);
         assert!(!record.deletable());
         assert!(!record.eligible());
     }
@@ -287,10 +294,8 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
-        assert!(record.last_reserved_at().is_none());
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
-        assert!(!record.reserved());
         assert!(record.deletable());
         assert!(!record.eligible());
     }
@@ -337,31 +342,30 @@ mod tests {
             let mut record = Record::known(test_address());
 
             assert_eq!(record.status, Status::Inert);
-            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
             assert_eq!(record.status, Status::Reserved);
-            assert!(record.reserved());
 
-            assert!(
-                !record.reserve(&mut context, Duration::ZERO),
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Unavailable,
                 "Cannot re-reserve when Reserved"
             );
             assert_eq!(record.status, Status::Reserved);
 
             record.connect();
             assert_eq!(record.status, Status::Active);
-            assert!(record.reserved());
 
-            assert!(
-                !record.reserve(&mut context, Duration::ZERO),
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Unavailable,
                 "Cannot reserve when Active"
             );
             assert_eq!(record.status, Status::Active);
 
             record.release();
             assert_eq!(record.status, Status::Inert);
-            assert!(!record.reserved());
 
-            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
             assert_eq!(record.status, Status::Reserved);
             record.release();
             assert_eq!(record.status, Status::Inert);
@@ -380,7 +384,7 @@ mod tests {
     fn test_connect_when_active_panics() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
-            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
             record.connect();
             record.connect();
         });
@@ -397,13 +401,13 @@ mod tests {
     fn test_reserved_status_check() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
-            assert!(!record.reserved());
-            assert!(record.reserve(&mut context, Duration::ZERO));
-            assert!(record.reserved());
+            assert_eq!(record.status, Status::Inert);
+            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
+            assert_eq!(record.status, Status::Reserved);
             record.connect();
-            assert!(record.reserved());
+            assert_eq!(record.status, Status::Active);
             record.release();
-            assert!(!record.reserved());
+            assert_eq!(record.status, Status::Inert);
         });
     }
 
@@ -420,7 +424,7 @@ mod tests {
             record.increment();
             assert!(!record.deletable());
 
-            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.reserve(&mut context, Duration::ZERO), ReserveResult::Reserved);
             assert!(!record.deletable());
 
             record.connect();
@@ -510,15 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve_records_timestamp() {
+    fn test_reserve_records_next_dial() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
-            assert_eq!(record.last_reserved_at(), None);
+            assert!(record.next_dial_at().is_none());
 
             let interval = Duration::from_secs(1);
             let now = context.current();
-            assert!(record.reserve(&mut context, interval));
-            assert_eq!(record.last_reserved_at(), Some(now));
+            assert_eq!(record.reserve(&mut context, interval), ReserveResult::Reserved);
             let next_dial = record.next_dial_at().unwrap();
             assert!(next_dial >= now + interval);
             assert!(next_dial <= now + interval * 3);

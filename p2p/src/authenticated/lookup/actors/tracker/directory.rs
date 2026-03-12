@@ -1,4 +1,9 @@
-use super::{ingress::Dialable, metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{
+    ingress::Dialable,
+    metrics::Metrics,
+    record::{Record, ReserveResult},
+    Metadata, Reservation,
+};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
     types::Address,
@@ -392,31 +397,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
-        // Already reserved
+        // Reserve
         let record = self.peers.get_mut(peer).unwrap();
-        if record.reserved() {
-            return None;
-        }
-
-        // Rate limit: ensure at least `rate_limit` has elapsed since last reservation
-        let now = self.context.current();
-        if let Some(last) = record.last_reserved_at() {
-            let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
-            if elapsed < self.rate_limit {
+        match record.reserve(&mut self.context, self.rate_limit) {
+            ReserveResult::Reserved => {
+                self.metrics.reserved.inc();
+                Some(Reservation::new(metadata, self.releaser.clone()))
+            }
+            ReserveResult::RateLimited => {
                 self.metrics
                     .limits
                     .get_or_create(&metrics::Peer::new(peer))
                     .inc();
-                return None;
+                None
             }
+            ReserveResult::Unavailable => None,
         }
-
-        // Reserve
-        if record.reserve(&mut self.context, self.rate_limit) {
-            self.metrics.reserved.inc();
-            return Some(Reservation::new(metadata, self.releaser.clone()));
-        }
-        None
     }
 
     /// Attempt to delete a record.
@@ -1603,10 +1599,8 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            // First reservation succeeds and records the time.
+            // First reservation succeeds.
             let reservation = directory.dial(&pk_1).expect("first dial should succeed");
-            let reserved_at = directory.peers.get(&pk_1).unwrap().last_reserved_at();
-            assert_eq!(reserved_at, Some(context.current()));
 
             // Release the reservation.
             drop(reservation);
