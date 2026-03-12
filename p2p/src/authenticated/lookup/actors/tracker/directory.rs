@@ -297,9 +297,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
+        // If we have no peers to dial, default to the next query time of the blocked peer.
         let now = self.context.current();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
+        // Collect peers with known addresses that are not blocked
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
             if self.blocked.contains(peer) {
