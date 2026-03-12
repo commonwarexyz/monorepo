@@ -9,6 +9,8 @@
 pub mod certificate;
 #[cfg(feature = "std")]
 pub mod dkg;
+#[cfg(feature = "std")]
+pub mod golden_dkg;
 pub mod primitives;
 mod scheme;
 pub mod tle;
