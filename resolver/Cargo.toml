@@ -43,7 +43,7 @@ development = ["commonware-resolver"]
 bench = false
 
 [features]
-mocks = []
+mocks = [ "commonware-cryptography/mocks", "commonware-p2p/mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
