@@ -203,7 +203,7 @@ impl<D: Digest> Proof<D> {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
-            let Ok(bp) = proof_blueprint(self.leaves, *loc..*loc + 1) else {
+            let Ok(bp) = blueprint(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
             for &pos in &bp.fold_prefix {
@@ -339,7 +339,7 @@ impl<D: Digest> Proof<D> {
         let Ok(bp) = start_loc
             .checked_add(elements.len() as u64)
             .ok_or(Error::LocationOverflow(start_loc))
-            .and_then(|end_loc| proof_blueprint(self.leaves, start_loc..end_loc))
+            .and_then(|end_loc| blueprint(self.leaves, start_loc..end_loc))
         else {
             return false;
         };
@@ -517,7 +517,7 @@ impl<D: Digest> Proof<D> {
 }
 
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
-pub(crate) struct ProofBlueprint {
+pub(crate) struct Blueprint {
     /// Peak positions that precede the proven range (to be folded into a single accumulator).
     pub fold_prefix: Vec<Position>,
     /// Node positions to include in the proof: after-peaks followed by DFS siblings.
@@ -544,22 +544,19 @@ fn collect_siblings_dfs(
 
     if !descend_left {
         out.push(left_pos);
-    }
-
-    if descend_left {
+    } else {
         collect_siblings_dfs(left_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
     }
 
     if !descend_right {
         out.push(right_pos);
-    }
-
-    if descend_right {
+    } else {
         collect_siblings_dfs(right_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
     }
 }
 
-/// Return the proof blueprint for the specified range of elements.
+/// Return a blueprint containing the digests required to generate a proof over the specified range
+/// of elements.
 ///
 /// # Errors
 ///
@@ -568,10 +565,7 @@ fn collect_siblings_dfs(
 /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
-pub(crate) fn proof_blueprint(
-    leaves: Location,
-    range: Range<Location>,
-) -> Result<ProofBlueprint, Error> {
+pub(crate) fn blueprint(leaves: Location, range: Range<Location>) -> Result<Blueprint, Error> {
     if range.is_empty() {
         return Err(Error::Empty);
     }
@@ -619,7 +613,7 @@ pub(crate) fn proof_blueprint(
         );
     }
 
-    Ok(ProofBlueprint {
+    Ok(Blueprint {
         fold_prefix,
         fetch_nodes,
     })
@@ -641,7 +635,7 @@ where
     D: Digest,
     H: Hasher<Digest = D>,
 {
-    let bp = proof_blueprint(leaves, range)?;
+    let bp = blueprint(leaves, range)?;
 
     let mut digests =
         Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
@@ -691,7 +685,7 @@ pub(crate) fn nodes_required_for_multi_proof(
             return Err(Error::LocationOverflow(*loc));
         }
         // `loc` is valid so it won't overflow from +1
-        let bp = proof_blueprint(leaves, *loc..*loc + 1)?;
+        let bp = blueprint(leaves, *loc..*loc + 1)?;
         acc.extend(bp.fold_prefix);
         acc.extend(bp.fetch_nodes);
 
@@ -1563,14 +1557,14 @@ mod tests {
         // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
         let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
 
-        let result = proof_blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
+        let result = blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
         assert!(
             result.is_ok(),
             "Should be able to prove with MAX_LOCATION leaves"
         );
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
-        let result_overflow = proof_blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
+        let result_overflow = blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1650,8 +1644,7 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let bp =
-            proof_blueprint(leaves, loc..loc + 1).expect("should compute blueprint for location 0");
+        let bp = blueprint(leaves, loc..loc + 1).expect("should compute blueprint for location 0");
         let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         assert_eq!(
@@ -1663,7 +1656,7 @@ mod tests {
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let bp = proof_blueprint(leaves, last_leaf_loc..last_leaf_loc + 1)
+        let bp = blueprint(leaves, last_leaf_loc..last_leaf_loc + 1)
             .expect("should compute blueprint for last leaf");
         let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 

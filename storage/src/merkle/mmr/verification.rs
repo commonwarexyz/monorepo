@@ -88,7 +88,7 @@ impl<D: Digest> ProofStore<D> {
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = Location::try_from(self.size)?;
-        let bp = proof::proof_blueprint(leaves, range)?;
+        let bp = proof::blueprint(leaves, range)?;
 
         let mut digests: Vec<D> = Vec::new();
         if !bp.fold_prefix.is_empty() {
@@ -182,7 +182,7 @@ pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage
     leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    let bp = proof::proof_blueprint(leaves, range)?;
+    let bp = proof::blueprint(leaves, range)?;
 
     let mut digests: Vec<D> = Vec::new();
     if !bp.fold_prefix.is_empty() {
