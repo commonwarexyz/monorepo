@@ -1,6 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use super::{Family, Location, Position};
+use crate::merkle::{Family, Location, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
 
