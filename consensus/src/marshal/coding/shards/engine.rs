@@ -502,9 +502,11 @@ where
 
                 let commitment = shard.commitment();
 
-                // Skip shards for already-reconstructed blocks unless it
-                // is the late leader-delivered shard for the local index.
-                if !self.should_handle_network_shard(commitment, &peer) {
+                // Skip shards for already-reconstructed blocks unless the
+                // assigned shard has not yet been verified. Validation and
+                // blocking checks still run; only the leader's shard will
+                // actually advance state.
+                if !self.should_handle_network_shard(commitment) {
                     continue;
                 }
 
@@ -537,16 +539,16 @@ where
     /// Returns whether an incoming network shard should still be processed.
     ///
     /// Shards for reconstructed commitments are normally ignored. The only
-    /// exception is the late leader-delivered shard for the local index,
-    /// which we still accept so we can notify readiness and gossip it to
-    /// slower peers.
-    fn should_handle_network_shard(&self, commitment: Commitment, sender: &P) -> bool {
+    /// exception is when the assigned shard has not yet been verified: we
+    /// still accept shards so that validation/blocking checks run, even
+    /// though only the leader's shard will actually progress the state.
+    fn should_handle_network_shard(&self, commitment: Commitment) -> bool {
         if !self.reconstructed_blocks.contains_key(&commitment) {
             return true;
         }
         self.state
             .get(&commitment)
-            .is_some_and(|s| !s.assigned_shard_ready && *sender == s.leader)
+            .is_some_and(|s| !s.assigned_shard_ready)
     }
 
     /// Attempts to reconstruct a [`CodedBlock`] from the checked [`Shard`]s present in the
