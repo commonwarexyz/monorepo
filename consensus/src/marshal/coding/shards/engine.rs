@@ -310,7 +310,7 @@ where
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
     reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
 
-    /// Open subscriptions for local shard readiness for the keyed
+    /// Open subscriptions for assigned shard readiness for the keyed
     /// [`Commitment`].
     ///
     /// For participants, readiness is satisfied once the leader-delivered
@@ -520,6 +520,7 @@ where
                             peer,
                             shard,
                             scheme.as_ref(),
+                            &self.strategy,
                             &mut self.blocker,
                         )
                         .await;
@@ -678,7 +679,7 @@ where
     /// Ingest buffered pre-leader shards for a commitment into active state.
     ///
     /// Returns `(progressed, assigned_shard_ready)`: whether any shard made
-    /// progress, and an optional local-shard-readiness action.
+    /// progress, and an optional assigned-shard-readiness action.
     #[allow(clippy::type_complexity)]
     async fn ingest_buffered_shards(
         &mut self,
@@ -711,13 +712,13 @@ where
         let mut assigned_shard_ready = None;
         for (peer, shard) in buffered {
             if let NetworkShardOutcome::Progressed(action) =
-                state.on_network_shard(peer, shard, scheme.as_ref(), &mut self.blocker).await
+                state.on_network_shard(peer, shard, scheme.as_ref(), &self.strategy, &mut self.blocker).await
             {
                 progressed = true;
                 if let Some(action) = action {
                     debug_assert!(
                         assigned_shard_ready.is_none(),
-                        "only one local shard should become ready per commitment"
+                        "only one assigned shard should become ready per commitment"
                     );
                     assigned_shard_ready = Some(action);
                 }
@@ -834,7 +835,7 @@ where
         }
     }
 
-    /// Applies any local-shard-readiness side effect for the given commitment
+    /// Applies any assigned-shard-readiness side effect for the given commitment
     /// and then attempts reconstruction.
     ///
     /// If reconstruction succeeds or fails, the state is cleaned up and
@@ -871,7 +872,7 @@ where
         }
     }
 
-    /// Handles the registry of a local shard readiness subscription.
+    /// Handles the registry of a assigned shard readiness subscription.
     ///
     /// For participants this is tied to verification of the leader-delivered
     /// shard for the local index, not to generic block reconstruction.
@@ -880,12 +881,12 @@ where
         commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
-        // Answer immediately if local shard readiness has already been established.
-        let has_local_shard = self
+        // Answer immediately if assigned shard readiness has already been established.
+        let has_assigned_shard = self
             .state
             .get(&commitment)
             .is_some_and(|s| s.assigned_shard_ready);
-        if has_local_shard {
+        if has_assigned_shard {
             response.send_lossy(());
             return;
         }
@@ -934,7 +935,7 @@ where
             .push(response);
     }
 
-    /// Notifies and cleans up any subscriptions waiting for local shard
+    /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// readiness.
     fn notify_assigned_shard_ready_subscribers(&mut self, commitment: Commitment) {
         if let Some(subscribers) = self.assigned_shard_ready_subscriptions.remove(&commitment) {
@@ -1021,9 +1022,9 @@ where
 
 /// Erasure coded block reconstruction state machine.
 ///
-/// Each shard is individually verified via [`CodingScheme::check`] on receipt.
-/// Valid shards accumulate in `checked_shards` until enough are present for
-/// reconstruction.
+/// The leader's assigned shard is verified eagerly (required before gossip).
+/// Gossip shards are accumulated unverified and batch-verified in parallel
+/// via [`Strategy::map_partition_collect_vec`] once quorum is reached.
 struct ReconstructionState<P, C>
 where
     P: PublicKey,
@@ -1037,6 +1038,8 @@ where
     received_shards: BTreeMap<u16, C::Shard>,
     /// Whether the leader-delivered shard for the local index has been verified.
     assigned_shard_ready: bool,
+    /// Gossip shards awaiting batch verification, keyed by sender.
+    pending_shards: BTreeMap<P, (u16, C::Shard)>,
 }
 
 /// Action to take once assigned shard readiness has been established.
@@ -1054,8 +1057,8 @@ enum AssignedShardReadyAction<C: CodingScheme, H: Hasher> {
 enum NetworkShardOutcome<C: CodingScheme, H: Hasher> {
     /// The shard was ignored or rejected.
     Ignored,
-    /// The shard was verified and added to checked shards. Carries an optional
-    /// assigned-shard-readiness action when the leader's shard was verified.
+    /// The shard was accepted. Carries an optional assigned-shard-readiness
+    /// action when the leader's shard was verified.
     Progressed(Option<AssignedShardReadyAction<C, H>>),
 }
 
@@ -1072,14 +1075,44 @@ where
             round,
             received_shards: BTreeMap::new(),
             assigned_shard_ready: false,
+            pending_shards: BTreeMap::new(),
+        }
+    }
+
+    /// Batch-verify pending gossip shards when quorum is reached.
+    async fn try_batch_verify(
+        &mut self,
+        commitment: Commitment,
+        strategy: &impl Strategy,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) {
+        let minimum = usize::from(commitment.config().minimum_shards.get());
+        if self.checked_shards.len() + self.pending_shards.len() < minimum {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_shards);
+        let (new_checked, to_block) =
+            strategy.map_partition_collect_vec(pending, |(peer, (index, data))| {
+                let checked = C::check(
+                    &commitment.config(),
+                    &commitment.root(),
+                    index,
+                    &data,
+                );
+                (peer, checked.ok())
+            });
+        for peer in to_block {
+            commonware_p2p::block!(blocker, peer, "invalid shard");
+        }
+        for checked in new_checked {
+            self.checked_shards.push(checked);
         }
     }
 
     /// Handle an incoming network shard.
     ///
-    /// The shard is individually verified via [`CodingScheme::check`]. Valid
-    /// shards are added to `checked_shards`; invalid shards cause the sender
-    /// to be blocked.
+    /// The leader's assigned shard is verified eagerly so it can be gossiped.
+    /// Gossip shards are deferred to batch verification at quorum.
     ///
     /// ## Peer Blocking Rules
     ///
@@ -1091,12 +1124,13 @@ where
     ///   sender's participant index.
     /// - Each shard index may only contribute ONE shard per commitment.
     ///   Equivocation (different data for the same index) results in blocking.
-    /// - Cryptographic verification failure results in blocking.
+    /// - Cryptographic verification failure results in blocking (eagerly for
+    ///   the leader's shard, at batch validation for gossip shards).
     ///
     /// ## Silent Discard Rules
     ///
     /// - Exact duplicate of a previously received shard for the same index.
-    /// - The index has already been reserved (verified shard already exists).
+    /// - The index has already been reserved.
     /// - When the leader is not yet known, shards are buffered at the
     ///   engine level until [`Discovered`](super::Message::Discovered).
     async fn on_network_shard<Sch, X, H: Hasher>(
@@ -1104,6 +1138,7 @@ where
         sender: P,
         shard: Shard<C, H>,
         scheme: &Sch,
+        strategy: &impl Strategy,
         blocker: &mut X,
     ) -> NetworkShardOutcome<C, H>
     where
@@ -1153,28 +1188,33 @@ where
             return NetworkShardOutcome::Ignored;
         }
 
-        // Verify the shard against the commitment.
-        self.received_shards.insert(index, data);
-        let data = self.received_shards.get(&index).unwrap();
-        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data) else {
-            self.received_shards.remove(&index);
-            commonware_p2p::block!(blocker, sender, "invalid shard");
-            return NetworkShardOutcome::Ignored;
-        };
-        self.reserved_indices.set(u64::from(index), true);
-        self.checked_shards.push(checked);
-
-        // If this is our assigned shard from the leader, mark readiness.
+        // Leader's assigned shard: verify eagerly so we can gossip it.
         if is_from_leader && !self.assigned_shard_ready {
+            self.received_shards.insert(index, data);
+            let data = self.received_shards.get(&index).unwrap();
+            let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data)
+            else {
+                self.received_shards.remove(&index);
+                commonware_p2p::block!(blocker, sender, "invalid shard");
+                return NetworkShardOutcome::Ignored;
+            };
+            self.reserved_indices.set(u64::from(index), true);
+            self.checked_shards.push(checked);
             self.assigned_shard_ready = true;
             let action = if scheme.me().is_some() {
                 AssignedShardReadyAction::Broadcast(Shard::new(commitment, index, data.clone()))
             } else {
                 AssignedShardReadyAction::NotifyOnly
             };
+            self.try_batch_verify(commitment, strategy, blocker).await;
             return NetworkShardOutcome::Progressed(Some(action));
         }
 
+        // Gossip shard: defer to batch verification.
+        self.received_shards.insert(index, data.clone());
+        self.reserved_indices.set(u64::from(index), true);
+        self.pending_shards.insert(sender, (index, data));
+        self.try_batch_verify(commitment, strategy, blocker).await;
         NetworkShardOutcome::Progressed(None)
     }
 }
