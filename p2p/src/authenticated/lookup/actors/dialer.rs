@@ -171,12 +171,7 @@ impl<
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
                     if self.queue.is_empty() {
-                        let now = self.context.current();
-                        dial_deadline = if dialable.next_query_at > now {
-                            dialable.next_query_at
-                        } else {
-                            now + self.dial_frequency
-                        };
+                        dial_deadline = dialable.next_query_at;
                         continue;
                     }
                 }
