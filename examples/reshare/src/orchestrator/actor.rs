@@ -232,7 +232,7 @@ where
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal
-                    .hint_finalized(boundary_height, NonEmptyVec::new(from))
+                    .hint_finalized(boundary_height, Some(NonEmptyVec::new(from)))
                     .await;
             },
             Some(transition) = self.mailbox.recv() else {
