@@ -61,8 +61,8 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
-    /// The rate limit for reservations per peer.
-    rate_limit: Quota,
+    /// Minimum duration between reservations for a given peer.
+    rate_limit: Duration,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -101,7 +101,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
-            rate_limit: cfg.rate_limit,
+            rate_limit: cfg.rate_limit.replenish_interval(),
             peers,
             sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
@@ -293,7 +293,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
-        let interval = self.rate_limit.replenish_interval();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
         let mut peers = Vec::new();
@@ -314,8 +313,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Dialable {
             peers,
             next_query_at: next_query_at
-                .map(|t| t.min(now + interval))
-                .unwrap_or(now + interval),
+                .map(|t| t.min(now + self.rate_limit))
+                .unwrap_or(now + self.rate_limit),
         }
     }
 
@@ -398,12 +397,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
-        // Rate limit: ensure at least `interval` has elapsed since last reservation
+        // Rate limit: ensure at least `rate_limit` has elapsed since last reservation
         let now = self.context.current();
-        let interval = self.rate_limit.replenish_interval();
         if let Some(last) = record.last_reserved_at() {
             let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
-            if elapsed < interval {
+            if elapsed < self.rate_limit {
                 self.metrics
                     .limits
                     .get_or_create(&metrics::Peer::new(peer))
@@ -414,7 +412,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
-        if record.reserve(&mut self.context, interval) {
+        if record.reserve(&mut self.context, self.rate_limit) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
