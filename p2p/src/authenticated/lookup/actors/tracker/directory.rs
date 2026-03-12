@@ -231,11 +231,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
-        let record = self.peers.get(peer)?;
-        if !record.dialable(self.allow_private_ips, self.allow_dns) {
-            return None;
-        }
-        let ingress = record.ingress()?;
+        let ingress = self.peers.get(peer)?.ingress()?;
         let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
         Some((reservation, ingress))
     }
@@ -297,7 +293,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
-        let interval = self.dial_quota.replenish_interval();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
         let mut peers = Vec::new();
@@ -317,7 +312,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         peers.sort();
         Dialable {
             peers,
-            next_query_at: next_query_at.unwrap_or(now + interval),
+            next_query_at: next_query_at.unwrap_or(now),
         }
     }
 
