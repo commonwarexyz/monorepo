@@ -1,7 +1,7 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::{
     authenticated::{
-        dialing::{self, DialStatus, Dialable, ReserveResult},
+        dialing::{earliest, DialStatus, Dialable, ReserveResult},
         discovery::{
             actors::tracker::ingress::Releaser,
             metrics,
@@ -380,13 +380,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
             if let Some(blocked_until) = self.blocked.get(peer) {
-                next_query_at = dialing::earliest(next_query_at, blocked_until);
+                next_query_at = earliest(next_query_at, blocked_until);
                 continue;
             }
             match record.dialable(now, self.allow_private_ips, self.allow_dns) {
                 DialStatus::Now => peers.push(peer.clone()),
                 DialStatus::After(t) => {
-                    next_query_at = dialing::earliest(next_query_at, t);
+                    next_query_at = earliest(next_query_at, t);
                 }
                 DialStatus::Unavailable => {}
             }
