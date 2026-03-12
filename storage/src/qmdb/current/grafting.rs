@@ -208,7 +208,11 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     /// Create a new Verifier.
     ///
     /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
-    pub(super) fn new(grafting_height: u32, start_chunk_index: u64, chunks: Vec<&'a [u8]>) -> Self {
+    pub(super) const fn new(
+        grafting_height: u32,
+        start_chunk_index: u64,
+        chunks: Vec<&'a [u8]>,
+    ) -> Self {
         Self {
             _phantom: PhantomData,
             grafting_height,
@@ -515,7 +519,7 @@ mod tests {
         let c2 = Sha256::fill(0xF2);
 
         // Build grafted MMR with 2 leaves.
-        let grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
         let mut grafted = Mmr::new(&grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
@@ -601,7 +605,7 @@ mod tests {
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
                     let loc = Location::new(0);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
 
@@ -609,20 +613,20 @@ mod tests {
                     assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
                     let loc = Location::new(1);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
 
                     let loc = Location::new(2);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
                     assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
@@ -631,7 +635,7 @@ mod tests {
                 // Verify that manipulated inputs cause proof verification to fail.
                 {
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                         .await
                         .unwrap();
                     let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
@@ -662,10 +666,13 @@ mod tests {
 
                 // Verify range proofs.
                 {
-                    let proof =
-                        verification::range_proof(&combined, Location::new(0)..Location::new(4))
-                            .await
-                            .unwrap();
+                    let proof = verification::range_proof(
+                        &standard,
+                        &combined,
+                        Location::new(0)..Location::new(4),
+                    )
+                    .await
+                    .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
                     let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1, &c2]);
                     assert!(proof.verify_range_inclusion(
@@ -717,7 +724,7 @@ mod tests {
 
             // Verify inclusion proofs still work for both covered and uncovered ops leaves.
             let loc = Location::new(0);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                 .await
                 .unwrap();
 
@@ -726,7 +733,7 @@ mod tests {
 
             let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new(4);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&standard, &combined, loc..loc + 1)
                 .await
                 .unwrap();
             assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));

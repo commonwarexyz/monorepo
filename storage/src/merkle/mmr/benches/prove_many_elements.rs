@@ -68,7 +68,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             let hasher = StandardHasher::<Sha256>::new();
                             block_on(async {
                                 for range in samples {
-                                    let proof = mmr.range_proof(range.clone()).unwrap();
+                                    let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &hasher,
                                         &elements[range.to_usize_range()],

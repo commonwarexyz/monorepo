@@ -39,6 +39,11 @@ pub trait Hasher: Clone + Send + Sync {
         self.hash(core::iter::once(data))
     }
 
+    /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        self.hash([acc.as_ref(), peak.as_ref()])
+    }
+
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
     fn root<'a>(
@@ -46,16 +51,11 @@ pub trait Hasher: Clone + Send + Sync {
         leaves: Location,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
-        #[allow(clippy::map_identity)] // The map coerces &'b to &'a; not a no-op.
-        fn compute<'a, 'b: 'a, H: Hasher>(
-            h: &H,
-            prefix: &'a [u8],
-            parts: impl Iterator<Item = &'b [u8]>,
-        ) -> H::Digest {
-            h.hash(core::iter::once(prefix).chain(parts.map(|p| p)))
+        let mut acc = self.digest(&leaves.to_be_bytes());
+        for digest in peak_digests {
+            acc = self.fold(&acc, digest);
         }
-        let leaves = leaves.to_be_bytes();
-        compute(self, &leaves, peak_digests.into_iter().map(AsRef::as_ref))
+        acc
     }
 }
 

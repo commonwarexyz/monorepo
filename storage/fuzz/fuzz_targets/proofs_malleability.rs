@@ -137,19 +137,16 @@ fn fuzz(input: FuzzInput) {
 
             for (leaf, element) in digests.iter().enumerate() {
                 let loc = Location::new(leaf as u64);
-                let original_proof = mmr.proof(loc).unwrap();
+                let original_proof = mmr.proof(&hasher, loc).unwrap();
                 assert!(original_proof.verify_element_inclusion(&hasher, element, loc, root));
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
                     mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                     if mutated_proof != original_proof {
-                        assert!(!mutated_proof.verify_element_inclusion(
-                            &hasher,
-                            element,
-                            loc,
-                            root
-                        ));
+                        assert!(
+                            !mutated_proof.verify_element_inclusion(&hasher, element, loc, root)
+                        );
                     }
                 }
             }
@@ -178,7 +175,8 @@ fn fuzz(input: FuzzInput) {
                 (i1.min(i2), i1.abs_diff(i2) + 1)
             };
             let start_loc = Location::new(start_idx as u64);
-            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
+            let Ok(original_proof) =
+                mmr.range_proof(&hasher, start_loc..start_loc + range_len as u64)
             else {
                 return;
             };

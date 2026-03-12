@@ -377,33 +377,26 @@ mod test {
 
     #[test]
     fn minifuzz_roundtrip_reed_solomon() {
-        minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(64)
-            .test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+        minifuzz::test(|u| {
+            let (config, data, selected) = generate_case(u)?;
+            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+            Ok(())
+        });
     }
 
     #[test]
     fn minifuzz_roundtrip_no_coding() {
-        minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(64)
-            .test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+        minifuzz::test(|u| {
+            let (config, data, selected) = generate_case(u)?;
+            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+            Ok(())
+        });
     }
 
     #[test_group("slow")]
     #[test]
     fn minifuzz_roundtrip_zoda() {
         minifuzz::Builder::default()
-            .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
                 let (config, data, selected) = generate_case(u)?;

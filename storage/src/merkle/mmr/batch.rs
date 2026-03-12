@@ -571,7 +571,7 @@ mod tests {
             assert_ne!(merkleized.root(), base_root);
 
             // Proof from merkleized batch should work.
-            let proof = merkleized.proof(Location::new(55)).unwrap();
+            let proof = merkleized.proof(&hasher, Location::new(55)).unwrap();
             let element = hasher.digest(&55u64.to_be_bytes());
             assert!(proof.verify_element_inclusion(
                 &hasher,
@@ -683,7 +683,7 @@ mod tests {
             // Proofs from B should verify.
             for i in [0u64, 25, 55, 65, 69] {
                 let element = hasher.digest(&i.to_be_bytes());
-                let proof = merkleized_b.proof(Location::new(i)).unwrap();
+                let proof = merkleized_b.proof(&hasher, Location::new(i)).unwrap();
                 assert!(
                     proof.verify_element_inclusion(
                         &hasher,
@@ -801,7 +801,7 @@ mod tests {
 
             // Verify new leaf's proof (add uses leaf_digest, so verify_element_inclusion works).
             let element = hasher.digest(&52u64.to_be_bytes());
-            let proof = merkleized.proof(Location::new(52)).unwrap();
+            let proof = merkleized.proof(&hasher, Location::new(52)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 &element,
@@ -873,7 +873,7 @@ mod tests {
 
             // Single element proof.
             let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = merkleized.proof(Location::new(55)).unwrap();
+            let proof = merkleized.proof(&hasher, Location::new(55)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 &element,
@@ -883,7 +883,7 @@ mod tests {
 
             // Range proof.
             let range = Location::new(50)..Location::new(55);
-            let range_proof = merkleized.range_proof(range.clone()).unwrap();
+            let range_proof = merkleized.range_proof(&hasher, range.clone()).unwrap();
             let mut elements = Vec::new();
             for i in 50u64..55 {
                 elements.push(hasher.digest(&i.to_be_bytes()));
@@ -913,8 +913,8 @@ mod tests {
 
             // Proofs should match.
             for loc in [0u64, 10, 49] {
-                let base_proof = base.proof(Location::new(loc)).unwrap();
-                let batch_proof = merkleized.proof(Location::new(loc)).unwrap();
+                let base_proof = base.proof(&hasher, Location::new(loc)).unwrap();
+                let batch_proof = merkleized.proof(&hasher, Location::new(loc)).unwrap();
                 assert_eq!(base_proof, batch_proof, "proof mismatch at loc {loc}");
             }
         });
@@ -998,7 +998,7 @@ mod tests {
 
             // Proof for retained element should work.
             let element = hasher.digest(&80u64.to_be_bytes());
-            let proof = merkleized.proof(Location::new(80)).unwrap();
+            let proof = merkleized.proof(&hasher, Location::new(80)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 &element,
@@ -1007,7 +1007,7 @@ mod tests {
             ));
 
             // Proof for pruned element should fail.
-            let result = merkleized.proof(Location::new(0));
+            let result = merkleized.proof(&hasher, Location::new(0));
             assert!(
                 matches!(result, Err(Error::ElementPruned(_))),
                 "expected ElementPruned, got {result:?}"

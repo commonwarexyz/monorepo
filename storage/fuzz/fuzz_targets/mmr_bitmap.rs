@@ -222,11 +222,7 @@ fn fuzz(input: FuzzInput) {
                                     sha256::Digest,
                                     CHUNK_SIZE,
                                 >::verify_bit_inclusion(
-                                    &hasher,
-                                    &proof,
-                                    &chunk,
-                                    bit_offset,
-                                    &root
+                                    &hasher, &proof, &chunk, bit_offset, &root
                                 ),
                                 "failed to verify bit {bit_offset}",
                             );

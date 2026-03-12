@@ -253,7 +253,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    if let Ok(proof) = mmr.proof(loc) {
+                    if let Ok(proof) = mmr.proof(&hasher, loc) {
                         let root = mmr.root();
                         assert!(proof.verify_element_inclusion(
                             &hasher,

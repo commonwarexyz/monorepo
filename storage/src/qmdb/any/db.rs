@@ -10,7 +10,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{Location, Proof},
+    mmr::{iterator::nodes_to_pin, Location, Position, Proof},
     qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
     Persistable,
 };
@@ -121,6 +121,21 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+        let pos = Position::try_from(loc)?;
+        let futs: Vec<_> = nodes_to_pin(pos)
+            .map(|p| async move {
+                self.log
+                    .mmr
+                    .get_node(p)
+                    .await?
+                    .ok_or(crate::mmr::Error::ElementPruned(p).into())
+            })
+            .collect();
+        futures::future::try_join_all(futs).await
     }
 }
 
