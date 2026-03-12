@@ -311,6 +311,16 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
+    /// Return the inactivity floor declared by this batch's commit.
+    pub const fn inactivity_floor(&self) -> Location<F> {
+        self.bounds.inactivity_floor
+    }
+
+    /// Return the location of the next append after this batch commits.
+    pub const fn size(&self) -> Location<F> {
+        Location::new(self.bounds.total_size)
+    }
+
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.root

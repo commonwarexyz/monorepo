@@ -522,7 +522,7 @@ where
     }
 
     /// Record a progress snapshot in metrics.
-    async fn record_progress(&self) {
+    async fn record_progress(&mut self) {
         self.progress_metrics
             .record(self.journal.size().await, *self.target.range.end());
     }
@@ -605,7 +605,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
+    pub async fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end();
 
@@ -634,7 +634,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
+    async fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
         Ok(self.is_at_target().await? && self.has_boundary_state())
     }
 
