@@ -45,6 +45,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
+    /// A request to retrieve the latest processed height acknowledged by the application.
+    GetProcessedHeight {
+        /// A channel to send the latest processed height.
+        response: oneshot::Sender<Height>,
+    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -111,7 +116,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// the floor is pruned when `prune_archives` is `true`.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
@@ -120,6 +125,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     SetFloor {
         /// The candidate floor height.
         height: Height,
+
+        /// Whether to prune finalized archives below the new floor.
+        prune_archives: bool,
     },
     /// Prunes finalized blocks and certificates below the given height.
     ///
@@ -192,6 +200,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .request(|response| Message::GetFinalization { height, response })
             .await
             .flatten()
+    }
+
+    /// Retrieve the latest processed height acknowledged by the application.
+    pub async fn get_processed_height(&self) -> Option<Height> {
+        self.sender
+            .request(|response| Message::GetProcessedHeight { response })
+            .await
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -300,14 +315,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// the floor is pruned when `prune_archives` is `true`.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
-    pub async fn set_floor(&self, height: Height) {
-        self.sender.send_lossy(Message::SetFloor { height }).await;
+    pub async fn set_floor(&self, height: Height, prune_archives: bool) {
+        self.sender
+            .send_lossy(Message::SetFloor {
+                height,
+                prune_archives,
+            })
+            .await;
     }
 
     /// Prunes finalized blocks and certificates below the given height.

@@ -625,6 +625,9 @@ where
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
                     }
+                    Message::GetProcessedHeight { response } => {
+                        response.send_lossy(self.last_processed_height);
+                    }
                     Message::HintFinalized { height, targets } => {
                         // Skip if height is at or below the floor
                         if height <= self.last_processed_height {
@@ -670,7 +673,10 @@ where
                         )
                         .await;
                     }
-                    Message::SetFloor { height } => {
+                    Message::SetFloor {
+                        height,
+                        prune_archives,
+                    } => {
                         if self.last_processed_height >= height {
                             warn!(
                                 %height,
@@ -692,10 +698,12 @@ where
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
 
-                        // Prune data in the finalized archives below the new floor.
-                        if let Err(err) = self.prune_finalized_archives(height).await {
-                            error!(?err, %height, "failed to prune finalized archives");
-                            return;
+                        if prune_archives {
+                            // Prune data in the finalized archives below the new floor.
+                            if let Err(err) = self.prune_finalized_archives(height).await {
+                                error!(?err, %height, "failed to prune finalized archives");
+                                return;
+                            }
                         }
 
                         // Intentionally keep existing block subscriptions alive. Canceling
