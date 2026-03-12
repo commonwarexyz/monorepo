@@ -258,8 +258,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
     /// when they are added to a peer set via `add_set`.
     pub fn block(&mut self, peer: &C) {
-        // Already blocked in queue
-        if self.blocked.contains(peer) {
+        // Already blocked
+        if self.is_blocked(peer) {
             return;
         }
 
@@ -1770,6 +1770,47 @@ mod tests {
             directory
                 .dial(&pk_1)
                 .expect("expired block should not prevent reservation");
+        });
+    }
+
+    #[test]
+    fn test_reblock_after_expired_block_without_unblock() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(200),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            directory.block(&pk_1);
+            assert!(directory.dialable().peers.is_empty());
+
+            // Advance past expiry without calling unblock_expired().
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Re-block should succeed despite stale entry.
+            directory.block(&pk_1);
+            assert!(
+                directory.dialable().peers.is_empty(),
+                "re-blocked peer should not be dialable"
+            );
+            assert!(
+                directory.dial(&pk_1).is_none(),
+                "re-blocked peer should not be reservable"
+            );
         });
     }
 
