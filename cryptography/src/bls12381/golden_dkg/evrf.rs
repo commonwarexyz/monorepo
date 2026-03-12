@@ -21,7 +21,7 @@ impl PrivateKey {
     ///
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
-    pub fn vrf(&self, _msg: &[u8], _receiver: &PublicKey) -> Scalar {
+    pub(super) fn vrf(&self, _msg: &[u8], _receiver: &PublicKey) -> Scalar {
         todo!()
     }
 
@@ -30,7 +30,7 @@ impl PrivateKey {
     /// We take in several receivers now, and associate each of them with their output.
     ///
     /// We also produce [`VrfCommitments`], which contain commitments
-    pub fn vrf_batch_checked(
+    pub(super) fn vrf_batch_checked(
         &self,
         _msg: &[u8],
         _receivers: impl IntoIterator<Item = PublicKey>,
@@ -42,7 +42,7 @@ impl PrivateKey {
 /// A public key, which we can use to create and check VRF outputs with.
 ///
 /// This can be created using [`PrivateKey::public`].
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PublicKey {}
 
 struct Proof {}
