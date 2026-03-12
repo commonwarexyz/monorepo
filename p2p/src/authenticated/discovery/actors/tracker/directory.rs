@@ -1,15 +1,12 @@
-use super::{
-    ingress::Dialable,
-    metrics::Metrics,
-    record::{DialStatus, Record, ReserveResult},
-    set::Set,
-    Metadata, Reservation,
-};
+use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::{
-    authenticated::discovery::{
-        actors::tracker::ingress::Releaser,
-        metrics,
-        types::{self, Info},
+    authenticated::{
+        dialing::{DialStatus, Dialable, ReserveResult},
+        discovery::{
+            actors::tracker::ingress::Releaser,
+            metrics,
+            types::{self, Info},
+        },
     },
     Ingress,
 };

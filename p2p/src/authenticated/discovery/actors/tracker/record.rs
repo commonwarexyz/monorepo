@@ -1,32 +1,16 @@
-use crate::{authenticated::discovery::types::Info, Ingress};
+use crate::{
+    authenticated::{
+        dialing::{DialStatus, ReserveResult},
+        discovery::types::Info,
+    },
+    Ingress,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 use tracing::trace;
-
-/// Result of checking whether a peer is dialable.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DialStatus {
-    /// Peer can be dialed immediately.
-    Now,
-    /// Peer will become dialable at the given time.
-    After(SystemTime),
-    /// Peer is not dialable.
-    Unavailable,
-}
-
-/// Result of attempting to reserve a peer.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ReserveResult {
-    /// Reservation succeeded.
-    Reserved,
-    /// Reservation denied because not enough time has elapsed since the last reservation.
-    RateLimited,
-    /// Reservation denied for any other reason (already reserved, is self, etc.).
-    Unavailable,
-}
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -250,7 +234,12 @@ impl<C: PublicKey> Record<C> {
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,
     /// [DialStatus::After] if it will become dialable at a future time,
     /// or [DialStatus::Unavailable] if it is not dialable at all.
-    pub fn dialable(&self, now: SystemTime, allow_private_ips: bool, allow_dns: bool) -> DialStatus {
+    pub fn dialable(
+        &self,
+        now: SystemTime,
+        allow_private_ips: bool,
+        allow_dns: bool,
+    ) -> DialStatus {
         if self.status != Status::Inert {
             return DialStatus::Unavailable;
         }

@@ -1,6 +1,7 @@
 use super::Reservation;
 use crate::{
     authenticated::{
+        dialing::Dialable,
         discovery::{
             actors::{peer, tracker::Metadata},
             types,
@@ -15,26 +16,6 @@ use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot},
     ordered::Set,
 };
-use std::time::SystemTime;
-
-/// Dialable peers and the next time it is worth querying again.
-#[derive(Clone, Debug)]
-pub struct Dialable<C: PublicKey> {
-    /// Peers that can be dialed immediately.
-    pub peers: Vec<C>,
-
-    /// Earliest known time at which another peer may become dialable.
-    pub next_query_at: Option<SystemTime>,
-}
-
-impl<C: PublicKey> Default for Dialable<C> {
-    fn default() -> Self {
-        Self {
-            peers: Vec::new(),
-            next_query_at: None,
-        }
-    }
-}
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]

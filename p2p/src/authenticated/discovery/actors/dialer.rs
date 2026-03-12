@@ -196,7 +196,10 @@ impl<
 mod tests {
     use super::*;
     use crate::{
-        authenticated::discovery::actors::tracker::{ingress::Releaser, Metadata},
+        authenticated::{
+            dialing::Dialable,
+            discovery::actors::tracker::{ingress::Releaser, Metadata},
+        },
         Ingress,
     };
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
@@ -265,7 +268,7 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(tracker::ingress::Dialable {
+                            let _ = responder.send(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: Some(context.current()),
                             });

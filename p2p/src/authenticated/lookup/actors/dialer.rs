@@ -1,9 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::{
-    Ingress,
     authenticated::{
-        Mailbox,
         lookup::{
             actors::{
                 spawner,
@@ -12,15 +10,17 @@ use crate::{
             metrics,
         },
         mailbox::UnboundedMailbox,
+        Mailbox,
     },
+    Ingress,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
@@ -68,8 +68,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer>
-    Actor<E, C>
+impl<
+        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        C: Signer,
+    > Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
@@ -204,10 +206,13 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Me
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::lookup::actors::tracker::{Metadata, ingress::Releaser};
+    use crate::authenticated::{
+        dialing::Dialable,
+        lookup::actors::tracker::{ingress::Releaser, Metadata},
+    };
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{Clock, Runner, deterministic};
+    use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_stream::encrypted::Config as StreamConfig;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -271,7 +276,7 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(tracker::Dialable {
+                            let _ = responder.send(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: Some(context.current()),
                             });
@@ -339,7 +344,7 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
                         refresh_count += 1;
-                        let _ = responder.send(tracker::Dialable {
+                        let _ = responder.send(Dialable {
                             peers: Vec::new(),
                             next_query_at: Some(context.current() + Duration::from_millis(100)),
                         });
@@ -398,7 +403,7 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(tracker::Dialable {
+                            let _ = responder.send(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: None,
                             });
@@ -461,7 +466,7 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
                         refresh_count += 1;
-                        let _ = responder.send(tracker::Dialable {
+                        let _ = responder.send(Dialable {
                             peers: Vec::new(),
                             next_query_at: None,
                         });

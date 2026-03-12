@@ -1,11 +1,9 @@
-use super::{
-    ingress::Dialable,
-    metrics::Metrics,
-    record::{DialStatus, Record, ReserveResult},
-    Metadata, Reservation,
-};
+use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
-    authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
+    authenticated::{
+        dialing::{DialStatus, Dialable, ReserveResult},
+        lookup::{actors::tracker::ingress::Releaser, metrics},
+    },
     types::Address,
     Ingress,
 };

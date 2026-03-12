@@ -1,4 +1,7 @@
-use crate::types::{self, Ingress};
+use crate::{
+    authenticated::dialing::{DialStatus, ReserveResult},
+    types::{self, Ingress},
+};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use rand::Rng;
@@ -6,28 +9,6 @@ use std::{
     net::IpAddr,
     time::{Duration, SystemTime},
 };
-
-/// Result of checking whether a peer is dialable.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DialStatus {
-    /// Peer can be dialed immediately.
-    Now,
-    /// Peer will become dialable at the given time.
-    After(SystemTime),
-    /// Peer is not dialable.
-    Unavailable,
-}
-
-/// Result of attempting to reserve a peer.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ReserveResult {
-    /// Reservation succeeded.
-    Reserved,
-    /// Reservation denied because not enough time has elapsed since the last reservation.
-    RateLimited,
-    /// Reservation denied for any other reason (already reserved, is self, etc.).
-    Unavailable,
-}
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -594,8 +575,14 @@ mod tests {
             egress: public_egress,
         };
         let record_private_ingress = Record::known(asymmetric_private_ingress);
-        assert_eq!(record_private_ingress.dialable(now, false, true), DialStatus::Unavailable);
-        assert_eq!(record_private_ingress.dialable(now, true, true), DialStatus::Now);
+        assert_eq!(
+            record_private_ingress.dialable(now, false, true),
+            DialStatus::Unavailable
+        );
+        assert_eq!(
+            record_private_ingress.dialable(now, true, true),
+            DialStatus::Now
+        );
 
         // Public ingress (Socket), private egress - dialable (egress not checked for dialing)
         let public_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 8080);
@@ -606,7 +593,10 @@ mod tests {
             egress: private_egress,
         };
         let record_private_egress = Record::known(asymmetric_private_egress);
-        assert_eq!(record_private_egress.dialable(now, false, true), DialStatus::Now);
+        assert_eq!(
+            record_private_egress.dialable(now, false, true),
+            DialStatus::Now
+        );
 
         // DNS ingress (no IP to check) - dialable (DNS private check happens at dial time)
         let dns_ingress = types::Address::Asymmetric {
@@ -618,6 +608,9 @@ mod tests {
         };
         let record_dns = Record::known(dns_ingress);
         assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
-        assert_eq!(record_dns.dialable(now, false, false), DialStatus::Unavailable);
+        assert_eq!(
+            record_dns.dialable(now, false, false),
+            DialStatus::Unavailable
+        );
     }
 }
