@@ -15,7 +15,7 @@ pub enum DialStatus {
     /// Peer will become dialable at the given time.
     After(SystemTime),
     /// Peer is not dialable.
-    No,
+    Unavailable,
 }
 
 /// Result of attempting to reserve a peer.
@@ -193,7 +193,7 @@ impl Record {
     ///
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,
     /// [DialStatus::After] if it will become dialable at a future time,
-    /// or [DialStatus::No] if it is not dialable at all.
+    /// or [DialStatus::Unavailable] if it is not dialable at all.
     pub fn dialable(
         &self,
         now: SystemTime,
@@ -201,14 +201,14 @@ impl Record {
         allow_dns: bool,
     ) -> DialStatus {
         if self.status != Status::Inert {
-            return DialStatus::No;
+            return DialStatus::Unavailable;
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return DialStatus::No,
+            Address::Myself => return DialStatus::Unavailable,
         };
         if !ingress.is_valid(allow_private_ips, allow_dns) {
-            return DialStatus::No;
+            return DialStatus::Unavailable;
         }
         match self.next_dial_at {
             Some(t) if t > now => DialStatus::After(t),
@@ -594,7 +594,7 @@ mod tests {
             egress: public_egress,
         };
         let record_private_ingress = Record::known(asymmetric_private_ingress);
-        assert_eq!(record_private_ingress.dialable(now, false, true), DialStatus::No);
+        assert_eq!(record_private_ingress.dialable(now, false, true), DialStatus::Unavailable);
         assert_eq!(record_private_ingress.dialable(now, true, true), DialStatus::Now);
 
         // Public ingress (Socket), private egress - dialable (egress not checked for dialing)
@@ -618,6 +618,6 @@ mod tests {
         };
         let record_dns = Record::known(dns_ingress);
         assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
-        assert_eq!(record_dns.dialable(now, false, false), DialStatus::No);
+        assert_eq!(record_dns.dialable(now, false, false), DialStatus::Unavailable);
     }
 }

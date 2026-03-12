@@ -310,7 +310,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 DialStatus::After(t) => {
                     next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
                 }
-                DialStatus::No => {}
+                DialStatus::Unavailable => {}
             }
         }
         peers.sort();
