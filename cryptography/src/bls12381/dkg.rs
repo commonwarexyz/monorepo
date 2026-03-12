@@ -503,7 +503,7 @@ where
 /// This is used to bind signatures to the current round, and to provide the
 /// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
-pub struct Info<V: Variant, P: PublicKey> {
+pub struct Info<V: Variant, P> {
     summary: Summary,
     round: u64,
     previous: Option<Output<V, P>>,
