@@ -64,6 +64,9 @@ active. Each `Activity::Finalization` event flows through `Stateful`,
 which extracts per-database sync targets from the finalized block and
 forwards them to the running sync engines.
 
+This requires finalized blocks to carry full per-database target metadata
+for every database in the set, not just roots.
+
 Each database in the `DatabaseSet` syncs independently and can run in
 parallel:
 
@@ -108,11 +111,20 @@ The node begins proposing and voting normally.
 
 ### Sync Target Discovery
 
-Each finalized block header should embed state roots for every database in
-the `DatabaseSet`. The wrapper extracts these roots to construct
-per-database sync targets. The exact format is application-specific (the
-`Application` trait needs a method to extract sync targets from a
-finalized block).
+Each finalized block header must embed full sync-target data for every
+database in the `DatabaseSet`:
+
+- The sync root (for `current` databases, this is the ops root).
+- `inactivity_floor`.
+- `size`.
+
+Together these define the sync operation range
+`[inactivity_floor, size)` and produce the per-database `sync::Target`.
+
+Blocks that only contain roots are insufficient for state sync and are not
+acceptable for this integration. The exact encoding is application-specific,
+but the required fields above are mandatory and must be extractable via the
+`Application` sync-target extraction hook.
 
 ### Resolver Provisioning
 

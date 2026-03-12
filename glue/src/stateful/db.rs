@@ -1,4 +1,4 @@
-//! Database batch lifecycle traits for stateful applications.
+//! Database batch lifecycle and sync orchestration traits for stateful applications.
 //!
 //! This module defines the traits that bridge the [`Stateful`](super::wrapper::Stateful)
 //! wrapper with the underlying storage layer (QMDB). The batch lifecycle has
@@ -9,14 +9,20 @@
 //! 3. Finalization: applying a merkleized batch's changeset to the
 //!    database via [`ManagedDb::finalize`].
 //!
-//! [`DatabaseSet`] composes one or more [`ManagedDb`] instances (each behind
-//! its own `Arc<AsyncRwLock<...>>`) into a single unit that the wrapper
-//! manages as a group. It is implemented for `Arc<AsyncRwLock<T>>` (singleton)
-//! and for tuples of up to 8 such values.
+//! [`DatabaseSet`] composes one or more [`ManagedDb`] instances into a single
+//! unit that the wrapper manages as a group. [`SyncableDatabaseSet`] extends
+//! this with startup sync lifecycle management.
 
 use commonware_cryptography::Digest;
-use commonware_utils::sync::AsyncRwLock;
+use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    sync::AsyncRwLock,
+};
+use rand::Rng;
 use std::{fmt::Debug, future::Future, sync::Arc};
+
+const TARGET_UPDATE_CHANNEL_CAPACITY: usize = 16;
 
 /// An in-progress batch of mutations that has not yet been merkleized.
 ///
@@ -111,14 +117,50 @@ pub trait ManagedDb: Send + Sync {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// Sync capabilities required by [`SyncableDatabaseSet`] for a single managed database.
+///
+/// Implementors should spawn and manage the underlying QMDB sync engine, apply
+/// target updates received from `target_updates`, and install the synced
+/// database state into `database` when complete.
+pub trait SyncableDb: ManagedDb + Sized {
+    /// Database-specific startup sync configuration.
+    type SyncConfig: Clone + Send + Sync;
+
+    /// Resolver used to fetch operations and proofs.
+    type SyncResolver: Clone + Send + Sync;
+
+    /// Sync target type extracted from finalized blocks.
+    type SyncTarget: Clone + Send;
+
+    /// Error type returned by sync workers.
+    type SyncError: Debug + Send;
+
+    /// Spawn sync for this database and return a completion receiver.
+    fn spawn_sync<E>(
+        database: Arc<AsyncRwLock<Self>>,
+        context: E,
+        sync_config: Self::SyncConfig,
+        sync_resolver: Self::SyncResolver,
+        initial_target: Self::SyncTarget,
+        target_updates: mpsc::Receiver<Self::SyncTarget>,
+    ) -> Result<oneshot::Receiver<Result<(), Self::SyncError>>, Self::SyncError>
+    where
+        E: Rng + Spawner + Metrics + Clock;
+}
+
+/// Handle returned by [`SyncableDatabaseSet::start_sync`].
+pub struct SyncHandle<T, E> {
+    /// Channel used to forward newer sync targets while sync is running.
+    pub target_updates: mpsc::Sender<T>,
+    /// Completion signal for the full database set sync.
+    pub completion: oneshot::Receiver<Result<(), E>>,
+}
+
 /// A collection of individually-locked [`ManagedDb`] instances.
 ///
-/// Each database is wrapped in `Arc<AsyncRwLock<...>>` so that the set
-/// can be cheaply cloned (for consensus) and individual databases can be
-/// shared with external services (RPC, state sync) without a global lock.
-///
-/// Implemented for `Arc<AsyncRwLock<T>>` (singleton) and for tuples of
-/// such values via `impl_database_set`.
+/// Each database is wrapped in `Arc<AsyncRwLock<...>>` so that the set can be
+/// cheaply cloned (for consensus) and individual databases can be shared with
+/// external services (RPC, state sync) without a global lock.
 pub trait DatabaseSet: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Unmerkleized`] for every database in the set.
     type Unmerkleized: Send;
@@ -142,6 +184,32 @@ pub trait DatabaseSet: Clone + Send + Sync + 'static {
     fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 }
 
+/// A [`DatabaseSet`] that can run startup sync.
+pub trait SyncableDatabaseSet: DatabaseSet {
+    /// Per-database sync engine configuration values.
+    type SyncConfigs: Clone + Send + Sync;
+
+    /// Per-database resolver instances used by sync engines.
+    type SyncResolvers: Clone + Send + Sync;
+
+    /// Per-database sync targets extracted from finalized blocks.
+    type SyncTargets: Clone + Send;
+
+    /// The error type returned by sync setup and coordination.
+    type SyncError: Debug + Send;
+
+    /// Start per-database sync tasks.
+    fn start_sync<E>(
+        &self,
+        context: E,
+        sync_configs: Self::SyncConfigs,
+        sync_resolvers: Self::SyncResolvers,
+        initial_targets: Self::SyncTargets,
+    ) -> Result<SyncHandle<Self::SyncTargets, Self::SyncError>, Self::SyncError>
+    where
+        E: Rng + Spawner + Metrics + Clock;
+}
+
 /// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
 impl<T: ManagedDb + 'static> DatabaseSet for Arc<AsyncRwLock<T>> {
     type Unmerkleized = T::Unmerkleized;
@@ -161,6 +229,39 @@ impl<T: ManagedDb + 'static> DatabaseSet for Arc<AsyncRwLock<T>> {
             .finalize(batches)
             .await
             .expect("finalize must succeed");
+    }
+}
+
+impl<T: SyncableDb + 'static> SyncableDatabaseSet for Arc<AsyncRwLock<T>> {
+    type SyncConfigs = T::SyncConfig;
+    type SyncResolvers = T::SyncResolver;
+    type SyncTargets = T::SyncTarget;
+    type SyncError = T::SyncError;
+
+    fn start_sync<E>(
+        &self,
+        context: E,
+        sync_configs: Self::SyncConfigs,
+        sync_resolvers: Self::SyncResolvers,
+        initial_targets: Self::SyncTargets,
+    ) -> Result<SyncHandle<Self::SyncTargets, Self::SyncError>, Self::SyncError>
+    where
+        E: Rng + Spawner + Metrics + Clock,
+    {
+        let (target_updates, target_updates_rx) = mpsc::channel(TARGET_UPDATE_CHANNEL_CAPACITY);
+        let completion = T::spawn_sync(
+            self.clone(),
+            context,
+            sync_configs,
+            sync_resolvers,
+            initial_targets,
+            target_updates_rx,
+        )?;
+
+        Ok(SyncHandle {
+            target_updates,
+            completion,
+        })
     }
 }
 
@@ -196,6 +297,100 @@ macro_rules! impl_database_set {
     };
 }
 
+/// Implement [`SyncableDatabaseSet`] for tuples of [`SyncableDb`]s.
+///
+/// All databases in the tuple must use the same sync error type.
+macro_rules! impl_syncable_database_set {
+    ($($T:ident : $idx:tt),+) => {
+        impl<Err, $($T,)+> SyncableDatabaseSet
+            for ($(Arc<AsyncRwLock<$T>>,)+)
+        where
+            Err: Debug + Send + 'static,
+            $($T: SyncableDb<SyncError = Err> + 'static,)+
+        {
+            type SyncConfigs = ($($T::SyncConfig,)+);
+            type SyncResolvers = ($($T::SyncResolver,)+);
+            type SyncTargets = ($($T::SyncTarget,)+);
+            type SyncError = Err;
+
+            fn start_sync<E>(
+                &self,
+                context: E,
+                sync_configs: Self::SyncConfigs,
+                sync_resolvers: Self::SyncResolvers,
+                initial_targets: Self::SyncTargets,
+            ) -> Result<SyncHandle<Self::SyncTargets, Self::SyncError>, Self::SyncError>
+            where
+                E: Rng + Spawner + Metrics + Clock,
+            {
+                let channels = ($({
+                    let _ = stringify!($idx);
+                    mpsc::channel(TARGET_UPDATE_CHANNEL_CAPACITY)
+                },)+);
+                let completions = (
+                    $(
+                        $T::spawn_sync(
+                            self.$idx.clone(),
+                            context.clone().with_label(concat!("stateful_sync_db_", stringify!($idx))),
+                            sync_configs.$idx,
+                            sync_resolvers.$idx,
+                            initial_targets.$idx,
+                            channels.$idx.1,
+                        )?,
+                    )+
+                );
+
+                let target_updates = ($(channels.$idx.0,)+);
+                let (combined_updates_tx, mut combined_updates_rx): (
+                    mpsc::Sender<Self::SyncTargets>,
+                    mpsc::Receiver<Self::SyncTargets>,
+                ) = mpsc::channel(TARGET_UPDATE_CHANNEL_CAPACITY);
+                context
+                    .clone()
+                    .with_label("stateful_sync_targets")
+                    .spawn(move |_| async move {
+                        while let Some(targets) = combined_updates_rx.recv().await {
+                            $(
+                                if target_updates.$idx.send(targets.$idx).await.is_err() {
+                                    return;
+                                }
+                            )+
+                        }
+                    });
+
+                let (completion_tx, completion) = oneshot::channel();
+                context
+                    .with_label("stateful_sync_completion")
+                    .spawn(move |_| async move {
+                        let result = (async {
+                            $(
+                                match completions.$idx.await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(err)) => return Err(err),
+                                    Err(err) => {
+                                        panic!(
+                                            "stateful per-database sync completion closed (index {}): {}",
+                                            stringify!($idx),
+                                            err
+                                        );
+                                    }
+                                }
+                            )+
+                            Ok(())
+                        })
+                        .await;
+                        let _ = completion_tx.send(result);
+                    });
+
+                Ok(SyncHandle {
+                    target_updates: combined_updates_tx,
+                    completion,
+                })
+            }
+        }
+    };
+}
+
 impl_database_set!(DB1: 0);
 impl_database_set!(DB1: 0, DB2: 1);
 impl_database_set!(DB1: 0, DB2: 1, DB3: 2);
@@ -204,3 +399,12 @@ impl_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4);
 impl_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5);
 impl_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5, DB7: 6);
 impl_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5, DB7: 6, DB8: 7);
+
+impl_syncable_database_set!(DB1: 0);
+impl_syncable_database_set!(DB1: 0, DB2: 1);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5, DB7: 6);
+impl_syncable_database_set!(DB1: 0, DB2: 1, DB3: 2, DB4: 3, DB5: 4, DB6: 5, DB7: 6, DB8: 7);

@@ -23,7 +23,7 @@
 //! replayed block is inserted into the pending map immediately so that
 //! partial progress survives timeouts.
 
-use super::{db::DatabaseSet, Application};
+use super::{db::DatabaseSet, sync, Application};
 use commonware_consensus::{
     marshal::ancestry::{AncestorStream, BlockProvider},
     simplex::types::Activity,
@@ -62,6 +62,11 @@ where
     /// Should be set to the genesis payload on first boot, or the last
     /// finalized payload on restart.
     pub finalized_payload: Option<A::Payload>,
+
+    /// Optional startup sync configuration.
+    ///
+    /// When present, `propose` and `verify` pend until sync completes.
+    pub sync: Option<sync::Config<A::Databases>>,
 }
 
 /// Wraps an [`Application`] and manages the pending-tip DAG of merkleized
@@ -109,6 +114,12 @@ where
     /// less than R are pruned (dead forks) while entries ahead of R are
     /// kept (still-live chains).
     pending: HashMap<A::Payload, (Round, <A::Databases as DatabaseSet>::Merkleized)>,
+
+    /// Shared startup sync coordinator.
+    ///
+    /// This is shared across `Stateful` clones so report-driven sync updates
+    /// and readiness are visible process-wide.
+    sync: sync::Coordinator<E, A::Databases>,
 }
 
 /// `Stateful` is `Clone` for the fields consensus needs. The `databases`
@@ -130,6 +141,7 @@ where
             block_provider: self.block_provider.clone(),
             finalized_payload: self.finalized_payload,
             pending: HashMap::new(),
+            sync: self.sync.clone(),
         }
     }
 }
@@ -141,6 +153,8 @@ where
     P: BlockProvider<Block = A::Block>,
 {
     pub fn new(context: E, cfg: Config<E, A, P>) -> Self {
+        let sync = sync::Coordinator::new(context.clone(), cfg.databases.clone(), cfg.sync);
+
         Self {
             context,
             inner: cfg.app,
@@ -149,7 +163,29 @@ where
             block_provider: cfg.block_provider,
             finalized_payload: cfg.finalized_payload,
             pending: HashMap::new(),
+            sync,
         }
+    }
+
+    /// Extract and forward sync targets for a finalized payload.
+    async fn forward_sync_target_update(
+        sync: sync::Coordinator<E, A::Databases>,
+        block_provider: P,
+        payload: A::Payload,
+    ) {
+        if sync.is_ready() {
+            return;
+        }
+
+        let Some(finalized_block) = block_provider.fetch_block(payload.into()).await else {
+            return;
+        };
+
+        let Some(sync_targets) = A::sync_targets(&finalized_block) else {
+            return;
+        };
+
+        sync.update_targets(sync_targets).await;
     }
 
     /// Fork unmerkleized batches for building on top of `parent`.
@@ -239,6 +275,13 @@ where
         context: (E, Self::Context),
         ancestry: AncestorStream<BP, Self::Block>,
     ) -> Option<Self::Block> {
+        // While startup sync is in progress this await will pend. Consensus
+        // interprets this as a slow node and times out naturally.
+        //
+        // TODO: If not ready, immediately drop channel. We can't currently do this
+        // from the `Application` interface, because `Automaton` is what manages this.
+        self.sync.wait_until_ready().await;
+
         // The ancestry stream starts from the parent block.
         let parent = ancestry.peek()?;
         let parent_payload = A::payload(parent);
@@ -272,6 +315,10 @@ where
         context: (E, Self::Context),
         ancestry: AncestorStream<BP, Self::Block>,
     ) -> bool {
+        // While startup sync is in progress this await will pend. Consensus
+        // interprets this as a slow node and times out naturally.
+        self.sync.wait_until_ready().await;
+
         // The ancestry stream starts from the block being verified.
         let tip = match ancestry.peek() {
             Some(block) => block,
@@ -308,6 +355,14 @@ where
         if let Activity::Finalization(finalization) = activity {
             let finalized_round = finalization.proposal.round;
             let payload = finalization.proposal.payload;
+
+            // Keep sync engines chasing the latest finalized tip.
+            Self::forward_sync_target_update(
+                self.sync.clone(),
+                self.block_provider.clone(),
+                payload,
+            )
+            .await;
 
             // Remove the finalized entry and apply it.
             if let Some((_, batches)) = self.pending.remove(&payload) {

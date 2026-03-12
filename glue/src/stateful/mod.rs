@@ -50,22 +50,21 @@
 //!      share one concrete batch type. The cost is one dynamic dispatch per
 //!      `get()` that falls through to a parent -- negligible compared to
 //!      storage I/O.
-//! - Manage state sync on startup. The wrapper must passively track
-//!   finalizations while syncing each database in parallel, then replay
-//!   unfinalized blocks to rebuild the pending map before joining consensus.
-//!   See `glue/STATE_SYNC.md` for the full design.
+//! - Implement concrete `DatabaseSet::start_sync` integrations for the QMDB
+//!   database wrappers in `commonware-storage`.
 
 use commonware_consensus::{
     marshal::ancestry::{AncestorStream, BlockProvider},
     CertifiableBlock, Epochable, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::DatabaseSet;
+use db::{DatabaseSet, SyncableDatabaseSet};
 use rand::Rng;
 use std::future::Future;
 
 pub mod db;
+pub mod sync;
 pub mod wrapper;
 
 /// A stateful application whose storage is managed by a [`DatabaseSet`].
@@ -91,7 +90,10 @@ where
     type Context: Epochable + Viewable + Send;
 
     /// The digest type used as the payload in consensus.
-    type Payload: Digest;
+    ///
+    /// Must be convertible to the block digest so the wrapper can fetch
+    /// finalized blocks when extracting sync targets.
+    type Payload: Digest + Into<<Self::Block as Digestible>::Digest>;
 
     /// The block type produced by the application.
     ///
@@ -101,7 +103,7 @@ where
     type Block: CertifiableBlock<Context = Self::Context>;
 
     /// The set of databases managed on behalf of this application.
-    type Databases: DatabaseSet;
+    type Databases: SyncableDatabaseSet;
 
     /// A provider of input to the application.
     ///
@@ -115,6 +117,14 @@ where
 
     /// Derive the parent's payload identifier from a block.
     fn parent_payload(block: &Self::Block) -> Self::Payload;
+
+    /// Extract per-database sync targets from a finalized block.
+    ///
+    /// The wrapper forwards these targets to running database sync engines so
+    /// sync can chase the latest finalized tip.
+    fn sync_targets(
+        block: &Self::Block,
+    ) -> Option<<Self::Databases as SyncableDatabaseSet>::SyncTargets>;
 
     /// Payload used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
