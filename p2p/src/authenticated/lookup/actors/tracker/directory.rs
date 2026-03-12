@@ -1,7 +1,7 @@
 use super::{
     ingress::Dialable,
     metrics::Metrics,
-    record::{Record, ReserveResult},
+    record::{DialStatus, Record, ReserveResult},
     Metadata, Reservation,
 };
 use crate::{
@@ -297,23 +297,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
-        // If we have no peers to dial, default to the next query time of the blocked peer.
         let now = self.context.current();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
-        // Collect peers with known addresses that are not blocked
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
             if self.blocked.contains(peer) {
                 continue;
             }
-            if !record.dialable(self.allow_private_ips, self.allow_dns) {
-                continue;
-            }
-            if let Some(t) = record.next_dial_at().filter(|&t| t > now) {
-                next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
-            } else {
-                peers.push(peer.clone());
+            match record.dialable(now, self.allow_private_ips, self.allow_dns) {
+                DialStatus::Now => peers.push(peer.clone()),
+                DialStatus::After(t) => {
+                    next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
+                }
+                DialStatus::No => {}
             }
         }
         peers.sort();

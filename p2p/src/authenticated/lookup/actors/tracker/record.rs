@@ -7,6 +7,17 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// Result of checking whether a peer is dialable.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DialStatus {
+    /// Peer can be dialed immediately.
+    Now,
+    /// Peer will become dialable at the given time.
+    After(SystemTime),
+    /// Peer is not dialable.
+    No,
+}
+
 /// Result of attempting to reserve a peer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReserveResult {
@@ -178,29 +189,31 @@ impl Record {
         self.sets
     }
 
-    /// Returns `true` if the record is dialable (ignoring timing).
+    /// Check whether this record is dialable at the given time.
     ///
-    /// A record is dialable if:
-    /// - We have a known address of the peer
-    /// - It is not ourselves
-    /// - We are not already connected or reserved
-    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
-    ///
-    /// The caller is responsible for checking `next_dial_at`.
-    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
+    /// Returns [DialStatus::Now] if the peer can be dialed immediately,
+    /// [DialStatus::After] if it will become dialable at a future time,
+    /// or [DialStatus::No] if it is not dialable at all.
+    pub fn dialable(
+        &self,
+        now: SystemTime,
+        allow_private_ips: bool,
+        allow_dns: bool,
+    ) -> DialStatus {
         if self.status != Status::Inert {
-            return false;
+            return DialStatus::No;
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return false,
+            Address::Myself => return DialStatus::No,
         };
-        ingress.is_valid(allow_private_ips, allow_dns)
-    }
-
-    /// Returns the earliest time we are willing to dial this peer.
-    pub const fn next_dial_at(&self) -> Option<SystemTime> {
-        self.next_dial_at
+        if !ingress.is_valid(allow_private_ips, allow_dns) {
+            return DialStatus::No;
+        }
+        match self.next_dial_at {
+            Some(t) if t > now => DialStatus::After(t),
+            _ => DialStatus::Now,
+        }
     }
 
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
@@ -508,20 +521,28 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve_records_next_dial() {
+    fn test_reserve_sets_next_dial() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
-            assert!(record.next_dial_at().is_none());
+            let now = context.current();
+            assert_eq!(record.dialable(now, true, true), DialStatus::Now);
 
             let interval = Duration::from_secs(1);
-            let now = context.current();
             assert_eq!(
                 record.reserve(&mut context, interval),
                 ReserveResult::Reserved
             );
-            let next_dial = record.next_dial_at().unwrap();
-            assert!(next_dial >= now + interval);
-            assert!(next_dial <= now + interval * 3);
+            record.release();
+
+            // Immediately after release, dialable returns After with jittered time.
+            let status = record.dialable(now, true, true);
+            match status {
+                DialStatus::After(t) => {
+                    assert!(t >= now + interval);
+                    assert!(t <= now + interval * 3);
+                }
+                other => panic!("expected After, got {:?}", other),
+            }
         });
     }
 
@@ -557,10 +578,12 @@ mod tests {
         use std::net::IpAddr;
         use Ingress;
 
+        let now = SystemTime::UNIX_EPOCH;
+
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
         let record_public = Record::known(types::Address::Symmetric(public_socket));
-        assert!(record_public.dialable(false, true));
+        assert_eq!(record_public.dialable(now, false, true), DialStatus::Now);
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
         let private_ingress =
@@ -571,14 +594,8 @@ mod tests {
             egress: public_egress,
         };
         let record_private_ingress = Record::known(asymmetric_private_ingress);
-        assert!(
-            !record_private_ingress.dialable(false, true),
-            "Should NOT be dialable when ingress Socket IP is private"
-        );
-        assert!(
-            record_private_ingress.dialable(true, true),
-            "Should be dialable when allow_private_ips=true"
-        );
+        assert_eq!(record_private_ingress.dialable(now, false, true), DialStatus::No);
+        assert_eq!(record_private_ingress.dialable(now, true, true), DialStatus::Now);
 
         // Public ingress (Socket), private egress - dialable (egress not checked for dialing)
         let public_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 8080);
@@ -589,10 +606,7 @@ mod tests {
             egress: private_egress,
         };
         let record_private_egress = Record::known(asymmetric_private_egress);
-        assert!(
-            record_private_egress.dialable(false, true),
-            "Should be dialable - egress IP is not checked for dialing"
-        );
+        assert_eq!(record_private_egress.dialable(now, false, true), DialStatus::Now);
 
         // DNS ingress (no IP to check) - dialable (DNS private check happens at dial time)
         let dns_ingress = types::Address::Asymmetric {
@@ -603,13 +617,7 @@ mod tests {
             egress: public_egress,
         };
         let record_dns = Record::known(dns_ingress);
-        assert!(
-            record_dns.dialable(false, true),
-            "DNS ingress should be dialable (private check happens at resolution)"
-        );
-        assert!(
-            !record_dns.dialable(false, false),
-            "DNS ingress should NOT be dialable when allow_dns=false"
-        );
+        assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
+        assert_eq!(record_dns.dialable(now, false, false), DialStatus::No);
     }
 }
