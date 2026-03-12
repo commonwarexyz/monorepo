@@ -1,4 +1,5 @@
 pub mod bounds;
+#[cfg(feature = "mocks")]
 pub mod certificate_mock;
 pub mod disrupter;
 pub mod id_mock;
@@ -41,10 +42,12 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
+#[cfg(feature = "mocks")]
+pub use simplex_protocol::SimplexCertificateMock;
 pub use simplex_protocol::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
-    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexCertificateMock,
-    SimplexEd25519, SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
+    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
+    SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
 use std::{
     collections::HashMap,
