@@ -2,8 +2,7 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
 
-use super::Position;
-use crate::merkle::mmr::Family;
+use crate::merkle::mmr::{Family, Position};
 use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
