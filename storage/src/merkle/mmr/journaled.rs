@@ -966,8 +966,7 @@ mod tests {
             let changeset = {
                 let mut batch = journaled_mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -2772,8 +2771,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..10 {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -2784,8 +2782,7 @@ mod tests {
             // Batch A: add 5 elements.
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -2793,8 +2790,7 @@ mod tests {
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);

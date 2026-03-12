@@ -11,7 +11,6 @@ use crate::{
     },
     mmr::{
         self,
-        hasher::Hasher as _,
         read::{BatchChainInfo, Readable},
         storage::Storage as MmrStorage,
         Location, Position, StandardHasher,
@@ -671,7 +670,7 @@ where
                 grafted_batch.add_leaf_digest(digest);
             }
         }
-        let mut gh = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
+        let mut gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
         grafted_batch.merkleize(&mut gh)
     };
 
