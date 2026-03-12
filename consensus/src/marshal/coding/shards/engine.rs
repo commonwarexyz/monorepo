@@ -319,7 +319,7 @@ where
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
     reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
 
-    /// Open subscriptions for assigned shard readiness for the keyed
+    /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
     ///
     /// For participants, readiness is satisfied once the leader-delivered
@@ -329,7 +329,7 @@ where
     ///
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
-    assigned_shard_ready_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
+    assigned_shard_verified_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
     /// the keyed [`Commitment`].
@@ -374,7 +374,7 @@ where
                 tracked_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
-                assigned_shard_ready_subscriptions: BTreeMap::new(),
+                assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 metrics,
             },
@@ -429,7 +429,7 @@ where
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
-                self.assigned_shard_ready_subscriptions.retain(|_, subscribers| {
+                self.assigned_shard_verified_subscriptions.retain(|_, subscribers| {
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
@@ -475,11 +475,11 @@ where
                         .cloned();
                     response.send_lossy(block);
                 }
-                Message::SubscribeAssignedShardReady {
+                Message::SubscribeAssignedShardVerified {
                     commitment,
                     response,
                 } => {
-                    self.handle_assigned_shard_ready_subscription(commitment, response);
+                    self.handle_assigned_shard_verified_subscription(commitment, response);
                 }
                 Message::SubscribeByCommitment {
                     commitment,
@@ -508,7 +508,6 @@ where
                     .inc();
 
                 let commitment = shard.commitment();
-
                 if !self.should_handle_network_shard(commitment) {
                     continue;
                 }
@@ -548,7 +547,7 @@ where
             return self
                 .state
                 .get(&commitment)
-                .is_some_and(|s| !s.is_assigned_shard_ready());
+                .is_some_and(|s| !s.is_assigned_shard_verified());
         }
         true
     }
@@ -802,7 +801,7 @@ where
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
-        self.notify_assigned_shard_ready_subscribers(commitment);
+        self.notify_assigned_shard_verified_subscribers(commitment);
 
         debug!(?commitment, "broadcasted shards");
     }
@@ -833,12 +832,12 @@ where
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
-                Some(AssignedShardReadyAction::Broadcast(shard)) => {
+                Some(AssignedShardVerifiedAction::Broadcast(shard)) => {
                     self.broadcast_shard(sender, shard).await;
-                    self.notify_assigned_shard_ready_subscribers(commitment);
+                    self.notify_assigned_shard_verified_subscribers(commitment);
                 }
-                Some(AssignedShardReadyAction::NotifyOnly) => {
-                    self.notify_assigned_shard_ready_subscribers(commitment);
+                Some(AssignedShardVerifiedAction::NotifyOnly) => {
+                    self.notify_assigned_shard_verified_subscribers(commitment);
                 }
                 None => {}
             }
@@ -870,11 +869,11 @@ where
         }
     }
 
-    /// Handles the registry of an assigned shard readiness subscription.
+    /// Handles the registry of an assigned shard verification subscription.
     ///
     /// For participants this is tied to verification of the leader-delivered
     /// shard for the local index, not to generic block reconstruction.
-    fn handle_assigned_shard_ready_subscription(
+    fn handle_assigned_shard_verified_subscription(
         &mut self,
         commitment: Commitment,
         response: oneshot::Sender<()>,
@@ -883,7 +882,7 @@ where
         let has_shard = self
             .state
             .get(&commitment)
-            .is_some_and(|state| state.is_assigned_shard_ready());
+            .is_some_and(|state| state.is_assigned_shard_verified());
         if has_shard {
             response.send_lossy(());
             return;
@@ -899,7 +898,7 @@ where
             return;
         }
 
-        self.assigned_shard_ready_subscriptions
+        self.assigned_shard_verified_subscriptions
             .entry(commitment)
             .or_default()
             .push(response);
@@ -934,9 +933,12 @@ where
     }
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
-    /// readiness.
-    fn notify_assigned_shard_ready_subscribers(&mut self, commitment: Commitment) {
-        if let Some(mut subscribers) = self.assigned_shard_ready_subscriptions.remove(&commitment) {
+    /// verification.
+    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment) {
+        if let Some(mut subscribers) = self
+            .assigned_shard_verified_subscriptions
+            .remove(&commitment)
+        {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(());
             }
@@ -974,7 +976,8 @@ where
     /// Removing these entries drops all senders, causing receivers to resolve
     /// with cancellation (`RecvError`) instead of hanging indefinitely.
     fn drop_subscriptions(&mut self, commitment: Commitment) {
-        self.assigned_shard_ready_subscriptions.remove(&commitment);
+        self.assigned_shard_verified_subscriptions
+            .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
         self.block_subscriptions
@@ -1036,11 +1039,11 @@ where
     Ready(ReadyState<P, C, H>),
 }
 
-/// Action to take once assigned shard readiness has been established.
+/// Action to take once assigned shard verification has been established.
 ///
 /// Participants broadcast the shard to all peers, while non-participants
 /// only notify local subscribers.
-enum AssignedShardReadyAction<C: CodingScheme, H: Hasher> {
+enum AssignedShardVerifiedAction<C: CodingScheme, H: Hasher> {
     /// Broadcast the shard to all peers and notify local subscribers.
     Broadcast(Shard<C, H>),
     /// Only notify local subscribers (non-participant validated the leader's shard).
@@ -1063,7 +1066,7 @@ where
     /// The leader associated with this reconstruction state.
     leader: P,
     /// Our validated shard and the action to take with it.
-    pending_action: Option<AssignedShardReadyAction<C, H>>,
+    pending_action: Option<AssignedShardVerifiedAction<C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
@@ -1074,7 +1077,7 @@ where
     /// Keyed by shard index.
     received_shards: BTreeMap<u16, C::Shard>,
     /// Whether the leader's shard for our assigned index has been verified.
-    assigned_shard_ready: bool,
+    assigned_shard_verified: bool,
 }
 
 /// Phase data for `ReconstructionState::AwaitingQuorum`.
@@ -1121,7 +1124,7 @@ where
             contributed: BitMap::zeroes(participants_len),
             round,
             received_shards: BTreeMap::new(),
-            assigned_shard_ready: false,
+            assigned_shard_verified: false,
         }
     }
 }
@@ -1162,11 +1165,15 @@ where
 
         self.contributed.set(u64::from(shard.index), true);
         self.checked_shards.push(checked);
-        self.assigned_shard_ready = true;
+        self.assigned_shard_verified = true;
         self.pending_action = Some(if is_participant {
-            AssignedShardReadyAction::Broadcast(Shard::new(commitment, shard.index, data.clone()))
+            AssignedShardVerifiedAction::Broadcast(Shard::new(
+                commitment,
+                shard.index,
+                data.clone(),
+            ))
         } else {
-            AssignedShardReadyAction::NotifyOnly
+            AssignedShardVerifiedAction::NotifyOnly
         });
         true
     }
@@ -1295,8 +1302,8 @@ where
     }
 
     /// Returns whether the leader's shard for our index has been verified.
-    const fn is_assigned_shard_ready(&self) -> bool {
-        self.common().assigned_shard_ready
+    const fn is_assigned_shard_verified(&self) -> bool {
+        self.common().assigned_shard_verified
     }
 
     /// Return the proposal round associated with this state.
@@ -1312,7 +1319,7 @@ where
     /// Takes the pending action for this commitment's validated shard.
     ///
     /// Returns [`None`] if the leader's shard hasn't been validated yet.
-    const fn take_pending_action(&mut self) -> Option<AssignedShardReadyAction<C, H>> {
+    const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<C, H>> {
         self.common_mut().pending_action.take()
     }
 
@@ -1422,7 +1429,7 @@ where
         // Leader's shard for our index is always verified eagerly,
         // even after transitioning to Ready. This ensures we broadcast
         // our own shard to help slower peers reach quorum.
-        if is_from_leader && !self.common().assigned_shard_ready {
+        if is_from_leader && !self.common().assigned_shard_verified {
             let progressed = self
                 .common_mut()
                 .verify_assigned_shard(
@@ -1872,7 +1879,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard_verified(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -1923,7 +1930,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard_verified(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -1976,7 +1983,7 @@ mod tests {
 
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard_verified(commitment)
                         .await
                         .await
                         .expect("shard subscription should complete");
@@ -2010,7 +2017,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe on the proposer before it caches the locally proposed block.
-            let shard_sub = peers[0].mailbox.subscribe_assigned_shard_ready(commitment).await;
+            let shard_sub = peers[0].mailbox.subscribe_assigned_shard_verified(commitment).await;
             let commitment_sub = peers[0].mailbox.subscribe(commitment).await;
             let digest_sub = peers[0].mailbox.subscribe_by_digest(digest).await;
 
@@ -2080,7 +2087,7 @@ mod tests {
                     .await;
                 let mut shard_sub = peers[2]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
 
                 // Byzantine peer sends the invalid shard.
@@ -2405,7 +2412,7 @@ mod tests {
                 // Subscribe before shards arrive so we can verify acceptance.
                 let shard_sub = peers[2]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
 
                 // First leader update should stick.
@@ -2487,7 +2494,7 @@ mod tests {
                 // Subscribe before shards arrive.
                 let shard_sub = peers[2]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
 
                 // A non-participant leader update should be ignored.
@@ -3012,7 +3019,7 @@ mod tests {
                 // Subscribe before any shards arrive.
                 let mut shard_sub = peers[receiver_idx]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
 
                 // Send the leader's shard (for receiver's index) and three shards,
@@ -3100,7 +3107,7 @@ mod tests {
 
                 let shard_sub = peers[receiver_idx]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
                 peers[receiver_idx]
                     .mailbox
@@ -4451,7 +4458,7 @@ mod tests {
                 // Subscribe to the shard and block BEFORE any broadcasting.
                 let mut shard_sub = peers[1]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
                 let block_sub = peers[1].mailbox.subscribe(commitment).await;
 
@@ -4515,7 +4522,7 @@ mod tests {
                 // Participants should receive and validate their own shards.
                 for peer in peers.iter_mut() {
                     peer.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard_verified(commitment)
                         .await
                         .await
                         .expect("participant shard subscription should complete");
@@ -4524,7 +4531,7 @@ mod tests {
                 // Non-participant should receive and validate the leader's shard.
                 for np in non_participants.iter() {
                     np.mailbox
-                        .subscribe_assigned_shard_ready(commitment)
+                        .subscribe_assigned_shard_verified(commitment)
                         .await
                         .await
                         .expect("non-participant shard subscription should complete");
@@ -4715,7 +4722,7 @@ mod tests {
 
             // Announce the leader. Buffered shards from the leader should have been
             // evicted, so the shard will NOT be ingested.
-            let mut shard_sub = mailbox.subscribe_assigned_shard_ready(commitment).await;
+            let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment).await;
             mailbox
                 .discovered(
                     commitment,
@@ -4801,7 +4808,7 @@ mod tests {
                 // because the victim has not verified its own shard.
                 let mut shard_sub = peers[victim_idx]
                     .mailbox
-                    .subscribe_assigned_shard_ready(commitment)
+                    .subscribe_assigned_shard_verified(commitment)
                     .await;
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
