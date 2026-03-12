@@ -1,4 +1,4 @@
-//! Aligned backing storage for [`IoBuf`] and [`IoBufMut`].
+//! Aligned backing storage for [`IoBuf`] and [`super::IoBufMut`].
 //!
 //! This module contains the low-level aligned allocation primitive and the
 //! immutable/mutable view types built on top of it:

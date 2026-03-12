@@ -659,7 +659,7 @@ impl BufferPoolInner {
 /// # Alignment
 ///
 /// Buffer alignment is guaranteed only at the base pointer (when `cursor == 0`).
-/// After calling [`Buf::advance`], the pointer returned by `as_mut_ptr()` may
+/// After calling [`bytes::Buf::advance`], the pointer returned by `as_mut_ptr()` may
 /// no longer be aligned. For direct I/O operations that require alignment,
 /// do not advance the buffer before use.
 #[derive(Clone)]
