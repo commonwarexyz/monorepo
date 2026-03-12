@@ -131,13 +131,8 @@ impl Record {
         self.status = Status::Inert;
     }
 
-    /// Defer the next outgoing dial attempt until the given deadline.
-    pub fn defer_until(&mut self, deadline: SystemTime) {
-        self.redial_at = deadline;
-    }
-
-    /// Defer the next outgoing dial attempt, without moving the deadline earlier.
-    pub fn defer_until_at_least(&mut self, deadline: SystemTime) {
+    /// Defer the next outgoing dial attempt, never moving the deadline earlier.
+    pub fn defer(&mut self, deadline: SystemTime) {
         self.redial_at = self.redial_at.max(deadline);
     }
 
@@ -156,38 +151,13 @@ impl Record {
         self.sets
     }
 
-    /// Returns `true` if the record is dialable.
+    /// Returns the earliest time at which this peer can be dialed, or `None` if it cannot
+    /// become dialable without a state change (e.g., it is reserved, connected, or has no
+    /// valid ingress).
     ///
-    /// A record is dialable if:
-    /// - We have a known address of the peer
-    /// - It is not ourselves
-    /// - We are not already connected or reserved
-    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
-    pub fn dialable(&self, now: SystemTime, allow_private_ips: bool, allow_dns: bool) -> bool {
+    /// A return value <= `now` means the peer is immediately dialable.
+    pub fn dialable_at(&self, allow_private_ips: bool, allow_dns: bool) -> Option<SystemTime> {
         if self.status != Status::Inert {
-            return false;
-        }
-        if now < self.redial_at {
-            return false;
-        }
-        let ingress = match &self.address {
-            Address::Known(addr) => addr.ingress(),
-            Address::Myself => return false,
-        };
-        ingress.is_valid(allow_private_ips, allow_dns)
-    }
-
-    /// Returns the next time this peer could become dialable from the current record state.
-    pub fn next_dialable_at(
-        &self,
-        now: SystemTime,
-        allow_private_ips: bool,
-        allow_dns: bool,
-    ) -> Option<SystemTime> {
-        if self.status != Status::Inert {
-            return None;
-        }
-        if now >= self.redial_at {
             return None;
         }
         let ingress = match &self.address {
@@ -197,6 +167,12 @@ impl Record {
         ingress
             .is_valid(allow_private_ips, allow_dns)
             .then_some(self.redial_at)
+    }
+
+    /// Returns `true` if the record is immediately dialable.
+    pub fn dialable(&self, now: SystemTime, allow_private_ips: bool, allow_dns: bool) -> bool {
+        self.dialable_at(allow_private_ips, allow_dns)
+            .is_some_and(|t| t <= now)
     }
 
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
@@ -548,32 +524,33 @@ mod tests {
 
         assert!(record.dialable(now, true, true));
 
-        record.defer_until(now + Duration::from_secs(5));
+        record.defer(now + Duration::from_secs(5));
         assert!(!record.dialable(now, true, true));
         assert!(record.dialable(now + Duration::from_secs(5), true, true));
     }
 
     #[test]
-    fn test_next_dialable_at_respects_redial_deadline() {
+    fn test_dialable_at_returns_redial_deadline() {
         let mut record = Record::known(test_address());
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let redial_at = now + Duration::from_secs(5);
+        let redial_at = SystemTime::UNIX_EPOCH + Duration::from_secs(15);
 
-        assert_eq!(record.next_dialable_at(now, true, true), None);
+        assert_eq!(
+            record.dialable_at(true, true),
+            Some(SystemTime::UNIX_EPOCH)
+        );
 
-        record.defer_until(redial_at);
-        assert_eq!(record.next_dialable_at(now, true, true), Some(redial_at));
-        assert_eq!(record.next_dialable_at(redial_at, true, true), None);
+        record.defer(redial_at);
+        assert_eq!(record.dialable_at(true, true), Some(redial_at));
     }
 
     #[test]
-    fn test_defer_until_at_least_never_moves_deadline_backwards() {
+    fn test_defer_is_monotonic() {
         let mut record = Record::known(test_address());
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         let later = now + Duration::from_secs(5);
 
-        record.defer_until_at_least(later);
-        record.defer_until_at_least(now);
+        record.defer(later);
+        record.defer(now);
 
         assert_eq!(record.redial_at, later);
     }

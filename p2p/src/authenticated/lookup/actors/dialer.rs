@@ -165,35 +165,30 @@ impl<
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                loop {
+                // Refill queue when exhausted.
+                if self.queue.is_empty() {
+                    let dialable = tracker.dialable().await;
+                    self.queue = dialable.peers;
+                    self.queue.shuffle(&mut self.context);
                     if self.queue.is_empty() {
-                        // Only re-query once we have exhausted the current queue. When the tracker
-                        // knows the next time a peer may become dialable, sleep until then instead
-                        // of polling every dial tick.
-                        let dialable = tracker.dialable().await;
-                        self.queue = dialable.peers;
-                        self.queue.shuffle(&mut self.context);
-                        if self.queue.is_empty() {
-                            let now = self.context.current();
-                            dial_deadline = if dialable.next_query_at > now {
-                                dialable.next_query_at
-                            } else {
-                                now + self.dial_frequency
-                            };
-                            break;
-                        }
+                        let now = self.context.current();
+                        dial_deadline = if dialable.next_query_at > now {
+                            dialable.next_query_at
+                        } else {
+                            now + self.dial_frequency
+                        };
+                        continue;
                     }
-
-                    let Some(peer) = self.queue.pop() else {
-                        continue;
-                    };
-                    let Some((reservation, ingress)) = tracker.dial(peer).await else {
-                        continue;
-                    };
-                    self.dial_peer(reservation, ingress, &mut supervisor);
-                    dial_deadline = self.context.current() + self.dial_frequency;
-                    break;
                 }
+
+                // Pop through peers until we can reserve and dial one.
+                while let Some(peer) = self.queue.pop() {
+                    if let Some((reservation, ingress)) = tracker.dial(peer).await {
+                        self.dial_peer(reservation, ingress, &mut supervisor);
+                        break;
+                    }
+                }
+                dial_deadline = self.context.current() + self.dial_frequency;
             },
         }
     }

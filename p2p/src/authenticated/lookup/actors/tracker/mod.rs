@@ -14,7 +14,9 @@ mod record;
 mod reservation;
 
 pub use actor::Actor;
-pub use ingress::{Dialable, Message, Oracle};
+#[cfg(test)]
+pub use ingress::Dialable;
+pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 

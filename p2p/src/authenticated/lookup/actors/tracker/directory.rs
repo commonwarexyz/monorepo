@@ -315,25 +315,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let now = self.context.current();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
-        // Collect peers with known addresses (excluding blocked peers)
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
             if self.blocked.contains(peer) {
                 continue;
             }
-            if record.dialable(now, self.allow_private_ips, self.allow_dns) {
-                peers.push(peer.clone());
-                continue;
+            match record.dialable_at(self.allow_private_ips, self.allow_dns) {
+                Some(t) if t <= now => peers.push(peer.clone()),
+                Some(t) => {
+                    next_query_at = Some(match next_query_at {
+                        Some(current) => current.min(t),
+                        None => t,
+                    });
+                }
+                None => {}
             }
-            let Some(record_next_query_at) =
-                record.next_dialable_at(now, self.allow_private_ips, self.allow_dns)
-            else {
-                continue;
-            };
-            next_query_at = Some(match next_query_at {
-                Some(current) => current.min(record_next_query_at),
-                None => record_next_query_at,
-            });
         }
         peers.sort();
         Dialable {
@@ -437,7 +433,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
         if record.reserve() {
-            record.defer_until_at_least(now.add_jittered(&mut self.context, jitter));
+            record.defer(now.add_jittered(&mut self.context, jitter));
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -1632,7 +1628,7 @@ mod tests {
                 .peers
                 .get_mut(&pk_1)
                 .expect("peer should be tracked")
-                .defer_until(redial_at);
+                .defer(redial_at);
 
             assert!(
                 !directory.dialable().peers.contains(&pk_1),
@@ -1717,7 +1713,7 @@ mod tests {
                 .peers
                 .get_mut(&pk_1)
                 .expect("peer should be tracked")
-                .defer_until(redial_at);
+                .defer(redial_at);
 
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
