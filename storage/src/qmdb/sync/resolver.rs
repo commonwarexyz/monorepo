@@ -84,8 +84,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
-           + Send
-           + 'a;
+           + Send + Sync + 'a;
 }
 
 macro_rules! impl_resolver {

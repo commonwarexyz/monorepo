@@ -44,7 +44,8 @@ struct TrackedRequest<F: Family> {
 /// Manages outstanding fetch requests.
 pub(super) struct Requests<F: Family, Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
-    futures: FuturesUnordered<FetchFuture<F, Op, D, E>>,
+    futures:
+        FuturesUnordered<FetchFuture<F, Op, D, E>>,
 
     /// Counter for assigning unique request IDs.
     next_id: u64,
@@ -141,7 +142,9 @@ impl<F: Family, Op, D: Digest, E> Requests<F, Op, D, E> {
     }
 
     /// Get a mutable reference to the futures stream.
-    pub fn futures_mut(&mut self) -> &mut FuturesUnordered<FetchFuture<F, Op, D, E>> {
+    pub fn futures_mut(&mut self) -> &mut FuturesUnordered<
+        FetchFuture<F, Op, D, E>,
+    > {
         &mut self.futures
     }
 

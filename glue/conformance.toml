@@ -1,0 +1,7 @@
+["commonware_glue::stateful::db::p2p::handler::tests::conformance::CodecConformance<Request>"]
+n_cases = 65536
+hash = "44c363dc52376203a66269a71e13f7271c1a9beb1f8ee9dd9864a3ce7ae2c281"
+
+["commonware_glue::stateful::db::p2p::handler::tests::conformance::CodecConformance<Response<u64,sha256::Digest>>"]
+n_cases = 65536
+hash = "84f9f3cad168682d218cc7e44e2ba71a54308833f6e7040ccd1b58a298c6b42a"

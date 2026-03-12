@@ -669,20 +669,35 @@ where
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
                     }
+                    Message::GetProcessedHeight { response } => {
+                        response.send_lossy(self.last_processed_height);
+                    }
                     Message::HintFinalized { height, targets } => {
-                        // Skip if height is at or below the floor
-                        if height <= self.last_processed_height {
+                        // Skip if height is below the floor
+                        if height < self.last_processed_height {
                             continue;
                         }
 
-                        // Skip if finalization is already available locally
-                        if self.get_finalization_by_height(height).await.is_some() {
+                        // Skip if both the finalization and the block are
+                        // already available locally. Both are checked because
+                        // `set_floor` can advance `last_processed_height` to
+                        // a height whose block was never finalized locally.
+                        if self.get_finalization_by_height(height).await.is_some()
+                            && self.get_finalized_block(height).await.is_some()
+                        {
                             continue;
                         }
 
-                        // Trigger a targeted fetch via the resolver
+                        // Trigger a fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets).await;
+                        match targets {
+                            Some(targets) => {
+                                resolver.fetch_targeted(request, targets).await;
+                            }
+                            None => {
+                                resolver.fetch(request).await;
+                            }
+                        }
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -714,7 +729,10 @@ where
                         )
                         .await;
                     }
-                    Message::SetFloor { height } => {
+                    Message::SetFloor {
+                        height,
+                        prune_archives,
+                    } => {
                         if self.last_processed_height >= height {
                             warn!(
                                 %height,
@@ -736,10 +754,12 @@ where
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
 
-                        // Prune data in the finalized archives below the new floor.
-                        if let Err(err) = self.prune_finalized_archives(height).await {
-                            error!(?err, %height, "failed to prune finalized archives");
-                            return;
+                        if prune_archives {
+                            // Prune data in the finalized archives below the new floor.
+                            if let Err(err) = self.prune_finalized_archives(height).await {
+                                error!(?err, %height, "failed to prune finalized archives");
+                                return;
+                            }
                         }
 
                         // Intentionally keep existing block subscriptions alive. Canceling
@@ -1456,15 +1476,19 @@ where
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        // Blocks below the last processed height are not useful to us, so we ignore them (this
-        // has the nice byproduct of ensuring we don't call a backing store with a block below the
-        // pruning boundary)
-        if height <= self.last_processed_height {
+        // Blocks below the last processed height are not useful to us, so we
+        // ignore them (this has the nice byproduct of ensuring we don't call
+        // a backing store with a block below the pruning boundary).
+        //
+        // Blocks at exactly the processed height are allowed, however. After
+        // a `set_floor`, it may be possible that the floor was set to a height
+        // that marshal doesn't have.
+        if height < self.last_processed_height {
             debug!(
                 %height,
                 floor = %self.last_processed_height,
                 ?digest,
-                "dropping finalization at or below processed height floor"
+                "dropping finalization below processed height floor"
             );
             return false;
         }

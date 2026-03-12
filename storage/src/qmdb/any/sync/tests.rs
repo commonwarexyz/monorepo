@@ -159,6 +159,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Create the engine
@@ -204,6 +205,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -255,6 +257,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Perform sync
@@ -338,6 +341,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -414,6 +418,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -514,6 +519,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -584,6 +590,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -653,6 +660,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -736,6 +744,7 @@ where
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
 
             // Send target update with increased bounds
@@ -808,6 +817,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         // Complete the sync
@@ -882,6 +892,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 0,
+            progress_tx: None,
         };
 
         let sync_handle = sync::sync(config);
@@ -980,6 +991,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1037,6 +1049,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let result: Result<H::Db, _> = sync::sync(config).await;
@@ -1087,6 +1100,7 @@ where
             finish_rx: None,
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1149,6 +1163,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -1258,6 +1273,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1326,6 +1342,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1676,6 +1693,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes
