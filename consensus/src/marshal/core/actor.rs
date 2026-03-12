@@ -625,6 +625,9 @@ where
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
                     }
+                    Message::GetProcessedHeight { response } => {
+                        response.send_lossy(self.last_processed_height);
+                    }
                     Message::HintFinalized { height, targets } => {
                         // Skip if height is at or below the floor
                         if height <= self.last_processed_height {

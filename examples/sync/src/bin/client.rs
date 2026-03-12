@@ -150,6 +150,9 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: config.max_outstanding_requests,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
@@ -213,6 +216,9 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: config.max_outstanding_requests,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
 
         let database: current::Database<_> = sync::sync(engine_config).await?;
@@ -273,6 +279,9 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: config.max_outstanding_requests,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;

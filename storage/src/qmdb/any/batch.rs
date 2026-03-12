@@ -952,6 +952,16 @@ where
     pub fn root(&self) -> D {
         self.journal_batch.root()
     }
+
+    /// Return the inactivity floor after this batch.
+    pub const fn inactivity_floor(&self) -> Location {
+        self.new_inactivity_floor_loc
+    }
+
+    /// Return the total operation count after this batch.
+    pub const fn size(&self) -> Location {
+        Location::new(self.total_size)
+    }
 }
 
 impl<D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<D, U>

@@ -1,7 +1,7 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
-    ingress::{self, Oracle},
+    ingress::{self, LinkSelector, Oracle},
     metrics,
     transmitter::{self, Completion},
     Error,
@@ -130,8 +130,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     sender: mpsc::UnboundedSender<Task<P>>,
     receiver: mpsc::UnboundedReceiver<Task<P>>,
 
-    // A map from a pair of public keys (from, to) to a link between the two peers
+    // Default links that apply to all channels between two peers.
     links: HashMap<(P, P), Link>,
+
+    // Channel-specific links that override the default route between two peers.
+    channel_links: HashMap<(P, P, Channel), Link>,
 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
@@ -195,6 +198,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 sender,
                 receiver,
                 links: HashMap::new(),
+                channel_links: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
@@ -427,6 +431,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::AddLink {
                 sender,
                 receiver,
+                selector,
                 sampler,
                 success_rate,
                 result,
@@ -440,36 +445,28 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.broadcast_peer_list().await;
                 }
 
-                // Require link to not already exist
-                let key = (sender.clone(), receiver.clone());
-                if self.links.contains_key(&key) {
-                    return send_result(result, Err(Error::LinkExists));
-                }
-
                 let link = Link::new(
                     &mut self.context,
-                    sender,
-                    receiver,
+                    sender.clone(),
+                    receiver.clone(),
                     receiver_socket,
                     sampler,
                     success_rate,
                     self.max_size,
                     self.received_messages.clone(),
                 );
-                self.links.insert(key, link);
-                send_result(result, Ok(()))
+                let key = LinkKey::new(sender, receiver, selector);
+                send_result(result, self.add_link_rule(key, link))
             }
             ingress::Message::RemoveLink {
                 sender,
                 receiver,
+                selector,
                 result,
-            } => {
-                match self.links.remove(&(sender, receiver)) {
-                    Some(_) => (),
-                    None => return send_result(result, Err(Error::LinkMissing)),
-                }
-                send_result(result, Ok(()))
-            }
+            } => send_result(
+                result,
+                self.remove_link_rule(LinkKey::new(sender, receiver, selector)),
+            ),
             ingress::Message::Block { from, to } => {
                 self.blocks.insert((from, to));
             }
@@ -541,6 +538,76 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .expect("BTreeMap keys are unique")
         }
     }
+
+    fn add_link_rule(&mut self, key: LinkKey<P>, link: Link) -> Result<(), Error> {
+        match key {
+            LinkKey::All(sender, receiver) => {
+                if self.links.insert((sender, receiver), link).is_some() {
+                    return Err(Error::LinkExists);
+                }
+            }
+            LinkKey::Channel(sender, receiver, channel) => {
+                if self
+                    .channel_links
+                    .insert((sender, receiver, channel), link)
+                    .is_some()
+                {
+                    return Err(Error::LinkExists);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_link_rule(&mut self, key: LinkKey<P>) -> Result<(), Error> {
+        let removed = match key {
+            LinkKey::All(sender, receiver) => self.links.remove(&(sender, receiver)).is_some(),
+            LinkKey::Channel(sender, receiver, channel) => self
+                .channel_links
+                .remove(&(sender, receiver, channel))
+                .is_some(),
+        };
+        if removed {
+            Ok(())
+        } else {
+            Err(Error::LinkMissing)
+        }
+    }
+
+    fn link_for_channel(&self, sender: &P, receiver: &P, channel: Channel) -> Option<&Link> {
+        self.channel_links
+            .get(&(sender.clone(), receiver.clone(), channel))
+            .or_else(|| self.links.get(&(sender.clone(), receiver.clone())))
+    }
+
+    fn link_for_channel_mut(
+        &mut self,
+        sender: &P,
+        receiver: &P,
+        channel: Channel,
+    ) -> Option<&mut Link> {
+        if let Some(link) = self
+            .channel_links
+            .get_mut(&(sender.clone(), receiver.clone(), channel))
+        {
+            return Some(link);
+        }
+        self.links.get_mut(&(sender.clone(), receiver.clone()))
+    }
+}
+
+enum LinkKey<P: PublicKey> {
+    All(P, P),
+    Channel(P, P, Channel),
+}
+
+impl<P: PublicKey> LinkKey<P> {
+    const fn new(sender: P, receiver: P, selector: LinkSelector) -> Self {
+        match selector {
+            LinkSelector::All => Self::All(sender, receiver),
+            LinkSelector::Channel(channel) => Self::Channel(sender, receiver, channel),
+        }
+    }
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
@@ -558,8 +625,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             };
 
             // Send message to link
-            let key = (completion.origin.clone(), completion.recipient.clone());
-            let Some(link) = self.links.get_mut(&key) else {
+            let Some(link) = self.link_for_channel_mut(
+                &completion.origin,
+                &completion.recipient,
+                completion.channel,
+            ) else {
                 // This can happen if the link is removed before the message is delivered
                 trace!(
                     origin = ?completion.origin,
@@ -641,7 +711,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // Determine if there is a link between the origin and recipient
-            let Some(link) = self.links.get_mut(&o_r) else {
+            let Some((sampler, success_rate)) = self
+                .link_for_channel(&origin, &recipient, channel)
+                .map(|link| (link.sampler, link.success_rate))
+            else {
                 trace!(?origin, ?recipient, reason = "no link", "dropping message");
                 continue;
             };
@@ -656,10 +729,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+            let latency = Duration::from_millis(sampler.sample(&mut self.context) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
+            let should_deliver = self.context.gen_bool(success_rate);
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
@@ -1354,6 +1427,111 @@ mod tests {
                 oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
+        });
+    }
+
+    #[test]
+    fn test_channel_specific_link_overrides_default_route() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
+            let receiver_pk = ed25519::PrivateKey::from_seed(11).public_key();
+
+            let mut manager = oracle.manager();
+            manager
+                .track(
+                    0,
+                    [sender_pk.clone(), receiver_pk.clone()].try_into().unwrap(),
+                )
+                .await;
+
+            let (mut sender_ch0, _) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut sender_ch1, _) = oracle
+                .control(sender_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver_ch0) = oracle
+                .control(receiver_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver_ch1) = oracle
+                .control(receiver_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let blocked = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 0.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), receiver_pk.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link_selected(
+                    sender_pk.clone(),
+                    receiver_pk.clone(),
+                    LinkSelector::Channel(1),
+                    blocked,
+                )
+                .await
+                .unwrap();
+
+            sender_ch0
+                .send(Recipients::One(receiver_pk.clone()), b"default", false)
+                .await
+                .unwrap();
+            sender_ch1
+                .send(Recipients::One(receiver_pk.clone()), b"blocked", false)
+                .await
+                .unwrap();
+
+            let (sender, payload) = receiver_ch0.recv().await.unwrap();
+            assert_eq!(sender, sender_pk);
+            assert_eq!(payload, b"default");
+
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(receiver_ch1.recv().now_or_never().is_none());
+
+            oracle
+                .remove_link_selected(
+                    sender_pk.clone(),
+                    receiver_pk.clone(),
+                    LinkSelector::Channel(1),
+                )
+                .await
+                .unwrap();
+
+            sender_ch1
+                .send(Recipients::One(receiver_pk), b"restored", false)
+                .await
+                .unwrap();
+
+            let (sender, payload) = receiver_ch1.recv().await.unwrap();
+            assert_eq!(sender, sender_pk);
+            assert_eq!(payload, b"restored");
         });
     }
 

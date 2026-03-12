@@ -8,7 +8,7 @@ use commonware_utils::hex;
 use std::fmt;
 
 pub(crate) mod fixed;
-pub(crate) mod update;
+pub mod update;
 pub(crate) mod variable;
 pub use update::Update;
 

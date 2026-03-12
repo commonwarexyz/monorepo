@@ -45,6 +45,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
+    /// A request to retrieve the latest processed height acknowledged by the application.
+    GetProcessedHeight {
+        /// A channel to send the latest processed height.
+        response: oneshot::Sender<Height>,
+    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -192,6 +197,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .request(|response| Message::GetFinalization { height, response })
             .await
             .flatten()
+    }
+
+    /// Retrieve the latest processed height acknowledged by the application.
+    pub async fn get_processed_height(&self) -> Option<Height> {
+        self.sender
+            .request(|response| Message::GetProcessedHeight { response })
+            .await
     }
 
     /// Hints that a finalized block may be available at the given height.
