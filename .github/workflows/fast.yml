@@ -18,6 +18,7 @@ env:
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly-2025-11-15
   PANDOC_VERSION: 3.8.2.1
+  FORKED_RUSTFMT_COMMIT: e20ec8b
 
 jobs:
   Lint:
@@ -51,6 +52,36 @@ jobs:
         tool: just@1.43.0
     - name: Fmt
       run: just check-fmt
+    - name: Restore forked rustfmt cache
+      if: runner.os == 'Linux'
+      id: forked-rustfmt-cache
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ runner.temp }}/forked-rustfmt/${{ env.FORKED_RUSTFMT_COMMIT }}
+        key: ${{ runner.os }}-forked-rustfmt-${{ env.FORKED_RUSTFMT_COMMIT }}
+    - name: Download forked rustfmt
+      if: runner.os == 'Linux' && steps.forked-rustfmt-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        commit="${FORKED_RUSTFMT_COMMIT}"
+        tag="forked-rustfmt-${commit}"
+        asset="forked-rustfmt-${commit}-linux-x64"
+        dir="${{ runner.temp }}/forked-rustfmt/${commit}"
+        mkdir -p "$dir"
+        base_url="https://github.com/${{ github.repository }}/releases/download/${tag}"
+        curl -fsSL -H "Authorization: Bearer ${{ github.token }}" -o "$dir/$asset" "$base_url/$asset"
+        curl -fsSL -H "Authorization: Bearer ${{ github.token }}" -o "$dir/$asset.sha256" "$base_url/$asset.sha256"
+        (cd "$dir" && sha256sum -c "$asset.sha256")
+        chmod +x "$dir/$asset"
+    - name: Fmt (forked rustfmt)
+      if: runner.os == 'Linux'
+      env:
+        RUSTFMT: ${{ runner.temp }}/forked-rustfmt/${{ env.FORKED_RUSTFMT_COMMIT }}/forked-rustfmt-${{ env.FORKED_RUSTFMT_COMMIT }}-linux-x64
+        NIGHTLY_VERSION: ""
+      run: |
+        chmod +x "$RUSTFMT"
+        just check-fmt
     - name: Lint
       run: just clippy ${{ matrix.flags }}
     - name: Check docs
