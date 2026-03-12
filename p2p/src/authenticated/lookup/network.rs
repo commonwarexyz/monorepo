@@ -185,7 +185,6 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                query_frequency: self.cfg.query_frequency,
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );

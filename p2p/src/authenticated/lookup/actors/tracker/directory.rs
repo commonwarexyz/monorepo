@@ -15,6 +15,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
+    cmp,
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
     time::{Duration, SystemTime},
@@ -62,6 +63,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
+    /// The shared quota for incoming and outgoing reservations per peer.
+    rate_limit: Quota,
+
     // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record>,
@@ -105,6 +109,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
+            rate_limit: cfg.rate_limit,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -123,6 +128,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
+        let deadline = cmp::max(record.next_allowed_at(), self.context.current())
+            .add_jittered(&mut self.context, self.rate_limit.replenish_interval());
+        record.defer_until(deadline);
         self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
@@ -242,7 +250,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
-        let ingress = self.peers.get(peer)?.ingress()?;
+        let now = self.context.current();
+        let record = self.peers.get(peer)?;
+        if !record.dialable(now, self.allow_private_ips, self.allow_dns) {
+            return None;
+        }
+        let ingress = record.ingress()?;
         let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
         Some((reservation, ingress))
     }
@@ -303,12 +316,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
     pub fn dialable(&self) -> Vec<C> {
+        let now = self.context.current();
+
         // Collect peers with known addresses (excluding blocked peers)
         let mut result: Vec<_> = self
             .peers
             .iter()
             .filter(|&(peer, r)| {
-                !self.blocked.contains(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
+                !self.blocked.contains(peer)
+                    && r.dialable(now, self.allow_private_ips, self.allow_dns)
             })
             .map(|(peer, _)| peer.clone())
             .collect();
@@ -391,13 +407,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Already reserved
-        let record = self.peers.get_mut(peer).unwrap();
-        if record.reserved() {
+        if self.peers.get(peer).unwrap().reserved() {
             return None;
         }
 
+        let jitter = self.rate_limit.replenish_interval();
+        let now = self.context.current();
+
         // Rate limit
-        if self.rate_limiter.check_key(peer).is_err() {
+        if let Err(not_until) = self.rate_limiter.check_key(peer) {
+            let deadline = cmp::max(not_until.earliest_possible(), now)
+                .add_jittered(&mut self.context, jitter);
+            self.peers.get_mut(peer).unwrap().defer_until(deadline);
             self.metrics
                 .limits
                 .get_or_create(&metrics::Peer::new(peer))
@@ -406,7 +427,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
+        let record = self.peers.get_mut(peer).unwrap();
         if record.reserve() {
+            record.note_reservation(now, self.rate_limit);
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -1572,6 +1595,55 @@ mod tests {
                 directory.dialable().contains(&pk_1),
                 "Peer should be dialable after unblock"
             );
+        });
+    }
+
+    #[test]
+    fn test_dial_waits_for_redial_deadline() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            let redial_at = context.current() + Duration::from_secs(10);
+            directory
+                .peers
+                .get_mut(&pk_1)
+                .expect("peer should be tracked")
+                .defer_until(redial_at);
+
+            assert!(
+                !directory.dialable().contains(&pk_1),
+                "Peer should not be dialable before redial deadline"
+            );
+            assert!(
+                directory.dial(&pk_1).is_none(),
+                "Dial reservations should respect the redial deadline"
+            );
+
+            context.sleep(Duration::from_secs(10)).await;
+
+            assert!(
+                directory.dialable().contains(&pk_1),
+                "Peer should become dialable once the deadline expires"
+            );
+            let (_reservation, ingress) =
+                directory.dial(&pk_1).expect("peer should reserve after deadline");
+            assert_eq!(ingress, Ingress::Socket(addr_1));
         });
     }
 

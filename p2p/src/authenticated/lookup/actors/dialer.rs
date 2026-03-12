@@ -41,14 +41,6 @@ pub struct Config<C: Signer> {
     /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
-    /// The frequency at which to refresh the list of dialable peers if there are no more peers in
-    /// the queue. This also limits the rate at which any single peer is dialed multiple times.
-    ///
-    /// This approach attempts to help ensure that the connection rate-limiter is not maxed out for
-    /// a single peer by preventing dialing it as fast as possible. This should make it easier for
-    /// other peers to dial us.
-    pub query_frequency: Duration,
-
     /// Whether to allow dialing private IP addresses after DNS resolution.
     pub allow_private_ips: bool,
 }
@@ -64,7 +56,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
-    query_frequency: Duration,
     allow_private_ips: bool,
 
     // ---------- Metrics ----------
@@ -89,7 +80,6 @@ impl<
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
-            query_frequency: cfg.query_frequency,
             allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
@@ -170,7 +160,6 @@ impl<
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
-        let mut query_deadline = self.context.current();
         select_loop! {
             self.context,
             on_stopped => {
@@ -179,6 +168,14 @@ impl<
             _ = self.context.sleep_until(dial_deadline) => {
                 // Update the deadline.
                 dial_deadline = dial_deadline.add_jittered(&mut self.context, self.dial_frequency);
+
+                if self.queue.is_empty() {
+                    // Only re-query once we have exhausted the current queue. The tracker enforces
+                    // when individual peers become dialable again, so queue refresh itself does not
+                    // need additional jitter.
+                    self.queue = tracker.dialable().await;
+                    self.queue.shuffle(&mut self.context);
+                }
 
                 // Pop the queue until we can reserve a peer.
                 // If a peer is reserved, attempt to dial it.
@@ -189,19 +186,6 @@ impl<
                     };
                     self.dial_peer(reservation, ingress, &mut supervisor);
                     break;
-                }
-            },
-            _ = self.context.sleep_until(query_deadline) => {
-                // Update the deadline.
-                query_deadline =
-                    query_deadline.add_jittered(&mut self.context, self.query_frequency);
-
-                // Only update the queue if it is empty.
-                if self.queue.is_empty() {
-                    // Query the tracker for dialable peers and shuffle the list to prevent
-                    // starvation.
-                    self.queue = tracker.dialable().await;
-                    self.queue.shuffle(&mut self.context);
                 }
             },
         }
@@ -242,7 +226,6 @@ mod tests {
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_frequency,
-                query_frequency: Duration::from_secs(60),
                 allow_private_ips: true,
             };
 
@@ -303,6 +286,51 @@ mod tests {
                 "expected 2-4 dial attempts (one per tick), got {}",
                 dial_count
             );
+        });
+    }
+
+    #[test]
+    fn test_dialer_refreshes_empty_queue_each_tick() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(100);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            refresh_count += 1;
+                            let _ = responder.send(Vec::new());
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(refresh_count, 4, "expected one queue refresh per dial tick");
         });
     }
 }

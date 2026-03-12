@@ -1,5 +1,7 @@
 use crate::types::{self, Ingress};
-use std::net::IpAddr;
+use commonware_runtime::Quota;
+use commonware_utils::SystemTimeExt;
+use std::{cmp, net::IpAddr, time::SystemTime};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -41,6 +43,12 @@ pub struct Record {
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
+
+    /// Earliest time at which we should attempt another outgoing dial.
+    redial_at: SystemTime,
+
+    /// Earliest time at which the shared connection rate limiter could allow another reservation.
+    next_allowed_at: SystemTime,
 }
 
 impl Record {
@@ -53,6 +61,8 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
+            redial_at: SystemTime::UNIX_EPOCH,
+            next_allowed_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -63,6 +73,8 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: true,
+            redial_at: SystemTime::UNIX_EPOCH,
+            next_allowed_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -126,6 +138,20 @@ impl Record {
         self.status = Status::Inert;
     }
 
+    /// Defer the next outgoing dial attempt until the given deadline.
+    pub fn defer_until(&mut self, deadline: SystemTime) {
+        self.redial_at = deadline;
+    }
+
+    /// Mirrors the next time the keyed rate limiter would allow another reservation.
+    pub fn note_reservation(&mut self, now: SystemTime, quota: Quota) {
+        let replenish_interval = quota.replenish_interval();
+        let tolerance = replenish_interval * quota.burst_size().get().saturating_sub(1);
+        let window_start = now.checked_sub(tolerance).unwrap_or(SystemTime::UNIX_EPOCH);
+        self.next_allowed_at = cmp::max(self.next_allowed_at, window_start)
+            .saturating_add_ext(replenish_interval);
+    }
+
     // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
@@ -141,6 +167,11 @@ impl Record {
         self.sets
     }
 
+    /// Returns the earliest time at which another reservation could satisfy the shared quota.
+    pub const fn next_allowed_at(&self) -> SystemTime {
+        self.next_allowed_at
+    }
+
     /// Returns `true` if the record is dialable.
     ///
     /// A record is dialable if:
@@ -148,8 +179,11 @@ impl Record {
     /// - It is not ourselves
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
-    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
+    pub fn dialable(&self, now: SystemTime, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
+            return false;
+        }
+        if now < self.redial_at {
             return false;
         }
         let ingress = match &self.address {
@@ -220,7 +254,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, time::{Duration, SystemTime}};
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -237,6 +271,8 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
+        assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
+        assert_eq!(record.next_allowed_at, SystemTime::UNIX_EPOCH);
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
         assert!(!record.reserved());
@@ -251,6 +287,8 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
+        assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
+        assert_eq!(record.next_allowed_at, SystemTime::UNIX_EPOCH);
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
         assert!(!record.reserved());
@@ -495,14 +533,48 @@ mod tests {
     }
 
     #[test]
+    fn test_dialable_respects_redial_deadline() {
+        let mut record = Record::known(test_address());
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+
+        assert!(record.dialable(now, true, true));
+
+        record.defer_until(now + Duration::from_secs(5));
+        assert!(!record.dialable(now, true, true));
+        assert!(record.dialable(now + Duration::from_secs(5), true, true));
+    }
+
+    #[test]
+    fn test_note_reservation_tracks_next_allowed_time() {
+        use commonware_utils::NZU32;
+
+        let mut record = Record::known(test_address());
+        let quota = Quota::per_second(NZU32!(3));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let t = quota.replenish_interval();
+
+        record.note_reservation(now, quota);
+        assert_eq!(record.next_allowed_at(), now.checked_sub(t * 2).unwrap() + t);
+
+        record.note_reservation(now, quota);
+        assert_eq!(record.next_allowed_at(), now);
+
+        let partial_refill = now + t / 2;
+        record.note_reservation(partial_refill, quota);
+        assert_eq!(record.next_allowed_at(), now + t);
+    }
+
+    #[test]
     fn test_dialable_checks_ingress_ip() {
         use std::net::IpAddr;
         use Ingress;
 
+        let now = SystemTime::UNIX_EPOCH;
+
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
         let record_public = Record::known(types::Address::Symmetric(public_socket));
-        assert!(record_public.dialable(false, true));
+        assert!(record_public.dialable(now, false, true));
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
         let private_ingress =
@@ -514,11 +586,11 @@ mod tests {
         };
         let record_private_ingress = Record::known(asymmetric_private_ingress);
         assert!(
-            !record_private_ingress.dialable(false, true),
+            !record_private_ingress.dialable(now, false, true),
             "Should NOT be dialable when ingress Socket IP is private"
         );
         assert!(
-            record_private_ingress.dialable(true, true),
+            record_private_ingress.dialable(now, true, true),
             "Should be dialable when allow_private_ips=true"
         );
 
@@ -532,7 +604,7 @@ mod tests {
         };
         let record_private_egress = Record::known(asymmetric_private_egress);
         assert!(
-            record_private_egress.dialable(false, true),
+            record_private_egress.dialable(now, false, true),
             "Should be dialable - egress IP is not checked for dialing"
         );
 
@@ -546,11 +618,11 @@ mod tests {
         };
         let record_dns = Record::known(dns_ingress);
         assert!(
-            record_dns.dialable(false, true),
+            record_dns.dialable(now, false, true),
             "DNS ingress should be dialable (private check happens at resolution)"
         );
         assert!(
-            !record_dns.dialable(false, false),
+            !record_dns.dialable(now, false, false),
             "DNS ingress should NOT be dialable when allow_dns=false"
         );
     }
