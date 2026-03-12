@@ -2415,15 +2415,18 @@ mod tests {
         partition::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
-    fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
+    fn slow_and_lossy_links_with<S, F, L>(
+        seed: u64,
+        n: u32,
+        required_containers: View,
+        mut fixture: F,
+    ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
-        let n = 5;
-        let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
@@ -2566,6 +2569,15 @@ mod tests {
         })
     }
 
+    fn slow_and_lossy_links<S, F, L>(seed: u64, fixture: F) -> String
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        slow_and_lossy_links_with::<S, F, L>(seed, 5, View::new(50), fixture)
+    }
+
     #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
@@ -2579,6 +2591,17 @@ mod tests {
         slow_and_lossy_links::<_, _, RoundRobin>(0, secp256r1::fixture);
         slow_and_lossy_links::<_, _, RoundRobin>(
             0,
+            scheme_mocks::fixture_with::<true, true, false, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_slow_and_lossy_links_mock_strict_stress() {
+        slow_and_lossy_links_with::<_, _, RoundRobin>(
+            0,
+            10,
+            View::new(100),
             scheme_mocks::fixture_with::<true, true, false, _>,
         );
     }
