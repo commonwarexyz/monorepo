@@ -12,6 +12,25 @@ use commonware_utils::{
 };
 use std::time::SystemTime;
 
+// Fuzzing hook provided by insitu-fuzz via weak linkage. Resolves to None when
+// insitu-fuzz is not linked, giving zero overhead in all non-fuzzing builds.
+#[cfg(feature = "fuzz")]
+extern "C" {
+    #[linkage = "extern_weak"]
+    static commonware_fuzz_corrupt_bytes: Option<unsafe extern "C" fn(*mut u8, usize) -> bool>;
+}
+
+#[cfg(feature = "fuzz")]
+#[inline(always)]
+fn corrupt_bytes_hook(msg: &mut [u8]) {
+    // SAFETY: weak linkage -- None when insitu-fuzz is not linked.
+    unsafe {
+        if let Some(corrupt_fn) = commonware_fuzz_corrupt_bytes {
+            corrupt_fn(msg.as_mut_ptr(), msg.len());
+        }
+    }
+}
+
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
@@ -53,6 +72,13 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
+        #[cfg(feature = "fuzz")]
+        let encoded = {
+            let mut buf = message.encode().into_vec();
+            corrupt_bytes_hook(&mut buf);
+            commonware_runtime::IoBuf::from(buf).into()
+        };
+        #[cfg(not(feature = "fuzz"))]
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority).await
     }
@@ -88,6 +114,13 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
+        #[cfg(feature = "fuzz")]
+        let encoded = {
+            let mut buf = message.encode().into_vec();
+            corrupt_bytes_hook(&mut buf);
+            commonware_runtime::IoBuf::from(buf).into()
+        };
+        #[cfg(not(feature = "fuzz"))]
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority).await
     }
