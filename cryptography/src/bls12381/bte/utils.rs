@@ -1,62 +1,6 @@
 use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
-use blst::{blst_final_exp, blst_fp12, blst_fp12_mul, blst_miller_loop};
 use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, Field, FieldNTT, Ring, Space};
-
-/// Compute the pairing e(g1, g2) -> GT.
-pub fn pairing(g1: &G1, g2: &G2) -> GT {
-    let p1_affine = g1.as_blst_p1_affine();
-    let p2_affine = g2.as_blst_p2_affine();
-
-    let mut result = blst_fp12::default();
-    let ptr = &raw mut result;
-    // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
-    unsafe {
-        blst_miller_loop(ptr, &p2_affine, &p1_affine);
-        blst_final_exp(ptr, ptr);
-    }
-
-    GT::from_blst_fp12(result)
-}
-
-/// Compute the product of multiple pairings: prod(e(g1_i, g2_i)) -> GT.
-///
-/// Uses a single final exponentiation for efficiency.
-pub fn multi_pairing(pairs: &[(G1, G2)]) -> GT {
-    assert!(!pairs.is_empty());
-
-    let mut acc = blst_fp12::default();
-    let acc_ptr = &raw mut acc;
-
-    // First pairing
-    let p1_affine = pairs[0].0.as_blst_p1_affine();
-    let p2_affine = pairs[0].1.as_blst_p2_affine();
-    // SAFETY: Valid affine points; miller_loop writes to acc_ptr.
-    unsafe {
-        blst_miller_loop(acc_ptr, &p2_affine, &p1_affine);
-    }
-
-    // Remaining pairings
-    for &(ref g1, ref g2) in &pairs[1..] {
-        let p1_affine = g1.as_blst_p1_affine();
-        let p2_affine = g2.as_blst_p2_affine();
-        let mut tmp = blst_fp12::default();
-        // SAFETY: Valid affine points; miller_loop writes to tmp. blst_fp12_mul supports
-        // in-place (ret==a).
-        unsafe {
-            blst_miller_loop(&mut tmp, &p2_affine, &p1_affine);
-            blst_fp12_mul(acc_ptr, acc_ptr, &tmp);
-        }
-    }
-
-    // Single final exponentiation
-    // SAFETY: blst_final_exp supports in-place (ret==f).
-    unsafe {
-        blst_final_exp(acc_ptr, acc_ptr);
-    }
-
-    GT::from_blst_fp12(acc)
-}
 
 /// Serialize a G1 element to bytes.
 fn g1_bytes(g: &G1) -> bytes::Bytes {
@@ -354,8 +298,8 @@ mod tests {
 
         for i in 0..domain_size {
             let eval = poly_eval(&f, &domain.element(i));
-            let lhs = pairing(&(com - &(g * &eval)), &h);
-            let rhs = pairing(&pi[i], &(crs.htau - &(h * &domain.element(i))));
+            let lhs = GT::pairing(&(com - &(g * &eval)), &h);
+            let rhs = GT::pairing(&pi[i], &(crs.htau - &(h * &domain.element(i))));
             assert_eq!(lhs, rhs);
         }
     }

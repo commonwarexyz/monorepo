@@ -15,9 +15,9 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12,
-    blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fp12_is_one,
-    blst_fp12_mul, blst_fp12_one, blst_fp12s_mult_pippenger,
+    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_final_exp,
+    blst_fp12, blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fp12_is_one,
+    blst_fp12_mul, blst_fp12_one, blst_fp12s_mult_pippenger, blst_miller_loop,
     blst_fp12s_mult_pippenger_scratch_sizeof, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
@@ -431,9 +431,56 @@ pub struct GT(blst_fp12);
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
-    /// Create GT from blst_fp12.
-    pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
-        Self(fp12)
+    /// Compute the pairing e(g1, g2).
+    pub fn pairing(g1: &G1, g2: &G2) -> Self {
+        let p1_affine = g1.as_blst_p1_affine();
+        let p2_affine = g2.as_blst_p2_affine();
+
+        let mut result = blst_fp12::default();
+        let ptr = &raw mut result;
+        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_miller_loop(ptr, &p2_affine, &p1_affine);
+            blst_final_exp(ptr, ptr);
+        }
+
+        Self(result)
+    }
+
+    /// Compute the product of multiple pairings: prod(e(g1_i, g2_i)).
+    ///
+    /// Uses a single final exponentiation for efficiency.
+    pub fn multi_pairing(pairs: &[(G1, G2)]) -> Self {
+        assert!(!pairs.is_empty());
+
+        let mut acc = blst_fp12::default();
+        let acc_ptr = &raw mut acc;
+
+        let p1_affine = pairs[0].0.as_blst_p1_affine();
+        let p2_affine = pairs[0].1.as_blst_p2_affine();
+        // SAFETY: Valid affine points; miller_loop writes to acc_ptr.
+        unsafe {
+            blst_miller_loop(acc_ptr, &p2_affine, &p1_affine);
+        }
+
+        for &(ref g1, ref g2) in &pairs[1..] {
+            let p1_affine = g1.as_blst_p1_affine();
+            let p2_affine = g2.as_blst_p2_affine();
+            let mut tmp = blst_fp12::default();
+            // SAFETY: Valid affine points; miller_loop writes to tmp. blst_fp12_mul supports
+            // in-place (ret==a).
+            unsafe {
+                blst_miller_loop(&mut tmp, &p2_affine, &p1_affine);
+                blst_fp12_mul(acc_ptr, acc_ptr, &tmp);
+            }
+        }
+
+        // SAFETY: blst_final_exp supports in-place (ret==f).
+        unsafe {
+            blst_final_exp(acc_ptr, acc_ptr);
+        }
+
+        Self(acc)
     }
 
     /// Multiplies two GT elements.

@@ -1,8 +1,8 @@
-use crate::bls12381::primitives::group::{Scalar, G1, G2};
+use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
 use commonware_math::algebra::{CryptoGroup, Random};
 use rand_core::CryptoRngCore;
 
-use super::utils::{hash_g1, hash_gt, pairing, xor, Transcript};
+use super::utils::{hash_g1, hash_gt, xor, Transcript};
 
 /// Domain separation tag for hashing to scalar in BTE.
 const DST_HASH_TO_SCALAR: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_BTE_HASH_TO_SCALAR";
@@ -125,7 +125,7 @@ pub fn encrypt(
     // Compute mask: e(H(id) - g*tg, h)^alpha
     let alpha = Scalar::random(&mut *rng);
     let beta = Scalar::random(&mut *rng);
-    let mask = pairing(&(hid - &(g * &tg)), &h).scalar_mul(&alpha);
+    let mask = GT::pairing(&(hid - &(g * &tg)), &h).scalar_mul(&alpha);
     let hmask = hash_gt(&mask);
 
     // XOR msg and hmask

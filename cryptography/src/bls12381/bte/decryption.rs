@@ -1,4 +1,4 @@
-use crate::bls12381::primitives::group::{Scalar, G1, G2};
+use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
 use commonware_math::algebra::{Additive, CryptoGroup, Space};
 use commonware_parallel::Sequential;
 use std::collections::BTreeMap;
@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::{
     dealer::CRS,
     encryption::Ciphertext,
-    utils::{hash_g1, hash_gt, lagrange_interp_eval, multi_pairing, open_all_values, xor, Domain},
+    utils::{hash_g1, hash_gt, lagrange_interp_eval, open_all_values, xor, Domain},
 };
 
 /// Domain separation tag for hashing G1 to scalar in BTE decryption.
@@ -88,11 +88,58 @@ pub fn decrypt_all(sigma: G1, ct: &[Ciphertext], hid: G1, crs: &CRS) -> Vec<[u8;
     let neg_sigma = -sigma;
     let mut m = vec![[0u8; 32]; batch_size];
     for i in 0..batch_size {
-        let mask = multi_pairing(&[(pi[i], ct[i].ct2), (delta, ct[i].ct3), (neg_sigma, ct[i].ct4)]);
+        let mask = GT::multi_pairing(&[(pi[i], ct[i].ct2), (delta, ct[i].ct3), (neg_sigma, ct[i].ct4)]);
 
         let hmask = hash_gt(&mask);
         m[i] = xor(&ct[i].ct1, &hmask).as_slice().try_into().unwrap();
     }
 
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bls12381::bte::dealer::Dealer;
+    use crate::bls12381::bte::encryption::encrypt;
+    use crate::bls12381::bte::utils::Domain;
+    use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_utils::test_rng;
+
+    #[test]
+    fn test_end_to_end_decrypt() {
+        let mut rng = test_rng();
+        let batch_size = 1 << 5;
+        let n = 1 << 3;
+
+        let mut dealer = Dealer::new(batch_size, n, n / 2 - 1, &mut rng);
+        let (crs, sk_shares) = dealer.setup(&mut rng);
+
+        let secret_keys: Vec<SecretKey> = sk_shares
+            .iter()
+            .map(|sk| SecretKey::new(sk.clone()))
+            .collect();
+
+        let tx_domain = Domain::new(batch_size);
+
+        let msg = [1u8; 32];
+        let hid = G1::generator() * &Scalar::random(&mut rng);
+        let pk = dealer.get_pk();
+
+        let ct: Vec<Ciphertext> = (0..batch_size)
+            .map(|i| encrypt(msg, tx_domain.element(i), hid, crs.htau, pk, &mut rng))
+            .collect();
+
+        let mut partial_decryptions: BTreeMap<usize, G1> = BTreeMap::new();
+        for i in 0..n / 2 {
+            let partial = secret_keys[i].partial_decrypt(&ct, hid, pk, &crs);
+            partial_decryptions.insert(i + 1, partial);
+        }
+
+        let sigma = aggregate_partial_decryptions(&partial_decryptions);
+        let messages = decrypt_all(sigma, &ct, hid, &crs);
+        for i in 0..batch_size {
+            assert_eq!(msg, messages[i]);
+        }
+    }
 }
