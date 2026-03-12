@@ -1,0 +1,28 @@
+[package]
+name = "commonware-glue"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Bootstrap applications with commonware primitive compositions."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/glue"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+
+[features]
+mocks = [
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks"
+]
