@@ -61,8 +61,8 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
-    /// The quota for outgoing dial attempts per peer.
-    dial_quota: Quota,
+    /// The rate limit for reservations per peer.
+    rate_limit: Quota,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -101,7 +101,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
-            dial_quota: cfg.rate_limit,
+            rate_limit: cfg.rate_limit,
             peers,
             sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
@@ -293,7 +293,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
-        let interval = self.dial_quota.replenish_interval();
+        let interval = self.rate_limit.replenish_interval();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
         let mut peers = Vec::new();
@@ -400,7 +400,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Rate limit: ensure at least `interval` has elapsed since last reservation
         let now = self.context.current();
-        let interval = self.dial_quota.replenish_interval();
+        let interval = self.rate_limit.replenish_interval();
         if let Some(last) = record.last_reserved_at() {
             let elapsed = now.duration_since(last).unwrap_or(Duration::ZERO);
             if elapsed < interval {
