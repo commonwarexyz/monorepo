@@ -57,12 +57,12 @@
 //!
 //! ## Rate Limiting
 //!
-//! There are four primary rate limits and one peer connection cooldown:
+//! There are five primary rate limits:
 //!
 //! - `max_concurrent_handshakes`: The maximum number of concurrent handshake attempts allowed.
 //! - `allowed_handshake_rate_per_ip`: The rate limit for handshake attempts originating from a single IP address.
 //! - `allowed_handshake_rate_per_subnet`: The rate limit for handshake attempts originating from a single IP subnet.
-//! - `peer_connection_cooldown`: The minimum time between inbound or outbound connection reservations for a single peer.
+//! - `peer_connection_cooldown`: The per-peer rate limit for inbound and outbound connection reservations, expressed as a minimum cooldown between attempts.
 //! - `rate` (per channel): The rate limit for messages sent on a single channel.
 //!
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
