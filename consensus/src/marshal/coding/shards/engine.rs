@@ -503,8 +503,19 @@ where
                     .inc();
 
                 let commitment = shard.commitment();
+
+                // Skip shards for already-reconstructed blocks unless the
+                // leader's own shard for our index has not been verified yet.
+                // Accepting the late leader shard ensures we broadcast it and
+                // help slower peers reach quorum.
                 if self.reconstructed_blocks.contains_key(&commitment) {
-                    continue;
+                    let own_shard_pending = self
+                        .state
+                        .get(&commitment)
+                        .is_some_and(|s| !s.has_own_shard());
+                    if !own_shard_pending {
+                        continue;
+                    }
                 }
 
                 if let Some(state) = self.state.get_mut(&commitment) {
@@ -698,7 +709,6 @@ where
         let commitment = block.commitment();
         self.reconstructed_blocks
             .insert(commitment, Arc::clone(&block));
-        self.notify_shard_subscribers(commitment);
         self.notify_block_subscribers(block);
     }
 
@@ -851,14 +861,22 @@ where
 
     /// Handles the registry of a local shard readiness subscription.
     fn handle_shard_subscription(&mut self, commitment: Commitment, response: oneshot::Sender<()>) {
-        // Answer immediately if our shard has already been verified or if the
-        // block has already been reconstructed through other shards.
+        // Answer immediately if our own shard has been verified.
         let has_shard = self
             .state
             .get(&commitment)
             .is_some_and(|state| state.has_own_shard());
-        let block_reconstructed = self.reconstructed_blocks.contains_key(&commitment);
-        if has_shard || block_reconstructed {
+        if has_shard {
+            response.send_lossy(());
+            return;
+        }
+
+        // When there is no reconstruction state but the block is already in
+        // the cache, the local node was the proposer. Proposers trivially
+        // have all shards, so resolve immediately.
+        if !self.state.contains_key(&commitment)
+            && self.reconstructed_blocks.contains_key(&commitment)
+        {
             response.send_lossy(());
             return;
         }
@@ -1090,7 +1108,7 @@ where
     }
 }
 
-impl<P, C, H> AwaitingQuorumState<P, C, H>
+impl<P, C, H> CommonState<P, C, H>
 where
     P: PublicKey,
     C: CodingScheme,
@@ -1117,25 +1135,32 @@ where
         // Store data for equivocation detection first (move), then clone
         // once for check. This avoids a second clone compared to cloning
         // for both check and storage.
-        self.common.received_shards.insert(index, shard.data);
-        let data = self.common.received_shards.get(&index).unwrap();
+        self.received_shards.insert(index, shard.data);
+        let data = self.received_shards.get(&index).unwrap();
         let Ok(checked) = C::check(&commitment.config(), &commitment.root(), index, data) else {
-            self.common.received_shards.remove(&index);
+            self.received_shards.remove(&index);
             commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
             return false;
         };
 
-        self.common.contributed.set(u64::from(index), true);
-        self.common.checked_shards.push(checked);
-        self.common.own_shard_verified = true;
-        self.common.pending_action = Some(if is_participant {
+        self.contributed.set(u64::from(index), true);
+        self.checked_shards.push(checked);
+        self.own_shard_verified = true;
+        self.pending_action = Some(if is_participant {
             ValidatedShardAction::Broadcast(Shard::new(commitment, index, data.clone()))
         } else {
             ValidatedShardAction::NotifyOnly
         });
         true
     }
+}
 
+impl<P, C, H> AwaitingQuorumState<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
     /// Check whether quorum is met and, if so, batch-validate all pending
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
     async fn try_transition(
@@ -1150,6 +1175,7 @@ where
             return None;
         }
 
+        // Batch-validate all pending weak shards in parallel.
         let pending = std::mem::take(&mut self.pending_shards);
         let (new_checked, to_block) =
             strategy.map_partition_collect_vec(pending, |(peer, shard)| {
@@ -1311,8 +1337,10 @@ where
     /// - Exact duplicate of a previously received shard for the same index.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Shards that arrive after the state has transitioned to [`ReconstructionState::Ready`]
-    ///   (i.e., batch validation has already passed).
+    /// - Non-leader shards that arrive after the state has transitioned to
+    ///   [`ReconstructionState::Ready`] (i.e., batch validation has already
+    ///   passed). The leader's shard for our index is still accepted in
+    ///   `Ready` state to ensure we verify and re-broadcast it.
     /// - When the leader is not yet known, shards are buffered at the
     ///   engine level in bounded per-peer queues until
     ///   [`Discovered`](super::Message::Discovered) creates a
@@ -1375,14 +1403,12 @@ where
             return false;
         }
 
-        // Once batch validation has passed, no new shards are accepted.
-        let Self::AwaitingQuorum(state) = self else {
-            return false;
-        };
-
-        let progressed = if is_from_leader && !state.common.own_shard_verified {
-            // Leader's shard for our index: verify immediately.
-            state
+        // Leader's shard for our index is always verified eagerly,
+        // even after transitioning to Ready. This ensures we broadcast
+        // our own shard to help slower peers reach quorum.
+        if is_from_leader && !self.common().own_shard_verified {
+            let progressed = self
+                .common_mut()
                 .verify_own_shard(
                     sender,
                     commitment,
@@ -1390,30 +1416,42 @@ where
                     ctx.scheme.me().is_some(),
                     blocker,
                 )
-                .await
-        } else {
-            // Buffer for batch validation.
-            state
-                .common
-                .received_shards
-                .insert(indexed.index, indexed.data.clone());
-            state.common.contributed.set(u64::from(indexed.index), true);
-            state.pending_shards.insert(sender, indexed);
-            true
-        };
+                .await;
 
-        if progressed {
-            if let Self::AwaitingQuorum(state) = self {
-                if let Some(ready) = state
-                    .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-                    .await
-                {
-                    *self = Self::Ready(ready);
+            if progressed {
+                if let Self::AwaitingQuorum(state) = self {
+                    if let Some(ready) = state
+                        .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
+                        .await
+                    {
+                        *self = Self::Ready(ready);
+                    }
                 }
             }
+            return progressed;
         }
 
-        progressed
+        // Non-leader shards are only accepted while awaiting quorum.
+        let Self::AwaitingQuorum(state) = self else {
+            return false;
+        };
+
+        // Buffer for batch validation.
+        state
+            .common
+            .received_shards
+            .insert(indexed.index, indexed.data.clone());
+        state.common.contributed.set(u64::from(indexed.index), true);
+        state.pending_shards.insert(sender, indexed);
+
+        if let Some(ready) = state
+            .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
+            .await
+        {
+            *self = Self::Ready(ready);
+        }
+
+        true
     }
 }
 
@@ -4357,12 +4395,13 @@ mod tests {
         );
     }
 
-    /// When the leader withholds its shard from a participant,
-    /// that participant can still reconstruct the block from gossipped shards.
-    /// The shard subscription must resolve once the block is reconstructed,
-    /// even though the leader's own shard was never directly received.
+    /// When the leader withholds its shard from a participant, the block
+    /// can still be reconstructed from gossipped shards. However, the shard
+    /// subscription must NOT resolve because the participant's own shard was
+    /// never verified. Voting requires own-shard verification to ensure the
+    /// participant re-broadcasts its shard and helps slower peers reach quorum.
     #[test_traced]
-    fn test_shard_subscription_resolves_after_reconstruction_without_leader_shard() {
+    fn test_shard_subscription_pending_after_reconstruction_without_leader_shard() {
         let fixture = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4386,7 +4425,7 @@ mod tests {
                     .expect("remove_link should succeed");
 
                 // Subscribe to the shard and block BEFORE any broadcasting.
-                let shard_sub = peers[1].mailbox.subscribe_shard(commitment).await;
+                let mut shard_sub = peers[1].mailbox.subscribe_shard(commitment).await;
                 let block_sub = peers[1].mailbox.subscribe(commitment).await;
 
                 // Leader broadcasts.
@@ -4407,14 +4446,12 @@ mod tests {
                 let reconstructed = block_sub.await.expect("block subscription should resolve");
                 assert_eq!(reconstructed.commitment(), commitment);
 
-                // Shard subscription must also resolve, even though the leader
-                // never sent the victim its own shard directly.
-                select! {
-                    _ = shard_sub => {},
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("shard subscription did not resolve after reconstruction");
-                    },
-                };
+                // Shard subscription must NOT resolve because the leader
+                // never sent the victim its own shard.
+                assert!(
+                    matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "shard subscription must not resolve without own shard verification"
+                );
             },
         );
     }
@@ -4671,5 +4708,111 @@ mod tests {
                 "block should not reconstruct from evicted buffers"
             );
         });
+    }
+
+    /// When peer gossip shards arrive before the leader's direct shard,
+    /// the state may transition to Ready before the leader shard is
+    /// processed. The late leader shard must still be accepted, verified,
+    /// and broadcast so that slower peers can reach quorum.
+    #[test_traced]
+    fn test_late_leader_shard_accepted_after_quorum_transition() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                let leader_idx = 0usize;
+                let victim_idx = 1usize;
+                let leader = peers[leader_idx].public_key.clone();
+                let victim = peers[victim_idx].public_key.clone();
+
+                // Sever the link from leader to victim so the leader's
+                // direct shard does not arrive initially.
+                oracle
+                    .remove_link(leader.clone(), victim.clone())
+                    .await
+                    .expect("remove_link should succeed");
+
+                // Leader proposes. All peers except the victim get their
+                // shard from the leader, verify it, and gossip it.
+                peers[leader_idx]
+                    .mailbox
+                    .proposed(round, coded_block.clone())
+                    .await;
+
+                // Inform all non-leader peers of the leader.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox
+                        .discovered(commitment, leader.clone(), round)
+                        .await;
+                }
+
+                // Wait for gossip to propagate. The victim should
+                // reconstruct the block from gossiped peer shards,
+                // transitioning to Ready without its own shard.
+                context.sleep(config.link.latency * 4).await;
+
+                let block_sub = peers[victim_idx].mailbox.subscribe(commitment).await;
+                select! {
+                    result = block_sub => {
+                        let reconstructed = result.expect("block subscription should resolve");
+                        assert_eq!(reconstructed.commitment(), commitment);
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("victim did not reconstruct block from gossip");
+                    },
+                }
+
+                // The shard subscription should NOT have resolved yet
+                // because the victim has not verified its own shard.
+                let mut shard_sub = peers[victim_idx].mailbox.subscribe_shard(commitment).await;
+                assert!(
+                    matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "shard subscription must not resolve before own shard is verified"
+                );
+
+                // Now restore the link so the leader's shard arrives late.
+                oracle
+                    .add_link(leader.clone(), victim.clone(), DEFAULT_LINK)
+                    .await
+                    .expect("add_link should succeed");
+
+                // Re-send the leader's shard manually via the leader's
+                // network sender (the engine already broadcast it earlier,
+                // but the link was down).
+                let leader_shard = coded_block
+                    .shard(peers[victim_idx].index.get() as u16)
+                    .expect("missing victim shard");
+                peers[leader_idx]
+                    .sender
+                    .send(Recipients::One(victim.clone()), leader_shard.encode(), true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // The shard subscription should now resolve because the
+                // late leader shard was accepted and verified.
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("shard subscription did not resolve after late leader shard");
+                    },
+                }
+
+                // No peer should be blocked.
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(
+                    blocked.is_empty(),
+                    "no peer should be blocked in late leader shard test"
+                );
+            },
+        );
     }
 }
