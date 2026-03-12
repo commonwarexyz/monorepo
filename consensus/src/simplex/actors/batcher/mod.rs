@@ -1545,6 +1545,209 @@ mod tests {
         conflicting_notarize_voter_is_forwarded(secp256r1::fixture);
     }
 
+    /// Regression: a participant who sent a finalize vote for the same proposal
+    /// already has the block and must not be included in the forwarding set.
+    fn finalize_voter_excluded_from_forwarding<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 7;
+        let namespace = b"batcher_finalize_voter_forwarding".to_vec();
+        let epoch = Epoch::new(555);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let relay = MockRelay::new();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                relay: relay.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+                forwarding: ForwardingPolicy::All,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::new();
+            for (i, pk) in participants.iter().enumerate() {
+                if i == 0 {
+                    participant_senders.push(None);
+                    continue;
+                }
+                let (sender, _receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(pk.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // View 2: participants 0..quorum notarize, participant 6 sends
+            // a finalize (implying they already have the block), and
+            // participant 5 is truly missing. Only participant 5 should
+            // appear in the forwarding set.
+            let view2 = View::new(2);
+            let leader2 = Participant::new(1);
+            batcher_mailbox.update(view2, leader2, View::zero()).await;
+
+            let round2 = Round::new(epoch, view2);
+            let proposal = Proposal::new(round2, View::new(1), Sha256::hash(b"payload"));
+
+            // Send notarize votes from participants 1..5 (quorum = 5 for n=7)
+            for i in 1..5 {
+                let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Vote::Notarize(vote).encode(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Participant 5 sends a nullify (establishes activity but no block)
+            let nullify_vote = Nullify::sign::<Sha256Digest>(&schemes[5], round2).unwrap();
+            if let Some(ref mut sender) = participant_senders[5] {
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::<S, Sha256Digest>::Nullify(nullify_vote).encode(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // Participant 6 sends a finalize vote for the same proposal
+            let finalize_vote = Finalize::sign(&schemes[6], proposal.clone()).unwrap();
+            if let Some(ref mut sender) = participant_senders[6] {
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::Finalize(finalize_vote).encode(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // Our own notarize vote (participant 0)
+            let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
+
+            context.sleep(Duration::from_millis(100)).await;
+            let mut saw_notarization = false;
+            loop {
+                let output = select! {
+                    output = voter_receiver.recv() => output,
+                    _ = context.sleep(Duration::from_millis(100)) => None,
+                };
+                let Some(output) = output else {
+                    break;
+                };
+                match output {
+                    voter::Message::Verified(Certificate::Notarization(n), _) => {
+                        assert_eq!(n.view(), view2);
+                        saw_notarization = true;
+                        break;
+                    }
+                    voter::Message::Proposal(_) => {}
+                    _ => panic!("unexpected batcher output"),
+                }
+            }
+            assert!(saw_notarization, "expected notarization");
+
+            let view3 = View::new(3);
+            batcher_mailbox
+                .update(view3, Participant::new(3), View::zero())
+                .await;
+            context.sleep(Duration::from_millis(50)).await;
+
+            let broadcasts = relay.broadcasts.lock();
+            assert_eq!(
+                broadcasts.len(),
+                1,
+                "expected exactly one targeted broadcast"
+            );
+            let (ref digest, forwarded_round, ref peers) = broadcasts[0];
+            assert_eq!(*digest, proposal.payload);
+            assert_eq!(forwarded_round, proposal.round);
+            // Only participant 5 should be forwarded to; participant 6 sent
+            // a finalize and already has the block.
+            assert_eq!(peers, &vec![participants[5].clone()]);
+        });
+    }
+
+    #[test_traced]
+    fn test_finalize_voter_excluded_from_forwarding() {
+        finalize_voter_excluded_from_forwarding(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        finalize_voter_excluded_from_forwarding(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        finalize_voter_excluded_from_forwarding(bls12381_threshold_std::fixture::<MinPk, _>);
+        finalize_voter_excluded_from_forwarding(bls12381_threshold_std::fixture::<MinSig, _>);
+        finalize_voter_excluded_from_forwarding(bls12381_multisig::fixture::<MinPk, _>);
+        finalize_voter_excluded_from_forwarding(bls12381_multisig::fixture::<MinSig, _>);
+        finalize_voter_excluded_from_forwarding(ed25519::fixture);
+        finalize_voter_excluded_from_forwarding(secp256r1::fixture);
+    }
+
     /// Test that if both votes and a certificate arrive, only one certificate is sent to voter.
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where

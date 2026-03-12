@@ -609,7 +609,7 @@ where
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
                     // Collect candidates while we still hold `round`.
-                    if !self.forwarding.is_disabled() {
+                    if self.forwarding.is_enabled() {
                         let candidates = round.missing_notarize_voters(&notarization.proposal);
                         forward_candidates = Some((notarization.proposal.clone(), candidates));
                     }
