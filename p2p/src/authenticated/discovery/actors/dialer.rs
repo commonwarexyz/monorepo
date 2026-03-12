@@ -18,7 +18,6 @@ use commonware_runtime::{
     Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::SystemTimeExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
@@ -38,13 +37,10 @@ pub struct Config<C: Signer> {
     /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
-    /// The frequency at which to refresh the list of dialable peers if there are no more peers in
-    /// the queue. This also limits the rate at which any single peer is dialed multiple times.
-    ///
-    /// This approach attempts to help ensure that the connection rate-limiter is not maxed out for
-    /// a single peer by preventing dialing it as fast as possible. This should make it easier for
-    /// other peers to dial us.
-    pub query_frequency: Duration,
+    /// The maximum interval between tracker queries when the queue is empty. This is the
+    /// per-peer rate limit interval, since that is the soonest any peer could become
+    /// reservable again.
+    pub max_query_interval: Duration,
 
     /// Whether to allow dialing private IP addresses after DNS resolution.
     pub allow_private_ips: bool,
@@ -61,7 +57,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
-    query_frequency: Duration,
+    max_query_interval: Duration,
     allow_private_ips: bool,
 
     // ---------- Metrics ----------
@@ -86,7 +82,7 @@ impl<
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
-            query_frequency: cfg.query_frequency,
+            max_query_interval: cfg.max_query_interval,
             allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
@@ -166,38 +162,30 @@ impl<
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
-        let mut query_deadline = self.context.current();
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                // Update the deadline.
-                dial_deadline = dial_deadline.add_jittered(&mut self.context, self.dial_frequency);
-
-                // Pop the queue until we can reserve a peer.
-                // If a peer is reserved, attempt to dial it.
-                while let Some(peer) = self.queue.pop() {
-                    // Attempt to reserve peer.
-                    let Some(reservation) = tracker.dial(peer).await else {
-                        continue;
-                    };
-                    self.dial_peer(reservation, &mut supervisor);
-                    break;
-                }
-            },
-            _ = self.context.sleep_until(query_deadline) => {
-                // Update the deadline.
-                query_deadline =
-                    query_deadline.add_jittered(&mut self.context, self.query_frequency);
-
-                // Only update the queue if it is empty.
-                if self.queue.is_empty() {
-                    // Query the tracker for dialable peers and shuffle the list to prevent
-                    // starvation.
-                    self.queue = tracker.dialable().await;
+                // Set next deadline.
+                let min = self.context.current() + self.dial_frequency;
+                dial_deadline = if self.queue.is_empty() {
+                    let max = self.context.current() + self.max_query_interval;
+                    let dialable = tracker.dialable().await;
+                    self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
+                    dialable.next_query_at.unwrap_or(max).clamp(min, max)
+                } else {
+                    min
+                };
+
+                // Pop through peers until we can reserve and dial one.
+                while let Some(peer) = self.queue.pop() {
+                    if let Some(reservation) = tracker.dial(peer).await {
+                        self.dial_peer(reservation, &mut supervisor);
+                        break;
+                    }
                 }
             },
         }
@@ -241,7 +229,7 @@ mod tests {
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_frequency,
-                query_frequency: Duration::from_secs(60),
+                max_query_interval: Duration::from_secs(60),
                 allow_private_ips: true,
             };
 
@@ -277,7 +265,10 @@ mod tests {
                 select! {
                     msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(peers.clone());
+                            let _ = responder.send(tracker::ingress::Dialable {
+                                peers: peers.clone(),
+                                next_query_at: Some(context.current()),
+                            });
                         }
                         Some(tracker::Message::Dial {
                             public_key,

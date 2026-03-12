@@ -586,7 +586,7 @@ mod tests {
             ));
 
             let dialable_peers = mailbox.dialable().await;
-            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
+            assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
         });
     }
 
@@ -866,8 +866,8 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
-            assert_eq!(dialable_peers.len(), 1);
-            assert_eq!(dialable_peers[0], boot_pk);
+            assert_eq!(dialable_peers.peers.len(), 1);
+            assert_eq!(dialable_peers.peers[0], boot_pk);
         });
     }
 

@@ -15,6 +15,26 @@ use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot},
     ordered::Set,
 };
+use std::time::SystemTime;
+
+/// Dialable peers and the next time it is worth querying again.
+#[derive(Clone, Debug)]
+pub struct Dialable<C: PublicKey> {
+    /// Peers that can be dialed immediately.
+    pub peers: Vec<C>,
+
+    /// Earliest known time at which another peer may become dialable.
+    pub next_query_at: Option<SystemTime>,
+}
+
+impl<C: PublicKey> Default for Dialable<C> {
+    fn default() -> Self {
+        Self {
+            peers: Vec::new(),
+            next_query_at: None,
+        }
+    }
+}
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -91,8 +111,8 @@ pub enum Message<C: PublicKey> {
     // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
     Dialable {
-        /// One-shot channel to send the list of dialable peers.
-        responder: oneshot::Sender<Vec<C>>,
+        /// One-shot channel to send the dialable peers and next query deadline.
+        responder: oneshot::Sender<Dialable<C>>,
     },
 
     /// Request a reservation for a particular peer to dial.
@@ -169,10 +189,10 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
         self.0.send_lossy(Message::Peers { peers });
     }
 
-    /// Request a list of dialable peers from the tracker.
+    /// Request dialable peers from the tracker.
     ///
-    /// Returns an empty list if the tracker is shut down.
-    pub async fn dialable(&mut self) -> Vec<C> {
+    /// Returns an empty response if the tracker is shut down.
+    pub async fn dialable(&mut self) -> Dialable<C> {
         self.0
             .request_or_default(|responder| Message::Dialable { responder })
             .await

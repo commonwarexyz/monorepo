@@ -192,7 +192,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                query_frequency: self.cfg.query_frequency,
+                max_query_interval: self.cfg.allowed_connection_rate_per_peer.replenish_interval(),
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );

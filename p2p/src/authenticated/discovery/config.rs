@@ -82,11 +82,6 @@ pub struct Config<C: Signer> {
     /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
 
-    /// Average frequency at which we will fetch a new list of dialable peers.
-    ///
-    /// This value also limits the rate at which we attempt to re-dial any single peer.
-    pub query_frequency: Duration,
-
     /// Times that dialing a given peer should fail before asking for updated peer information for
     /// that peer.
     pub dial_fail_limit: usize,
@@ -155,7 +150,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             dial_frequency: Duration::from_secs(1),
-            query_frequency: Duration::from_secs(60),
             dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
@@ -198,7 +192,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             dial_frequency: Duration::from_millis(500),
-            query_frequency: Duration::from_secs(30),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
@@ -234,7 +227,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(200),
-            query_frequency: Duration::from_secs(5),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8

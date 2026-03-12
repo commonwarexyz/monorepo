@@ -1,4 +1,10 @@
-use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
+use super::{
+    ingress::Dialable,
+    metrics::Metrics,
+    record::{DialStatus, Record, ReserveResult},
+    set::Set,
+    Metadata, Reservation,
+};
 use crate::{
     authenticated::discovery::{
         actors::tracker::ingress::Releaser,
@@ -9,8 +15,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
-    Quota, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Quota, Spawner,
 };
 use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
 use rand::{seq::IteratorRandom, Rng};
@@ -64,15 +69,15 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
+    /// Minimum duration between reservations for a given peer.
+    rate_limit: Duration,
+
     // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record<C>>,
 
     /// The peer sets
     sets: BTreeMap<u64, Set<C>>,
-
-    /// Rate limiter for connection attempts.
-    rate_limiter: KeyedRateLimiter<C, E>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -105,7 +110,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
         peers.insert(myself.public_key.clone(), Record::myself(myself));
-        let rate_limiter = KeyedRateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         // Other initialization.
         // TODO(#1833): Metrics should use the post-start context
@@ -119,9 +123,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             block_duration: cfg.block_duration,
+            rate_limit: cfg.rate_limit.replenish_interval(),
             peers,
             sets: BTreeMap::new(),
-            rate_limiter,
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -244,13 +248,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 self.delete_if_needed(peer);
             });
         }
-
-        // Attempt to remove any old records from the rate limiter.
-        // This is a best-effort attempt to prevent memory usage from growing indefinitely.
-        //
-        // We don't reduce the capacity of the rate limiter to avoid re-allocation on
-        // future peer set additions.
-        self.rate_limiter.retain_recent();
 
         true
     }
@@ -379,19 +376,30 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
-    pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses that are not blocked
-        let mut result: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|&(peer, r)| {
-                !self.blocked.contains(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
-            })
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        result.sort();
-        result
+    /// Returns dialable peers and the next time another peer may become dialable.
+    pub fn dialable(&self) -> Dialable<C> {
+        let now = self.context.current();
+        let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
+
+        let mut peers = Vec::new();
+        for (peer, record) in &self.peers {
+            if self.blocked.contains(peer) {
+                continue;
+            }
+            match record.dialable(now, self.allow_private_ips, self.allow_dns) {
+                DialStatus::Now => peers.push(peer.clone()),
+                DialStatus::After(t) => {
+                    next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
+                }
+                DialStatus::Unavailable => {}
+            }
+        }
+        peers.sort();
+
+        Dialable {
+            peers,
+            next_query_at,
+        }
     }
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
@@ -449,27 +457,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
-        // Already reserved
-        let record = self.peers.get_mut(peer).unwrap();
-        if record.reserved() {
-            return None;
-        }
-
-        // Rate limit
-        if self.rate_limiter.check_key(peer).is_err() {
-            self.metrics
-                .limits
-                .get_or_create(&metrics::Peer::new(peer))
-                .inc();
-            return None;
-        }
-
         // Reserve
-        if record.reserve() {
-            self.metrics.reserved.inc();
-            return Some(Reservation::new(metadata, self.releaser.clone()));
+        let record = self.peers.get_mut(peer).unwrap();
+        match record.reserve(&mut self.context, self.rate_limit) {
+            ReserveResult::Reserved => {
+                self.metrics.reserved.inc();
+                Some(Reservation::new(metadata, self.releaser.clone()))
+            }
+            ReserveResult::RateLimited => {
+                self.metrics
+                    .limits
+                    .get_or_create(&metrics::Peer::new(peer))
+                    .inc();
+                None
+            }
+            ReserveResult::Unavailable => None,
         }
-        None
     }
 
     /// Attempt to delete a record.
@@ -1153,7 +1156,7 @@ mod tests {
 
             // Peer should be dialable before blocking
             assert!(
-                directory.dialable().contains(&peer_pk),
+                directory.dialable().peers.contains(&peer_pk),
                 "Peer should be dialable before blocking"
             );
 
@@ -1162,7 +1165,7 @@ mod tests {
 
             // Peer should NOT be dialable while blocked
             assert!(
-                !directory.dialable().contains(&peer_pk),
+                !directory.dialable().peers.contains(&peer_pk),
                 "Blocked peer should not be dialable"
             );
 
@@ -1172,7 +1175,7 @@ mod tests {
 
             // Peer should be dialable again after unblock
             assert!(
-                directory.dialable().contains(&peer_pk),
+                directory.dialable().peers.contains(&peer_pk),
                 "Peer should be dialable after unblock"
             );
         });
