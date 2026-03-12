@@ -2,7 +2,6 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use commonware_runtime::Quota;
 use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 pub mod actor;
@@ -22,7 +21,7 @@ pub use reservation::Reservation;
 pub struct Config<C: Signer> {
     pub crypto: C,
     pub tracked_peer_sets: usize,
-    pub allowed_connection_rate_per_peer: Quota,
+    pub peer_connection_cooldown: Duration,
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub bypass_ip_check: bool,

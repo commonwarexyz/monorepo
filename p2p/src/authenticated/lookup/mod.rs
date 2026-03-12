@@ -62,7 +62,7 @@
 //! - `max_concurrent_handshakes`: The maximum number of concurrent handshake attempts allowed.
 //! - `allowed_handshake_rate_per_ip`: The rate limit for handshake attempts originating from a single IP address.
 //! - `allowed_handshake_rate_per_subnet`: The rate limit for handshake attempts originating from a single IP subnet.
-//! - `allowed_connection_rate_per_peer`: The rate limit for connections to a single peer (incoming or outgoing).
+//! - `peer_connection_cooldown`: The per-peer rate limit for inbound and outbound connection reservations, expressed as a minimum cooldown between attempts.
 //! - `rate` (per channel): The rate limit for messages sent on a single channel.
 //!
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)

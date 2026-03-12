@@ -8,6 +8,7 @@
 //! and that they can be looked up by their identifiers.
 
 mod data;
+pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
 mod mailbox;
