@@ -19,7 +19,7 @@
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
 //! ensures the commitment's context digest matches the consensus context and waits for validation of
-//! the shard assigned to this participant by the proposer. If that shard is valid, the local shard is
+//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
 //! relayed to all other participants to aid in block reconstruction.
 //!
 //! A participant may still reconstruct the full block from gossiped shards before its designated
@@ -776,12 +776,12 @@ where
 
         match scheme.me() {
             Some(_) => {
-                // Subscribe to local shard readiness. For participants, this
+                // Subscribe to assigned shard readiness. For participants, this
                 // only completes once the leader-delivered shard for our
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_shard(payload).await;
+                let validity_rx = self.shards.subscribe_assigned_shard_ready(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context
                     .with_label("shard_validity_wait")
