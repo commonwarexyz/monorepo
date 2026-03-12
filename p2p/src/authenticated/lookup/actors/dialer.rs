@@ -40,6 +40,11 @@ pub struct Config<C: Signer> {
     /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
+    /// The maximum interval between tracker queries when the queue is empty. This is the
+    /// per-peer rate limit interval, since that is the soonest any peer could become
+    /// reservable again.
+    pub max_query_interval: Duration,
+
     /// Whether to allow dialing private IP addresses after DNS resolution.
     pub allow_private_ips: bool,
 }
@@ -55,6 +60,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
+    max_query_interval: Duration,
     allow_private_ips: bool,
 
     // ---------- Metrics ----------
@@ -79,6 +85,7 @@ impl<
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
+            max_query_interval: cfg.max_query_interval,
             allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
@@ -166,14 +173,14 @@ impl<
             },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Set next deadline.
-                let max = self.context.current() + self.dial_frequency;
                 dial_deadline = if self.queue.is_empty() {
+                    let max = self.context.current() + self.max_query_interval;
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
                     dialable.next_query_at.map_or(max, |t| t.min(max))
                 } else {
-                    max
+                    self.context.current() + self.dial_frequency
                 };
 
                 // Pop through peers until we can reserve and dial one.
@@ -222,6 +229,7 @@ mod tests {
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_frequency,
+                max_query_interval: Duration::from_secs(60),
                 allow_private_ips: true,
             };
 
@@ -300,6 +308,7 @@ mod tests {
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_frequency,
+                    max_query_interval: dial_frequency,
                     allow_private_ips: true,
                 },
             );
