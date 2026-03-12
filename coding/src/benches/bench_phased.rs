@@ -90,15 +90,15 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                         })
                                         .collect();
 
-                                    (commitment, my_shard, weak_shards)
-                                },
-                                |(commitment, my_shard, weak_shards)| {
                                     let my_index =
                                         config.minimum_shards.get() + config.extra_shards.get() - 1;
                                     let (checking_data, my_checked_shard, _) =
                                         S::weaken(&config, &commitment, my_index, my_shard)
                                             .unwrap();
 
+                                    (commitment, checking_data, my_checked_shard, weak_shards)
+                                },
+                                |(commitment, checking_data, my_checked_shard, weak_shards)| {
                                     let mut checked_shards = weak_shards
                                         .into_iter()
                                         .map(|(idx, weak_shard)| {

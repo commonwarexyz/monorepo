@@ -89,16 +89,16 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                         })
                                         .collect();
 
-                                    (commitment, selected_shards)
-                                },
-                                |(commitment, selected_shards)| {
-                                    let checked_shards = selected_shards
+                                    let checked_shards: Vec<_> = selected_shards
                                         .iter()
                                         .map(|(idx, shard)| {
                                             S::check(&config, &commitment, *idx, shard).unwrap()
                                         })
-                                        .collect::<Vec<_>>();
+                                        .collect();
 
+                                    (commitment, checked_shards)
+                                },
+                                |(commitment, checked_shards)| {
                                     // Decode data
                                     if conc > 1 {
                                         S::decode(
