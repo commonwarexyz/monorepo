@@ -1,14 +1,14 @@
 //! MMR conformance tests and shared test utilities for root stability.
 
 use crate::mmr::{
-    hasher::{Hasher as MmrHasher, Standard},
+    hasher::{Hasher, Standard},
     mem::Mmr,
 };
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{sha256, Sha256};
 
 /// Build a test MMR by adding `elements` elements using the provided hasher.
-pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
+pub fn build_test_mmr<H: Hasher<Digest = sha256::Digest>>(
     hasher: &mut H,
     mut mmr: Mmr<sha256::Digest>,
     elements: u64,
@@ -16,8 +16,7 @@ pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
     let changeset = {
         let mut batch = mmr.new_batch();
         for i in 0u64..elements {
-            hasher.inner().update(&i.to_be_bytes());
-            let element = hasher.inner().finalize();
+            let element = hasher.digest(&i.to_be_bytes());
             batch.add(hasher, &element);
         }
         batch.merkleize(hasher).finalize()

@@ -129,7 +129,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<E, C, I, H, U>,
@@ -171,7 +171,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<E, C, I, H, U>,
@@ -237,7 +237,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     db: &'a Db<E, C, I, H, U>,
     journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
@@ -257,7 +257,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Read an operation at a given location from the correct source.
     ///
@@ -490,7 +490,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
@@ -534,7 +534,7 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Read through: mutations -> base diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
@@ -558,8 +558,8 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    P: Readable<H::Digest>
-        + BatchChainInfo<H::Digest>
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -680,8 +680,8 @@ where
     I: OrderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    P: Readable<H::Digest>
-        + BatchChainInfo<H::Digest>
+    P: Readable<Digest = H::Digest>
+        + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -944,7 +944,7 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Read through: diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
@@ -963,7 +963,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {
@@ -998,7 +998,7 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
     pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>> {
@@ -1181,8 +1181,8 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        P: Readable<H::Digest>
-            + BatchChainInfo<H::Digest>
+        P: Readable<Digest = H::Digest>
+            + BatchChainInfo<Digest = H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
     {
         type K = K;
@@ -1215,8 +1215,8 @@ mod trait_impls {
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        P: Readable<H::Digest>
-            + BatchChainInfo<H::Digest>
+        P: Readable<Digest = H::Digest>
+            + BatchChainInfo<Digest = H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
     {
         type K = K;
@@ -1245,7 +1245,9 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<U>: Codec,
-        P: Readable<H::Digest> + BatchChainInfo<H::Digest> + BatchChain<Operation<U>>,
+        P: Readable<Digest = H::Digest>
+            + BatchChainInfo<Digest = H::Digest>
+            + BatchChain<Operation<U>>,
     {
         type Digest = H::Digest;
         type Changeset = Changeset<U::Key, H::Digest, Operation<U>>;

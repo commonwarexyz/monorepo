@@ -70,7 +70,7 @@ cfg_if::cfg_if! {
 }
 
 /// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
+pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
     /// The parent MMR.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
@@ -103,7 +103,7 @@ pub struct Changeset<D: Digest> {
     pub(crate) base_size: Position,
 }
 
-impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -135,7 +135,7 @@ impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location {
         Location::try_from(self.size()).expect("invalid mmr size")
@@ -357,7 +357,7 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
             same_height
                 .par_iter()
                 .map_init(
-                    || hasher.fork(),
+                    || hasher.clone(),
                     |hasher, &pos| {
                         let left = pos - two_h;
                         let right = pos - 1;
@@ -399,7 +399,9 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D, P> {
+    type Digest = D;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -417,9 +419,11 @@ impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
+impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchChainInfo
     for MerkleizedBatch<'a, D, P>
 {
+    type Digest = D;
+
     fn base_size(&self) -> Position {
         self.parent.base_size()
     }
@@ -435,7 +439,7 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
     /// Access the parent MMR.
     #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
@@ -469,7 +473,9 @@ impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
+    MerkleizedBatch<'a, D, P>
+{
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMR.
     pub fn finalize(self) -> Changeset<D> {
@@ -499,13 +505,8 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> MerkleizedBatch<'a, D, P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr,
-        hasher::{Hasher as _, Standard},
-        mem::Mmr,
-        read::Readable,
-    };
-    use commonware_cryptography::{Hasher, Sha256};
+    use crate::mmr::{conformance::build_test_mmr, hasher::Standard, mem::Mmr, read::Readable};
+    use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 
     /// Build a reference MMR with `n` elements for comparison.
@@ -531,8 +532,7 @@ mod tests {
                 let base = Mmr::new(&mut hasher);
                 let mut batch = UnmerkleizedBatch::new(&base);
                 for i in 0..n {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 let merkleized = batch.merkleize(&mut hasher);
@@ -566,8 +566,7 @@ mod tests {
 
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
@@ -577,8 +576,7 @@ mod tests {
 
             // Proof from merkleized batch should work.
             let proof = merkleized.proof(Location::new(55)).unwrap();
-            hasher.inner().update(&55u64.to_be_bytes());
-            let element = hasher.inner().finalize();
+            let element = hasher.digest(&55u64.to_be_bytes());
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &element,
@@ -601,8 +599,7 @@ mod tests {
 
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 50u64..75 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
@@ -638,8 +635,7 @@ mod tests {
             // Fork A: add 10 elements.
             let mut batch_a = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -647,8 +643,7 @@ mod tests {
             // Fork B: add 5 different elements (using different seed).
             let mut batch_b = UnmerkleizedBatch::new(&base);
             for i in 100u64..105 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -672,8 +667,7 @@ mod tests {
             // Layer A: add elements 50..60.
             let mut batch_a = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -681,8 +675,7 @@ mod tests {
             // Layer B on top of A: add elements 60..70.
             let mut batch_b = UnmerkleizedBatch::new(&merkleized_a);
             for i in 60u64..70 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -693,8 +686,7 @@ mod tests {
 
             // Proofs from B should verify.
             for i in [0u64, 25, 55, 65, 69] {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 let proof = merkleized_b.proof(Location::new(i)).unwrap();
                 assert!(
                     proof.verify_element_inclusion(
@@ -720,8 +712,7 @@ mod tests {
             // Layer A.
             let mut batch_a = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -729,8 +720,7 @@ mod tests {
             // Layer B on top of A.
             let mut batch_b = UnmerkleizedBatch::new(&merkleized_a);
             for i in 60u64..70 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -803,8 +793,7 @@ mod tests {
 
             // Add more leaves.
             for i in 50u64..55 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
@@ -815,8 +804,7 @@ mod tests {
             assert_eq!(merkleized.get_node(leaf_10_pos), Some(updated_digest));
 
             // Verify new leaf's proof (add uses leaf_digest, so verify_element_inclusion works).
-            hasher.inner().update(&52u64.to_be_bytes());
-            let element = hasher.inner().finalize();
+            let element = hasher.digest(&52u64.to_be_bytes());
             let proof = merkleized.proof(Location::new(52)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
@@ -882,15 +870,13 @@ mod tests {
 
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
 
             // Single element proof.
-            hasher.inner().update(&55u64.to_be_bytes());
-            let element = hasher.inner().finalize();
+            let element = hasher.digest(&55u64.to_be_bytes());
             let proof = merkleized.proof(Location::new(55)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
@@ -904,8 +890,7 @@ mod tests {
             let range_proof = merkleized.range_proof(range.clone()).unwrap();
             let mut elements = Vec::new();
             for i in 50u64..55 {
-                hasher.inner().update(&i.to_be_bytes());
-                elements.push(hasher.inner().finalize());
+                elements.push(hasher.digest(&i.to_be_bytes()));
             }
             assert!(range_proof.verify_range_inclusion(
                 &mut hasher,
@@ -950,8 +935,7 @@ mod tests {
             // First batch: add 5 leaves.
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 50u64..55 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
@@ -959,8 +943,7 @@ mod tests {
             // Round-trip: back to dirty, add more, merkleize again.
             let mut dirty_again = merkleized.into_dirty();
             for i in 55u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 dirty_again.add(&mut hasher, &element);
             }
             let merkleized_again = dirty_again.merkleize(&mut hasher);
@@ -981,8 +964,7 @@ mod tests {
             // Changeset 1: add 10 leaves.
             let mut batch1 = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch1.add(&mut hasher, &element);
             }
             let cs1 = batch1.merkleize(&mut hasher).finalize();
@@ -991,8 +973,7 @@ mod tests {
             // Changeset 2: add 10 more leaves on updated base.
             let mut batch2 = UnmerkleizedBatch::new(&base);
             for i in 60u64..70 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch2.add(&mut hasher, &element);
             }
             let cs2 = batch2.merkleize(&mut hasher).finalize();
@@ -1014,15 +995,13 @@ mod tests {
 
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 100u64..110 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&mut hasher);
 
             // Proof for retained element should work.
-            hasher.inner().update(&80u64.to_be_bytes());
-            let element = hasher.inner().finalize();
+            let element = hasher.digest(&80u64.to_be_bytes());
             let proof = merkleized.proof(Location::new(80)).unwrap();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
@@ -1060,8 +1039,7 @@ mod tests {
             // Layer B on A: add leaves.
             let mut batch_b = UnmerkleizedBatch::new(&merkleized_a);
             for i in 100u64..105 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -1108,8 +1086,7 @@ mod tests {
             // Layer C on B: add 10 leaves.
             let mut batch_c = merkleized_b.new_batch();
             for i in 300u64..310 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch_c.add(&mut hasher, &element);
             }
             let merkleized_c = batch_c.merkleize(&mut hasher);
@@ -1135,8 +1112,7 @@ mod tests {
                     .update_leaf_digest(Location::new(10), digest_b)
                     .unwrap();
                 for i in 300u64..310 {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -1204,8 +1180,7 @@ mod tests {
             // Add 10 leaves in batch, then update the 3rd new leaf (location 52).
             let mut batch = UnmerkleizedBatch::new(&base);
             for i in 50u64..60 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
                 batch.add(&mut hasher, &element);
             }
             let updated_digest = Sha256::fill(0xEE);

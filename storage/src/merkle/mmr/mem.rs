@@ -465,7 +465,9 @@ impl<D: Digest> Mmr<D> {
     }
 }
 
-impl<D: Digest> Readable<D> for Mmr<D> {
+impl<D: Digest> Readable for Mmr<D> {
+    type Digest = D;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -483,7 +485,9 @@ impl<D: Digest> Readable<D> for Mmr<D> {
     }
 }
 
-impl<D: Digest> BatchChainInfo<D> for Mmr<D> {
+impl<D: Digest> BatchChainInfo for Mmr<D> {
+    type Digest = D;
+
     fn base_size(&self) -> Position {
         self.size()
     }
@@ -520,7 +524,7 @@ mod tests {
             assert_eq!(mmr.leaves(), Location::new(0));
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(&mut Sha256::new()));
             let mut mmr2 = Mmr::new(&mut hasher);
             mmr2.prune_all();
             assert_eq!(mmr2.size(), 0, "prune_all on empty MMR should do nothing");
@@ -741,8 +745,7 @@ mod tests {
             let changeset = {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -785,8 +788,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -809,8 +811,7 @@ mod tests {
             let mut reference_mmr = Mmr::new(&mut hasher);
             let mut mmr = Mmr::new(&mut hasher);
             for i in 0u64..200 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
 
                 // Add to reference MMR
                 let cs = {
@@ -857,8 +858,7 @@ mod tests {
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
-                hasher.inner().update(&leaf.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&leaf.to_be_bytes());
                 let mut batch = mmr.new_batch();
                 batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
@@ -1049,8 +1049,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
-                hasher.inner().update(&leaf.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&leaf.to_be_bytes());
                 let leaf_loc = Location::new(leaf);
                 batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }

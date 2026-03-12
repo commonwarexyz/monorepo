@@ -142,7 +142,7 @@ where
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
     /// height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
+    fn grafted_storage(&self) -> impl mmr::storage::Storage<Digest = H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
@@ -455,13 +455,18 @@ pub(super) fn combine_roots<H: Hasher>(
     grafted_mmr_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    hasher.inner().update(ops_root);
-    hasher.inner().update(grafted_mmr_root);
-    if let Some((next_bit, last_chunk_digest)) = partial {
-        hasher.inner().update(&next_bit.to_be_bytes());
-        hasher.inner().update(last_chunk_digest);
+    match partial {
+        Some((next_bit, last_chunk_digest)) => {
+            let next_bit = next_bit.to_be_bytes();
+            hasher.hash([
+                ops_root.as_ref(),
+                grafted_mmr_root.as_ref(),
+                next_bit.as_slice(),
+                last_chunk_digest.as_ref(),
+            ])
+        }
+        None => hasher.hash([ops_root.as_ref(), grafted_mmr_root.as_ref()]),
     }
-    hasher.inner().finalize()
 }
 
 /// Compute the canonical root digest of a [Db].
@@ -469,8 +474,8 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    G: mmr::read::Readable<H::Digest>,
-    S: mmr::storage::Storage<H::Digest>,
+    G: mmr::read::Readable<Digest = H::Digest>,
+    S: mmr::storage::Storage<Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &mut StandardHasher<H>,
@@ -496,8 +501,8 @@ pub(super) async fn compute_db_root<
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
 pub(super) async fn compute_grafted_mmr_root<
     H: Hasher,
-    G: mmr::read::Readable<H::Digest>,
-    S: mmr::storage::Storage<H::Digest>,
+    G: mmr::read::Readable<Digest = H::Digest>,
+    S: mmr::storage::Storage<Digest = H::Digest>,
 >(
     hasher: &mut StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
@@ -527,7 +532,7 @@ pub(super) async fn compute_grafted_mmr_root<
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
@@ -554,14 +559,12 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
             inputs
                 .into_par_iter()
                 .map_init(
-                    || hasher.fork(),
+                    || hasher.clone(),
                     |h, (ops_pos, ops_digest, chunk)| {
                         if chunk == zero_chunk {
                             (ops_pos, ops_digest)
                         } else {
-                            h.inner().update(&chunk);
-                            h.inner().update(&ops_digest);
-                            (ops_pos, h.inner().finalize())
+                            (ops_pos, h.hash([chunk.as_slice(), ops_digest.as_ref()]))
                         }
                     },
                 )
@@ -573,9 +576,10 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
                 if chunk == zero_chunk {
                     (ops_pos, ops_digest)
                 } else {
-                    hasher.inner().update(&chunk);
-                    hasher.inner().update(&ops_digest);
-                    (ops_pos, hasher.inner().finalize())
+                    (
+                        ops_pos,
+                        hasher.hash([chunk.as_slice(), ops_digest.as_ref()]),
+                    )
                 }
             })
             .collect(),
@@ -593,7 +597,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
     pool: Option<&ThreadPool>,
 ) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
@@ -610,7 +614,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     .await?;
 
     // Build a base Mmr: either from pruned components or empty.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
+    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
         let grafted_pruned_to = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
