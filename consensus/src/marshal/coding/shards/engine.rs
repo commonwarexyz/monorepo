@@ -1047,7 +1047,8 @@ where
     /// Whether the leader-delivered shard for the local index has been verified.
     assigned_shard_ready: bool,
     /// Gossip shards awaiting batch verification, keyed by sender.
-    pending_shards: BTreeMap<P, (u16, C::Shard)>,
+    /// Set to `None` after batch verification passes to reject further gossip.
+    pending_shards: Option<BTreeMap<P, (u16, C::Shard)>>,
 }
 
 /// Action to take once assigned shard readiness has been established.
@@ -1083,22 +1084,28 @@ where
             round,
             received_shards: BTreeMap::new(),
             assigned_shard_ready: false,
-            pending_shards: BTreeMap::new(),
+            pending_shards: Some(BTreeMap::new()),
         }
     }
 
     /// Batch-verify pending gossip shards when quorum is reached.
+    ///
+    /// After a successful batch, `pending_shards` is set to `None` so that
+    /// further gossip shards are silently rejected.
     async fn try_batch_verify(
         &mut self,
         commitment: Commitment,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) {
+        let Some(pending) = &self.pending_shards else {
+            return;
+        };
         let minimum = usize::from(commitment.config().minimum_shards.get());
-        if self.checked_shards.len() + self.pending_shards.len() < minimum {
+        if self.checked_shards.len() + pending.len() < minimum {
             return;
         }
-        let pending = std::mem::take(&mut self.pending_shards);
+        let pending = self.pending_shards.take().unwrap();
         let (new_checked, to_block) =
             strategy.map_partition_collect_vec(pending, |(peer, (index, data))| {
                 let checked = C::check(
@@ -1114,6 +1121,9 @@ where
         }
         for checked in new_checked {
             self.checked_shards.push(checked);
+        }
+        if self.checked_shards.len() < minimum {
+            self.pending_shards = Some(BTreeMap::new());
         }
     }
 
@@ -1218,10 +1228,15 @@ where
             return NetworkShardOutcome::Progressed(Some(action));
         }
 
-        // Gossip shard: defer to batch verification.
+        // Gossip shard: defer to batch verification. After batch
+        // verification passes, pending_shards is None and further gossip
+        // is rejected.
+        if self.pending_shards.is_none() {
+            return NetworkShardOutcome::Ignored;
+        }
         self.received_shards.insert(index, data.clone());
         self.reserved_indices.set(u64::from(index), true);
-        self.pending_shards.insert(sender, (index, data));
+        self.pending_shards.as_mut().unwrap().insert(sender, (index, data));
         self.try_batch_verify(commitment, strategy, blocker).await;
         NetworkShardOutcome::Progressed(None)
     }
