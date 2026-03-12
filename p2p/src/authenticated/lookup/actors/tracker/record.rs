@@ -42,8 +42,8 @@ pub struct Record {
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
 
-    /// Earliest time at which we should attempt another outgoing dial.
-    redial_at: SystemTime,
+    /// The last time a reservation was made for this peer (`None` if never reserved).
+    last_reserved_at: Option<SystemTime>,
 }
 
 impl Record {
@@ -56,7 +56,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            redial_at: SystemTime::UNIX_EPOCH,
+            last_reserved_at: None,
         }
     }
 
@@ -67,7 +67,7 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            redial_at: SystemTime::UNIX_EPOCH,
+            last_reserved_at: None,
         }
     }
 
@@ -105,13 +105,15 @@ impl Record {
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub const fn reserve(&mut self) -> bool {
+    /// `now` is recorded as the last reservation time. Returns `true` if the
+    /// reservation was successful, `false` otherwise.
+    pub fn reserve(&mut self, now: SystemTime) -> bool {
         if matches!(self.address, Address::Myself) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
             self.status = Status::Reserved;
+            self.last_reserved_at = Some(now);
             return true;
         }
         false
@@ -131,11 +133,6 @@ impl Record {
         self.status = Status::Inert;
     }
 
-    /// Defer the next outgoing dial attempt, never moving the deadline earlier.
-    pub fn defer(&mut self, deadline: SystemTime) {
-        self.redial_at = self.redial_at.max(deadline);
-    }
-
     // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
@@ -151,28 +148,28 @@ impl Record {
         self.sets
     }
 
-    /// Returns the earliest time at which this peer can be dialed, or `None` if it cannot
-    /// become dialable without a state change (e.g., it is reserved, connected, or has no
-    /// valid ingress).
+    /// Returns `true` if the record is dialable (ignoring timing).
     ///
-    /// A return value <= `now` means the peer is immediately dialable.
-    pub fn dialable_at(&self, allow_private_ips: bool, allow_dns: bool) -> Option<SystemTime> {
+    /// A record is dialable if:
+    /// - It is not ourselves
+    /// - We are not already connected or reserved
+    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
+    ///
+    /// The caller is responsible for checking `last_reserved_at` against the dial quota.
+    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
-            return None;
+            return false;
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return None,
+            Address::Myself => return false,
         };
-        ingress
-            .is_valid(allow_private_ips, allow_dns)
-            .then_some(self.redial_at)
+        ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if the record is immediately dialable.
-    pub fn dialable(&self, now: SystemTime, allow_private_ips: bool, allow_dns: bool) -> bool {
-        self.dialable_at(allow_private_ips, allow_dns)
-            .is_some_and(|t| t <= now)
+    /// Returns the last time a reservation was made for this peer.
+    pub const fn last_reserved_at(&self) -> Option<SystemTime> {
+        self.last_reserved_at
     }
 
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
@@ -254,7 +251,7 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
+        assert_eq!(record.last_reserved_at, None);
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
         assert!(!record.reserved());
@@ -269,7 +266,7 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
-        assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
+        assert_eq!(record.last_reserved_at, None);
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
         assert!(!record.reserved());
@@ -318,25 +315,25 @@ mod tests {
         let mut record = Record::known(test_address());
 
         assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve());
+        assert!(record.reserve(SystemTime::UNIX_EPOCH));
         assert_eq!(record.status, Status::Reserved);
         assert!(record.reserved());
 
-        assert!(!record.reserve(), "Cannot re-reserve when Reserved");
+        assert!(!record.reserve(SystemTime::UNIX_EPOCH), "Cannot re-reserve when Reserved");
         assert_eq!(record.status, Status::Reserved);
 
         record.connect();
         assert_eq!(record.status, Status::Active);
         assert!(record.reserved());
 
-        assert!(!record.reserve(), "Cannot reserve when Active");
+        assert!(!record.reserve(SystemTime::UNIX_EPOCH), "Cannot reserve when Active");
         assert_eq!(record.status, Status::Active);
 
         record.release();
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
 
-        assert!(record.reserve());
+        assert!(record.reserve(SystemTime::UNIX_EPOCH));
         assert_eq!(record.status, Status::Reserved);
         record.release();
         assert_eq!(record.status, Status::Inert);
@@ -353,7 +350,7 @@ mod tests {
     #[should_panic]
     fn test_connect_when_active_panics() {
         let mut record = Record::known(test_address());
-        assert!(record.reserve());
+        assert!(record.reserve(SystemTime::UNIX_EPOCH));
         record.connect();
         record.connect();
     }
@@ -369,7 +366,7 @@ mod tests {
     fn test_reserved_status_check() {
         let mut record = Record::known(test_address());
         assert!(!record.reserved());
-        assert!(record.reserve());
+        assert!(record.reserve(SystemTime::UNIX_EPOCH));
         assert!(record.reserved());
         record.connect();
         assert!(record.reserved());
@@ -389,7 +386,7 @@ mod tests {
         record.increment();
         assert!(!record.deletable());
 
-        assert!(record.reserve());
+        assert!(record.reserve(SystemTime::UNIX_EPOCH));
         assert!(!record.deletable());
 
         record.connect();
@@ -448,7 +445,7 @@ mod tests {
         // Already reserved - not acceptable
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
-        record_reserved.reserve();
+        record_reserved.reserve(SystemTime::UNIX_EPOCH);
         assert!(
             !record_reserved.acceptable(egress_ip, false),
             "Not acceptable when reserved"
@@ -457,7 +454,7 @@ mod tests {
         // Already connected - not acceptable
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
-        record_connected.reserve();
+        record_connected.reserve(SystemTime::UNIX_EPOCH);
         record_connected.connect();
         assert!(
             !record_connected.acceptable(egress_ip, false),
@@ -489,7 +486,7 @@ mod tests {
         // Still not acceptable when reserved
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
-        record_reserved.reserve();
+        record_reserved.reserve(SystemTime::UNIX_EPOCH);
         assert!(
             !record_reserved.acceptable(egress_ip, true),
             "Not acceptable when reserved"
@@ -498,7 +495,7 @@ mod tests {
         // Still not acceptable when connected
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
-        record_connected.reserve();
+        record_connected.reserve(SystemTime::UNIX_EPOCH);
         record_connected.connect();
         assert!(
             !record_connected.acceptable(egress_ip, true),
@@ -514,41 +511,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dialable_respects_redial_deadline() {
+    fn test_reserve_records_timestamp() {
         let mut record = Record::known(test_address());
+        assert_eq!(record.last_reserved_at(), None);
+
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-
-        assert!(record.dialable(now, true, true));
-
-        record.defer(now + Duration::from_secs(5));
-        assert!(!record.dialable(now, true, true));
-        assert!(record.dialable(now + Duration::from_secs(5), true, true));
-    }
-
-    #[test]
-    fn test_dialable_at_returns_redial_deadline() {
-        let mut record = Record::known(test_address());
-        let redial_at = SystemTime::UNIX_EPOCH + Duration::from_secs(15);
-
-        assert_eq!(
-            record.dialable_at(true, true),
-            Some(SystemTime::UNIX_EPOCH)
-        );
-
-        record.defer(redial_at);
-        assert_eq!(record.dialable_at(true, true), Some(redial_at));
-    }
-
-    #[test]
-    fn test_defer_is_monotonic() {
-        let mut record = Record::known(test_address());
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let later = now + Duration::from_secs(5);
-
-        record.defer(later);
-        record.defer(now);
-
-        assert_eq!(record.dialable_at(true, true), Some(later));
+        assert!(record.reserve(now));
+        assert_eq!(record.last_reserved_at(), Some(now));
     }
 
     #[test]
@@ -556,12 +525,10 @@ mod tests {
         use std::net::IpAddr;
         use Ingress;
 
-        let now = SystemTime::UNIX_EPOCH;
-
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
         let record_public = Record::known(types::Address::Symmetric(public_socket));
-        assert!(record_public.dialable(now, false, true));
+        assert!(record_public.dialable(false, true));
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
         let private_ingress =
@@ -573,11 +540,11 @@ mod tests {
         };
         let record_private_ingress = Record::known(asymmetric_private_ingress);
         assert!(
-            !record_private_ingress.dialable(now, false, true),
+            !record_private_ingress.dialable(false, true),
             "Should NOT be dialable when ingress Socket IP is private"
         );
         assert!(
-            record_private_ingress.dialable(now, true, true),
+            record_private_ingress.dialable(true, true),
             "Should be dialable when allow_private_ips=true"
         );
 
@@ -591,7 +558,7 @@ mod tests {
         };
         let record_private_egress = Record::known(asymmetric_private_egress);
         assert!(
-            record_private_egress.dialable(now, false, true),
+            record_private_egress.dialable(false, true),
             "Should be dialable - egress IP is not checked for dialing"
         );
 
@@ -605,11 +572,11 @@ mod tests {
         };
         let record_dns = Record::known(dns_ingress);
         assert!(
-            record_dns.dialable(now, false, true),
+            record_dns.dialable(false, true),
             "DNS ingress should be dialable (private check happens at resolution)"
         );
         assert!(
-            !record_dns.dialable(now, false, false),
+            !record_dns.dialable(false, false),
             "DNS ingress should NOT be dialable when allow_dns=false"
         );
     }
