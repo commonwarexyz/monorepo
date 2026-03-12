@@ -181,11 +181,12 @@ impl Record {
     /// Returns `true` if the record is dialable (ignoring timing).
     ///
     /// A record is dialable if:
+    /// - We have a known address of the peer
     /// - It is not ourselves
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     ///
-    /// The caller is responsible for checking `last_reserved_at` against the dial quota.
+    /// The caller is responsible for checking `next_dial_at`.
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
