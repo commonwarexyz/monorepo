@@ -315,6 +315,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
         peers.sort();
+
         Dialable {
             peers,
             next_query_at: next_query_at
