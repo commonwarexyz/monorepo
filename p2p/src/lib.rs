@@ -8,6 +8,7 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![cfg_attr(feature = "fuzz", feature(linkage))]
 
 use commonware_macros::{stability_mod, stability_scope};
 

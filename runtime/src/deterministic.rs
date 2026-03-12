@@ -106,6 +106,17 @@ use std::{
 use tracing::{info_span, trace, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+// Fuzzing hooks provided by insitu-fuzz via weak linkage. Both symbols resolve
+// to None at runtime when insitu-fuzz is not linked, so there is zero overhead
+// in normal builds even when the feature is enabled.
+#[cfg(feature = "fuzz")]
+extern "C" {
+    #[linkage = "extern_weak"]
+    static commonware_fuzz_permute_tasks: Option<unsafe extern "C" fn(*mut u128, usize) -> bool>;
+    #[linkage = "extern_weak"]
+    static insitu_fuzz_checkpoint: Option<unsafe extern "C" fn()>;
+}
+
 #[derive(Debug)]
 struct Metrics {
     iterations: Counter,
@@ -568,10 +579,36 @@ impl Runner {
             // Drain all ready tasks
             let mut queue = executor.tasks.drain();
 
+            // Fuzzer checkpoint: allows insitu-fuzz to snapshot state here for
+            // deferred fork (avoids replaying early messages on each iteration).
+            #[cfg(feature = "fuzz")]
+            // SAFETY: weak linkage -- None when insitu-fuzz is not linked.
+            unsafe {
+                if let Some(checkpoint) = insitu_fuzz_checkpoint {
+                    checkpoint();
+                }
+            }
+
             // Shuffle tasks (if more than one)
             if queue.len() > 1 {
-                let mut rng = executor.rng.lock();
-                queue.shuffle(&mut *rng);
+                // When insitu-fuzz is linked it supplies a fuzzer-controlled
+                // permutation so the fuzzer can explore scheduling orders.
+                #[cfg(feature = "fuzz")]
+                // SAFETY: weak linkage -- None when insitu-fuzz is not linked.
+                let did_permute = unsafe {
+                    if let Some(permute) = commonware_fuzz_permute_tasks {
+                        permute(queue.as_mut_ptr(), queue.len())
+                    } else {
+                        false
+                    }
+                };
+                #[cfg(not(feature = "fuzz"))]
+                let did_permute = false;
+
+                if !did_permute {
+                    let mut rng = executor.rng.lock();
+                    queue.shuffle(&mut *rng);
+                }
             }
 
             // Run all snapshotted tasks
