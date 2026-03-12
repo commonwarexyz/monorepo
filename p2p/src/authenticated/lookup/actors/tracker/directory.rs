@@ -1624,8 +1624,8 @@ mod tests {
                 "should not appear in dialable list during rate-limit window"
             );
 
-            // After the jitter window (up to 2x interval), peer becomes dialable again.
-            context.sleep(quota.replenish_interval() * 2).await;
+            // After the jitter window (up to 3x interval), peer becomes dialable again.
+            context.sleep(quota.replenish_interval() * 3).await;
             assert!(directory.dialable().peers.contains(&pk_1));
             let (_reservation, ingress) = directory
                 .dial(&pk_1)

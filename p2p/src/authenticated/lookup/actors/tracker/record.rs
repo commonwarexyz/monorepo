@@ -126,7 +126,7 @@ impl Record {
             let now = context.current();
             self.status = Status::Reserved;
             self.last_reserved_at = Some(now);
-            self.next_dial_at = Some(now.add_jittered(context, interval));
+            self.next_dial_at = Some((now + interval).add_jittered(context, interval));
             return true;
         }
         false
@@ -520,8 +520,8 @@ mod tests {
             assert!(record.reserve(&mut context, interval));
             assert_eq!(record.last_reserved_at(), Some(now));
             let next_dial = record.next_dial_at().unwrap();
-            assert!(next_dial >= now);
-            assert!(next_dial <= now + interval * 2);
+            assert!(next_dial >= now + interval);
+            assert!(next_dial <= now + interval * 3);
         });
     }
 
