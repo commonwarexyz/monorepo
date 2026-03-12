@@ -63,7 +63,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let mut batch = db.new_batch();
     for _ in 0u64..num_operations {
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 300) + 10) as usize];
-        batch.append(v);
+        batch = batch.append(v);
         if rng.next_u32() % COMMIT_FREQUENCY == 0 {
             let finalized = batch.merkleize(None).finalize();
             db.apply_batch(finalized).await.unwrap();

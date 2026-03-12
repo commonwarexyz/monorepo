@@ -18,7 +18,7 @@ pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
         for i in 0u64..elements {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            batch.add(hasher, &element);
+            batch = batch.add(hasher, &element);
         }
         batch.merkleize(hasher).finalize()
     };
