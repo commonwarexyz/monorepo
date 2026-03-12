@@ -1,8 +1,9 @@
 use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
+use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, Random};
 use rand_core::CryptoRngCore;
 
-use super::utils::{hash_g1, hash_gt, xor, Transcript};
+use super::utils::{xor, Transcript};
 
 /// Domain separation tag for hashing to scalar in BTE.
 const DST_HASH_TO_SCALAR: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_BTE_HASH_TO_SCALAR";
@@ -118,7 +119,7 @@ pub fn encrypt(
     let s = Scalar::random(&mut *rng);
     let gs = g * &s;
     let tg = {
-        let hgs = hash_g1(&gs);
+        let hgs = *blake3::hash(gs.encode().as_ref()).as_bytes();
         Scalar::map(DST_HASH_TO_SCALAR, &hgs)
     };
 
@@ -126,7 +127,7 @@ pub fn encrypt(
     let alpha = Scalar::random(&mut *rng);
     let beta = Scalar::random(&mut *rng);
     let mask = GT::pairing(&(hid - &(g * &tg)), &h).scalar_mul(&alpha);
-    let hmask = hash_gt(&mask);
+    let hmask = *blake3::hash(&mask.as_slice()).as_bytes();
 
     // XOR msg and hmask
     let ct1: [u8; 32] = xor(&msg, &hmask).as_slice().try_into().unwrap();
@@ -174,8 +175,8 @@ pub fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::bte::dealer::Dealer;
-    use crate::bls12381::bte::utils::Domain;
+    use crate::bte::dealer::Dealer;
+    use crate::bte::utils::Domain;
     use commonware_utils::test_rng;
 
     #[test]

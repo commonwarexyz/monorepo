@@ -1,35 +1,18 @@
-use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
+use crate::bls12381::primitives::group::{Scalar, G1, G2};
 use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, Field, FieldNTT, Ring, Space};
+use commonware_math::ntt::{ntt, Columns};
 
-/// Serialize a G1 element to bytes.
-fn g1_bytes(g: &G1) -> bytes::Bytes {
-    g.encode()
-}
-
-/// Serialize a G2 element to bytes.
-fn g2_bytes(g: &G2) -> bytes::Bytes {
-    g.encode()
-}
-
-/// Serialize a Scalar to bytes.
-fn scalar_bytes(s: &Scalar) -> bytes::Bytes {
-    s.encode()
-}
-
-/// Hash arbitrary bytes to 32 bytes via blake3.
-pub fn hash_to_bytes(data: &[u8]) -> [u8; 32] {
-    *blake3::hash(data).as_bytes()
-}
-
-/// Hash a G1 element to 32 bytes.
-pub fn hash_g1(g: &G1) -> [u8; 32] {
-    hash_to_bytes(&g1_bytes(g))
-}
-
-/// Hash a GT element to 32 bytes.
-pub fn hash_gt(g: &GT) -> [u8; 32] {
-    hash_to_bytes(&g.as_slice())
+/// Reverse the first `lg_n` bits of each index; swap elements so that element at `i` moves to `reverse_bits(i)`.
+fn bit_reverse_slice<T>(data: &mut [T], lg_n: u8) {
+    let n = data.len();
+    assert_eq!(n, 1 << lg_n);
+    for i in 0..n {
+        let j = (i as u64).reverse_bits() >> (64 - lg_n as u32);
+        if i < j as usize {
+            data.swap(i, j as usize);
+        }
+    }
 }
 
 /// XOR two byte slices of equal length.
@@ -58,17 +41,17 @@ impl Transcript {
 
     /// Append a G1 element to the transcript.
     pub fn append_g1(&mut self, label: &[u8], g: &G1) {
-        self.append(label, &g1_bytes(g));
+        self.append(label, &g.encode());
     }
 
     /// Append a G2 element to the transcript.
     pub fn append_g2(&mut self, label: &[u8], g: &G2) {
-        self.append(label, &g2_bytes(g));
+        self.append(label, &g.encode());
     }
 
     /// Append a Scalar to the transcript.
     pub fn append_scalar(&mut self, label: &[u8], s: &Scalar) {
-        self.append(label, &scalar_bytes(s));
+        self.append(label, &s.encode());
     }
 
     /// Derive challenge bytes from the current transcript state.
@@ -138,8 +121,6 @@ pub fn poly_eval(coeffs: &[Scalar], point: &Scalar) -> Scalar {
 pub struct Domain {
     lg_size: u8,
     omega: Scalar,
-    omega_inv: Scalar,
-    size_inv: Scalar,
 }
 
 impl Domain {
@@ -148,14 +129,7 @@ impl Domain {
         let size = min_size.next_power_of_two();
         let lg_size = size.ilog2() as u8;
         let omega = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
-        let omega_inv = omega.inv();
-        let size_inv = Scalar::from_u64(size as u64).inv();
-        Self {
-            lg_size,
-            omega,
-            omega_inv,
-            size_inv,
-        }
+        Self { lg_size, omega }
     }
 
     /// The size of this domain (always a power of 2).
@@ -174,6 +148,7 @@ impl Domain {
     }
 
     /// Forward FFT: coefficients -> evaluations at roots of unity.
+    /// Input and output are in natural order (coeff i / eval at omega^i at index i).
     pub fn fft<T>(&self, input: &[T]) -> Vec<T>
     where
         T: Additive + Space<Scalar> + Clone,
@@ -182,11 +157,13 @@ impl Domain {
         let mut data = Vec::with_capacity(n);
         data.extend_from_slice(input);
         data.resize(n, T::zero());
-        fft_in_place(&mut data, &self.omega, self.lg_size);
+        bit_reverse_slice(&mut data, self.lg_size);
+        ntt::<true, Scalar, T, _>(n, 1, &mut Columns { data: [data.as_mut_slice()] });
         data
     }
 
     /// Inverse FFT: evaluations at roots of unity -> coefficients.
+    /// Input and output are in natural order.
     pub fn ifft<T>(&self, input: &[T]) -> Vec<T>
     where
         T: Additive + Space<Scalar> + Clone,
@@ -195,53 +172,9 @@ impl Domain {
         let mut data = Vec::with_capacity(n);
         data.extend_from_slice(input);
         data.resize(n, T::zero());
-        fft_in_place(&mut data, &self.omega_inv, self.lg_size);
-        // Divide by N
-        for x in &mut data {
-            *x *= &self.size_inv;
-        }
+        ntt::<false, Scalar, T, _>(n, 1, &mut Columns { data: [data.as_mut_slice()] });
+        bit_reverse_slice(&mut data, self.lg_size);
         data
-    }
-}
-
-/// In-place Cooley-Tukey radix-2 DIT FFT.
-///
-/// Works generically over any type supporting addition and scalar multiplication.
-fn fft_in_place<T>(data: &mut [T], root: &Scalar, lg_n: u8)
-where
-    T: Additive + Space<Scalar> + Clone,
-{
-    let n = data.len();
-    assert_eq!(n, 1 << lg_n);
-
-    // Bit-reversal permutation
-    for i in 0..n {
-        let j = (i as u64).reverse_bits() >> (64 - lg_n as u32);
-        if i < j as usize {
-            data.swap(i, j as usize);
-        }
-    }
-
-    // Butterfly stages
-    let mut len = 2;
-    while len <= n {
-        let half = len / 2;
-        // w_len = root^(n/len), the principal len-th root of unity
-        let w_len = root.exp(&[(n / len) as u64]);
-
-        let mut k = 0;
-        while k < n {
-            let mut w = Scalar::one();
-            for j in 0..half {
-                let u = data[k + j].clone();
-                let v = data[k + j + half].clone() * &w;
-                data[k + j] = u.clone() + &v;
-                data[k + j + half] = u - &v;
-                w = w * &w_len;
-            }
-            k += len;
-        }
-        len <<= 1;
     }
 }
 
@@ -272,6 +205,7 @@ pub fn open_all_values(y: &[G1], f: &[Scalar], domain: &Domain) -> Vec<G1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::group::GT;
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;

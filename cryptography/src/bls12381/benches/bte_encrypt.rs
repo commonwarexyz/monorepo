@@ -1,11 +1,5 @@
-use commonware_cryptography::bls12381::{
-    bte::{
-        dealer::Dealer,
-        encryption::encrypt,
-        utils::Domain,
-    },
-    primitives::group::{Scalar, G1},
-};
+use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
+use commonware_cryptography::bte::{dealer::Dealer, encryption::encrypt, utils::Domain};
 use commonware_math::algebra::{CryptoGroup, Random};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, SeedableRng};

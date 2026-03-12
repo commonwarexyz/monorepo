@@ -1,4 +1,5 @@
 use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
+use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, CryptoGroup, Space};
 use commonware_parallel::Sequential;
 use std::collections::BTreeMap;
@@ -6,7 +7,7 @@ use std::collections::BTreeMap;
 use super::{
     dealer::CRS,
     encryption::Ciphertext,
-    utils::{hash_g1, hash_gt, lagrange_interp_eval, open_all_values, xor, Domain},
+    utils::{lagrange_interp_eval, open_all_values, xor, Domain},
 };
 
 /// Domain separation tag for hashing G1 to scalar in BTE decryption.
@@ -37,7 +38,7 @@ impl SecretKey {
 
         let fevals: Vec<Scalar> = (0..batch_size)
             .map(|i| {
-                let tg_bytes = hash_g1(&ct[i].gs);
+                let tg_bytes = *blake3::hash(ct[i].gs.encode().as_ref()).as_bytes();
                 Scalar::map(DST_HASH_TO_SCALAR, &tg_bytes)
             })
             .collect();
@@ -71,7 +72,7 @@ pub fn decrypt_all(sigma: G1, ct: &[Ciphertext], hid: G1, crs: &CRS) -> Vec<[u8;
     // Compute fevals by hashing gs of the ciphertexts
     let fevals: Vec<Scalar> = (0..batch_size)
         .map(|i| {
-            let tg_bytes = hash_g1(&ct[i].gs);
+            let tg_bytes = *blake3::hash(ct[i].gs.encode().as_ref()).as_bytes();
             Scalar::map(DST_HASH_TO_SCALAR, &tg_bytes)
         })
         .collect();
@@ -90,7 +91,7 @@ pub fn decrypt_all(sigma: G1, ct: &[Ciphertext], hid: G1, crs: &CRS) -> Vec<[u8;
     for i in 0..batch_size {
         let mask = GT::multi_pairing(&[(pi[i], ct[i].ct2), (delta, ct[i].ct3), (neg_sigma, ct[i].ct4)]);
 
-        let hmask = hash_gt(&mask);
+        let hmask = *blake3::hash(&mask.as_slice()).as_bytes();
         m[i] = xor(&ct[i].ct1, &hmask).as_slice().try_into().unwrap();
     }
 
@@ -100,9 +101,9 @@ pub fn decrypt_all(sigma: G1, ct: &[Ciphertext], hid: G1, crs: &CRS) -> Vec<[u8;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::bte::dealer::Dealer;
-    use crate::bls12381::bte::encryption::encrypt;
-    use crate::bls12381::bte::utils::Domain;
+    use crate::bte::dealer::Dealer;
+    use crate::bte::encryption::encrypt;
+    use crate::bte::utils::Domain;
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::test_rng;
 
