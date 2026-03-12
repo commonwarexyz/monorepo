@@ -18,6 +18,7 @@
 //!
 //! # Design
 //!
+//! TODO: temporal description that should be deleted after finishing the informal spec located below
 //! ## Protocol Description
 //!
 //! ### Genesis
@@ -409,7 +410,7 @@
 //! // Priority: finalization > nullification > notarization.
 //! fn get_best_certificate(r, v) -> Option<certificate> {
 //!     if v == 0 {
-//!         return genesis;
+//!         return None;
 //!     }
 //!     if r.round[v].finalization = finalization(c, v) {
 //!         return finalization(c, v);
@@ -429,7 +430,7 @@
 //! ### 7.0. Initialization
 //!
 //! 1. At startup, after initializing replica state with genesis (view `0`) implicitly finalized,
-//!    call `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
+//!    call `enter_view(r, 1)` and `set_leader(r, 1)` exactly once.
 //!
 //! ### 7.1. View Entry
 //!
@@ -479,23 +480,23 @@
 //!          1. Call `enter_view(r, v + 1)`.
 //!       1. On failure:
 //!          1. Set `r.round[v].certified = Some(false)`.
-//!          1. If `v == r.view` and `!r.round[v].broadcast_nullify`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!          1. If `v == r.view` and `r.round[v].t_l != 0` and `r.round[v].t_a != 0`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!
 //! ### 7.4. Nullification Path
 //!
 //! 1. On receiving `nullify(v)` from replica `r'`:
 //!    1. If `!record_message(r, r', nullify(v))`, return.
-//!    2. If `r' == leader(v)` and `!r.round[v].broadcast_notarize`:
+//!    2. If `r' == leader(v)`:
 //!       3. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
+//!    1. Call `enter_view(r, v + 1)` and `set_leader(r, v + 1)`.
 //!    1. Set `r.round[v].nullification = nullification(v)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
 //!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
 //!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
-//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!
 //! ### 7.5. Finalization Path
 //!
@@ -504,18 +505,18 @@
 //! 1. On observing `≥ Q` `finalize(c, v)` votes:
 //!    1. Assemble `finalization(c, v)`.
 //! 1. On constructing or receiving the first `finalization(c, v)`:
+//!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
+//!    1. Call `enter_view(r, v + 1)` and `set_leader(r, v + 1)`.
 //!    1. Set `r.round[v].finalization = finalization(c, v)`.
 //!    1. Call `record_proposal(r, v, c)`.
-//!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. Mark `c` finalized (views `<= last_finalized` are implicitly finalized).
 //!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
-//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!
 //! ### 7.6. Timeout Behavior
 //!
 //! 1. On `r.round[v].t_l` or `r.round[v].t_a` firing:
-//!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`:
+//!    1. If `!r.round[v].broadcast_finalize`:
 //!       1. Set `r.round[v].broadcast_nullify = true`.
 //!       1. Broadcast `nullify(v)`.
 //!       1. Set `r.round[v].t_r = now + T`.
