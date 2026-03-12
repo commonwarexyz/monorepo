@@ -22,14 +22,14 @@ pub struct Dialable<C: PublicKey> {
     pub peers: Vec<C>,
 
     /// Earliest known time at which another peer may become dialable.
-    pub next_query_at: SystemTime,
+    pub next_query_at: Option<SystemTime>,
 }
 
 impl<C: PublicKey> Default for Dialable<C> {
     fn default() -> Self {
         Self {
             peers: Vec::new(),
-            next_query_at: SystemTime::UNIX_EPOCH,
+            next_query_at: None,
         }
     }
 }

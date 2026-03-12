@@ -165,16 +165,16 @@ impl<
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                // Refill queue when exhausted.
-                if self.queue.is_empty() {
+                // Set next deadline.
+                let max = self.context.current() + self.dial_frequency;
+                dial_deadline = if self.queue.is_empty() {
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
-                    if self.queue.is_empty() {
-                        dial_deadline = dialable.next_query_at;
-                        continue;
-                    }
-                }
+                    dialable.next_query_at.map_or(max, |t| t.min(max))
+                } else {
+                    max
+                };
 
                 // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
@@ -183,7 +183,6 @@ impl<
                         break;
                     }
                 }
-                dial_deadline = self.context.current() + self.dial_frequency;
             },
         }
     }
@@ -260,7 +259,7 @@ mod tests {
                         Some(tracker::Message::Dialable { responder }) => {
                             let _ = responder.send(tracker::Dialable {
                                 peers: peers.clone(),
-                                next_query_at: context.current(),
+                                next_query_at: Some(context.current()),
                             });
                         }
                         Some(tracker::Message::Dial {
@@ -294,7 +293,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
-            let dial_frequency = Duration::from_millis(100);
+            let dial_frequency = Duration::from_millis(500);
 
             let dialer = Actor::new(
                 context.with_label("dialer"),
@@ -315,6 +314,10 @@ mod tests {
 
             let _handle = dialer.start(tracker_mailbox, supervisor);
 
+            // Tracker reports next_query_at=100ms, which is shorter than
+            // dial_frequency=500ms. The dialer should use the earlier time,
+            // giving us ~3 refreshes in 350ms instead of just 1 with
+            // dial_frequency alone.
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);
             loop {
@@ -323,16 +326,17 @@ mod tests {
                         refresh_count += 1;
                         let _ = responder.send(tracker::Dialable {
                             peers: Vec::new(),
-                            next_query_at: context.current() + Duration::from_millis(250),
+                            next_query_at: Some(context.current() + Duration::from_millis(100)),
                         });
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
             }
 
-            assert_eq!(
-                refresh_count, 2,
-                "expected queue refresh to follow tracker deadline"
+            assert!(
+                (3..=4).contains(&refresh_count),
+                "expected 3-4 refreshes (tracker deadline < dial_frequency), got {}",
+                refresh_count
             );
         });
     }

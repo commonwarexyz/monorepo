@@ -318,9 +318,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         Dialable {
             peers,
-            next_query_at: next_query_at
-                .map(|t| t.min(now + self.rate_limit))
-                .unwrap_or(now + self.rate_limit),
+            next_query_at,
         }
     }
 
@@ -1655,11 +1653,13 @@ mod tests {
             drop(reservation);
             directory.release(super::Metadata::Dialer(pk_1.clone()));
 
-            // next_query_at is capped at interval from now.
+            // next_query_at reflects the jittered next_dial_at (between 1x and 3x interval).
             let interval = quota.replenish_interval();
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
-            assert_eq!(dialable.next_query_at, reserved_at + interval);
+            let nqa = dialable.next_query_at.unwrap();
+            assert!(nqa >= reserved_at + interval);
+            assert!(nqa <= reserved_at + interval * 3);
         });
     }
 
@@ -1684,10 +1684,7 @@ mod tests {
 
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
-            assert_eq!(
-                dialable.next_query_at,
-                context.current() + quota.replenish_interval()
-            );
+            assert_eq!(dialable.next_query_at, None);
         });
     }
 
@@ -1716,12 +1713,12 @@ mod tests {
             // Block the only peer with a very long block_duration.
             directory.block(&pk_1);
 
-            // next_query_at must be capped at interval, not blocked_until.
+            // next_query_at should reflect the blocked peer's unblock time.
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
             assert_eq!(
                 dialable.next_query_at,
-                context.current() + quota.replenish_interval()
+                Some(context.current() + Duration::from_secs(3600))
             );
         });
     }
