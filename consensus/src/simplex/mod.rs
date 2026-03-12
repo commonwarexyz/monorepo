@@ -267,7 +267,7 @@
 //! ```text
 //! // Selects the best parent proof for a leader proposal in view `v`.
 //! // Returns either a parent `(c_parent, v_parent)` or a missing view `v_m`.
-//! fn select_parent(r, v) -> Result<(c_parent, v_parent), v_m> {
+//! fn find_parent(r, v) -> Result<(c_parent, v_parent), v_m> {
 //!     let i = v - 1;
 //!     while i > 0 {
 //!         if r.round[i].finalization = finalization(c_parent, i) {
@@ -442,7 +442,7 @@
 //!    1. If `r != l` and `l` has not been active in the last `skip_timeout` locally tracked rounds,
 //!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!    1. If `r == l`, attempt to propose:
-//!       1. Let `parent = select_parent(r, v)`.
+//!       1. Let `parent = find_parent(r, v)`.
 //!       1. If `parent = Err(_)`, return.
 //!       1. Let `c = propose(v, parent)`.
 //!       1. If `c = None`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`, and return.
@@ -456,9 +456,9 @@
 //!    1. If `!record_message(r, r', notarize(c, v))`, return.
 //!    1. If `r.round[v].broadcast_nullify`, return.
 //!    1. Set `r.round[v].t_l = None`.
+//!    1. Call `record_proposal(r, v, c, false)`.
 //!    1. Let `v_parent` be `c`'s declared parent view.
 //!    1. If `parent_payload(r, v, v_parent) = None`, return.
-//!    1. Call `record_proposal(r, v, c, false)`.
 //!    1. Verify `c`.
 //!    1. If verification succeeds, set `r.round[v].proposal_status = Verified`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
 //!    1. If verification fails, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
@@ -480,8 +480,8 @@
 //!       1. On success:
 //!          1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!          1. Set `r.round[v].certified = Some(true)`.
-//!          1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize` and `r.round[v].proposal_status != Equivocated`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!          1. Call `enter_view(r, v + 1)`.
+//!          1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize` and `r.round[v].proposal_status != Equivocated`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!       1. On failure:
 //!          1. Set `r.round[v].certified = Some(false)`.
 //!          1. If `v == r.view` and `r.round[v].t_l != 0` and `r.round[v].t_a != 0`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
