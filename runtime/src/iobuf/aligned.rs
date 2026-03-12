@@ -105,7 +105,7 @@ impl Drop for AlignedBuffer {
 /// Untracked owners deallocate directly, while tracked owners return the
 /// allocation to a pool size class.
 pub(crate) trait Owner: Send + Sync + 'static {
-    fn release(&self, buffer: AlignedBuffer);
+    fn release(self, buffer: AlignedBuffer);
 }
 
 #[derive(Clone, Copy)]
@@ -113,7 +113,7 @@ pub(crate) struct UntrackedOwner;
 
 impl Owner for UntrackedOwner {
     #[inline]
-    fn release(&self, buffer: AlignedBuffer) {
+    fn release(self, buffer: AlignedBuffer) {
         drop(buffer);
     }
 }
@@ -125,8 +125,8 @@ pub(crate) struct TrackedOwner {
 
 impl Owner for TrackedOwner {
     #[inline]
-    fn release(&self, buffer: AlignedBuffer) {
-        TlsCache::push(Arc::clone(&self.class), buffer);
+    fn release(self, buffer: AlignedBuffer) {
+        TlsCache::push(self.class, buffer);
     }
 }
 
@@ -137,7 +137,7 @@ impl Owner for TrackedOwner {
 /// directly and may later freeze it into an immutable shared view.
 struct BufInner<O: Owner> {
     buffer: ManuallyDrop<AlignedBuffer>,
-    owner: O,
+    owner: ManuallyDrop<O>,
 }
 
 // SAFETY: `BufInner` contains only the aligned allocation and owner state.
@@ -149,7 +149,7 @@ impl<O: Owner> BufInner<O> {
     const fn new(buffer: AlignedBuffer, owner: O) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),
-            owner,
+            owner: ManuallyDrop::new(owner),
         }
     }
 
@@ -163,7 +163,9 @@ impl<O: Owner> Drop for BufInner<O> {
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        self.owner.release(buffer);
+        // SAFETY: Drop is called at most once for this value.
+        let owner = unsafe { ManuallyDrop::take(&mut self.owner) };
+        owner.release(buffer);
     }
 }
 
@@ -632,6 +634,7 @@ impl std::fmt::Debug for BufMut<UntrackedOwner> {
 }
 
 impl BufMut<UntrackedOwner> {
+    #[inline]
     pub(crate) const fn new(buffer: AlignedBuffer) -> Self {
         Self {
             inner: ManuallyDrop::new(BufInner::new(buffer, UntrackedOwner)),
@@ -660,6 +663,7 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
 }
 
 impl BufMut<TrackedOwner> {
+    #[inline]
     pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>) -> Self {
         Self {
             inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class })),

@@ -279,6 +279,7 @@ impl BufferPoolConfig {
     }
 
     /// Returns the number of size classes.
+    #[inline]
     fn num_classes(&self) -> usize {
         if self.max_size < self.min_size {
             return 0;
@@ -289,6 +290,7 @@ impl BufferPoolConfig {
 
     /// Returns the size class index for a given size.
     /// Returns None if size > max_size.
+    #[inline]
     fn class_index(&self, size: usize) -> Option<usize> {
         if size > self.max_size.get() {
             return None;
@@ -464,10 +466,12 @@ impl TlsSizeClassCache {
         }
     }
 
+    #[inline]
     const fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[inline]
     fn pop(&mut self) -> Option<TlsSizeClassCacheEntry> {
         self.entries.pop()
     }
@@ -565,6 +569,7 @@ impl TlsCache {
         });
     }
 
+    #[inline]
     fn with_class_cache_mut<R>(
         class_id: usize,
         local_capacity: usize,
@@ -716,6 +721,7 @@ impl BufferPool {
     }
 
     /// Returns the size class index for `capacity`, recording oversized metrics on failure.
+    #[inline]
     fn class_index_or_record_oversized(&self, capacity: usize) -> Option<usize> {
         let class_index = self.inner.config.class_index(capacity);
         if class_index.is_none() {
