@@ -415,9 +415,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
-        let next_dial_at = now.add_jittered(&mut self.context, interval);
         let record = self.peers.get_mut(peer).unwrap();
-        if record.reserve(now, next_dial_at) {
+        if record.reserve(&mut self.context, interval) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }

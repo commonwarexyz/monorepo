@@ -1,5 +1,11 @@
 use crate::types::{self, Ingress};
-use std::{net::IpAddr, time::SystemTime};
+use commonware_runtime::Clock;
+use commonware_utils::SystemTimeExt;
+use rand::Rng;
+use std::{
+    net::IpAddr,
+    time::{Duration, SystemTime},
+};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -110,17 +116,17 @@ impl Record {
 
     /// Attempt to reserve the peer for connection.
     ///
-    /// `now` is recorded as the last reservation time and `next_dial_at` is
-    /// set to the earliest time we are willing to dial this peer again.
-    /// Returns `true` if the reservation was successful.
-    pub const fn reserve(&mut self, now: SystemTime, next_dial_at: SystemTime) -> bool {
+    /// Records the current time as the last reservation time and computes
+    /// `next_dial_at` by adding jitter over `interval`. Returns `true` if successful.
+    pub fn reserve(&mut self, context: &mut (impl Rng + Clock), interval: Duration) -> bool {
         if matches!(self.address, Address::Myself) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
+            let now = context.current();
             self.status = Status::Reserved;
             self.last_reserved_at = Some(now);
-            self.next_dial_at = Some(next_dial_at);
+            self.next_dial_at = Some(now.add_jittered(context, interval));
             return true;
         }
         false
@@ -245,9 +251,10 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_runtime::{deterministic, Runner};
     use std::{
         net::SocketAddr,
-        time::{Duration, SystemTime},
+        time::Duration,
     };
 
     fn test_socket() -> SocketAddr {
@@ -326,37 +333,39 @@ mod tests {
 
     #[test]
     fn test_status_transitions_reserve_connect_release() {
-        let mut record = Record::known(test_address());
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
 
-        assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
-        assert_eq!(record.status, Status::Reserved);
-        assert!(record.reserved());
+            assert_eq!(record.status, Status::Inert);
+            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.status, Status::Reserved);
+            assert!(record.reserved());
 
-        assert!(
-            !record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH),
-            "Cannot re-reserve when Reserved"
-        );
-        assert_eq!(record.status, Status::Reserved);
+            assert!(
+                !record.reserve(&mut context, Duration::ZERO),
+                "Cannot re-reserve when Reserved"
+            );
+            assert_eq!(record.status, Status::Reserved);
 
-        record.connect();
-        assert_eq!(record.status, Status::Active);
-        assert!(record.reserved());
+            record.connect();
+            assert_eq!(record.status, Status::Active);
+            assert!(record.reserved());
 
-        assert!(
-            !record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH),
-            "Cannot reserve when Active"
-        );
-        assert_eq!(record.status, Status::Active);
+            assert!(
+                !record.reserve(&mut context, Duration::ZERO),
+                "Cannot reserve when Active"
+            );
+            assert_eq!(record.status, Status::Active);
 
-        record.release();
-        assert_eq!(record.status, Status::Inert);
-        assert!(!record.reserved());
+            record.release();
+            assert_eq!(record.status, Status::Inert);
+            assert!(!record.reserved());
 
-        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
-        assert_eq!(record.status, Status::Reserved);
-        record.release();
-        assert_eq!(record.status, Status::Inert);
+            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert_eq!(record.status, Status::Reserved);
+            record.release();
+            assert_eq!(record.status, Status::Inert);
+        });
     }
 
     #[test]
@@ -369,10 +378,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_active_panics() {
-        let mut record = Record::known(test_address());
-        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
-        record.connect();
-        record.connect();
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            assert!(record.reserve(&mut context, Duration::ZERO));
+            record.connect();
+            record.connect();
+        });
     }
 
     #[test]
@@ -384,39 +395,43 @@ mod tests {
 
     #[test]
     fn test_reserved_status_check() {
-        let mut record = Record::known(test_address());
-        assert!(!record.reserved());
-        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
-        assert!(record.reserved());
-        record.connect();
-        assert!(record.reserved());
-        record.release();
-        assert!(!record.reserved());
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            assert!(!record.reserved());
+            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert!(record.reserved());
+            record.connect();
+            assert!(record.reserved());
+            record.release();
+            assert!(!record.reserved());
+        });
     }
 
     #[test]
     fn test_deletable_logic_detailed() {
-        assert!(!Record::myself().deletable());
+        deterministic::Runner::default().start(|mut context| async move {
+            assert!(!Record::myself().deletable());
 
-        let mut record = Record::known(test_address());
-        assert_eq!(record.sets, 0);
-        assert_eq!(record.status, Status::Inert);
-        assert!(record.deletable());
+            let mut record = Record::known(test_address());
+            assert_eq!(record.sets, 0);
+            assert_eq!(record.status, Status::Inert);
+            assert!(record.deletable());
 
-        record.increment();
-        assert!(!record.deletable());
+            record.increment();
+            assert!(!record.deletable());
 
-        assert!(record.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
-        assert!(!record.deletable());
+            assert!(record.reserve(&mut context, Duration::ZERO));
+            assert!(!record.deletable());
 
-        record.connect();
-        assert!(!record.deletable());
+            record.connect();
+            assert!(!record.deletable());
 
-        record.release();
-        assert!(!record.deletable());
+            record.release();
+            assert!(!record.deletable());
 
-        record.decrement();
-        assert!(record.deletable());
+            record.decrement();
+            assert!(record.deletable());
+        });
     }
 
     #[test]
@@ -435,111 +450,79 @@ mod tests {
 
     #[test]
     fn test_acceptable_checks_eligibility_status_and_ip() {
-        use std::net::IpAddr;
+        deterministic::Runner::default().start(|mut context| async move {
+            use std::net::IpAddr;
 
-        let egress_ip: IpAddr = [8, 8, 8, 8].into();
-        let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+            let egress_ip: IpAddr = [8, 8, 8, 8].into();
+            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
+            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-        // Eligible, Inert, and correct IP - acceptable
-        let mut record = Record::known(types::Address::Symmetric(public_socket));
-        record.increment();
-        assert!(
-            record.acceptable(egress_ip, false),
-            "Eligible, Inert, correct IP is acceptable"
-        );
+            let mut record = Record::known(types::Address::Symmetric(public_socket));
+            record.increment();
+            assert!(record.acceptable(egress_ip, false));
+            assert!(!record.acceptable(wrong_ip, false));
 
-        // Correct everything but wrong IP - not acceptable
-        assert!(
-            !record.acceptable(wrong_ip, false),
-            "Not acceptable when IP doesn't match"
-        );
+            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
+            assert!(!record_not_eligible.acceptable(egress_ip, false));
 
-        // Not eligible (sets=0) - not acceptable
-        let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-        assert!(
-            !record_not_eligible.acceptable(egress_ip, false),
-            "Not acceptable when not eligible"
-        );
+            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
+            record_reserved.increment();
+            record_reserved.reserve(&mut context, Duration::ZERO);
+            assert!(!record_reserved.acceptable(egress_ip, false));
 
-        // Already reserved - not acceptable
-        let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-        record_reserved.increment();
-        record_reserved.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
-        assert!(
-            !record_reserved.acceptable(egress_ip, false),
-            "Not acceptable when reserved"
-        );
-
-        // Already connected - not acceptable
-        let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-        record_connected.increment();
-        record_connected.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
-        record_connected.connect();
-        assert!(
-            !record_connected.acceptable(egress_ip, false),
-            "Not acceptable when connected"
-        );
+            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
+            record_connected.increment();
+            record_connected.reserve(&mut context, Duration::ZERO);
+            record_connected.connect();
+            assert!(!record_connected.acceptable(egress_ip, false));
+        });
     }
 
     #[test]
     fn test_acceptable_bypass_ip_check() {
-        let egress_ip: IpAddr = [8, 8, 8, 8].into();
-        let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        deterministic::Runner::default().start(|mut context| async move {
+            use std::net::IpAddr;
 
-        // With bypass_ip_check=true, accepts even with wrong IP (skips IP check)
-        let mut record = Record::known(types::Address::Symmetric(public_socket));
-        record.increment();
-        assert!(
-            record.acceptable(wrong_ip, true),
-            "Acceptable with wrong IP when bypass_ip_check=true"
-        );
+            let egress_ip: IpAddr = [8, 8, 8, 8].into();
+            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
+            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-        // Still requires eligible (sets > 0), even with bypass_ip_check=true
-        let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-        assert!(
-            !record_not_eligible.acceptable(egress_ip, true),
-            "Not acceptable when not eligible (sets=0), even with bypass_ip_check=true"
-        );
+            let mut record = Record::known(types::Address::Symmetric(public_socket));
+            record.increment();
+            assert!(record.acceptable(wrong_ip, true));
 
-        // Still not acceptable when reserved
-        let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-        record_reserved.increment();
-        record_reserved.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
-        assert!(
-            !record_reserved.acceptable(egress_ip, true),
-            "Not acceptable when reserved"
-        );
+            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
+            assert!(!record_not_eligible.acceptable(egress_ip, true));
 
-        // Still not acceptable when connected
-        let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-        record_connected.increment();
-        record_connected.reserve(SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH);
-        record_connected.connect();
-        assert!(
-            !record_connected.acceptable(egress_ip, true),
-            "Not acceptable when connected"
-        );
+            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
+            record_reserved.increment();
+            record_reserved.reserve(&mut context, Duration::ZERO);
+            assert!(!record_reserved.acceptable(egress_ip, true));
 
-        // Still not acceptable when myself
-        let record_myself = Record::myself();
-        assert!(
-            !record_myself.acceptable(egress_ip, true),
-            "Not acceptable when myself"
-        );
+            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
+            record_connected.increment();
+            record_connected.reserve(&mut context, Duration::ZERO);
+            record_connected.connect();
+            assert!(!record_connected.acceptable(egress_ip, true));
+
+            assert!(!Record::myself().acceptable(egress_ip, true));
+        });
     }
 
     #[test]
     fn test_reserve_records_timestamp() {
-        let mut record = Record::known(test_address());
-        assert_eq!(record.last_reserved_at(), None);
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            assert_eq!(record.last_reserved_at(), None);
 
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let next_dial = now + Duration::from_secs(5);
-        assert!(record.reserve(now, next_dial));
-        assert_eq!(record.last_reserved_at(), Some(now));
-        assert_eq!(record.next_dial_at(), Some(next_dial));
+            let interval = Duration::from_secs(1);
+            let now = context.current();
+            assert!(record.reserve(&mut context, interval));
+            assert_eq!(record.last_reserved_at(), Some(now));
+            let next_dial = record.next_dial_at().unwrap();
+            assert!(next_dial >= now);
+            assert!(next_dial <= now + interval * 2);
+        });
     }
 
     #[test]
