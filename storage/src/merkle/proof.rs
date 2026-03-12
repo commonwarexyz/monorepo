@@ -4,11 +4,9 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::nodes_to_pin;
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{PathIterator, PeakIterator},
+    iterator::{nodes_to_pin, PeakIterator},
     Error, Location, Position,
 };
 use alloc::{
@@ -19,9 +17,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use core::{cmp::Reverse, ops::Range};
-#[cfg(feature = "std")]
-use tracing::debug;
+use core::ops::Range;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
@@ -50,13 +46,16 @@ pub enum ReconstructionError {
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in the MMR from its root digest.
 ///
-/// The `digests` vector contains:
+/// The `digests` vector uses a fold-based layout:
 ///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
+/// 1. If there are peaks entirely before the proven range (fold prefix), the first digest is
+///    a single accumulator produced by folding those peaks: `fold(fold(..., peak0), peak1)`.
+///    If there are no such peaks, this entry is absent.
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
+/// 2. The digests of peaks entirely after the proven range, in peak iteration order.
+///
+/// 3. The sibling digests needed to reconstruct each range-peak digest from the proven elements,
+///    in depth-first (forward consumption) order for each range peak.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
     /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
@@ -195,22 +194,25 @@ impl<D: Digest> Proof<D> {
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
-        // Single pass to collect all required positions with deduplication
+        // Collect all required positions with deduplication, and blueprints per element.
         let mut node_positions = BTreeSet::new();
-        let mut nodes_required = BTreeMap::new();
+        let mut blueprints = BTreeMap::new();
 
         for (_, loc) in elements {
             if !loc.is_valid() {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
-            let Ok(required) = nodes_required_for_range_proof(self.leaves, *loc..*loc + 1) else {
+            let Ok(bp) = blueprint(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
-            for req_pos in &required {
-                node_positions.insert(*req_pos);
+            for &pos in &bp.fold_prefix {
+                node_positions.insert(pos);
             }
-            nodes_required.insert(*loc, required);
+            for &pos in &bp.fetch_nodes {
+                node_positions.insert(pos);
+            }
+            blueprints.insert(*loc, bp);
         }
 
         // Verify we have the exact number of digests needed
@@ -225,104 +227,38 @@ impl<D: Digest> Proof<D> {
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
-        // Verify each element by reconstructing its path
+        // Verify each element by constructing its sub-proof in fold-based format
         for (element, loc) in elements {
-            // Get required positions for this element
-            let required = &nodes_required[loc];
+            let bp = &blueprints[loc];
 
-            // Build proof with required digests
-            let mut digests = Vec::with_capacity(required.len());
-            for req_pos in required {
-                // There must exist a digest for each required position (by
-                // construction of `node_digests`)
-                let digest = node_digests
-                    .get(req_pos)
-                    .expect("must exist by construction of node_digests");
-                digests.push(*digest);
+            // Build the sub-proof: [fold_acc? | fetch_nodes...]
+            let mut digests = Vec::with_capacity(
+                if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
+            );
+            if !bp.fold_prefix.is_empty() {
+                // Fold prefix peaks into accumulator
+                let mut acc = hasher.digest(&self.leaves.to_be_bytes());
+                for &pos in &bp.fold_prefix {
+                    let d = node_digests.get(&pos).expect("must exist by construction");
+                    acc = hasher.fold(&acc, d);
+                }
+                digests.push(acc);
+            }
+            for &pos in &bp.fetch_nodes {
+                let d = node_digests.get(&pos).expect("must exist by construction");
+                digests.push(*d);
             }
             let proof = Self {
                 leaves: self.leaves,
                 digests,
             };
 
-            // Verify the proof
             if !proof.verify_element_inclusion(hasher, element.as_ref(), *loc, root) {
                 return false;
             }
         }
 
         true
-    }
-
-    // The functions below are lower level functions that are useful to building verification
-    // functions for new or extended proof types.
-
-    /// Computes the set of pinned nodes for the pruning boundary corresponding to the start of the
-    /// given range, returning the digest of each by extracting it from the proof.
-    ///
-    /// # Arguments
-    /// * `range` - The start and end locations of the proven range, where start is also used as the
-    ///   pruning boundary.
-    ///
-    /// # Returns
-    /// A Vec of digests for all nodes in `nodes_to_pin(pruning_boundary)`, in the same order as
-    /// returned by `nodes_to_pin` (decreasing height order)
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidSize] if the proof size is not a valid MMR size.
-    /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
-    /// positions count.
-    /// Returns [Error::MissingDigest] if a pinned node is not found in the proof.
-    #[cfg(any(feature = "std", test))]
-    pub(crate) fn extract_pinned_nodes(
-        &self,
-        range: std::ops::Range<Location>,
-    ) -> Result<Vec<D>, Error> {
-        // Get the positions of all nodes that should be pinned.
-        let start_pos = Position::try_from(range.start)?;
-        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
-
-        // Get all positions required for the proof.
-        let required_positions = nodes_required_for_range_proof(self.leaves, range)?;
-
-        if required_positions.len() != self.digests.len() {
-            #[cfg(feature = "std")]
-            debug!(
-                digests_len = self.digests.len(),
-                required_positions_len = required_positions.len(),
-                "Proof digest count doesn't match required positions",
-            );
-            return Err(Error::InvalidProofLength);
-        }
-
-        // Happy path: we can extract the pinned nodes directly from the proof.
-        // This happens when the `end_element_pos` is the last element in the MMR.
-        if pinned_positions
-            == required_positions[required_positions.len() - pinned_positions.len()..]
-        {
-            return Ok(self.digests[required_positions.len() - pinned_positions.len()..].to_vec());
-        }
-
-        // Create a mapping from position to digest.
-        let position_to_digest: BTreeMap<Position, D> = required_positions
-            .iter()
-            .zip(self.digests.iter())
-            .map(|(&pos, &digest)| (pos, digest))
-            .collect();
-
-        // Extract the pinned nodes in the same order as nodes_to_pin.
-        let mut result = Vec::with_capacity(pinned_positions.len());
-        for pinned_pos in pinned_positions {
-            let Some(&digest) = position_to_digest.get(&pinned_pos) else {
-                #[cfg(feature = "std")]
-                debug!(?pinned_pos, "Pinned node not found in proof");
-                return Err(Error::MissingDigest(pinned_pos));
-            };
-            result.push(digest);
-        }
-        Ok(result)
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
@@ -342,20 +278,104 @@ impl<D: Digest> Proof<D> {
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
-        let Ok(peak_digests) = self.reconstruct_peak_digests(
-            hasher,
-            elements,
-            start_loc,
-            Some(&mut collected_digests),
-        ) else {
+        let Ok(reconstructed_root) =
+            self.reconstruct_root_impl(hasher, elements, start_loc, Some(&mut collected_digests))
+        else {
             return Err(Error::InvalidProof);
         };
 
-        if hasher.root(self.leaves, peak_digests.iter()) != *root {
+        if reconstructed_root != *root {
             return Err(Error::RootMismatch);
         }
 
         Ok(collected_digests)
+    }
+
+    /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
+    ///
+    /// The `pinned_nodes` are the peak digests of the sub-MMR at `start_loc`, in the order returned
+    /// by `nodes_to_pin`. Each pinned node is either:
+    ///
+    /// - A peak of the full MMR that precedes the proven range (fold-prefix peak). These are
+    ///   verified by refolding them and comparing against the proof's fold-prefix accumulator.
+    /// - A sibling node within a range peak's reconstruction. These are verified against the
+    ///   digests extracted during proof verification.
+    ///
+    /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
+    /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
+    pub fn verify_proof_and_pinned_nodes<H, E>(
+        &self,
+        hasher: &mut H,
+        elements: &[E],
+        start_loc: Location,
+        pinned_nodes: &[D],
+        root: &D,
+    ) -> bool
+    where
+        H: Hasher<Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        // Verify the proof and extract all node digests used in the reconstruction.
+        let collected = match self
+            .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        if elements.is_empty() {
+            return pinned_nodes.is_empty();
+        }
+
+        let Ok(start_pos) = Position::try_from(start_loc) else {
+            return false;
+        };
+
+        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
+        if pinned_positions.len() != pinned_nodes.len() {
+            return false;
+        }
+
+        let Ok(bp) = start_loc
+            .checked_add(elements.len() as u64)
+            .ok_or(Error::LocationOverflow(start_loc))
+            .and_then(|end_loc| blueprint(self.leaves, start_loc..end_loc))
+        else {
+            return false;
+        };
+
+        // Combine pinned positions and digests into a map for fast lookup.
+        let mut pinned_map: BTreeMap<Position, D> = pinned_positions
+            .into_iter()
+            .zip(pinned_nodes.iter().copied())
+            .collect();
+
+        // Verify fold-prefix pinned nodes by recomputing the accumulator.
+        if !bp.fold_prefix.is_empty() {
+            if self.digests.is_empty() {
+                return false;
+            }
+            let mut acc = hasher.digest(&self.leaves.to_be_bytes());
+            for pos in &bp.fold_prefix {
+                let Some(digest) = pinned_map.remove(pos) else {
+                    return false;
+                };
+                acc = hasher.fold(&acc, &digest);
+            }
+            if acc != self.digests[0] {
+                return false;
+            }
+        }
+
+        // Verify remaining pinned nodes (siblings) against the extracted digests.
+        let extracted: BTreeMap<Position, D> = collected.into_iter().collect();
+        for (pos, digest) in pinned_map {
+            if extracted.get(&pos) != Some(&digest) {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
@@ -370,28 +390,32 @@ impl<D: Digest> Proof<D> {
         H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
-        let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_loc, None)?;
-
-        Ok(hasher.root(self.leaves, peak_digests.iter()))
+        self.reconstruct_root_impl(hasher, elements, start_loc, None)
     }
 
-    /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
-    /// node digests used in the process will be added to the wrapped vector.
-    pub fn reconstruct_peak_digests<H, E>(
+    /// Core implementation for reconstructing the MMR root from a proof. Uses the fold-based proof
+    /// layout: `[folded_prefix? | after_peaks... | siblings_dfs...]`.
+    ///
+    /// If `collected_digests` is Some, all node digests encountered during reconstruction are
+    /// appended to the wrapped vector.
+    fn reconstruct_root_impl<H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_loc: Location,
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
-    ) -> Result<Vec<D>, ReconstructionError>
+    ) -> Result<D, ReconstructionError>
     where
         H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
             if start_loc == 0 {
-                return Ok(vec![]);
+                return if self.digests.is_empty() {
+                    Ok(hasher.digest(&self.leaves.to_be_bytes()))
+                } else {
+                    Err(ReconstructionError::ExtraDigests)
+                };
             }
             return Err(ReconstructionError::MissingElements);
         }
@@ -410,59 +434,129 @@ impl<D: Digest> Proof<D> {
             return Err(ReconstructionError::InvalidEndLoc);
         }
 
-        let mut proof_digests_iter = self.digests.iter();
-        let mut siblings_iter = self.digests.iter().rev();
+        // Classify peaks.
+        let mut before_count = 0usize;
+        let mut after_peaks: Vec<Position> = Vec::new();
+        let mut range_peaks: Vec<(Position, u32)> = Vec::new();
 
-        // Include peak digests only for trees that have no elements from the range, and keep track
-        // of the starting and ending trees of those that do contain some.
-        let mut peak_digests: Vec<D> = Vec::new();
-        let mut proof_digests_used = 0;
-        let mut elements_iter = elements.iter();
         for (peak_pos, height) in PeakIterator::new(size) {
-            let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
-            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
-                let hash = peak_digest_from_range(
-                    hasher,
-                    RangeInfo {
-                        pos: peak_pos,
-                        two_h: 1 << height,
-                        leftmost_pos: start_element_pos,
-                        rightmost_pos: end_element_pos,
-                    },
-                    &mut elements_iter,
-                    &mut siblings_iter,
-                    collected_digests.as_deref_mut(),
-                )?;
-                peak_digests.push(hash);
-                if let Some(ref mut collected_digests) = collected_digests {
-                    collected_digests.push((peak_pos, hash));
-                }
-            } else if let Some(hash) = proof_digests_iter.next() {
-                proof_digests_used += 1;
-                peak_digests.push(*hash);
-                if let Some(ref mut collected_digests) = collected_digests {
-                    collected_digests.push((peak_pos, *hash));
-                }
+            let leftmost_pos = peak_pos + 2 - (1u64 << (height + 1));
+            if peak_pos < start_element_pos {
+                before_count += 1;
+            } else if leftmost_pos > end_element_pos {
+                after_peaks.push(peak_pos);
             } else {
-                return Err(ReconstructionError::MissingDigests);
+                range_peaks.push((peak_pos, height));
             }
         }
 
+        // Slice self.digests into [folded_prefix? | after_peaks... | siblings...]
+        let has_prefix = before_count > 0;
+        let prefix_digests = if has_prefix { 1 } else { 0 };
+        let expected_min = prefix_digests + after_peaks.len();
+        if self.digests.len() < expected_min {
+            return Err(ReconstructionError::MissingDigests);
+        }
+
+        let after_start = prefix_digests;
+        let after_end = after_start + after_peaks.len();
+        let siblings = &self.digests[after_end..];
+
+        // Start fold accumulator.
+        let mut acc = if has_prefix {
+            // The first digest is the pre-folded prefix accumulator.
+            self.digests[0]
+        } else {
+            hasher.digest(&self.leaves.to_be_bytes())
+        };
+
+        // Reconstruct each range peak and fold into acc.
+        let mut sibling_cursor = 0usize;
+        let mut elements_iter = elements.iter();
+        for &(peak_pos, height) in &range_peaks {
+            let peak_digest = peak_digest_from_range(
+                hasher,
+                RangeInfo {
+                    pos: peak_pos,
+                    two_h: 1 << height,
+                    leftmost_pos: start_element_pos,
+                    rightmost_pos: end_element_pos,
+                },
+                &mut elements_iter,
+                siblings,
+                &mut sibling_cursor,
+                collected_digests.as_deref_mut(),
+            )?;
+            if let Some(ref mut cd) = collected_digests {
+                cd.push((peak_pos, peak_digest));
+            }
+            acc = hasher.fold(&acc, &peak_digest);
+        }
+
+        // Fold after-peak digests.
+        for (i, &after_peak_pos) in after_peaks.iter().enumerate() {
+            let digest = self.digests[after_start + i];
+            if let Some(ref mut cd) = collected_digests {
+                cd.push((after_peak_pos, digest));
+            }
+            acc = hasher.fold(&acc, &digest);
+        }
+
+        // Verify all elements were consumed.
         if elements_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
-        if let Some(next_sibling) = siblings_iter.next() {
-            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
-                return Err(ReconstructionError::ExtraDigests);
-            }
+
+        // Verify all siblings were consumed.
+        if sibling_cursor != siblings.len() {
+            return Err(ReconstructionError::ExtraDigests);
         }
 
-        Ok(peak_digests)
+        Ok(acc)
     }
 }
 
-/// Return the list of node positions required by the range proof for the specified range of
-/// elements.
+/// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
+pub(crate) struct Blueprint {
+    /// Peak positions that precede the proven range (to be folded into a single accumulator).
+    pub fold_prefix: Vec<Position>,
+    /// Node positions to include in the proof: after-peaks followed by DFS siblings.
+    pub fetch_nodes: Vec<Position>,
+}
+
+/// Collect sibling positions needed to reconstruct a peak digest from a range of elements, in DFS
+/// (forward consumption) order. This mirrors the traversal of `peak_digest_from_range`.
+fn collect_siblings_dfs(
+    pos: Position,
+    two_h: u64,
+    leftmost_pos: Position,
+    rightmost_pos: Position,
+    out: &mut Vec<Position>,
+) {
+    if two_h == 1 {
+        return;
+    }
+
+    let left_pos = pos - two_h;
+    let right_pos = left_pos + two_h - 1;
+    let descend_left = left_pos >= leftmost_pos;
+    let descend_right = left_pos < rightmost_pos;
+
+    if !descend_left {
+        out.push(left_pos);
+    } else {
+        collect_siblings_dfs(left_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
+    }
+
+    if !descend_right {
+        out.push(right_pos);
+    } else {
+        collect_siblings_dfs(right_pos, two_h >> 1, leftmost_pos, rightmost_pos, out);
+    }
+}
+
+/// Return a blueprint containing the digests required to generate a proof over the specified range
+/// of elements.
 ///
 /// # Errors
 ///
@@ -471,10 +565,7 @@ impl<D: Digest> Proof<D> {
 /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
-pub(crate) fn nodes_required_for_range_proof(
-    leaves: Location,
-    range: Range<Location>,
-) -> Result<Vec<Position>, Error> {
+pub(crate) fn blueprint(leaves: Location, range: Range<Location>) -> Result<Blueprint, Error> {
     if range.is_empty() {
         return Err(Error::Empty);
     }
@@ -486,71 +577,85 @@ pub(crate) fn nodes_required_for_range_proof(
         return Err(Error::RangeOutOfBounds(range.end));
     }
 
-    // Find the mountains that contain no elements from the range. The peaks of these mountains
-    // are required to prove the range, so they are added to the result.
-    let mut start_tree_with_element: Option<(Position, u32)> = None;
-    let mut end_tree_with_element: Option<(Position, u32)> = None;
-    let mut positions = Vec::new();
     let size = Position::try_from(leaves)?;
     let start_element_pos = Position::try_from(range.start)?;
     let end_element_pos = Position::try_from(end_minus_one)?;
 
-    let mut peak_iterator = PeakIterator::new(size);
-    while let Some(peak) = peak_iterator.next() {
-        if start_tree_with_element.is_none() && peak.0 >= start_element_pos {
-            // Found the first tree to contain an element in the range
-            start_tree_with_element = Some(peak);
-            if peak.0 >= end_element_pos {
-                // Start and end tree are the same
-                end_tree_with_element = Some(peak);
-                continue;
-            }
-            for peak in peak_iterator.by_ref() {
-                if peak.0 >= end_element_pos {
-                    // Found the last tree to contain an element in the range
-                    end_tree_with_element = Some(peak);
-                    break;
-                }
-            }
+    let mut fold_prefix = Vec::new();
+    let mut after_peaks = Vec::new();
+    let mut range_peaks: Vec<(Position, u32)> = Vec::new();
+
+    for (peak_pos, height) in PeakIterator::new(size) {
+        let leftmost_pos = peak_pos + 2 - (1u64 << (height + 1));
+        if peak_pos < start_element_pos {
+            fold_prefix.push(peak_pos);
+        } else if leftmost_pos > end_element_pos {
+            after_peaks.push(peak_pos);
         } else {
-            // Tree is outside the range, its peak is thus required.
-            positions.push(peak.0);
+            range_peaks.push((peak_pos, height));
         }
     }
 
-    // We checked above that all range elements are in this MMR, so some mountain must contain
-    // the first and last elements in the range.
-    let (start_tree_peak, start_tree_height) =
-        start_tree_with_element.expect("start_tree_with_element is Some");
-    let (end_tree_peak, end_tree_height) =
-        end_tree_with_element.expect("end_tree_with_element is Some");
+    assert!(
+        !range_peaks.is_empty(),
+        "at least one peak must contain range elements"
+    );
 
-    // Include the positions of any left-siblings of each node on the path from peak to
-    // leftmost-leaf, and right-siblings for the path from peak to rightmost-leaf. These are
-    // added in order of decreasing parent position.
-    let left_path_iter = PathIterator::new(start_element_pos, start_tree_peak, start_tree_height);
-
-    let mut siblings = Vec::new();
-    if start_element_pos == end_element_pos {
-        // For the (common) case of a single element range, the right and left path are the
-        // same so no need to process each independently.
-        siblings.extend(left_path_iter);
-    } else {
-        let right_path_iter = PathIterator::new(end_element_pos, end_tree_peak, end_tree_height);
-        // filter the right path for right siblings only
-        siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
-        // filter the left path for left siblings only
-        siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
-
-        // If the range spans more than one tree, then the digests must already be in the correct
-        // order. Otherwise, we enforce the desired order through sorting.
-        if start_tree_peak == end_tree_peak {
-            siblings.sort_by_key(|a| Reverse(a.0));
-        }
+    // Build fetch_nodes: after_peaks first, then DFS siblings for each range peak.
+    let mut fetch_nodes = after_peaks;
+    for &(peak_pos, height) in &range_peaks {
+        collect_siblings_dfs(
+            peak_pos,
+            1 << height,
+            start_element_pos,
+            end_element_pos,
+            &mut fetch_nodes,
+        );
     }
-    positions.extend(siblings.into_iter().map(|(_, pos)| pos));
 
-    Ok(positions)
+    Ok(Blueprint {
+        fold_prefix,
+        fetch_nodes,
+    })
+}
+
+/// Build a range proof using the fold-based layout.
+///
+/// The prover folds prefix peak digests into a single accumulator. The resulting proof contains:
+/// `[fold_acc? | after_peaks... | siblings_dfs...]`
+///
+/// `get_node` returns the digest for a given position, or `None` if pruned.
+pub(crate) fn build_range_proof<D, H>(
+    hasher: &mut H,
+    leaves: Location,
+    range: Range<Location>,
+    get_node: impl Fn(Position) -> Option<D>,
+) -> Result<Proof<D>, Error>
+where
+    D: Digest,
+    H: Hasher<Digest = D>,
+{
+    let bp = blueprint(leaves, range)?;
+
+    let mut digests =
+        Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
+
+    // Fold prefix peaks into a single accumulator.
+    if !bp.fold_prefix.is_empty() {
+        let mut acc = hasher.digest(&leaves.to_be_bytes());
+        for &pos in &bp.fold_prefix {
+            let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
+            acc = hasher.fold(&acc, &d);
+        }
+        digests.push(acc);
+    }
+
+    // Append after-peak and sibling digests.
+    for &pos in &bp.fetch_nodes {
+        digests.push(get_node(pos).ok_or(Error::ElementPruned(pos))?);
+    }
+
+    Ok(Proof { leaves, digests })
 }
 
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
@@ -580,8 +685,9 @@ pub(crate) fn nodes_required_for_multi_proof(
             return Err(Error::LocationOverflow(*loc));
         }
         // `loc` is valid so it won't overflow from +1
-        let positions = nodes_required_for_range_proof(leaves, *loc..*loc + 1)?;
-        acc.extend(positions);
+        let bp = blueprint(leaves, *loc..*loc + 1)?;
+        acc.extend(bp.fold_prefix);
+        acc.extend(bp.fetch_nodes);
 
         Ok(acc)
     })
@@ -595,18 +701,20 @@ struct RangeInfo {
     rightmost_pos: Position, // rightmost leaf in the tree to be traversed
 }
 
-fn peak_digest_from_range<'a, D, H, E, S>(
+/// Reconstruct the peak digest from a DFS traversal over the range of elements and siblings.
+/// Siblings are consumed in forward order from `siblings[*cursor..]`.
+fn peak_digest_from_range<D, H, E>(
     hasher: &mut H,
     range_info: RangeInfo,
     elements: &mut E,
-    sibling_digests: &mut S,
+    siblings: &[D],
+    cursor: &mut usize,
     mut collected_digests: Option<&mut Vec<(Position, D)>>,
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
     H: Hasher<Digest = D>,
     E: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a D>,
 {
     assert_ne!(range_info.two_h, 0);
     if range_info.two_h == 1 {
@@ -616,14 +724,14 @@ where
         }
     }
 
-    let mut left_digest: Option<D> = None;
-    let mut right_digest: Option<D> = None;
-
     let left_pos = range_info.pos - range_info.two_h;
     let right_pos = left_pos + range_info.two_h - 1;
-    if left_pos >= range_info.leftmost_pos {
-        // Descend left
-        let digest = peak_digest_from_range(
+    let descend_left = left_pos >= range_info.leftmost_pos;
+    let descend_right = left_pos < range_info.rightmost_pos;
+
+    // Read siblings and descend in the same order as collect_siblings_dfs.
+    let left_digest = if descend_left {
+        peak_digest_from_range(
             hasher,
             RangeInfo {
                 pos: left_pos,
@@ -632,14 +740,21 @@ where
                 rightmost_pos: range_info.rightmost_pos,
             },
             elements,
-            sibling_digests,
+            siblings,
+            cursor,
             collected_digests.as_deref_mut(),
-        )?;
-        left_digest = Some(digest);
-    }
-    if left_pos < range_info.rightmost_pos {
-        // Descend right
-        let digest = peak_digest_from_range(
+        )?
+    } else {
+        if *cursor >= siblings.len() {
+            return Err(ReconstructionError::MissingDigests);
+        }
+        let d = siblings[*cursor];
+        *cursor += 1;
+        d
+    };
+
+    let right_digest = if descend_right {
+        peak_digest_from_range(
             hasher,
             RangeInfo {
                 pos: right_pos,
@@ -648,41 +763,25 @@ where
                 rightmost_pos: range_info.rightmost_pos,
             },
             elements,
-            sibling_digests,
+            siblings,
+            cursor,
             collected_digests.as_deref_mut(),
-        )?;
-        right_digest = Some(digest);
-    }
-
-    if left_digest.is_none() {
-        match sibling_digests.next() {
-            Some(hash) => left_digest = Some(*hash),
-            None => return Err(ReconstructionError::MissingDigests),
+        )?
+    } else {
+        if *cursor >= siblings.len() {
+            return Err(ReconstructionError::MissingDigests);
         }
-    }
-    if right_digest.is_none() {
-        match sibling_digests.next() {
-            Some(hash) => right_digest = Some(*hash),
-            None => return Err(ReconstructionError::MissingDigests),
-        }
+        let d = siblings[*cursor];
+        *cursor += 1;
+        d
+    };
+
+    if let Some(ref mut cd) = collected_digests {
+        cd.push((left_pos, left_digest));
+        cd.push((right_pos, right_digest));
     }
 
-    if let Some(ref mut collected_digests) = collected_digests {
-        collected_digests.push((
-            left_pos,
-            left_digest.expect("left_digest guaranteed to be Some after checks above"),
-        ));
-        collected_digests.push((
-            right_pos,
-            right_digest.expect("right_digest guaranteed to be Some after checks above"),
-        ));
-    }
-
-    Ok(hasher.node_digest(
-        range_info.pos,
-        &left_digest.expect("left_digest guaranteed to be Some after checks above"),
-        &right_digest.expect("right_digest guaranteed to be Some after checks above"),
-    ))
+    Ok(hasher.node_digest(range_info.pos, &left_digest, &right_digest))
 }
 
 #[cfg(test)]
@@ -751,7 +850,7 @@ mod tests {
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
             let leaf = Location::new(leaf);
-            let proof: Proof<Digest> = mmr.proof(leaf).unwrap();
+            let proof: Proof<Digest> = mmr.proof(&mut hasher, leaf).unwrap();
             assert!(
                 proof.verify_element_inclusion(&mut hasher, &element, leaf, root),
                 "valid proof should verify successfully"
@@ -761,7 +860,7 @@ mod tests {
         // Create a valid proof, then confirm various mangling of the proof or proof args results in
         // verification failure.
         const LEAF: Location = Location::new(10);
-        let proof = mmr.proof(LEAF).unwrap();
+        let proof = mmr.proof(&mut hasher, LEAF).unwrap();
         assert!(
             proof.verify_element_inclusion(&mut hasher, &element, LEAF, root),
             "proof verification should be successful"
@@ -809,22 +908,18 @@ mod tests {
                 "proof verification should fail with missing digests"
             );
         }
-        proof2 = proof.clone();
-        proof2.digests.clear();
-        const PEAK_COUNT: usize = 3;
-        proof2
-            .digests
-            .extend(proof.digests[0..PEAK_COUNT - 1].iter().cloned());
-        // sneak in an extra hash that won't be used in the computation and make sure it's
-        // detected
-        proof2.digests.push(test_digest(0));
-        proof2
-            .digests
-            .extend(proof.digests[PEAK_COUNT - 1..].iter().cloned());
-        assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
-            "proof verification should fail with extra hash even if it's unused by the computation"
-        );
+        // Inserting an extra digest in the middle should cause verification failure.
+        if proof.digests.len() >= 2 {
+            proof2 = proof.clone();
+            proof2.digests.clear();
+            proof2.digests.extend(proof.digests[0..1].iter().cloned());
+            proof2.digests.push(test_digest(0));
+            proof2.digests.extend(proof.digests[1..].iter().cloned());
+            assert!(
+                !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+                "proof verification should fail with extra hash even if it's unused by the computation"
+            );
+        }
     }
 
     #[test]
@@ -847,7 +942,7 @@ mod tests {
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -863,7 +958,7 @@ mod tests {
         // Create a proof over a range of elements, confirm it verifies successfully, then mangle
         // the proof & proof input in various ways, confirming verification fails.
         let range = Location::new(33)..Location::new(40);
-        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let valid_elements = &elements[range.to_usize_range()];
         assert!(
             range_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, root),
@@ -980,7 +1075,7 @@ mod tests {
             assert_eq!(root, *pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new(loc as u64);
-                let proof = mmr.proof(loc);
+                let proof = mmr.proof(&mut hasher, loc);
                 if loc < prune_loc {
                     continue;
                 }
@@ -1023,7 +1118,7 @@ mod tests {
             }
             for j in (i + 2)..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -1053,7 +1148,7 @@ mod tests {
 
         let updated_root = mmr.root();
         let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);
-        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
@@ -1085,7 +1180,7 @@ mod tests {
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let proof = mmr.range_proof(range).unwrap();
+                let proof = mmr.range_proof(&mut hasher, range).unwrap();
 
                 let expected_size = proof.encode_size();
                 let serialized_proof = proof.encode();
@@ -1139,120 +1234,6 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_proving_extract_pinned_nodes() {
-        // Test for every number of elements from 1 to 255
-        for num_elements in 1u64..255 {
-            // Build MMR with the specified number of elements
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
-
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                for i in 0..num_elements {
-                    batch.add(&mut hasher, &test_digest(i as u8));
-                }
-                batch.merkleize(&mut hasher).finalize()
-            };
-            mmr.apply(changeset).unwrap();
-
-            // Test pruning to each leaf.
-            for leaf in 0..num_elements {
-                // Test with a few different end positions to get good coverage
-                let test_end_locs = if num_elements == 1 {
-                    // Single element case
-                    vec![leaf + 1]
-                } else {
-                    // Multi-element case: test with various end positions
-                    let mut ends = vec![leaf + 1]; // Single element proof
-
-                    // Add a few more end positions if available
-                    if leaf + 2 <= num_elements {
-                        ends.push(leaf + 2);
-                    }
-                    if leaf + 3 <= num_elements {
-                        ends.push(leaf + 3);
-                    }
-                    // Always test with the last element if different
-                    if ends.last().unwrap() != &num_elements {
-                        ends.push(num_elements);
-                    }
-
-                    ends.into_iter()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect()
-                };
-
-                for end_loc in test_end_locs {
-                    // Generate proof for the range
-                    let range = Location::new(leaf)..Location::new(end_loc);
-                    let proof_result = mmr.range_proof(range.clone());
-                    let proof = proof_result.unwrap();
-
-                    // Extract pinned nodes
-                    let extract_result = proof.extract_pinned_nodes(range.clone());
-                    assert!(
-                            extract_result.is_ok(),
-                            "Failed to extract pinned nodes for {num_elements} elements, boundary={leaf}, range={}..{}", range.start, range.end
-                        );
-
-                    let pinned_nodes = extract_result.unwrap();
-                    let leaf_loc = Location::new(leaf);
-                    let leaf_pos = Position::try_from(leaf_loc).unwrap();
-                    let expected_pinned: Vec<Position> = nodes_to_pin(leaf_pos).collect();
-
-                    // Verify count matches expected
-                    assert_eq!(
-                            pinned_nodes.len(),
-                            expected_pinned.len(),
-                            "Pinned node count mismatch for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
-                        );
-
-                    // Verify extracted hashes match actual node values
-                    // The pinned_nodes Vec is in the same order as expected_pinned
-                    for (i, &expected_pos) in expected_pinned.iter().enumerate() {
-                        let extracted_hash = pinned_nodes[i];
-                        let actual_hash = mmr.get_node(expected_pos).unwrap();
-                        assert_eq!(
-                                extracted_hash, actual_hash,
-                                "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
-                            );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_proving_extract_pinned_nodes_invalid_size() {
-        // Test that extract_pinned_nodes returns an error for invalid MMR size
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
-
-        // Build MMR with 10 elements
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            for i in 0..10 {
-                batch.add(&mut hasher, &test_digest(i));
-            }
-            batch.merkleize(&mut hasher).finalize()
-        };
-        mmr.apply(changeset).unwrap();
-
-        // Generate a valid proof
-        let range = Location::new(5)..Location::new(8);
-        let mut proof = mmr.range_proof(range.clone()).unwrap();
-
-        // Verify the proof works with valid size
-        assert!(proof.extract_pinned_nodes(range.clone()).is_ok());
-
-        // Test with invalid location.
-        proof.leaves = Location::new(*MAX_LOCATION + 2);
-        let result = proof.extract_pinned_nodes(range);
-        assert!(matches!(result, Err(Error::LocationOverflow(_))));
-    }
-
     #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
@@ -1271,7 +1252,9 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr.range_proof(Location::new(0)..mmr.leaves()).unwrap();
+        let proof = mmr
+            .range_proof(&mut hasher, Location::new(0)..mmr.leaves())
+            .unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1300,7 +1283,7 @@ mod tests {
 
         // Test 2: Single element range (first element)
         let range = Location::new(0)..Location::new(1);
-        let single_proof = mmr.range_proof(range.clone()).unwrap();
+        let single_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let range_start = range.start;
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
@@ -1316,7 +1299,7 @@ mod tests {
         let mid_idx = 24;
         let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
         let range_start = range.start;
-        let mid_proof = mmr.range_proof(range.clone()).unwrap();
+        let mid_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1331,7 +1314,7 @@ mod tests {
         let last_idx = elements.len() as u64 - 1;
         let range = Location::new(last_idx)..Location::new(last_idx + 1);
         let range_start = range.start;
-        let last_proof = mmr.range_proof(range.clone()).unwrap();
+        let last_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1340,12 +1323,12 @@ mod tests {
                 root,
             )
             .unwrap();
-        assert!(last_digests.len() > 1);
+        assert!(!last_digests.is_empty());
 
         // Test 5: Small range at the beginning
         let range = Location::new(0)..Location::new(5);
         let range_start = range.start;
-        let small_proof = mmr.range_proof(range.clone()).unwrap();
+        let small_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1360,7 +1343,7 @@ mod tests {
         // Test 6: Medium range in the middle
         let range = Location::new(10)..Location::new(31);
         let range_start = range.start;
-        let mid_range_proof = mmr.range_proof(range.clone()).unwrap();
+        let mid_range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1535,8 +1518,8 @@ mod tests {
         mmr.apply(changeset).unwrap();
 
         // Get individual proofs that will share some digests (elements in same subtree)
-        let proof1 = mmr.proof(Location::new(0)).unwrap();
-        let proof2 = mmr.proof(Location::new(1)).unwrap();
+        let proof1 = mmr.proof(&mut hasher, Location::new(0)).unwrap();
+        let proof2 = mmr.proof(&mut hasher, Location::new(1)).unwrap();
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
         // Generate multi-proof for the same positions
@@ -1574,15 +1557,14 @@ mod tests {
         // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
         let max_loc_plus_1 = Location::new(*MAX_LOCATION + 1);
 
-        let result = nodes_required_for_range_proof(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
+        let result = blueprint(MAX_LOCATION, MAX_LOCATION - 1..MAX_LOCATION);
         assert!(
             result.is_ok(),
             "Should be able to prove with MAX_LOCATION leaves"
         );
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
-        let result_overflow =
-            nodes_required_for_range_proof(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
+        let result_overflow = blueprint(max_loc_plus_1, MAX_LOCATION..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1662,11 +1644,11 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let positions = nodes_required_for_range_proof(leaves, loc..loc + 1)
-            .expect("should compute positions for location 0");
+        let bp = blueprint(leaves, loc..loc + 1).expect("should compute blueprint for location 0");
+        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         assert_eq!(
-            positions.len(),
+            total_nodes,
             EXPECTED_WORST_CASE,
             "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
         );
@@ -1674,12 +1656,13 @@ mod tests {
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let positions = nodes_required_for_range_proof(leaves, last_leaf_loc..last_leaf_loc + 1)
-            .expect("should compute positions for last leaf");
+        let bp = blueprint(leaves, last_leaf_loc..last_leaf_loc + 1)
+            .expect("should compute blueprint for last leaf");
+        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         let expected_last_leaf = NUM_PEAKS - 1;
         assert_eq!(
-            positions.len(),
+            total_nodes,
             expected_last_leaf,
             "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
         );
@@ -1707,6 +1690,135 @@ mod tests {
         assert!(
             !Position::new(size_truncated).is_mmr_size(),
             "Size for 63 peaks should fail is_mmr_size()"
+        );
+    }
+
+    /// Regression test: pinned nodes that are sibling digests (not fold-prefix peaks) must be
+    /// verified against the extracted proof digests. A 3-leaf MMR with start_loc=1 has a pinned
+    /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
+    #[test]
+    fn test_verify_proof_and_pinned_nodes_sibling_case() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&mut hasher);
+        let elements: Vec<Digest> = (0..3).map(test_digest).collect();
+        let changeset = {
+            let mut batch = mmr.new_batch();
+            for e in &elements {
+                batch.add(&mut hasher, e);
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmr.apply(changeset).unwrap();
+        let root = mmr.root();
+
+        // Proof for range [1, 3) — fold prefix is empty, pinned node at position 0 is a sibling.
+        let start_loc = Location::new(1);
+        let proof = mmr
+            .range_proof(&mut hasher, start_loc..Location::new(3))
+            .unwrap();
+
+        let pinned: Vec<Digest> = mmr
+            .nodes_to_pin(Position::try_from(start_loc).unwrap())
+            .into_values()
+            .collect();
+        assert_eq!(pinned.len(), 1, "should have exactly one pinned node");
+
+        // Correct pinned nodes must verify.
+        assert!(
+            proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[1..],
+                start_loc,
+                &pinned,
+                root,
+            ),
+            "valid pinned nodes should verify"
+        );
+
+        // Wrong pinned digest must fail.
+        let bad_pinned = vec![test_digest(99)];
+        assert!(
+            !proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[1..],
+                start_loc,
+                &bad_pinned,
+                root,
+            ),
+            "wrong pinned digest should fail"
+        );
+
+        // Extra pinned node must fail.
+        let extra_pinned = vec![pinned[0], test_digest(42)];
+        assert!(
+            !proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[1..],
+                start_loc,
+                &extra_pinned,
+                root,
+            ),
+            "extra pinned node should fail"
+        );
+
+        // Empty pinned nodes must fail (start_loc > 0 requires at least one).
+        assert!(
+            !proof
+                .verify_proof_and_pinned_nodes(&mut hasher, &elements[1..], start_loc, &[], root,),
+            "missing pinned nodes should fail"
+        );
+    }
+
+    /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
+    #[test]
+    fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&mut hasher);
+        // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
+        // start_loc=8 puts the first peak entirely in the fold prefix.
+        let elements: Vec<Digest> = (0..10).map(test_digest).collect();
+        let changeset = {
+            let mut batch = mmr.new_batch();
+            for e in &elements {
+                batch.add(&mut hasher, e);
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmr.apply(changeset).unwrap();
+        let root = mmr.root();
+
+        let start_loc = Location::new(8);
+        let proof = mmr
+            .range_proof(&mut hasher, start_loc..Location::new(10))
+            .unwrap();
+
+        let pinned: Vec<Digest> = mmr
+            .nodes_to_pin(Position::try_from(start_loc).unwrap())
+            .into_values()
+            .collect();
+        assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
+
+        assert!(
+            proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[8..],
+                start_loc,
+                &pinned,
+                root,
+            ),
+            "valid fold-prefix pinned nodes should verify"
+        );
+
+        // Wrong digest must fail.
+        assert!(
+            !proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[8..],
+                start_loc,
+                &[test_digest(99)],
+                root,
+            ),
+            "wrong fold-prefix digest should fail"
         );
     }
 

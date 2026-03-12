@@ -208,7 +208,7 @@ where
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end;
 
-        // Special case: If we don't have pinned nodes, we need to extract them from a proof
+        // Special case: If we don't have pinned nodes, we need to get them from the resolver
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
             let start_loc = self.target.range.start;
@@ -217,7 +217,7 @@ where
                 start_loc,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .get_operations(target_size, start_loc, NZU64!(1), true)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -260,7 +260,7 @@ where
                 gap_range.start,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size)
+                        .get_operations(target_size, gap_range.start, batch_size, false)
                         .await;
                     IndexedFetchResult {
                         start_loc: gap_range.start,
@@ -407,6 +407,7 @@ where
             proof,
             operations,
             success_tx,
+            pinned_nodes,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -418,31 +419,50 @@ where
             return Ok(());
         }
 
-        // Verify the proof
-        let proof_valid = qmdb::verify_proof(
-            &mut self.hasher,
-            &proof,
-            start_loc,
-            &operations,
-            &self.target.root,
-        );
+        // Verify the proof (and pinned nodes if this is the sync boundary batch).
+        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start;
+        let valid = if need_pinned {
+            let elements: Vec<_> = operations
+                .iter()
+                .map(commonware_codec::Encode::encode)
+                .collect();
+            let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
+            proof.verify_proof_and_pinned_nodes(
+                &mut self.hasher,
+                &elements,
+                start_loc,
+                nodes,
+                &self.target.root,
+            )
+        } else {
+            qmdb::verify_proof(
+                &mut self.hasher,
+                &proof,
+                start_loc,
+                &operations,
+                &self.target.root,
+            )
+        };
 
-        // Report success or failure to the resolver
-        let _ = success_tx.send(proof_valid);
+        // Report success or failure to the resolver.
+        let _ = success_tx.send(valid);
 
-        if proof_valid {
-            // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
-                    crate::qmdb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
-                    self.pinned_nodes = Some(nodes);
-                }
+        if !valid {
+            if need_pinned {
+                tracing::warn!("boundary proof or pinned nodes failed verification, will retry");
             }
-
-            // Store operations for later application
-            self.store_operations(start_loc, operations);
+            return Ok(());
         }
+
+        // Cache pinned nodes only after successful verification.
+        if need_pinned {
+            if let Some(nodes) = pinned_nodes {
+                self.pinned_nodes = Some(nodes);
+            }
+        }
+
+        // Store operations for later application.
+        self.store_operations(start_loc, operations);
 
         Ok(())
     }
@@ -559,6 +579,7 @@ mod tests {
                     },
                     operations: vec![],
                     success_tx: oneshot::channel().0,
+                    pinned_nodes: None,
                 }),
             }
         });

@@ -30,6 +30,8 @@ pub struct FetchResult<Op, D: Digest> {
     pub operations: Vec<Op>,
     /// Channel to report success/failure back to resolver
     pub success_tx: oneshot::Sender<bool>,
+    /// Pinned MMR nodes at the start location, if requested
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
@@ -38,6 +40,7 @@ impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
             .field("proof", &self.proof)
             .field("operations", &self.operations)
             .field("success_tx", &"<callback>")
+            .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
 }
@@ -55,13 +58,15 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
-    /// `size` operations.
+    /// `size` operations. If `include_pinned_nodes` is true, the result will include the pinned
+    /// MMR nodes at `start_loc`.
     #[allow(clippy::type_complexity)]
     fn get_operations<'a>(
         &'a self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
@@ -85,14 +90,21 @@ macro_rules! impl_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-                self.historical_proof(op_count, start_loc, max_ops)
-                    .await
-                    .map(|(proof, operations)| FetchResult {
-                        proof,
-                        operations,
-                        success_tx: oneshot::channel().0,
-                    })
+                let (proof, operations) =
+                    self.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(self.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
 
@@ -114,15 +126,21 @@ macro_rules! impl_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
-                db.historical_proof(op_count, start_loc, max_ops).await.map(
-                    |(proof, operations)| FetchResult {
-                        proof,
-                        operations,
-                        success_tx: oneshot::channel().0,
-                    },
-                )
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
 
@@ -144,16 +162,22 @@ macro_rules! impl_resolver {
                 op_count: Location,
                 start_loc: Location,
                 max_ops: NonZeroU64,
+                include_pinned_nodes: bool,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                db.historical_proof(op_count, start_loc, max_ops).await.map(
-                    |(proof, operations)| FetchResult {
-                        proof,
-                        operations,
-                        success_tx: oneshot::channel().0,
-                    },
-                )
+                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
+                let pinned_nodes = if include_pinned_nodes {
+                    Some(db.pinned_nodes_at(start_loc).await?)
+                } else {
+                    None
+                };
+                Ok(FetchResult {
+                    proof,
+                    operations,
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes,
+                })
             }
         }
     };
@@ -199,6 +223,7 @@ pub(crate) mod tests {
             _op_count: Location,
             _start_loc: Location,
             _max_ops: NonZeroU64,
+            _include_pinned_nodes: bool,
         ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
