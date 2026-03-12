@@ -18,9 +18,14 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and subscribes to shard validity
-//! for the shard received by the proposer. If the shard is valid, the local shard is relayed to all
-//! other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and waits for validation of
+//! the shard assigned to this participant by the proposer. If that shard is valid, the local shard is
+//! relayed to all other participants to aid in block reconstruction.
+//!
+//! A participant may still reconstruct the full block from gossiped shards before its designated
+//! leader-delivered shard arrives. That is sufficient for later certification and repair flows, but it
+//! is not treated as notarization readiness: a participant only helps form a notarization once it has
+//! validated the shard it is supposed to echo.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
@@ -771,9 +776,11 @@ where
 
         match scheme.me() {
             Some(_) => {
-                // Subscribe to local shard readiness. This completes once we
-                // can vote on the proposal, either because our shard verified
-                // directly or because the block was reconstructed first.
+                // Subscribe to local shard readiness. For participants, this
+                // only completes once the leader-delivered shard for our
+                // assigned index has been verified. Reconstructing the block
+                // from peer gossip is useful for certification later, but is
+                // not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_shard(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context

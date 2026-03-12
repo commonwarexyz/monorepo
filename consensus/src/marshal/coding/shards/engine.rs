@@ -322,8 +322,13 @@ where
     /// Open subscriptions for local shard readiness for the keyed
     /// [`Commitment`].
     ///
-    /// Readiness is satisfied once our shard has been verified directly or
-    /// once the full block has already been reconstructed.
+    /// For participants, readiness is satisfied once the leader-delivered
+    /// shard for the local participant index has been verified. Block
+    /// reconstruction from peer gossip is tracked separately and does not
+    /// satisfy this readiness condition.
+    ///
+    /// Proposers are a special case: they satisfy readiness once their local
+    /// proposal is cached because they already hold all shards.
     shard_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
@@ -860,6 +865,9 @@ where
     }
 
     /// Handles the registry of a local shard readiness subscription.
+    ///
+    /// For participants this is tied to verification of the leader-delivered
+    /// shard for the local index, not to generic block reconstruction.
     fn handle_shard_subscription(&mut self, commitment: Commitment, response: oneshot::Sender<()>) {
         // Answer immediately if our own shard has been verified.
         let has_shard = self

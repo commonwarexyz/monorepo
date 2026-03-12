@@ -52,10 +52,14 @@ where
     },
     /// A request to open a subscription for local shard readiness.
     ///
-    /// This resolves once the node can proceed as if it had validated its
-    /// shard for the commitment, either because the leader's shard for this
-    /// node was verified directly or because the full block was reconstructed
-    /// before that shard arrived.
+    /// For participants, this resolves once the leader-delivered shard for
+    /// the local participant index has been verified. Reconstructing the full
+    /// block from gossiped shards does not resolve this subscription: that
+    /// block may still be used for later certification, but it is not enough
+    /// to claim the participant received the shard it is expected to echo.
+    ///
+    /// For proposers, this resolves immediately after the locally built block
+    /// is cached because they trivially have all shards.
     SubscribeShard {
         /// The block's commitment.
         commitment: Commitment,
@@ -151,10 +155,14 @@ where
 
     /// Subscribe to local shard readiness for a commitment.
     ///
-    /// This resolves once the node can proceed as if it had validated its
-    /// shard for the commitment, either because the leader's shard for this
-    /// node was verified directly or because the full block was reconstructed
-    /// before that shard arrived.
+    /// For participants, this resolves once the leader-delivered shard for
+    /// the local participant index has been verified. Reconstructing the full
+    /// block from gossiped shards does not resolve this subscription: that
+    /// block may still be used for later certification, but it is not enough
+    /// to claim the participant received the shard it is expected to echo.
+    ///
+    /// For proposers, this resolves immediately after the locally built block
+    /// is cached because they trivially have all shards.
     pub async fn subscribe_shard(&self, commitment: Commitment) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeShard {
