@@ -140,7 +140,7 @@ impl<D: Digest> Proof<D> {
     /// with root digest `root`.
     pub fn verify_element_inclusion<H>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         element: &[u8],
         loc: Location,
         root: &D,
@@ -156,7 +156,7 @@ impl<D: Digest> Proof<D> {
     /// false.
     pub fn verify_range_inclusion<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
         root: &D,
@@ -181,7 +181,7 @@ impl<D: Digest> Proof<D> {
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[(E, Location)],
         root: &D,
     ) -> bool
@@ -332,7 +332,7 @@ impl<D: Digest> Proof<D> {
     /// root.
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
         root: &D,
@@ -362,7 +362,7 @@ impl<D: Digest> Proof<D> {
     /// of elements, or returns a [ReconstructionError] if the input data is invalid.
     pub fn reconstruct_root<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
@@ -380,7 +380,7 @@ impl<D: Digest> Proof<D> {
     /// node digests used in the process will be added to the wrapped vector.
     pub fn reconstruct_peak_digests<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
@@ -596,7 +596,7 @@ struct RangeInfo {
 }
 
 fn peak_digest_from_range<'a, D, H, E, S>(
-    hasher: &mut H,
+    hasher: &H,
     range_info: RangeInfo,
     elements: &mut E,
     sibling_digests: &mut S,
@@ -700,50 +700,40 @@ mod tests {
     #[test]
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mmr = Mmr::new(&hasher);
         let root = mmr.root();
         let proof = Proof::default();
-        assert!(proof.verify_range_inclusion(
-            &mut hasher,
-            &[] as &[Digest],
-            Location::new(0),
-            root
-        ));
+        assert!(proof.verify_range_inclusion(&hasher, &[] as &[Digest], Location::new(0), root));
 
         // Any starting position other than 0 should fail to verify.
-        assert!(!proof.verify_range_inclusion(
-            &mut hasher,
-            &[] as &[Digest],
-            Location::new(1),
-            root
-        ));
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[Digest], Location::new(1), root));
 
         // Invalid root should fail to verify.
         let test_digest = test_digest(0);
         assert!(!proof.verify_range_inclusion(
-            &mut hasher,
+            &hasher,
             &[] as &[Digest],
             Location::new(0),
             &test_digest
         ));
 
         // Non-empty elements list should fail to verify.
-        assert!(!proof.verify_range_inclusion(&mut hasher, &[test_digest], Location::new(0), root));
+        assert!(!proof.verify_range_inclusion(&hasher, &[test_digest], Location::new(0), root));
     }
 
     #[test]
     fn test_proving_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let element = Digest::from(*b"01234567012345670123456701234567");
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let changeset = {
             let mut batch = mmr.new_batch();
             for _ in 0..11 {
-                batch.add(&mut hasher, &element);
+                batch.add(&hasher, &element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -753,7 +743,7 @@ mod tests {
             let leaf = Location::new(leaf);
             let proof: Proof<Digest> = mmr.proof(leaf).unwrap();
             assert!(
-                proof.verify_element_inclusion(&mut hasher, &element, leaf, root),
+                proof.verify_element_inclusion(&hasher, &element, leaf, root),
                 "valid proof should verify successfully"
             );
         }
@@ -763,49 +753,49 @@ mod tests {
         const LEAF: Location = Location::new(10);
         let proof = mmr.proof(LEAF).unwrap();
         assert!(
-            proof.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+            proof.verify_element_inclusion(&hasher, &element, LEAF, root),
             "proof verification should be successful"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, LEAF + 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, LEAF + 1, root),
             "proof verification should fail with incorrect element position"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, LEAF - 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, LEAF - 1, root),
             "proof verification should fail with incorrect element position 2"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &test_digest(0), LEAF, root),
+            !proof.verify_element_inclusion(&hasher, &test_digest(0), LEAF, root),
             "proof verification should fail with mangled element"
         );
         let root2 = test_digest(0);
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root2),
+            !proof.verify_element_inclusion(&hasher, &element, LEAF, &root2),
             "proof verification should fail with mangled root"
         );
         let mut proof2 = proof.clone();
         proof2.digests[0] = test_digest(0);
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
         proof2.leaves = Location::new(10);
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
             "proof verification should fail with incorrect leaves"
         );
         proof2 = proof.clone();
         proof2.digests.push(test_digest(0));
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
             "proof verification should fail with extra hash"
         );
         proof2 = proof.clone();
         while !proof2.digests.is_empty() {
             proof2.digests.pop();
             assert!(
-                !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+                !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
                 "proof verification should fail with missing digests"
             );
         }
@@ -822,7 +812,7 @@ mod tests {
             .digests
             .extend(proof.digests[PEAK_COUNT - 1..].iter().cloned());
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
+            !proof2.verify_element_inclusion(&hasher, &element, LEAF, root),
             "proof verification should fail with extra hash even if it's unused by the computation"
         );
     }
@@ -830,15 +820,15 @@ mod tests {
     #[test]
     fn test_proving_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         // test range proofs over all possible ranges of at least 2 elements
@@ -850,7 +840,7 @@ mod tests {
                 let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[range.to_usize_range()],
                         range.start,
                         root,
@@ -866,7 +856,7 @@ mod tests {
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         let valid_elements = &elements[range.to_usize_range()];
         assert!(
-            range_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, root),
+            range_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root),
             "valid range proof should verify successfully"
         );
         // Remove digests from the proof until it's empty, confirming proof verification fails for
@@ -875,12 +865,7 @@ mod tests {
         for _i in 0..range_proof.digests.len() {
             invalid_proof.digests.remove(0);
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "range proof with removed elements should fail"
             );
         }
@@ -894,7 +879,7 @@ mod tests {
                 }
                 assert!(
                     !range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[i..j],
                         range.start,
                         root,
@@ -907,7 +892,7 @@ mod tests {
         let invalid_root = test_digest(1);
         assert!(
             !range_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 valid_elements,
                 range.start,
                 &invalid_root,
@@ -920,12 +905,7 @@ mod tests {
             invalid_proof.digests[i] = test_digest(0);
 
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "mangled range proof should fail verification"
             );
         }
@@ -934,12 +914,7 @@ mod tests {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests.insert(i, test_digest(0));
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "mangled range proof should fail verification. inserted element at: {i}",
             );
         }
@@ -950,7 +925,7 @@ mod tests {
                 continue;
             }
             assert!(
-                !range_proof.verify_range_inclusion(&mut hasher, valid_elements, loc, root),
+                !range_proof.verify_range_inclusion(&hasher, valid_elements, loc, root),
                 "bad start_loc should fail verification {loc}",
             );
         }
@@ -959,15 +934,15 @@ mod tests {
     #[test_traced]
     fn test_proving_retained_nodes_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -986,7 +961,7 @@ mod tests {
                 }
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
-                    &mut hasher,
+                    &hasher,
                     &elements[*loc as usize],
                     loc,
                     &root
@@ -998,15 +973,15 @@ mod tests {
     #[test]
     fn test_proving_ranges_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1026,7 +1001,7 @@ mod tests {
                 let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[range.to_usize_range()],
                         range.start,
                         root,
@@ -1042,9 +1017,9 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &new_elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         elements.extend(new_elements);
@@ -1056,7 +1031,7 @@ mod tests {
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
-                    &mut hasher,
+                    &hasher,
                     &elements[range.to_usize_range()],
                     range.start,
                     updated_root,
@@ -1068,15 +1043,15 @@ mod tests {
     #[test]
     fn test_proving_proof_serialization() {
         // create a new MMR and add a non-trivial amount of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1144,15 +1119,15 @@ mod tests {
         // Test for every number of elements from 1 to 255
         for num_elements in 1u64..255 {
             // Build MMR with the specified number of elements
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
 
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..num_elements {
-                    batch.add(&mut hasher, &test_digest(i as u8));
+                    batch.add(&hasher, &test_digest(i as u8));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
 
@@ -1227,16 +1202,16 @@ mod tests {
     #[test]
     fn test_proving_extract_pinned_nodes_invalid_size() {
         // Test that extract_pinned_nodes returns an error for invalid MMR size
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
 
         // Build MMR with 10 elements
         let changeset = {
             let mut batch = mmr.new_batch();
             for i in 0..10 {
-                batch.add(&mut hasher, &test_digest(i));
+                batch.add(&hasher, &test_digest(i));
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1256,15 +1231,15 @@ mod tests {
     #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -1273,12 +1248,7 @@ mod tests {
         // in the tree.
         let proof = mmr.range_proof(Location::new(0)..mmr.leaves()).unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
-                &elements,
-                Location::new(0),
-                root,
-            )
+            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), root)
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -1290,7 +1260,7 @@ mod tests {
         let wrong_root = elements[0]; // any other digest will do
         assert!(matches!(
             proof.verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements,
                 Location::new(0),
                 &wrong_root
@@ -1304,7 +1274,7 @@ mod tests {
         let range_start = range.start;
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -1319,7 +1289,7 @@ mod tests {
         let mid_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -1334,7 +1304,7 @@ mod tests {
         let last_proof = mmr.range_proof(range.clone()).unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -1348,7 +1318,7 @@ mod tests {
         let small_proof = mmr.range_proof(range.clone()).unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -1363,7 +1333,7 @@ mod tests {
         let mid_range_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -1376,15 +1346,15 @@ mod tests {
     #[test]
     fn test_proving_multi_proof_generation_and_verify() {
         // Create an MMR with multiple elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..20).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1407,7 +1377,7 @@ mod tests {
 
         // Verify the proof
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1418,7 +1388,7 @@ mod tests {
 
         // Verify in different order
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[10], Location::new(10)),
                 (elements[5], Location::new(5)),
@@ -1429,7 +1399,7 @@ mod tests {
 
         // Verify with duplicate items
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[0], Location::new(0)),
@@ -1443,7 +1413,7 @@ mod tests {
         let mut wrong_size_proof = multi_proof.clone();
         wrong_size_proof.leaves = Location::new(*MAX_LOCATION + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1454,7 +1424,7 @@ mod tests {
 
         // Verify with wrong positions
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(1)),
                 (elements[5], Location::new(6)),
@@ -1470,7 +1440,7 @@ mod tests {
             vec![249u8, 248u8, 247u8],
         ];
         let wrong_verification = multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (wrong_elements[0].as_slice(), Location::new(0)),
                 (wrong_elements[1].as_slice(), Location::new(5)),
@@ -1482,7 +1452,7 @@ mod tests {
 
         // Verify with out of range element
         let wrong_verification = multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1498,7 +1468,7 @@ mod tests {
         // Verify with wrong root should fail
         let wrong_root = test_digest(99);
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1508,12 +1478,12 @@ mod tests {
         ));
 
         // Empty multi-proof
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let empty_mmr = Mmr::new(&hasher);
         let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[] as &[(Digest, Location)],
             empty_root
         ));
@@ -1521,16 +1491,16 @@ mod tests {
 
     #[test]
     fn test_proving_multi_proof_deduplication() {
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         // Create an MMR with enough elements to have shared digests
         let elements: Vec<_> = (0..30).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
 
@@ -1558,7 +1528,7 @@ mod tests {
         // Verify it still works
         let root = mmr.root();
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[1], Location::new(1))

@@ -110,8 +110,8 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
-        let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher = Standard::<Sha256>::new();
+        let mut mmr = Mmr::new(&hasher);
         let mut reference = ReferenceMmr::new();
 
         for (op_idx, op) in input.operations.iter().enumerate() {
@@ -133,8 +133,8 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let (mmr_pos, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let mmr_pos_inner = batch.add(&mut hasher, limited_data);
-                        (mmr_pos_inner, batch.merkleize(&mut hasher).finalize())
+                        let mmr_pos_inner = batch.add(&hasher, limited_data);
+                        (mmr_pos_inner, batch.merkleize(&hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     reference.add(mmr_pos, limited_data.to_vec());
@@ -178,8 +178,8 @@ fn fuzz(input: FuzzInput) {
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
                         let mut batch = mmr.new_batch();
-                        batch.update_leaf(&mut hasher, leaf_loc, limited_data).unwrap();
-                        mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
+                        batch.update_leaf(&hasher, leaf_loc, limited_data).unwrap();
+                        mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change
@@ -256,7 +256,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok(proof) = mmr.proof(loc) {
                         let root = mmr.root();
                         assert!(proof.verify_element_inclusion(
-                            &mut hasher,
+                            &hasher,
                             reference.leaf_data[location_idx].as_slice(),
                             loc,
                             root,

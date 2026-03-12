@@ -27,7 +27,7 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+    let hasher: Standard<Sha256> = Standard::new();
 
     let digests = input
         .digests
@@ -55,7 +55,7 @@ fn fuzz(input: FuzzInput) {
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(&mut hasher, &proof, operations.as_slice(), &root);
+    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {

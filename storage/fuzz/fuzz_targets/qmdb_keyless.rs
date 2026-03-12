@@ -146,7 +146,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new();
         let cfg = test_config("keyless-fuzz-test", &context);
         let mut db = Db::init(context.clone(), cfg)
             .await
@@ -260,7 +260,7 @@ fn fuzz(input: FuzzInput) {
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
@@ -296,7 +296,7 @@ fn fuzz(input: FuzzInput) {
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }

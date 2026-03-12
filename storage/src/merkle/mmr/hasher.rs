@@ -3,6 +3,7 @@
 use super::Position;
 use crate::mmr::Location;
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use core::marker::PhantomData;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher: Clone + Send + Sync {
@@ -12,11 +13,11 @@ pub trait Hasher: Clone + Send + Sync {
     ///
     /// The parts are concatenated before hashing (i.e. there is no domain separation
     /// between parts).
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
@@ -29,25 +30,25 @@ pub trait Hasher: Clone + Send + Sync {
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+    fn leaf_digest(&self, pos: Position, element: &[u8]) -> Self::Digest {
         self.hash([(*pos).to_be_bytes().as_slice(), element])
     }
 
     /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
+    fn digest(&self, data: &[u8]) -> Self::Digest {
         self.hash(core::iter::once(data))
     }
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
     fn root<'a>(
-        &mut self,
+        &self,
         leaves: Location,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
         #[allow(clippy::map_identity)] // The map coerces &'b to &'a; not a no-op.
         fn compute<'a, 'b: 'a, H: Hasher>(
-            h: &mut H,
+            h: &H,
             prefix: &'a [u8],
             parts: impl Iterator<Item = &'b [u8]>,
         ) -> H::Digest {
@@ -62,13 +63,15 @@ pub trait Hasher: Clone + Send + Sync {
 /// external data.
 #[derive(Clone)]
 pub struct Standard<H: CHasher> {
-    hasher: H,
+    _phantom: PhantomData<H>,
 }
 
 impl<H: CHasher> Standard<H> {
     /// Creates a new [Standard] hasher.
-    pub fn new() -> Self {
-        Self { hasher: H::new() }
+    pub const fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -81,11 +84,12 @@ impl<H: CHasher> Default for Standard<H> {
 impl<H: CHasher> Hasher for Standard<H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        let mut h = H::new();
         for part in parts {
-            self.hasher.update(part);
+            h.update(part);
         }
-        self.hasher.finalize()
+        h.finalize()
     }
 }
 
@@ -93,7 +97,6 @@ impl<H: CHasher> Hasher for Standard<H> {
 mod tests {
     use super::*;
     use crate::mmr::{mem::Mmr, Location};
-    use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     #[test]
@@ -118,7 +121,7 @@ mod tests {
     }
 
     fn test_leaf_digest<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new();
         // input hashes to use
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
@@ -137,7 +140,7 @@ mod tests {
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new();
         // input hashes to use
 
         let d1 = test_digest::<H>(1);
@@ -173,15 +176,14 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
+        let mmr_hasher: Standard<H> = Standard::new();
         // input digests to use
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
         let d4 = test_digest::<H>(4);
 
-        let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Location::new(0), empty_vec.iter());
+        let empty_out = mmr_hasher.root(Location::new(0), core::iter::empty());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),

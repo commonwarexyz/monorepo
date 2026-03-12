@@ -65,7 +65,7 @@ where
     U: Send + Sync + 'static,
     C: Mutable<Item = O>,
 {
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
 
     let mmr = crate::mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
@@ -74,7 +74,7 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &mut hasher,
+        &hasher,
     )
     .await?;
 

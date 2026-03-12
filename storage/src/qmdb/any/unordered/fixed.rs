@@ -281,9 +281,9 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -306,7 +306,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -329,7 +329,7 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             let ops = create_test_ops(50);
 
             let mut db = create_test_db(context.with_label("first")).await;
@@ -342,7 +342,7 @@ pub(crate) mod test {
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &proof_ops,
@@ -381,7 +381,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
@@ -412,7 +412,7 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
                 assert!(verify_proof(
-                    &mut hasher,
+                    &hasher,
                     &historical_proof,
                     start_loc,
                     &historical_ops,
@@ -424,7 +424,7 @@ pub(crate) mod test {
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &full_proof,
                 start_loc,
                 &full_ops,
