@@ -156,7 +156,7 @@ impl Record {
         self.status = Status::Reserved;
         let next_reservable_at = now + interval;
         self.next_reservable_at = Some(next_reservable_at);
-        self.next_dial_at = Some(next_reservable_at.add_jittered(context, interval));
+        self.next_dial_at = Some(next_reservable_at.add_jittered(context, interval / 2));
         ReserveResult::Reserved
     }
 
@@ -539,7 +539,7 @@ mod tests {
             match status {
                 DialStatus::After(t) => {
                     assert!(t >= now + interval);
-                    assert!(t <= now + interval * 3);
+                    assert!(t <= now + interval * 2);
                 }
                 other => panic!("expected After, got {:?}", other),
             }

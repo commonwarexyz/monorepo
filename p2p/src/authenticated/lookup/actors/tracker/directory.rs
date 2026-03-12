@@ -1614,8 +1614,8 @@ mod tests {
                 "should not appear in dialable list during rate-limit window"
             );
 
-            // After the jitter window (up to 3x interval), peer becomes dialable again.
-            context.sleep(quota.replenish_interval() * 3).await;
+            // After the jitter window (up to 2x interval), peer becomes dialable again.
+            context.sleep(quota.replenish_interval() * 2).await;
             assert!(directory.dialable().peers.contains(&pk_1));
             let (_reservation, ingress) = directory
                 .dial(&pk_1)
@@ -1652,13 +1652,13 @@ mod tests {
             drop(reservation);
             directory.release(super::Metadata::Dialer(pk_1.clone()));
 
-            // next_query_at reflects the jittered next_dial_at (between 1x and 3x interval).
+            // next_query_at reflects the jittered next_dial_at (between 1x and 2x interval).
             let interval = quota.replenish_interval();
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
             let nqa = dialable.next_query_at.unwrap();
             assert!(nqa >= reserved_at + interval);
-            assert!(nqa <= reserved_at + interval * 3);
+            assert!(nqa <= reserved_at + interval * 2);
         });
     }
 
