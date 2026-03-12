@@ -159,6 +159,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Create the engine
@@ -204,10 +205,47 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
         assert!(result.is_err());
+    });
+}
+
+/// Test that the top-level sync future remains `Send`.
+pub(crate) fn test_sync_future_is_send<H: SyncTestHarness>()
+where
+    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
+        Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    ConfigOf<H>: Send,
+    JournalOf<H>: Contiguous,
+{
+    fn assert_send<T: Send>(_value: T) {}
+
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
+        let engine_config: Config<H::Db, _> = Config {
+            context: context.with_label("client"),
+            target: Target {
+                root: Digest::from([0; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(5)),
+            },
+            resolver,
+            apply_batch_size: 2,
+            max_outstanding_requests: 2,
+            fetch_batch_size: NZU64!(2),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+            progress_tx: None,
+        };
+
+        assert_send(sync::sync(engine_config));
     });
 }
 
@@ -255,6 +293,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Perform sync
@@ -338,6 +377,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -414,6 +454,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -514,6 +555,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -584,6 +626,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -653,6 +696,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -736,6 +780,7 @@ where
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
 
             // Send target update with increased bounds
@@ -808,6 +853,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         // Complete the sync
@@ -947,6 +993,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 0,
+            progress_tx: None,
         };
 
         let sync_handle = sync::sync(config);
@@ -1045,6 +1092,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1102,6 +1150,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let result: Result<H::Db, _> = sync::sync(config).await;
@@ -1152,6 +1201,7 @@ where
             finish_rx: None,
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1214,6 +1264,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -1323,6 +1374,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1391,6 +1443,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1741,6 +1794,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes
@@ -1910,6 +1964,7 @@ where
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
@@ -2685,6 +2740,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_empty_operations_no_panic() {
                 super::test_sync_empty_operations_no_panic::<$harness>();
+            }
+
+            #[test]
+            fn test_sync_future_is_send() {
+                super::test_sync_future_is_send::<$harness>();
             }
 
             #[test_traced]

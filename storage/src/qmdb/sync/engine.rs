@@ -8,7 +8,7 @@ use crate::{
             error::EngineError,
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
-            target::validate_update,
+            target::{validate_update, SyncProgress},
             Database, DbResolver, Error as SyncError, Journal, Target,
         },
     },
@@ -148,6 +148,12 @@ where
     /// requests after target updates. Set to 0 to disable (all retained
     /// requests will be re-fetched).
     pub max_retained_roots: usize,
+
+    /// Optional channel for reporting sync progress after each batch of
+    /// operations is applied or the target is updated.
+    ///
+    /// The engine uses `send_lossy` so a dropped receiver never stalls sync.
+    pub progress_tx: Option<mpsc::Sender<SyncProgress>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
 pub(crate) struct Engine<DB, R>
@@ -235,6 +241,9 @@ where
 
     /// Tracks whether the current target has already been reported as reached.
     reached_current_target_reported: bool,
+
+    /// Optional channel for reporting sync progress.
+    progress_tx: Option<mpsc::Sender<SyncProgress>>,
 }
 
 #[cfg(test)]
@@ -307,6 +316,7 @@ where
             reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
+            progress_tx: config.progress_tx,
         };
         engine.schedule_requests().await?;
         Ok(engine)
@@ -483,6 +493,19 @@ where
         self.reached_current_target_reported = true;
     }
 
+    /// Send a progress snapshot if a progress channel is configured.
+    async fn report_progress(&mut self) {
+        if let Some(tx) = self.progress_tx.as_ref() {
+            let progress = SyncProgress {
+                journal_size: self.journal.size().await,
+                target_end: *self.target.range.end(),
+            };
+            if !tx.send_lossy(progress).await {
+                self.progress_tx = None;
+            }
+        }
+    }
+
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
     pub(crate) fn store_operations(
         &mut self,
@@ -561,7 +584,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
+    pub async fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end();
 
@@ -590,7 +613,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
+    async fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
         Ok(self.is_at_target().await? && self.has_boundary_state())
     }
 
@@ -708,6 +731,7 @@ where
                 validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
+                updated_self.report_progress().await;
                 updated_self.schedule_requests().await?;
                 Ok(NextStep::Continue(updated_self))
             }
@@ -724,6 +748,7 @@ where
                 self.handle_fetch_result(fetch_result)?;
                 self.schedule_requests().await?;
                 self.apply_operations().await?;
+                self.report_progress().await;
                 Ok(NextStep::Continue(self))
             }
         }
