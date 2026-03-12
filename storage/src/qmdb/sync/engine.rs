@@ -75,6 +75,10 @@ async fn wait_for_event<Op, D: Digest, E>(
     }
 }
 
+fn is_duplicate_target_update<D: Digest>(old_target: &Target<D>, new_target: &Target<D>) -> bool {
+    new_target == old_target
+}
+
 /// Configuration for creating a new Engine
 pub struct Config<DB, R>
 where
@@ -513,6 +517,12 @@ where
 
         match event {
             Event::TargetUpdate(new_target) => {
+                // Ignore duplicate targets. Marshal can report finalizations at-least-once,
+                // and untouched databases may emit identical targets across finalized blocks.
+                if is_duplicate_target_update(&self.target, &new_target) {
+                    return Ok(NextStep::Continue(self));
+                }
+
                 // Validate and handle the target update
                 validate_update(&self.target, &new_target)?;
 
@@ -590,5 +600,20 @@ mod tests {
         // Test removing requests
         requests.remove(Location::new(10));
         assert!(!requests.locations().contains(&Location::new(10)));
+    }
+
+    #[test]
+    fn duplicate_target_updates_are_ignored() {
+        let target = Target {
+            root: sha256::Digest::from([7; 32]),
+            range: Location::new(10)..Location::new(20),
+        };
+        let distinct = Target {
+            root: sha256::Digest::from([8; 32]),
+            range: Location::new(10)..Location::new(20),
+        };
+
+        assert!(is_duplicate_target_update(&target, &target));
+        assert!(!is_duplicate_target_update(&target, &distinct));
     }
 }

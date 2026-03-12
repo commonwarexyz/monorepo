@@ -1,0 +1,41 @@
+[package]
+name = "commonware-glue"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Bootstrap applications with commonware primitive compositions."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/glue"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p = { workspace = true, optional = true }
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+commonware-broadcast.workspace = true
+commonware-codec.workspace = true
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-p2p.workspace = true
+commonware-parallel.workspace = true
+commonware-resolver.workspace = true
+commonware-storage.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+test-utils = [
+	"dep:commonware-p2p",
+]

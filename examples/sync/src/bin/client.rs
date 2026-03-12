@@ -76,8 +76,9 @@ where
 
         match resolver.get_sync_target().await {
             Ok(new_target) => {
-                // Check if target has changed
-                if new_target.root != current_target.root {
+                // Check if target has changed.
+                // Compare the full target so range-only changes are not missed.
+                if new_target != current_target {
                     // Send new target to the sync client
                     match update_tx.clone().try_send(new_target.clone()) {
                         Ok(()) => {

@@ -1383,6 +1383,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-glue"
+version = "2026.3.0"
+dependencies = [
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-invariants"
 version = "2026.3.0"
 dependencies = [
