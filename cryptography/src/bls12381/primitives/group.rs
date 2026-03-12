@@ -16,7 +16,9 @@ use crate::Secret;
 use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12,
-    blst_fp12_cyclotomic_sqr, blst_fp12_is_one, blst_fp12_mul, blst_fp12_one, blst_fr,
+    blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fp12_is_one,
+    blst_fp12_mul, blst_fp12_one, blst_fp12s_mult_pippenger,
+    blst_fp12s_mult_pippenger_scratch_sizeof, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
     blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
@@ -510,6 +512,146 @@ impl GT {
             blst_bendian_from_fp12(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+
+    /// Computes the conjugate of this GT element (negation in the
+    /// cyclotomic subgroup).
+    fn conjugate(&self) -> GT {
+        let mut out = self.0;
+        // SAFETY: blst_fp12_conjugate operates in-place on a valid blst_fp12.
+        unsafe {
+            blst_fp12_conjugate(&mut out);
+        }
+        GT(out)
+    }
+
+    fn msm_sequential(points: &[Self], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = points.len();
+
+        // SAFETY: blst_fp12s_mult_pippenger_scratch_sizeof returns size in bytes.
+        let scratch_size = unsafe { blst_fp12s_mult_pippenger_scratch_sizeof(npoints) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![0u64; scratch_size / 8];
+
+        let p: [*const blst_fp12; 2] = [&points[0].0 as *const _, ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_fp12::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_fp12s_mult_pippenger(
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr(),
+            );
+        }
+        GT(result)
+    }
+}
+
+// GT uses multiplicative notation internally but the algebra traits use additive
+// notation. The mapping is: add -> mul, zero -> one, neg -> conjugate,
+// sub -> mul(conjugate), scalar_mul -> exponentiation.
+
+impl Object for GT {}
+
+impl AddAssign<&GT> for GT {
+    fn add_assign(&mut self, rhs: &GT) {
+        // SAFETY: blst_fp12_mul supports in-place when ret aliases a.
+        unsafe {
+            blst_fp12_mul(&mut self.0, &self.0, &rhs.0);
+        }
+    }
+}
+
+impl Add<&GT> for GT {
+    type Output = GT;
+
+    fn add(self, rhs: &GT) -> GT {
+        GT::mul(&self, rhs)
+    }
+}
+
+impl SubAssign<&GT> for GT {
+    fn sub_assign(&mut self, rhs: &GT) {
+        let inv = rhs.conjugate();
+        *self += &inv;
+    }
+}
+
+impl Sub<&GT> for GT {
+    type Output = GT;
+
+    fn sub(mut self, rhs: &GT) -> GT {
+        self -= rhs;
+        self
+    }
+}
+
+impl Neg for GT {
+    type Output = GT;
+
+    fn neg(self) -> GT {
+        self.conjugate()
+    }
+}
+
+impl Additive for GT {
+    fn zero() -> Self {
+        GT::one()
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for GT {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        *self = self.scalar_mul(rhs);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for GT {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a Scalar) -> Self::Output {
+        self.scalar_mul(rhs)
+    }
+}
+
+impl Space<Scalar> for GT {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let n = points.len();
+        if n == 0 {
+            return Self::zero();
+        }
+
+        // Filter out identity points and zero scalars
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = points
+            .iter()
+            .zip(scalar_bytes.iter())
+            .filter_map(|(point, scalar)| {
+                if point.is_one() || all_zero(&scalar.b).into() {
+                    return None;
+                }
+                Some((*point, scalar))
+            })
+            .unzip();
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        // Flatten scalars into contiguous byte array
+        let nbytes = SCALAR_BITS.div_ceil(8);
+        let flat_scalars: Vec<u8> = scalars_filtered
+            .iter()
+            .flat_map(|s| s.b[..nbytes].iter().copied())
+            .collect();
+
+        Self::msm_sequential(&points_filtered, &flat_scalars, SCALAR_BITS)
     }
 }
 

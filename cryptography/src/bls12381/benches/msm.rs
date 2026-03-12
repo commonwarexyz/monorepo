@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::primitives::group::{Scalar, G1, G2};
+use commonware_cryptography::bls12381::primitives::{
+    group::{Scalar, G1, G2, GT},
+    variant::{MinPk, Variant},
+};
 use commonware_math::algebra::{CryptoGroup, Random, Space};
 use commonware_parallel::{Rayon, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -8,7 +11,7 @@ use std::{hint::black_box, num::NonZeroUsize};
 fn bench_msm(c: &mut Criterion) {
     let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-    for n in [10, 50, 100, 200, 1000, 5000] {
+    for n in [1 << 10, 1 << 13, 1 << 15, 1 << 17] {
         // G1 Sequential (conc=1)
         c.bench_function(
             &format!("{}/group=g1 n={} conc=1", module_path!(), n),
@@ -49,41 +52,61 @@ fn bench_msm(c: &mut Criterion) {
             },
         );
 
-        // G2 Sequential (conc=1)
-        c.bench_function(
-            &format!("{}/group=g2 n={} conc=1", module_path!(), n),
-            |b| {
-                b.iter_batched(
-                    || {
-                        let mut rng = StdRng::seed_from_u64(0);
-                        let points: Vec<G2> = (0..n)
-                            .map(|_| G2::generator() * &Scalar::random(&mut rng))
-                            .collect();
-                        let scalars: Vec<Scalar> =
-                            (0..n).map(|_| Scalar::random(&mut rng)).collect();
-                        (points, scalars)
-                    },
-                    |(points, scalars)| black_box(G2::msm(&points, &scalars, &Sequential)),
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        // // G2 Sequential (conc=1)
+        // c.bench_function(
+        //     &format!("{}/group=g2 n={} conc=1", module_path!(), n),
+        //     |b| {
+        //         b.iter_batched(
+        //             || {
+        //                 let mut rng = StdRng::seed_from_u64(0);
+        //                 let points: Vec<G2> = (0..n)
+        //                     .map(|_| G2::generator() * &Scalar::random(&mut rng))
+        //                     .collect();
+        //                 let scalars: Vec<Scalar> =
+        //                     (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        //                 (points, scalars)
+        //             },
+        //             |(points, scalars)| black_box(G2::msm(&points, &scalars, &Sequential)),
+        //             BatchSize::SmallInput,
+        //         );
+        //     },
+        // );
 
-        // G2 Parallel (conc=8)
+        // // G2 Parallel (conc=8)
+        // c.bench_function(
+        //     &format!("{}/group=g2 n={} conc=8", module_path!(), n),
+        //     |b| {
+        //         b.iter_batched(
+        //             || {
+        //                 let mut rng = StdRng::seed_from_u64(0);
+        //                 let points: Vec<G2> = (0..n)
+        //                     .map(|_| G2::generator() * &Scalar::random(&mut rng))
+        //                     .collect();
+        //                 let scalars: Vec<Scalar> =
+        //                     (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        //                 (points, scalars)
+        //             },
+        //             |(points, scalars)| black_box(G2::msm(&points, &scalars, &par)),
+        //             BatchSize::SmallInput,
+        //         );
+        //     },
+        // );
+
+        // GT Sequential (conc=1)
         c.bench_function(
-            &format!("{}/group=g2 n={} conc=8", module_path!(), n),
+            &format!("{}/group=gt n={} conc=1", module_path!(), n),
             |b| {
                 b.iter_batched(
                     || {
                         let mut rng = StdRng::seed_from_u64(0);
-                        let points: Vec<G2> = (0..n)
-                            .map(|_| G2::generator() * &Scalar::random(&mut rng))
-                            .collect();
+                        let gt_gen = MinPk::pairing(&G1::generator(), &G2::generator());
+                        let points: Vec<GT> =
+                            (0..n).map(|_| gt_gen * &Scalar::random(&mut rng)).collect();
                         let scalars: Vec<Scalar> =
                             (0..n).map(|_| Scalar::random(&mut rng)).collect();
                         (points, scalars)
                     },
-                    |(points, scalars)| black_box(G2::msm(&points, &scalars, &par)),
+                    |(points, scalars)| black_box(GT::msm(&points, &scalars, &Sequential)),
                     BatchSize::SmallInput,
                 );
             },

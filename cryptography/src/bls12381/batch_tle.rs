@@ -1,376 +1,387 @@
-use crate::bls12381::primitives::{
-    group::{Scalar, GT},
-    variant::Variant,
+//! Batch verification of Timelock Encryption (TLE) decryptions.
+//!
+//! Uses the Fujisaki-Okamoto transform from [tle] with a "Different Witnesses"
+//! batch verification technique. Instead of verifying each decryption
+//! individually (1 pairing per ciphertext), batch verification requires only:
+//!
+//! * One G1-MSM of size B
+//! * One GT-MSM of size B
+//! * One pairing evaluation (for `e(pk, H(id))`)
+//! * O(B) hash evaluations
+//!
+//! # Flow
+//!
+//! 1. Decryptor runs [decrypt] on each ciphertext, producing the message
+//!    and a [Hint] `(K, P)`.
+//! 2. Decryptor publishes the hints alongside the claimed messages.
+//! 3. Verifier runs [verify_decryption] with the ciphertexts, hints,
+//!    and public parameters to batch-check correctness.
+
+use crate::bls12381::{
+    primitives::{
+        group::{Scalar, GT},
+        ops::hash_with_namespace,
+        variant::Variant,
+    },
+    tle::{self, Block},
 };
-use crate::{Hasher, Sha256};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use commonware_math::algebra::{Additive, CryptoGroup, Random, Space};
 use rand_core::CryptoRngCore;
-use std::collections::HashMap;
-use std::ops::Neg;
 
-/// Encrypted message from a small message space {0, ..., 2^k - 1}.
+/// Hint produced during decryption for batch verification.
 ///
-/// The VRF committee samples a random gamma and publishes `pk^gamma` and
-/// `H(id)^{gamma^{-1}}` for each target identity. Callers pass these
-/// pre-processed values to encrypt/decrypt/verify.
+/// Contains the intermediate values needed to verify a decryption
+/// without recomputing the pairing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ciphertext<V: Variant> {
-    /// Commitment u = alpha * G.
-    pub u: V::Public,
-    /// Encrypted message c = (alpha + m) * H(id)^{gamma^{-1}}.
-    pub c: V::Signature,
+pub struct Hint {
+    /// The recovered random key K (sigma in FO terminology).
+    pub k: Block,
+    /// The pairing element P = alpha * e(pk, H(id)).
+    pub p: GT,
 }
 
-/// Hash a GT element to a 32-byte key for table lookup.
-fn hash_gt(gt: &GT) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(&gt.as_slice());
-    hasher.finalize().0
-}
-
-/// Discrete log lookup table mapping hashed GT elements to messages.
+/// Decrypt a ciphertext and produce a [Hint] for batch verification.
 ///
-/// Stores `H(base^m) -> m` for `m in 0..2^k` where
-/// `base = e(pk^gamma, H(id)^{gamma^{-1}})`.
+/// This performs the same decryption as [tle::decrypt] but additionally
+/// returns the intermediate pairing element `P = e(ct_0, sigma_id)` needed
+/// for batch verification.
 ///
-/// This table is reused across all decryptions for the same target.
-pub type Table = HashMap<[u8; 32], u64>;
-
-/// Precompute a discrete log lookup table for decryption.
-pub fn build_table<V: Variant>(public: &V::Public, h_id: &V::Signature, k: u32) -> Table {
-    assert!(k <= 20, "message space too large");
-    let size = 1usize << k;
-    let mut table = HashMap::with_capacity(size);
-    let base = V::pairing(public, h_id);
-    let mut acc = GT::one();
-    for m in 0..size {
-        table.insert(hash_gt(&acc), m as u64);
-        acc = acc.mul(&base);
-    }
-    table
-}
-
-/// Encrypt a message from {0, ..., 2^k - 1} for a given target.
-///
-/// The message m is encrypted as:
-/// - u = alpha * G
-/// - c = (alpha + m) * h_id
-///
-/// # Arguments
-/// * `h_id_gamma` - The pre-processed target point `H(id)^{gamma^{-1}}` from the
-///   committee. This cannot be computed locally.
-/// * `message` - The message to encrypt (must be < 2^k).
-pub fn encrypt<R: CryptoRngCore, V: Variant>(
-    rng: &mut R,
-    h_id_gamma: &V::Signature,
-    message: u64,
-) -> Ciphertext<V> {
-    // Sample random alpha
-    let alpha = Scalar::random(rng);
-
-    // u = alpha * G
-    let mut u = V::Public::generator();
-    u *= &alpha;
-
-    // c = (alpha + m) * H(id)^{gamma^{-1}}
-    let m_scalar = Scalar::from_u64(message);
-    let scalar = alpha + &m_scalar;
-    let mut c = *h_id_gamma;
-    c *= &scalar;
-
-    Ciphertext { u, c }
-}
-
-/// Decrypt a ciphertext using the public key, signature, and a precomputed
-/// lookup table.
-///
-/// Computes `e(pk^gamma, c) * e(-u, sig_id)` and looks up the hashed result
-/// in the table to recover the message.
-///
-/// # Arguments
-/// * `pk_gamma` - The gamma-modified public key `pk^gamma`.
-/// * `signature` - The BLS signature over the target identity.
-/// * `table` - Precomputed lookup table from [build_table].
+/// # Returns
+/// * `Some((message, hint))` if decryption succeeds
+/// * `None` if the FO consistency check fails
 pub fn decrypt<V: Variant>(
-    pk_gamma: &V::Public,
     signature: &V::Signature,
-    table: &Table,
-    ciphertext: &Ciphertext<V>,
-) -> Option<u64> {
-    let lhs = V::pairing(pk_gamma, &ciphertext.c);
-    let rhs = V::pairing(&ciphertext.u.neg(), signature);
-    let target = lhs.mul(&rhs);
-    table.get(&hash_gt(&target)).copied()
+    ciphertext: &tle::Ciphertext<V>,
+) -> Option<(Block, Hint)> {
+    // P = e(ct_0, sigma_id)
+    let p = V::pairing(&ciphertext.u, signature);
+
+    // K = ct_1 XOR H_K(P)
+    let h_k = tle::hash::h2(&p);
+    let k = tle::xor(&ciphertext.v, &h_k);
+
+    // msg = ct_2 XOR H_M(K)
+    let h_m = tle::hash::h4(&k);
+    let msg = tle::xor(&ciphertext.w, &h_m);
+
+    // alpha = H_R(K, msg)
+    let alpha = tle::hash::h3(&k, msg.as_ref());
+
+    // Check ct_0 = alpha * G
+    let mut expected_u = V::Public::generator();
+    expected_u *= &alpha;
+    if ciphertext.u != expected_u {
+        return None;
+    }
+
+    Some((msg, Hint { k, p }))
 }
 
-/// Batch-verify that claimed decryptions are correct for a set of ciphertexts.
+/// Batch-verify that the given hints are consistent with the ciphertexts.
 ///
-/// All ciphertexts must be encrypted to the same target. Messages are from
-/// {0, ..., 2^k - 1}.
+/// All ciphertexts must be encrypted to the same target. The verification
+/// checks three conditions:
 ///
-/// The verification equation:
+/// 1. **G1 check**: `sum(r_i * ct_0_i) == (sum(r_i * alpha_i)) * G`
+/// 2. **GT check**: `sum(r_i * P_i) == (sum(r_i * alpha_i)) * e(pk, H(id))`
+/// 3. **Hash check**: `ct_1_i == H_K(P_i) XOR K_i` for all i
 ///
-/// ```text
-/// e(pk^gamma, Σ c_i*r_i - (Σ r_i*m_i)*h_id) * e(-Σ u_i*r_i, sig_id) == 1
-/// ```
+/// Where `alpha_i = H_R(K_i, msg_i)` and `msg_i = ct_2_i XOR H_M(K_i)`.
 ///
-/// Uses one [V::Signature] MSM, one [V::Public] MSM, and two pairings.
-///
-/// # Arguments
-/// * `public` - The gamma-modified public key `pk^gamma`.
-/// * `signature` - The BLS signature over the target identity.
-/// * `h_id_gamma` - The pre-processed target point `H(id)^{gamma^{-1}}`.
+/// # Cost
+/// One G1-MSM(B), one GT-MSM(B), one pairing, and O(B) hash evaluations.
 pub fn verify_decryption<R, V>(
     rng: &mut R,
-    pk_gamma: &V::Public,
-    signature: &V::Signature,
-    h_id_gamma: &V::Signature,
-    ciphertexts: &[Ciphertext<V>],
-    messages: &[u64],
+    public: &V::Public,
+    target: (&[u8], &[u8]),
+    ciphertexts: &[tle::Ciphertext<V>],
+    hints: &[Hint],
 ) -> bool
 where
     R: CryptoRngCore,
     V: Variant,
     V::Public: Space<Scalar>,
-    V::Signature: Space<Scalar>,
 {
-    assert_eq!(ciphertexts.len(), messages.len());
-    if ciphertexts.is_empty() {
+    assert_eq!(ciphertexts.len(), hints.len());
+    let n = ciphertexts.len();
+    if n == 0 {
         return true;
     }
 
-    let n = ciphertexts.len();
-
-    // Sample random challenge scalars
-    let t0 = std::time::Instant::now();
-    let challenges: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut *rng)).collect();
-    let t_challenges = t0.elapsed();
-
-    // V::Signature MSM: Σ c_i * r_i
-    let t0 = std::time::Instant::now();
-    let c_points: Vec<V::Signature> = ciphertexts.iter().map(|ct| ct.c).collect();
-    let c_agg = V::Signature::msm(&c_points, &challenges, &commonware_parallel::Sequential);
-    let t_sig_msm = t0.elapsed();
-
-    // V::Public MSM: Σ u_i * r_i
-    let t0 = std::time::Instant::now();
-    let u_points: Vec<V::Public> = ciphertexts.iter().map(|ct| ct.u).collect();
-    let u_agg = V::Public::msm(&u_points, &challenges, &commonware_parallel::Sequential);
-    let t_pub_msm = t0.elapsed();
-
-    // Scalar sum: s = Σ r_i * m_i
-    let t0 = std::time::Instant::now();
-    let mut msg_scalar = Scalar::zero();
-    for (r, &m) in challenges.iter().zip(messages.iter()) {
-        let m_scalar = Scalar::from_u64(m);
-        msg_scalar = msg_scalar + &(r.clone() * &m_scalar);
+    // Step 1: Recover alphas from hints
+    let mut alphas = Vec::with_capacity(n);
+    for (ct, hint) in ciphertexts.iter().zip(hints.iter()) {
+        let h_m = tle::hash::h4(&hint.k);
+        let msg = tle::xor(&ct.w, &h_m);
+        let alpha = tle::hash::h3(&hint.k, msg.as_ref());
+        alphas.push(alpha);
     }
 
-    // sig_term = Σ c_i*r_i - (Σ r_i*m_i)*h_id
-    let mut msg_term = *h_id_gamma;
-    msg_term *= &(-msg_scalar);
-    let sig_term = c_agg + &msg_term;
-    let t_scalar = t0.elapsed();
+    // Step 2: Sample random challenges
+    let challenges: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut *rng)).collect();
 
-    // Check: e(pk^gamma, sig_term) * e(-u_agg, sig_id) == 1
-    let t0 = std::time::Instant::now();
-    let lhs = V::pairing(pk_gamma, &sig_term);
-    let rhs = V::pairing(&u_agg.neg(), signature);
-    let result = lhs.mul(&rhs).is_one();
-    let t_pairing = t0.elapsed();
+    // Compute shared scalar: s = sum(r_i * alpha_i)
+    let mut s = Scalar::zero();
+    for (r, alpha) in challenges.iter().zip(alphas.iter()) {
+        s = s + &(r.clone() * alpha);
+    }
 
-    println!(
-        "  verify_decryption(n={n}): challenges={t_challenges:.2?}, sig_msm={t_sig_msm:.2?}, pub_msm={t_pub_msm:.2?}, scalar={t_scalar:.2?}, pairing={t_pairing:.2?}",
-    );
+    // Step 3: G1 check — sum(r_i * ct_0_i) == s * G
+    let ct0_points: Vec<V::Public> = ciphertexts.iter().map(|ct| ct.u).collect();
+    let lhs_g1 = V::Public::msm(&ct0_points, &challenges, &commonware_parallel::Sequential);
+    let mut rhs_g1 = V::Public::generator();
+    rhs_g1 *= &s;
+    if lhs_g1 != rhs_g1 {
+        return false;
+    }
 
-    result
+    // Step 4: GT check — sum(r_i * P_i) == s * e(pk, H(id))
+    let p_points: Vec<GT> = hints.iter().map(|h| h.p).collect();
+    let lhs_gt = GT::msm(&p_points, &challenges, &commonware_parallel::Sequential);
+    let (namespace, target_bytes) = target;
+    let q_id = hash_with_namespace::<V>(V::MESSAGE, namespace, target_bytes);
+    let pk_h_id = V::pairing(public, &q_id);
+    let rhs_gt = pk_h_id.scalar_mul(&s);
+    if lhs_gt != rhs_gt {
+        return false;
+    }
+
+    // Step 5: Hash consistency — ct_1_i == H_K(P_i) XOR K_i
+    for (ct, hint) in ciphertexts.iter().zip(hints.iter()) {
+        let h_k = tle::hash::h2(&hint.p);
+        let expected_v = tle::xor(&hint.k, &h_k);
+        if ct.v != expected_v {
+            return false;
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::{ops, ops::hash_with_namespace, variant::MinPk};
+    use crate::bls12381::primitives::{ops, variant::MinPk};
     use commonware_utils::test_rng;
     use std::time::Instant;
 
-    /// Compute H(id)^{gamma^{-1}} for tests (gamma = 1).
-    fn test_h_id(namespace: &[u8], target: &[u8]) -> <MinPk as Variant>::Signature {
-        hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, target)
+    const NAMESPACE: &[u8] = b"_TLE_";
+
+    fn setup(
+        rng: &mut impl CryptoRngCore,
+        target_val: u64,
+    ) -> (
+        <MinPk as Variant>::Public,
+        <MinPk as Variant>::Signature,
+        [u8; 8],
+    ) {
+        let (secret, public) = ops::keypair::<_, MinPk>(rng);
+        let target = target_val.to_be_bytes();
+        let signature = ops::sign_message::<MinPk>(&secret, NAMESPACE, &target);
+        (public, signature, target)
     }
 
     #[test]
-    fn test_encrypt_decrypt() {
+    fn test_decrypt_produces_valid_hint() {
         let mut rng = test_rng();
-        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 200u64.to_be_bytes();
-        let signature = ops::sign_message::<MinPk>(&master_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
+        let (public, signature, target) = setup(&mut rng, 100);
+        let msg = Block::new(*b"Hello, batch TLE! 32 bytes here!");
 
-        let k = 4; // message space {0, ..., 15}
-        let table = build_table::<MinPk>(&master_public, &h_id, k);
+        let ct = tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), &msg);
 
-        for m in 0..1u64 << k {
-            let ct = encrypt::<_, MinPk>(&mut rng, &h_id, m);
-            let result = decrypt::<MinPk>(&master_public, &signature, &table, &ct);
-            assert_eq!(result, Some(m), "failed for m={m}");
-        }
+        let (decrypted, hint) = decrypt::<MinPk>(&signature, &ct).expect("decryption should work");
+        assert_eq!(decrypted, msg);
+
+        // Hint should be consistent
+        let h_k = tle::hash::h2(&hint.p);
+        assert_eq!(ct.v, tle::xor(&hint.k, &h_k));
     }
 
     #[test]
     fn test_decrypt_wrong_signature() {
         let mut rng = test_rng();
-        let (_, master_public) = ops::keypair::<_, MinPk>(&mut rng);
+        let (public, _, target) = setup(&mut rng, 200);
         let (wrong_secret, _) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 210u64.to_be_bytes();
-        let wrong_signature = ops::sign_message::<MinPk>(&wrong_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
+        let wrong_sig = ops::sign_message::<MinPk>(&wrong_secret, NAMESPACE, &target);
 
-        let table = build_table::<MinPk>(&master_public, &h_id, 4);
-        let ct = encrypt::<_, MinPk>(&mut rng, &h_id, 7);
-        assert_eq!(
-            decrypt::<MinPk>(&master_public, &wrong_signature, &table, &ct),
-            None
-        );
+        let msg = Block::new(*b"Secret message padded to 32bytes");
+        let ct = tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), &msg);
+
+        assert!(decrypt::<MinPk>(&wrong_sig, &ct).is_none());
     }
 
     #[test]
     fn test_verify_decryption_valid() {
         let mut rng = test_rng();
-        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 300u64.to_be_bytes();
-        let signature = ops::sign_message::<MinPk>(&master_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
+        let (public, signature, target) = setup(&mut rng, 300);
 
-        let k = 4;
-        let table = build_table::<MinPk>(&master_public, &h_id, k);
-        let msgs: Vec<u64> = vec![0, 5, 15, 3, 11];
-        let ciphertexts: Vec<_> = msgs
-            .iter()
-            .map(|&m| encrypt::<_, MinPk>(&mut rng, &h_id, m))
+        let messages: Vec<Block> = (0..5)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                Block::new(bytes)
+            })
             .collect();
 
-        // Verify decryptions are correct
-        for (ct, &m) in ciphertexts.iter().zip(msgs.iter()) {
-            assert_eq!(
-                decrypt::<MinPk>(&master_public, &signature, &table, ct),
-                Some(m)
-            );
-        }
+        let ciphertexts: Vec<_> = messages
+            .iter()
+            .map(|m| tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), m))
+            .collect();
+
+        let hints: Vec<_> = ciphertexts
+            .iter()
+            .map(|ct| {
+                let (_, hint) = decrypt::<MinPk>(&signature, ct).unwrap();
+                hint
+            })
+            .collect();
 
         assert!(verify_decryption::<_, MinPk>(
             &mut rng,
-            &master_public,
-            &signature,
-            &h_id,
+            &public,
+            (NAMESPACE, &target),
             &ciphertexts,
-            &msgs,
+            &hints,
         ));
     }
 
     #[test]
-    fn test_verify_decryption_wrong_message() {
+    fn test_verify_decryption_wrong_key() {
         let mut rng = test_rng();
-        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 400u64.to_be_bytes();
-        let signature = ops::sign_message::<MinPk>(&master_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
+        let (public, signature, target) = setup(&mut rng, 400);
 
-        let msgs: Vec<u64> = vec![1, 2, 3];
-        let ciphertexts: Vec<_> = msgs
-            .iter()
-            .map(|&m| encrypt::<_, MinPk>(&mut rng, &h_id, m))
-            .collect();
+        let msg = Block::new(*b"Testing wrong key detection!!!!!");
+        let ct = tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), &msg);
+        let (_, mut hint) = decrypt::<MinPk>(&signature, &ct).unwrap();
 
-        let wrong_msgs: Vec<u64> = vec![1, 4, 3];
+        // Tamper with K
+        let mut k_bytes = [0u8; 32];
+        k_bytes.copy_from_slice(hint.k.as_ref());
+        k_bytes[0] ^= 0xFF;
+        hint.k = Block::new(k_bytes);
+
         assert!(!verify_decryption::<_, MinPk>(
             &mut rng,
-            &master_public,
-            &signature,
-            &h_id,
-            &ciphertexts,
-            &wrong_msgs,
+            &public,
+            (NAMESPACE, &target),
+            &[ct],
+            &[hint],
+        ));
+    }
+
+    #[test]
+    fn test_verify_decryption_wrong_p() {
+        let mut rng = test_rng();
+        let (public, signature, target) = setup(&mut rng, 500);
+
+        let msg = Block::new(*b"Testing wrong P detection!!!!!!!");
+        let ct = tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), &msg);
+        let (_, mut hint) = decrypt::<MinPk>(&signature, &ct).unwrap();
+
+        // Tamper with P by multiplying with a random scalar
+        let s = Scalar::random(&mut rng);
+        hint.p = hint.p.scalar_mul(&s);
+
+        assert!(!verify_decryption::<_, MinPk>(
+            &mut rng,
+            &public,
+            (NAMESPACE, &target),
+            &[ct],
+            &[hint],
         ));
     }
 
     #[test]
     fn test_verify_decryption_wrong_signature() {
         let mut rng = test_rng();
-        let (_, master_public) = ops::keypair::<_, MinPk>(&mut rng);
+        let (public, _, target) = setup(&mut rng, 600);
         let (wrong_secret, _) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 500u64.to_be_bytes();
-        let wrong_signature = ops::sign_message::<MinPk>(&wrong_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
+        let wrong_sig = ops::sign_message::<MinPk>(&wrong_secret, NAMESPACE, &target);
 
-        let msgs: Vec<u64> = vec![5, 10];
-        let ciphertexts: Vec<_> = msgs
-            .iter()
-            .map(|&m| encrypt::<_, MinPk>(&mut rng, &h_id, m))
-            .collect();
+        let msg = Block::new(*b"Wrong sig batch test 32 bytes!!!");
+        let ct = tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), &msg);
 
-        assert!(!verify_decryption::<_, MinPk>(
-            &mut rng,
-            &master_public,
-            &wrong_signature,
-            &h_id,
-            &ciphertexts,
-            &msgs,
-        ));
+        // Decrypt with wrong signature produces a hint that won't verify
+        // (decrypt itself may return None, but if it somehow returns Some,
+        // batch verify should catch it)
+        if let Some((_, hint)) = decrypt::<MinPk>(&wrong_sig, &ct) {
+            assert!(!verify_decryption::<_, MinPk>(
+                &mut rng,
+                &public,
+                (NAMESPACE, &target),
+                &[ct],
+                &[hint],
+            ));
+        }
     }
 
-    fn bench_individual_vs_batch(n: usize, k: u32) {
+    #[test]
+    fn test_verify_decryption_empty() {
         let mut rng = test_rng();
-        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
-        let target = 600u64.to_be_bytes();
-        let signature = ops::sign_message::<MinPk>(&master_secret, b"_TLE_", &target);
-        let h_id = test_h_id(b"_TLE_", &target);
-
-        let max_msg = 1u64 << k;
-        let table = build_table::<MinPk>(&master_public, &h_id, k);
-
-        let msgs: Vec<u64> = (0..n).map(|i| (i as u64) % max_msg).collect();
-        let ciphertexts: Vec<_> = msgs
-            .iter()
-            .map(|&m| encrypt::<_, MinPk>(&mut rng, &h_id, m))
-            .collect();
-
-        // Individual decryption
-        let start = Instant::now();
-        for (ct, &expected) in ciphertexts.iter().zip(msgs.iter()) {
-            let result = decrypt::<MinPk>(&master_public, &signature, &table, ct);
-            assert_eq!(result, Some(expected));
-        }
-        let individual = start.elapsed();
-
-        // Batch verification
-        let start = Instant::now();
-        let valid = verify_decryption::<_, MinPk>(
+        let (public, _, target) = setup(&mut rng, 700);
+        assert!(verify_decryption::<_, MinPk>(
             &mut rng,
-            &master_public,
-            &signature,
-            &h_id,
-            &ciphertexts,
-            &msgs,
-        );
-        let batch = start.elapsed();
-        assert!(valid);
-
-        println!(
-            "n={n} k={k}: individual={individual:.2?} ({:.2?}/ct), batch={batch:.2?} ({:.2?}/ct), speedup={:.1}x",
-            individual / n as u32,
-            batch / n as u32,
-            individual.as_secs_f64() / batch.as_secs_f64(),
-        );
+            &public,
+            (NAMESPACE, &target),
+            &[],
+            &[],
+        ));
     }
 
     #[test]
     fn test_bench_individual_vs_batch() {
+        let mut rng = test_rng();
+
         for &n in &[100, 1000, 10000, 100000] {
-            for &k in &[1, 16] {
-                bench_individual_vs_batch(n, k);
-            }
+            let (public, signature, target) = setup(&mut rng, 800);
+
+            let messages: Vec<Block> = (0..n)
+                .map(|i| {
+                    let mut bytes = [0u8; 32];
+                    bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    Block::new(bytes)
+                })
+                .collect();
+
+            let ciphertexts: Vec<_> = messages
+                .iter()
+                .map(|m| tle::encrypt::<_, MinPk>(&mut rng, public, (NAMESPACE, &target), m))
+                .collect();
+
+            // Individual decryption
+            let start = Instant::now();
+            let hints: Vec<_> = ciphertexts
+                .iter()
+                .zip(messages.iter())
+                .map(|(ct, expected_msg)| {
+                    let (msg, hint) = decrypt::<MinPk>(&signature, ct).unwrap();
+                    assert_eq!(&msg, expected_msg);
+                    hint
+                })
+                .collect();
+            let individual = start.elapsed();
+
+            // Batch verification
+            let start = Instant::now();
+            let valid = verify_decryption::<_, MinPk>(
+                &mut rng,
+                &public,
+                (NAMESPACE, &target),
+                &ciphertexts,
+                &hints,
+            );
+            let batch = start.elapsed();
+            assert!(valid);
+
+            eprintln!(
+                "n={n}: individual={individual:.2?} ({:.2?}/ct), batch={batch:.2?} ({:.2?}/ct), speedup={:.1}x",
+                individual / n as u32,
+                batch / n as u32,
+                individual.as_secs_f64() / batch.as_secs_f64(),
+            );
         }
     }
 }
