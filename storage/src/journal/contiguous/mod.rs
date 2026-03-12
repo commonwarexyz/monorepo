@@ -33,7 +33,7 @@ pub trait Reader: Send + Sync {
     /// Read the item at the given position.
     ///
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
-    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send + Sync;
 
     /// Return a stream of all items starting from `start_pos`.
     ///

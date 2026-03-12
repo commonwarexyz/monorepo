@@ -157,6 +157,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_set_floor_without_pruning_preserves_archives() {
+        harness::set_floor_without_pruning_preserves_archives::<InlineHarness>();
+        harness::set_floor_without_pruning_preserves_archives::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_subscribe_basic_block_delivery() {
         harness::subscribe_basic_block_delivery::<InlineHarness>();
         harness::subscribe_basic_block_delivery::<DeferredHarness>();

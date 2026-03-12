@@ -76,7 +76,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         cancel_rx: oneshot::Receiver<()>,
-    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + Sync + 'a;
 }
 
 macro_rules! impl_resolver {

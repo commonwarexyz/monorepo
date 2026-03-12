@@ -20,6 +20,15 @@ pub struct Target<D: Digest> {
     pub range: NonEmptyRange<Location>,
 }
 
+/// Snapshot of sync progress emitted by the sync engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncProgress {
+    /// Current journal size (operations applied so far).
+    pub journal_size: u64,
+    /// Target range end (total operations needed).
+    pub target_end: u64,
+}
+
 impl<D: Digest> Write for Target<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
