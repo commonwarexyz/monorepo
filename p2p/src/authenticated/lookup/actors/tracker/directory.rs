@@ -293,6 +293,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
+        let interval = self.dial_quota.replenish_interval();
         let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
 
         let mut peers = Vec::new();
@@ -312,7 +313,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         peers.sort();
         Dialable {
             peers,
-            next_query_at: next_query_at.unwrap_or(now),
+            next_query_at: next_query_at
+                .map(|t| t.min(now + interval))
+                .unwrap_or(now + interval),
         }
     }
 
@@ -1687,6 +1690,41 @@ mod tests {
         runtime.start(|context| async move {
             let directory = Directory::init(context.clone(), my_pk, config, releaser);
 
+            let dialable = directory.dialable();
+            assert!(dialable.peers.is_empty());
+            assert_eq!(
+                dialable.next_query_at,
+                context.current() + quota.replenish_interval()
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialable_next_query_at_capped_by_interval() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let quota = Quota::per_second(NZU32!(5));
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: quota,
+            block_duration: Duration::from_secs(3600),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Block the only peer with a very long block_duration.
+            directory.block(&pk_1);
+
+            // next_query_at must be capped at interval, not blocked_until.
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
             assert_eq!(
