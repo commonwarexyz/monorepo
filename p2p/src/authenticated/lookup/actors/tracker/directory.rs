@@ -15,7 +15,6 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    cmp,
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
     time::{Duration, SystemTime},
@@ -128,9 +127,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
-        let deadline = cmp::max(record.next_allowed_at(), self.context.current())
-            .add_jittered(&mut self.context, self.rate_limit.replenish_interval());
-        record.defer_until(deadline);
         self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
@@ -415,10 +411,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let now = self.context.current();
 
         // Rate limit
-        if let Err(not_until) = self.rate_limiter.check_key(peer) {
-            let deadline = cmp::max(not_until.earliest_possible(), now)
-                .add_jittered(&mut self.context, jitter);
-            self.peers.get_mut(peer).unwrap().defer_until(deadline);
+        if self.rate_limiter.check_key(peer).is_err() {
             self.metrics
                 .limits
                 .get_or_create(&metrics::Peer::new(peer))
@@ -429,7 +422,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
         if record.reserve() {
-            record.note_reservation(now, self.rate_limit);
+            record.defer_until(now.add_jittered(&mut self.context, jitter));
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -471,7 +464,7 @@ mod tests {
     use commonware_utils::{hostname, SystemTimeExt, NZU32};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     fn addr(socket: SocketAddr) -> Address {
@@ -1644,6 +1637,81 @@ mod tests {
             let (_reservation, ingress) =
                 directory.dial(&pk_1).expect("peer should reserve after deadline");
             assert_eq!(ingress, Ingress::Socket(addr_1));
+        });
+    }
+
+    #[test]
+    fn test_successful_incoming_reservation_updates_redial_deadline() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let quota = Quota::per_second(NZU32!(1));
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: quota,
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            context.sleep(Duration::from_millis(1)).await;
+            let now = context.current();
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().redial_at(),
+                SystemTime::UNIX_EPOCH
+            );
+
+            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let redial_at = directory.peers.get(&pk_1).unwrap().redial_at();
+            assert!(redial_at >= now);
+            assert!(redial_at <= now + quota.replenish_interval() * 2);
+        });
+    }
+
+    #[test]
+    fn test_rate_limit_rejection_does_not_update_redial_deadline() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(1)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            let redial_at = directory.peers.get(&pk_1).unwrap().redial_at();
+            assert_eq!(redial_at, SystemTime::UNIX_EPOCH);
+            assert!(directory.dialable().contains(&pk_1));
+
+            assert!(directory.rate_limiter.check_key(&pk_1).is_ok());
+            assert!(
+                directory.dial(&pk_1).is_none(),
+                "reservation should fail once the token is exhausted"
+            );
+
+            assert_eq!(directory.peers.get(&pk_1).unwrap().redial_at(), redial_at);
+            assert!(
+                directory.dialable().contains(&pk_1),
+                "rate-limit rejection should not defer future dialability"
+            );
         });
     }
 

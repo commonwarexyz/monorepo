@@ -1,7 +1,5 @@
 use crate::types::{self, Ingress};
-use commonware_runtime::Quota;
-use commonware_utils::SystemTimeExt;
-use std::{cmp, net::IpAddr, time::SystemTime};
+use std::{net::IpAddr, time::SystemTime};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -46,9 +44,6 @@ pub struct Record {
 
     /// Earliest time at which we should attempt another outgoing dial.
     redial_at: SystemTime,
-
-    /// Earliest time at which the shared connection rate limiter could allow another reservation.
-    next_allowed_at: SystemTime,
 }
 
 impl Record {
@@ -62,7 +57,6 @@ impl Record {
             sets: 0,
             persistent: false,
             redial_at: SystemTime::UNIX_EPOCH,
-            next_allowed_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -74,7 +68,6 @@ impl Record {
             sets: 0,
             persistent: true,
             redial_at: SystemTime::UNIX_EPOCH,
-            next_allowed_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -143,15 +136,6 @@ impl Record {
         self.redial_at = deadline;
     }
 
-    /// Mirrors the next time the keyed rate limiter would allow another reservation.
-    pub fn note_reservation(&mut self, now: SystemTime, quota: Quota) {
-        let replenish_interval = quota.replenish_interval();
-        let tolerance = replenish_interval * quota.burst_size().get().saturating_sub(1);
-        let window_start = now.checked_sub(tolerance).unwrap_or(SystemTime::UNIX_EPOCH);
-        self.next_allowed_at = cmp::max(self.next_allowed_at, window_start)
-            .saturating_add_ext(replenish_interval);
-    }
-
     // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
@@ -165,11 +149,6 @@ impl Record {
     /// Returns the number of peer sets this peer is part of.
     pub const fn sets(&self) -> usize {
         self.sets
-    }
-
-    /// Returns the earliest time at which another reservation could satisfy the shared quota.
-    pub const fn next_allowed_at(&self) -> SystemTime {
-        self.next_allowed_at
     }
 
     /// Returns `true` if the record is dialable.
@@ -250,6 +229,11 @@ impl Record {
             Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
+
+    #[cfg(test)]
+    pub const fn redial_at(&self) -> SystemTime {
+        self.redial_at
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -272,7 +256,6 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
         assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
-        assert_eq!(record.next_allowed_at, SystemTime::UNIX_EPOCH);
         assert!(record.ingress().is_none());
         assert!(!record.is_blockable());
         assert!(!record.reserved());
@@ -288,7 +271,6 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
         assert_eq!(record.redial_at, SystemTime::UNIX_EPOCH);
-        assert_eq!(record.next_allowed_at, SystemTime::UNIX_EPOCH);
         assert!(record.ingress().is_some());
         assert!(record.is_blockable());
         assert!(!record.reserved());
@@ -542,26 +524,6 @@ mod tests {
         record.defer_until(now + Duration::from_secs(5));
         assert!(!record.dialable(now, true, true));
         assert!(record.dialable(now + Duration::from_secs(5), true, true));
-    }
-
-    #[test]
-    fn test_note_reservation_tracks_next_allowed_time() {
-        use commonware_utils::NZU32;
-
-        let mut record = Record::known(test_address());
-        let quota = Quota::per_second(NZU32!(3));
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let t = quota.replenish_interval();
-
-        record.note_reservation(now, quota);
-        assert_eq!(record.next_allowed_at(), now.checked_sub(t * 2).unwrap() + t);
-
-        record.note_reservation(now, quota);
-        assert_eq!(record.next_allowed_at(), now);
-
-        let partial_refill = now + t / 2;
-        record.note_reservation(partial_refill, quota);
-        assert_eq!(record.next_allowed_at(), now + t);
     }
 
     #[test]
