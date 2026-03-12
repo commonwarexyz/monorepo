@@ -70,7 +70,7 @@ cfg_if::cfg_if! {
 }
 
 /// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<'a, D: Digest, P: Readable<D>, S: State<D> = Dirty> {
+pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
     /// The parent MMR.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
@@ -103,7 +103,7 @@ pub struct Changeset<D: Digest> {
     pub(crate) base_size: Position,
 }
 
-impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -135,7 +135,7 @@ impl<'a, D: Digest, P: Readable<D>, S: State<D>> Batch<'a, D, P, S> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location {
         Location::try_from(self.size()).expect("invalid mmr size")
@@ -399,7 +399,9 @@ impl<'a, D: Digest, P: Readable<D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D, P> {
+    type Digest = D;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -417,9 +419,11 @@ impl<'a, D: Digest, P: Readable<D>> Readable<D> for MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
+impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchChainInfo
     for MerkleizedBatch<'a, D, P>
 {
+    type Digest = D;
+
     fn base_size(&self) -> Position {
         self.parent.base_size()
     }
@@ -435,7 +439,7 @@ impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> BatchChainInfo<D>
     }
 }
 
-impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
     /// Access the parent MMR.
     #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
@@ -469,7 +473,9 @@ impl<'a, D: Digest, P: Readable<D>> MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<D> + BatchChainInfo<D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
+    MerkleizedBatch<'a, D, P>
+{
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMR.
     pub fn finalize(self) -> Changeset<D> {

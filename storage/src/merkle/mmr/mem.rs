@@ -510,7 +510,9 @@ impl<H: Hasher> Mmr<H> {
     }
 }
 
-impl<H: Hasher> Readable<H::Digest> for Mmr<H> {
+impl<H: Hasher> Readable for Mmr<H> {
+    type Digest = H::Digest;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -528,7 +530,9 @@ impl<H: Hasher> Readable<H::Digest> for Mmr<H> {
     }
 }
 
-impl<H: Hasher> BatchChainInfo<H::Digest> for Mmr<H> {
+impl<H: Hasher> BatchChainInfo for Mmr<H> {
+    type Digest = H::Digest;
+
     fn base_size(&self) -> Position {
         self.size()
     }
@@ -565,7 +569,7 @@ mod tests {
             assert_eq!(mmr.leaves(), Location::new(0));
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), hasher.digest(&0u64.to_be_bytes()));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(&mut hasher));
             let mut mmr2 = Mmr::new(hasher.clone());
             mmr2.prune_all();
             assert_eq!(mmr2.size(), 0, "prune_all on empty MMR should do nothing");

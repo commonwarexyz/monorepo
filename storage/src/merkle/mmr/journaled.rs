@@ -861,7 +861,9 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: Hasher> Readable<H::Digest> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> Readable for Mmr<E, H> {
+    type Digest = H::Digest;
+
     fn size(&self) -> Position {
         self.size()
     }
@@ -879,7 +881,9 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Readable<H::Digest> for Mmr<E, H>
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: Hasher> BatchChainInfo<H::Digest> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> BatchChainInfo for Mmr<E, H> {
+    type Digest = H::Digest;
+
     fn base_size(&self) -> Position {
         self.size()
     }
@@ -887,7 +891,9 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> BatchChainInfo<H::Digest> for Mmr
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position, H::Digest>) {}
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, H: Hasher> Storage<H::Digest> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics + Sync, H: Hasher> Storage for Mmr<E, H> {
+    type Digest = H::Digest;
+
     async fn size(&self) -> Position {
         self.size()
     }

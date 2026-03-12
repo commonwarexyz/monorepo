@@ -6,19 +6,26 @@ use commonware_cryptography::Digest;
 use std::future::Future;
 
 /// A trait for accessing MMR digests from storage.
-pub trait Storage<D: Digest>: Send + Sync {
+pub trait Storage: Send + Sync {
+    /// The digest type used by this MMR.
+    type Digest: Digest;
+
     /// Return the number of elements in the MMR.
     fn size(&self) -> impl Future<Output = Position> + Send;
 
     /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(&self, position: Position)
-        -> impl Future<Output = Result<Option<D>, Error>> + Send;
+    fn get_node(
+        &self,
+        position: Position,
+    ) -> impl Future<Output = Result<Option<Self::Digest>, Error>> + Send;
 }
 
-impl<H> Storage<H::Digest> for Mmr<H>
+impl<H> Storage for Mmr<H>
 where
     H: Hasher,
 {
+    type Digest = H::Digest;
+
     async fn size(&self) -> Position {
         self.size()
     }

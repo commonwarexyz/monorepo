@@ -92,7 +92,7 @@ impl<H: CHasher> Hasher for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::Location;
+    use crate::mmr::{mem::Mmr, Location};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -188,7 +188,7 @@ mod tests {
             "root of empty MMR should be non-zero"
         );
         // Empty MMR root is the hash of size 0 bytes, not the empty hash
-        assert_eq!(empty_out, mmr_hasher.digest(&0u64.to_be_bytes()));
+        assert_eq!(empty_out, Mmr::empty_mmr_root(&mut Standard::<H>::new()));
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new(10), digests.iter());

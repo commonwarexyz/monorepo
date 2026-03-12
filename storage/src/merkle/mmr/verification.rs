@@ -66,7 +66,8 @@ impl<D: Digest> ProofStore<D> {
     }
 }
 
-impl<D: Digest> Storage<D> for ProofStore<D> {
+impl<D: Digest> Storage for ProofStore<D> {
+    type Digest = D;
     async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
         Ok(self.digests.get(&pos).cloned())
     }
@@ -84,7 +85,7 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<D: Digest, S: Storage<D>>(
+pub async fn range_proof<D: Digest, S: Storage<Digest = D>>(
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
@@ -101,7 +102,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
+pub async fn historical_range_proof<D: Digest, S: Storage<Digest = D>>(
     mmr: &S,
     leaves: Location,
     range: Range<Location>,
@@ -135,7 +136,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
-pub async fn multi_proof<D: Digest, S: Storage<D>>(
+pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
     mmr: &S,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {

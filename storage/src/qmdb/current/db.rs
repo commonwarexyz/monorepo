@@ -142,7 +142,7 @@ where
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
     /// height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
+    fn grafted_storage(&self) -> impl mmr::storage::Storage<Digest = H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
@@ -474,8 +474,8 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    G: mmr::read::Readable<H::Digest>,
-    S: mmr::storage::Storage<H::Digest>,
+    G: mmr::read::Readable<Digest = H::Digest>,
+    S: mmr::storage::Storage<Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &mut StandardHasher<H>,
@@ -501,8 +501,8 @@ pub(super) async fn compute_db_root<
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
 pub(super) async fn compute_grafted_mmr_root<
     H: Hasher,
-    G: mmr::read::Readable<H::Digest>,
-    S: mmr::storage::Storage<H::Digest>,
+    G: mmr::read::Readable<Digest = H::Digest>,
+    S: mmr::storage::Storage<Digest = H::Digest>,
 >(
     hasher: &mut StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
@@ -532,7 +532,7 @@ pub(super) async fn compute_grafted_mmr_root<
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
@@ -597,7 +597,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
     pool: Option<&ThreadPool>,
 ) -> Result<mmr::mem::Mmr<grafting::GraftedHasher<StandardHasher<H>>>, Error> {
     let grafting_height = grafting::height::<N>();

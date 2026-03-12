@@ -14,7 +14,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::UnmerkleizedBatch,
-        hasher::Hasher as MmrHasher,
+        hasher::Hasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr, MIN_TO_PARALLELIZE},
         storage::Storage,
@@ -37,7 +37,7 @@ use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub(crate) fn partial_chunk_root<H: MmrHasher, const N: usize>(
+pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
     hasher: &mut H,
     mmr_root: &H::Digest,
     next_bit: u64,
@@ -85,7 +85,7 @@ impl<D: Digest> State<D> for Unmerkleized {}
 
 /// A merkleized bitmap whose root digest has been computed and cached.
 pub type MerkleizedBitMap<E, H, const N: usize> =
-    BitMap<E, H, N, Merkleized<<H as MmrHasher>::Digest>>;
+    BitMap<E, H, N, Merkleized<<H as Hasher>::Digest>>;
 
 /// An unmerkleized bitmap whose root digest has not been computed.
 pub type UnmerkleizedBitMap<E, H, const N: usize> = BitMap<E, H, N, Unmerkleized>;
@@ -107,8 +107,7 @@ pub type UnmerkleizedBitMap<E, H, const N: usize> = BitMap<E, H, N, Unmerkleized
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize, S: State<H::Digest>>
-{
+pub struct BitMap<E: Clock + RStorage + Metrics, H: Hasher, const N: usize, S: State<H::Digest>> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
@@ -143,7 +142,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize, S: State<H::Digest>>
+impl<E: Clock + RStorage + Metrics, H: Hasher, const N: usize, S: State<H::Digest>>
     BitMap<E, H, N, S>
 {
     /// The size of a chunk in bits.
@@ -223,7 +222,7 @@ impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize, S: State<H::Di
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl MmrHasher<Digest = H::Digest>,
+        hasher: &mut impl Hasher<Digest = H::Digest>,
         proof: &Proof<H::Digest>,
         chunk: &[u8; N],
         bit: u64,
@@ -289,7 +288,7 @@ impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize, S: State<H::Di
     }
 }
 
-impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> MerkleizedBitMap<E, H, N> {
+impl<E: Clock + RStorage + Metrics, H: Hasher, const N: usize> MerkleizedBitMap<E, H, N> {
     /// Initialize a bitmap from the metadata in the given partition. If the partition is empty,
     /// returns an empty bitmap. Otherwise restores the pruned state (the caller must replay
     /// retained elements to restore its full state).
@@ -505,7 +504,7 @@ impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> MerkleizedBitM
     }
 }
 
-impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> UnmerkleizedBitMap<E, H, N> {
+impl<E: Clock + RStorage + Metrics, H: Hasher, const N: usize> UnmerkleizedBitMap<E, H, N> {
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -624,9 +623,11 @@ impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> UnmerkleizedBi
     }
 }
 
-impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> Storage<H::Digest>
+impl<E: Clock + RStorage + Metrics, H: Hasher, const N: usize> Storage
     for MerkleizedBitMap<E, H, N>
 {
+    type Digest = H::Digest;
+
     async fn size(&self) -> Position {
         self.size()
     }
@@ -641,7 +642,7 @@ mod tests {
     use super::*;
     use crate::mmr::StandardHasher;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Hasher, Sha256};
+    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
 
@@ -651,7 +652,7 @@ mod tests {
     type TestMerkleizedBitMap<const N: usize> =
         MerkleizedBitMap<TestContext, StandardHasher<Sha256>, N>;
 
-    impl<E: Clock + RStorage + Metrics, H: MmrHasher, const N: usize> UnmerkleizedBitMap<E, H, N> {
+    impl<E: Clock + RStorage + Metrics, H: Hasher, const N: usize> UnmerkleizedBitMap<E, H, N> {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning
