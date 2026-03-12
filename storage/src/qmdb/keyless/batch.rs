@@ -86,12 +86,15 @@ where
     H: Hasher,
     P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
 {
+    /// The location that the next appended value will be placed at.
+    pub const fn size(&self) -> Location {
+        Location::new(self.base_size + self.appends.len() as u64)
+    }
+
     /// Append a value.
-    /// Returns the uncommitted location where this value will be placed.
-    pub fn append(&mut self, value: V) -> Location {
-        let loc = Location::new(self.base_size + self.appends.len() as u64);
+    pub fn append(mut self, value: V) -> Self {
         self.appends.push(value);
-        loc
+        self
     }
 
     /// Read a value at `loc`.
@@ -138,7 +141,7 @@ where
         // Merkleize the journal batch (created eagerly at batch construction).
         let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
         let journal_batch = journal_batch.merkleize();
 

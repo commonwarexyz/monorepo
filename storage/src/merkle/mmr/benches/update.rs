@@ -69,9 +69,9 @@ fn bench_update(c: &mut Criterion) {
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = batch.add(&mut h, &digest);
-                                    let loc = Location::try_from(pos).expect("leaf position");
+                                    let loc = batch.leaves();
                                     leaf_locations.push(loc);
+                                    batch = batch.add(&mut h, &digest);
                                 }
                                 batch.merkleize(&mut h).finalize()
                             };
@@ -106,7 +106,7 @@ fn bench_update(c: &mut Criterion) {
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
-                                        batch.update_leaf_batched(&updates).unwrap();
+                                        batch = batch.update_leaf_batched(&updates).unwrap();
                                         batch.merkleize(&mut h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();

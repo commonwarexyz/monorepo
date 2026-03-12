@@ -166,7 +166,7 @@ where
         // Merkleize the journal batch (created eagerly at batch construction).
         let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
         let journal_batch = journal_batch.merkleize();
 

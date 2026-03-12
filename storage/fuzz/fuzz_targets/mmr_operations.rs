@@ -131,24 +131,19 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let (mmr_pos, changeset) = {
-                        let mut batch = mmr.new_batch();
-                        let mmr_pos_inner = batch.add(&mut hasher, limited_data);
-                        (mmr_pos_inner, batch.merkleize(&mut hasher).finalize())
-                    };
+                    let changeset = mmr
+                        .new_batch()
+                        .add(&mut hasher, limited_data)
+                        .merkleize(&mut hasher)
+                        .finalize();
                     mmr.apply(changeset).unwrap();
+                    let mmr_pos = Position::try_from(mmr.leaves() - 1).unwrap();
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
                     assert!(
                         mmr.size() > size_before,
                         "Operation {op_idx}: Size should increase after add"
-                    );
-
-                    assert_eq!(
-                        Some(Position::try_from(mmr.leaves() - 1).unwrap()),
-                        Some(mmr_pos),
-                        "Operation {op_idx}: Last leaf position should be the added position"
                     );
 
                     assert!(

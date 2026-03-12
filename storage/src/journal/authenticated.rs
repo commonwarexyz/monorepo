@@ -64,10 +64,12 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
     UnmerkleizedBatch<'a, H, P, Item>
 {
     /// Add an item to the batch.
-    pub fn add(&mut self, item: Item) {
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner.add(&mut self.hasher, &encoded);
+        self.inner = self.inner.add(&mut self.hasher, &encoded);
         self.items.push(item);
+        self
     }
 
     /// Merkleize the batch, computing the root digest.
@@ -303,7 +305,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch.add(hasher, &op.encode());
+                        batch = batch.add(hasher, &op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
@@ -326,11 +328,12 @@ where
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
-        let changeset = {
-            let mut batch = self.mmr.new_batch();
-            batch.add(&mut self.hasher, &encoded_item);
-            batch.merkleize(&mut self.hasher).finalize()
-        };
+        let changeset = self
+            .mmr
+            .new_batch()
+            .add(&mut self.hasher, &encoded_item)
+            .merkleize(&mut self.hasher)
+            .finalize();
         self.mmr.apply(changeset)?;
 
         Ok(Location::new(loc))
@@ -861,7 +864,7 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch.add(&mut hasher, &encoded);
+                        batch = batch.add(&mut hasher, &encoded);
                         journal.append(&op).await.unwrap();
                     }
                     batch.merkleize(&mut hasher).finalize()
@@ -1779,14 +1782,14 @@ mod tests {
             let original_root = journal.root();
 
             // Fork two independent speculative batches.
-            let mut b1 = journal.new_batch();
-            let mut b2 = journal.new_batch();
+            let b1 = journal.new_batch();
+            let b2 = journal.new_batch();
 
             // Add different items to each batch.
             let op_a = create_operation(100);
             let op_b = create_operation(200);
-            b1.add(op_a.clone());
-            b2.add(op_b);
+            let b1 = b1.add(op_a.clone());
+            let b2 = b2.add(op_b);
 
             // Merkleize and verify independent roots.
             let m1 = b1.merkleize();
@@ -1823,13 +1826,11 @@ mod tests {
 
             // Build stacked batches in a block so intermediate borrows drop.
             let (expected_root, finalized) = {
-                let mut batch_a = journal.new_batch();
-                batch_a.add(op_a.clone());
-                let merkleized_a = batch_a.merkleize();
+                let batch_a = journal.new_batch();
+                let merkleized_a = batch_a.add(op_a.clone()).merkleize();
 
-                let mut batch_b = merkleized_a.new_batch();
-                batch_b.add(op_b.clone());
-                let merkleized_b = batch_b.merkleize();
+                let batch_b = merkleized_a.new_batch();
+                let merkleized_b = batch_b.add(op_b.clone()).merkleize();
 
                 let root = merkleized_b.root();
                 (root, merkleized_b.finalize())
@@ -1858,16 +1859,8 @@ mod tests {
             let op_b = create_operation(2);
 
             // Create two batches from the same base.
-            let finalized_a = {
-                let mut batch = journal.new_batch();
-                batch.add(op_a.clone());
-                batch.merkleize().finalize()
-            };
-            let finalized_b = {
-                let mut batch = journal.new_batch();
-                batch.add(op_b);
-                batch.merkleize().finalize()
-            };
+            let finalized_a = journal.new_batch().add(op_a.clone()).merkleize().finalize();
+            let finalized_b = journal.new_batch().add(op_b).merkleize().finalize();
 
             // Apply A -- should succeed.
             journal.apply_batch(finalized_a).await.unwrap();
@@ -1899,21 +1892,17 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "stale-chained", 5).await;
 
             // Parent batch, then fork two children.
-            let parent = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(10));
-                batch.merkleize()
-            };
-            let child_a = {
-                let mut batch = parent.new_batch();
-                batch.add(create_operation(20));
-                batch.merkleize().finalize()
-            };
-            let child_b = {
-                let mut batch = parent.new_batch();
-                batch.add(create_operation(30));
-                batch.merkleize().finalize()
-            };
+            let parent = journal.new_batch().add(create_operation(10)).merkleize();
+            let child_a = parent
+                .new_batch()
+                .add(create_operation(20))
+                .merkleize()
+                .finalize();
+            let child_b = parent
+                .new_batch()
+                .add(create_operation(30))
+                .merkleize()
+                .finalize();
             drop(parent);
 
             // Apply child_a, then child_b should be stale.
@@ -1937,16 +1926,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
@@ -1971,16 +1956,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
