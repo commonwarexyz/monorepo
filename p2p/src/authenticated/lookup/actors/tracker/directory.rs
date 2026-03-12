@@ -392,7 +392,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
-        let record = self.peers.get(peer).unwrap();
+        // Already reserved
+        let record = self.peers.get_mut(peer).unwrap();
         if record.reserved() {
             return None;
         }
@@ -411,7 +412,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
-        let record = self.peers.get_mut(peer).unwrap();
         if record.reserve(&mut self.context, self.rate_limit) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
