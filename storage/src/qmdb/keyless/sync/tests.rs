@@ -110,6 +110,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
 
         let result: Result<DbOf<H>, _> = sync::sync(config).await;
@@ -151,6 +152,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -212,6 +214,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -263,6 +266,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -336,6 +340,7 @@ where
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
             let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
             loop {
@@ -410,6 +415,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -464,6 +470,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -516,6 +523,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -564,6 +572,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -625,6 +634,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -697,6 +707,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         update_sender
@@ -754,6 +765,7 @@ where
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 1,
+            progress_tx: None,
         };
 
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();

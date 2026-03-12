@@ -85,6 +85,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         cancel_rx: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
            + Send
+           + Sync
            + 'a;
 }
 

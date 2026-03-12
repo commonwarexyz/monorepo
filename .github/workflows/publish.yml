@@ -120,6 +120,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish glue
+      run: cargo publish --manifest-path glue/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish chat
       run: cargo publish --manifest-path examples/chat/Cargo.toml
       continue-on-error: true

@@ -142,6 +142,7 @@ where
         apply_batch_size: 100,
         max_outstanding_requests: 10,
         max_retained_roots: 8,
+        progress_tx: None,
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {

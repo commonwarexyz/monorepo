@@ -534,6 +534,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
+            progress_tx: None,
         })
         .await
         .unwrap();
