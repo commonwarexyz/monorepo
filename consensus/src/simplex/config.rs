@@ -15,24 +15,18 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Controls whether and how the engine proactively forwards blocks to peers
 /// that did not vote in a notarization certificate.
 ///
-/// Forwarding is a best-effort liveness aid for peers that are expected to
-/// participate in the next few views. The batcher keeps
-/// [`ForwardingPolicy::NextLeader`] within a next-view assistance window, but
-/// [`ForwardingPolicy::All`] broadcasts immediately to the current set of
-/// active missing peers because it does not depend on learning the next leader.
+/// Forwarding is a best-effort liveness aid: when enabled, the batcher
+/// broadcasts immediately to all active missing peers once a notarization
+/// is accepted or constructed.
+///
+/// While currently only two options are available, this type is reserved
+/// as an enum to allow for more sophisticated policies in the future.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ForwardingPolicy {
     /// Do nothing when notified of missing voters.
     #[default]
     Disabled,
-    /// Forward the block to the elected leader for the next view, if they did
-    /// not vote.
-    NextLeader,
     /// Forward the block to all active participants that did not vote.
-    ///
-    /// This widens the recipient set and emits immediately once the notarization
-    /// is accepted or constructed, even if the local voter has already advanced
-    /// beyond the next view.
     All,
 }
 
@@ -44,7 +38,7 @@ impl ForwardingPolicy {
 
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
-        matches!(self, Self::NextLeader | Self::All)
+        matches!(self, Self::All)
     }
 }
 
@@ -150,22 +144,19 @@ where
 
     /// Policy for proactively forwarding blocks to peers that did not vote
     /// in a notarization certificate.
-    ///
-    /// See [`ForwardingPolicy`] for the timeliness guarantees and the point at
-    /// which stale forwards are intentionally dropped.
     pub forwarding: ForwardingPolicy,
 }
 
-impl<S, L, B, D, A, R, F, T> Config<S, L, B, D, A, R, F, T>
-where
-    S: Scheme,
-    L: Elector<S>,
-    B: Blocker<PublicKey = S::PublicKey>,
-    D: Digest,
-    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-    R: Relay,
-    F: Reporter<Activity = Activity<S, D>>,
-    T: Strategy,
+impl<
+        S: Scheme,
+        L: Elector<S>,
+        B: Blocker<PublicKey = S::PublicKey>,
+        D: Digest,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+        R: Relay,
+        F: Reporter<Activity = Activity<S, D>>,
+        T: Strategy,
+    > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

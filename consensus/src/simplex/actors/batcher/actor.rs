@@ -174,31 +174,14 @@ where
         )
     }
 
-    /// Applies [`ForwardingPolicy`] to determine which peers should receive a
-    /// targeted block forward. `leader` is the elected leader for the next
-    /// view when that information is required, and `missing` contains all
-    /// active participants that did not vote.
-    ///
-    /// Returns `None` when forwarding is disabled or no peers need the block.
-    fn forwarding_peers(
-        &self,
-        leader: Option<Participant>,
-        missing: &[Participant],
-    ) -> Option<Vec<S::PublicKey>> {
-        match self.forwarding {
-            ForwardingPolicy::Disabled => None,
-            ForwardingPolicy::NextLeader => leader
-                .filter(|leader| missing.contains(leader))
-                .and_then(|leader| self.participants.key(leader).cloned())
-                .map(|pk| vec![pk]),
-            ForwardingPolicy::All => {
-                let peers: Vec<_> = missing
-                    .iter()
-                    .filter_map(|&p| self.participants.key(p).cloned())
-                    .collect();
-                (!peers.is_empty()).then_some(peers)
-            }
-        }
+    /// Resolves the public keys of `missing` participants for a targeted
+    /// block forward. Returns `None` when no peers need the block.
+    fn forwarding_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
+        let peers: Vec<_> = missing
+            .iter()
+            .filter_map(|&p| self.participants.key(p).cloned())
+            .collect();
+        (!peers.is_empty()).then_some(peers)
     }
 
     /// Broadcasts a targeted block forward to the selected peers.
@@ -233,34 +216,16 @@ where
             .collect()
     }
 
-    /// Emits or defers block forwarding for a notarized proposal.
-    ///
-    /// [`ForwardingPolicy::All`] broadcasts immediately because the recipient
-    /// set is independent of any future leader election. [`ForwardingPolicy::NextLeader`]
-    /// stays live only through the next-view handoff; once the local voter has
-    /// moved past `view + 1`, the forward is intentionally dropped as stale.
-    async fn forward_notarization(
-        &mut self,
-        current: &Current,
-        pending_forwards: &mut BTreeMap<View, (Proposal<D>, Vec<Participant>)>,
-        view: View,
-        proposal: Proposal<D>,
-        missing: Vec<Participant>,
-    ) {
+    /// Broadcasts a block forward for a notarized proposal to all active
+    /// missing peers.
+    async fn forward_notarization(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
         if self.forwarding.is_disabled() || missing.is_empty() {
             return;
         }
-
-        let next_view = view.next();
-        if matches!(self.forwarding, ForwardingPolicy::All) || next_view == current.view {
-            let Some(peers) = self.forwarding_peers(current.leader, &missing) else {
-                return;
-            };
-            self.broadcast_forward(proposal, peers).await;
-        } else if next_view > current.view {
-            pending_forwards.insert(next_view, (proposal, missing));
-        }
-        // If next_view < current.view, we've moved past; drop.
+        let Some(peers) = self.forwarding_peers(&missing) else {
+            return;
+        };
+        self.broadcast_forward(proposal, peers).await;
     }
 
     /// Returns true if the leader has nullified the current view
@@ -308,7 +273,6 @@ where
         };
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
-        let mut pending_forwards: BTreeMap<View, (Proposal<D>, Vec<Participant>)> = BTreeMap::new();
         select_loop! {
             self.context,
             on_start => {
@@ -371,14 +335,6 @@ where
                         current.timed_out = true;
                     }
                     response.send_lossy(timeout_reason);
-
-                    // Emit any pending forwards for this view now that we
-                    // know the leader from the voter.
-                    if let Some((proposal, missing)) = pending_forwards.remove(&new_current) {
-                        if let Some(peers) = self.forwarding_peers(Some(leader), &missing) {
-                            self.broadcast_forward(proposal, peers).await;
-                        }
-                    }
 
                     // Setting leader may enable batch verification
                     updated_view = current.view;
@@ -459,14 +415,7 @@ where
                             .await;
                         if let Some((proposal, candidates)) = forward_candidates {
                             let missing = self.active_missing_voters(&work, candidates);
-                            self.forward_notarization(
-                                &current,
-                                &mut pending_forwards,
-                                view,
-                                proposal,
-                                missing,
-                            )
-                            .await;
+                            self.forward_notarization(proposal, missing).await;
                         }
                     }
                     Certificate::Nullification(nullification) => {
@@ -688,17 +637,10 @@ where
                         .await;
                 }
 
-                // Filter candidates and emit or defer forwarding.
+                // Filter candidates and emit forwarding.
                 if let Some((proposal, candidates)) = forward_candidates {
                     let missing = self.active_missing_voters(&work, candidates);
-                    self.forward_notarization(
-                        &current,
-                        &mut pending_forwards,
-                        updated_view,
-                        proposal,
-                        missing,
-                    )
-                    .await;
+                    self.forward_notarization(proposal, missing).await;
                 }
 
                 // Drop any rounds that are no longer interesting
@@ -706,15 +648,6 @@ where
                     !interesting(self.activity_timeout, finalized, current.view, view, false)
                 }) {
                     work.pop_first();
-                }
-
-                // Prune stale pending forward entries for views we've
-                // already processed (or skipped past).
-                while pending_forwards
-                    .first_key_value()
-                    .is_some_and(|(&v, _)| v <= current.view)
-                {
-                    pending_forwards.pop_first();
                 }
             },
         }
