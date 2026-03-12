@@ -168,16 +168,23 @@ impl<
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                // Set next deadline.
-                let min = self.context.current() + self.dial_frequency;
-                dial_deadline = if self.queue.is_empty() {
-                    let max = self.context.current() + self.max_query_interval;
+                // Refill the queue if empty.
+                let now = self.context.current();
+                let mut next_query_at = None;
+                if self.queue.is_empty() {
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
-                    dialable.next_query_at.unwrap_or(max).clamp(min, max)
+                    next_query_at = dialable.next_query_at;
+                }
+
+                // Set next deadline.
+                dial_deadline = if self.queue.is_empty() {
+                    let min = now + self.dial_frequency;
+                    let max = (now + self.max_query_interval).max(min);
+                    next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
-                    min
+                    now + self.dial_frequency
                 };
 
                 // Pop through peers until we can reserve and dial one.
