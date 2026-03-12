@@ -4576,6 +4576,30 @@ mod tests {
                     blocked.is_empty(),
                     "no peer should be blocked in late leader shard test"
                 );
+
+                // After both reconstruction and assigned shard readiness,
+                // additional gossip shards should be silently ignored.
+                let extra_sender_idx = 2usize;
+                let extra_shard = coded_block
+                    .shard(peers[extra_sender_idx].index.get() as u16)
+                    .expect("missing shard");
+                peers[extra_sender_idx]
+                    .sender
+                    .send(
+                        Recipients::One(victim.clone()),
+                        extra_shard.encode(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // The gossip shard should be silently dropped (not blocked).
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(
+                    blocked.is_empty(),
+                    "gossip shard after full reconstruction should be silently ignored"
+                );
             },
         );
     }
