@@ -1662,12 +1662,11 @@ mod tests {
             drop(reservation);
             directory.release(super::Metadata::Dialer(pk_1.clone()));
 
-            // next_query_at should reflect the jittered next dial time.
+            // next_query_at is capped at interval from now.
             let interval = quota.replenish_interval();
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
-            assert!(dialable.next_query_at >= reserved_at);
-            assert!(dialable.next_query_at <= reserved_at + interval * 2);
+            assert_eq!(dialable.next_query_at, reserved_at + interval);
         });
     }
 
