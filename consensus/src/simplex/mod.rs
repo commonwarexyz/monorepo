@@ -85,7 +85,7 @@
 //! * Enter `v+1`
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * If `nullify(v)` and `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T`
+//! * If `finalize(c,v)` have not yet been broadcast, broadcast `nullify(v)` and set `t_r` to `now+T`
 //!
 //! Upon `t_r` firing:
 //! * Broadcast `nullify(v)` and either `finalization(c, v-1)`, `notarization(c, v-1)` or `nullification(v-1)`
@@ -226,7 +226,7 @@
 //!   - `broadcast_finalize`: `bool`, whether `finalize(c, v)` has been broadcast, initially `false`.
 //!   - `broadcast_finalization`: `bool`, whether `finalization(c, v)` has been broadcast, initially `false`.
 //!   - `proposal`: `Option<c>`, the container for this view, initially `None`.
-//!   - `proposal_status`: `None | Verified | Equivocated`, initially `None`.
+//!   - `proposal_status`: `None | Unverified | Verified | Equivocated`, initially `None`.
 //!   - `certified`: `Option<bool>`, where `None` means certification is pending,
 //!     `Some(true)` means certified, and `Some(false)` means rejected.
 //!   - `t_l`: leader proposal timeout.
@@ -364,19 +364,22 @@
 //!
 //! // Records container `c` for view `v`. If a different container already exists,
 //! // marks the proposal as equivocated. Returns the equivocating leader if detected.
-//! fn record_proposal(r, v, c) -> Option<leader> {
+//! // `recovered` indicates whether `c` came from a certificate (true) or a vote (false).
+//! fn record_proposal(r, v, c, recovered) -> Option<leader> {
 //!     if r.round[v].proposal_status == Equivocated {
 //!         return None;
 //!     }
 //!     if r.round[v].proposal == None {
 //!         r.round[v].proposal = Some(c);
-//!         r.round[v].proposal_status = Verified;
+//!         r.round[v].proposal_status = if recovered { Verified } else { Unverified };
 //!         return None;
 //!     }
 //!     if r.round[v].proposal == Some(c) {
+//!         if recovered { r.round[v].proposal_status = Verified; }
 //!         return None;
 //!     }
-//!     r.round[v].proposal = Some(c);
+//!     // Equivocation: only overwrite with certificate-backed proposals.
+//!     if recovered { r.round[v].proposal = Some(c); }
 //!     r.round[v].proposal_status = Equivocated;
 //!     return Some(leader(v));
 //! }
@@ -398,8 +401,8 @@
 //!     r.round[next].t_l = now + 2Δ;
 //!     r.round[next].t_r = None;
 //!     r.round[next].t_a = now + 3Δ;
-//!     let l = r.round[next].leader;
-//!     if l != None and r != l and l has not been active in the last skip_timeout locally tracked rounds {
+//!     let leader = r.round[next].leader;
+//!     if leader != None and r != leader and leader has not been active in the last skip_timeout locally tracked rounds {
 //!         r.round[next].t_l = 0;
 //!         r.round[next].t_a = 0;
 //!     }
@@ -430,7 +433,7 @@
 //! ### 7.0. Initialization
 //!
 //! 1. At startup, after initializing replica state with genesis (view `0`) implicitly finalized,
-//!    call `enter_view(r, 1)` and `set_leader(r, 1)` exactly once.
+//!    call `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
 //!
 //! ### 7.1. View Entry
 //!
@@ -443,7 +446,7 @@
 //!       1. If `parent = Err(_)`, return.
 //!       1. Let `c = propose(v, parent)`.
 //!       1. If `c = None`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`, and return.
-//!       1. Call `record_proposal(r, v, c)`.
+//!       1. Call `record_proposal(r, v, c, true)`.
 //!       1. Set `r.round[v].broadcast_notarize = true`.
 //!       1. Broadcast `notarize(c, v)`.
 //!
@@ -455,8 +458,9 @@
 //!    1. Set `r.round[v].t_l = None`.
 //!    1. Let `v_parent` be `c`'s declared parent view.
 //!    1. If `parent_payload(r, v, v_parent) = None`, return.
+//!    1. Call `record_proposal(r, v, c, false)`.
 //!    1. Verify `c`.
-//!    1. If verification succeeds, call `record_proposal(r, v, c)`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
+//!    1. If verification succeeds, set `r.round[v].proposal_status = Verified`, set `r.round[v].broadcast_notarize = true`, and broadcast `notarize(c, v)`.
 //!    1. If verification fails, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //!
 //! ### 7.3. Notarization Path
@@ -470,7 +474,7 @@
 //! 1. On constructing or receiving the first `notarization(c, v)`:
 //!    1. Set `r.round[v].notarization = notarization(c, v)`.
 //!    1. Call `set_leader(r, v + 1)`.
-//!    1. Call `record_proposal(r, v, c)`.
+//!    1. Call `record_proposal(r, v, c, true)`.
 //!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
 //!    1. Attempt `certify(c)`:
 //!       1. On success:
@@ -491,7 +495,7 @@
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
-//!    1. Call `enter_view(r, v + 1)` and `set_leader(r, v + 1)`.
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!    1. Set `r.round[v].nullification = nullification(v)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
@@ -506,9 +510,9 @@
 //!    1. Assemble `finalization(c, v)`.
 //! 1. On constructing or receiving the first `finalization(c, v)`:
 //!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
-//!    1. Call `enter_view(r, v + 1)` and `set_leader(r, v + 1)`.
+//!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!    1. Set `r.round[v].finalization = finalization(c, v)`.
-//!    1. Call `record_proposal(r, v, c)`.
+//!    1. Call `record_proposal(r, v, c, true)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. Mark `c` finalized (views `<= last_finalized` are implicitly finalized).
 //!    1. If `!r.round[v].broadcast_finalization`, set `r.round[v].broadcast_finalization = true` and broadcast `finalization(c, v)` (even if `c` itself is not yet verified locally).
