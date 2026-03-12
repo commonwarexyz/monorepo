@@ -649,7 +649,11 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::Info,
-            primitives::{group::Scalar, sharing::Mode, variant::MinPk},
+            primitives::{
+                group::{Private, Scalar},
+                sharing::Mode,
+                variant::MinPk,
+            },
         },
         ed25519, Signer,
     };
@@ -748,7 +752,10 @@ mod tests {
 
             let player = signers[1].public_key();
             let mut unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
-            unsent.insert(player.clone(), DealerPrivMsg::new(Scalar::one()));
+            unsent.insert(
+                player.clone(),
+                DealerPrivMsg::new(Private::try_from(Scalar::one()).expect("non-zero scalar")),
+            );
 
             let mut dealer = Dealer::<MinPk, ed25519::PrivateKey>::new(None, pub_msg, unsent);
 
