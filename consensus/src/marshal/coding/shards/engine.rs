@@ -855,6 +855,11 @@ where
 
         match self.try_reconstruct(commitment) {
             Ok(Some(block)) => {
+                // Do not prune other reconstruction state here. A Byzantine
+                // leader can equivocate by proposing multiple commitments in
+                // the same round, so more than one block may be reconstructed
+                // for a given round. Pruning is deferred to `prune()`, which
+                // is called once a commitment is finalized.
                 debug!(
                     %commitment,
                     parent = %block.parent(),
@@ -862,7 +867,9 @@ where
                     "successfully reconstructed block from shards"
                 );
             }
-            Ok(None) => {}
+            Ok(None) => {
+                debug!(%commitment, "not enough checked shards to reconstruct block");
+            }
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
