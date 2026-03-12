@@ -1,7 +1,9 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::{
+    Ingress,
     authenticated::{
+        Mailbox,
         lookup::{
             actors::{
                 spawner,
@@ -10,17 +12,15 @@ use crate::{
             metrics,
         },
         mailbox::UnboundedMailbox,
-        Mailbox,
     },
-    Ingress,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
+    StreamOf, spawn_cell,
 };
-use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::{Config as StreamConfig, dial};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
@@ -68,10 +68,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
-        C: Signer,
-    > Actor<E, C>
+impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer>
+    Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
@@ -179,7 +177,14 @@ impl<
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
-                    dialable.next_query_at.unwrap_or(max).clamp(min, max)
+                    if self.queue.is_empty() {
+                        // If the polling ceiling is shorter than the dial cadence, we still must
+                        // not wake earlier than the next permitted dial tick.
+                        let max = max.max(min);
+                        dialable.next_query_at.unwrap_or(max).clamp(min, max)
+                    } else {
+                        min
+                    }
                 } else {
                     min
                 };
@@ -199,10 +204,10 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::lookup::actors::tracker::{ingress::Releaser, Metadata};
+    use crate::authenticated::lookup::actors::tracker::{Metadata, ingress::Releaser};
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{Clock, Runner, deterministic};
     use commonware_stream::encrypted::Config as StreamConfig;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -346,6 +351,128 @@ mod tests {
             assert_eq!(
                 refresh_count, 1,
                 "expected 1 refresh (clamped to dial_frequency), got {}",
+                refresh_count
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialer_keeps_dialing_queued_peers_when_next_query_deadline_is_unknown() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(100);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    max_query_interval: Duration::from_secs(60),
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            let (releaser_mailbox, _releaser_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let releaser = Releaser::new(releaser_mailbox);
+
+            let peers: Vec<PublicKey> = (0..3)
+                .map(|i| PrivateKey::from_seed(i).public_key())
+                .collect();
+
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            let mut dial_count = 0;
+            let deadline = context.current() + Duration::from_millis(250);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(tracker::Dialable {
+                                peers: peers.clone(),
+                                next_query_at: None,
+                            });
+                        }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let metadata = Metadata::Dialer(public_key);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let _ = reservation.send(Some((res, ingress)));
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(
+                dial_count, 3,
+                "expected queued peers to drain at dial_frequency, got {} dials",
+                dial_count
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialer_does_not_panic_when_dial_frequency_exceeds_max_query_interval() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(200);
+
+            let dialer = Actor::new(
+                context.with_label("dialer"),
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_frequency,
+                    max_query_interval: Duration::from_millis(50),
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => if let Some(tracker::Message::Dialable { responder }) = msg {
+                        refresh_count += 1;
+                        let _ = responder.send(tracker::Dialable {
+                            peers: Vec::new(),
+                            next_query_at: None,
+                        });
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(
+                refresh_count, 2,
+                "expected 2 refreshes at dial_frequency without panicking, got {}",
                 refresh_count
             );
         });
