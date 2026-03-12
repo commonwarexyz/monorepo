@@ -502,11 +502,9 @@ where
 
                 let commitment = shard.commitment();
 
-                // Skip shards for already-reconstructed blocks unless the
-                // local leader-delivered shard has not been verified yet.
-                // Accepting the late leader shard ensures we broadcast it and
-                // help slower peers reach quorum.
-                if !self.should_handle_network_shard(commitment) {
+                // Skip shards for already-reconstructed blocks unless it
+                // is the late leader-delivered shard for the local index.
+                if !self.should_handle_network_shard(commitment, &peer) {
                     continue;
                 }
 
@@ -542,13 +540,13 @@ where
     /// exception is the late leader-delivered shard for the local index,
     /// which we still accept so we can notify readiness and gossip it to
     /// slower peers.
-    fn should_handle_network_shard(&self, commitment: Commitment) -> bool {
+    fn should_handle_network_shard(&self, commitment: Commitment, sender: &P) -> bool {
         if !self.reconstructed_blocks.contains_key(&commitment) {
             return true;
         }
         self.state
             .get(&commitment)
-            .is_some_and(|s| !s.assigned_shard_ready)
+            .is_some_and(|s| !s.assigned_shard_ready && *sender == s.leader)
     }
 
     /// Attempts to reconstruct a [`CodedBlock`] from the checked [`Shard`]s present in the
