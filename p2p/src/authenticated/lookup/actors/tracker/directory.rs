@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Quota, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
@@ -37,8 +37,8 @@ pub struct Config {
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
-    /// The rate limit for allowing reservations per-peer.
-    pub rate_limit: Quota,
+    /// The cooldown between reservations for a given peer.
+    pub peer_connection_cooldown: Duration,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -65,7 +65,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     block_duration: Duration,
 
     /// Minimum duration between reservations for a given peer.
-    rate_limit: Duration,
+    peer_connection_cooldown: Duration,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -104,7 +104,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
-            rate_limit: cfg.rate_limit.replenish_interval(),
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
             sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
@@ -395,7 +395,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
-        match record.reserve(&mut self.context, self.rate_limit) {
+        match record.reserve(&mut self.context, self.peer_connection_cooldown) {
             ReserveResult::Reserved => {
                 self.metrics.reserved.inc();
                 Some(Reservation::new(metadata, self.releaser.clone()))
@@ -442,8 +442,8 @@ mod tests {
         Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{hostname, SystemTimeExt, NZU32};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::{hostname, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -472,7 +472,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -535,7 +535,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -624,7 +624,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -668,7 +668,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -736,7 +736,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -836,7 +836,7 @@ mod tests {
             allow_dns: false,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -902,7 +902,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -968,7 +968,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1031,7 +1031,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1110,7 +1110,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1, // Only keep 1 set so we can evict peers
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1208,7 +1208,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1298,7 +1298,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1343,7 +1343,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1435,7 +1435,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1536,7 +1536,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1581,13 +1581,13 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
-        let quota = Quota::per_second(NZU32!(1));
+        let cooldown = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: quota,
+            peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
 
@@ -1613,7 +1613,7 @@ mod tests {
             );
 
             // After the jitter window (up to 2x interval), peer becomes dialable again.
-            context.sleep(quota.replenish_interval() * 2).await;
+            context.sleep(cooldown * 2).await;
             assert!(directory.dialable().peers.contains(&pk_1));
             let (_reservation, ingress) = directory
                 .dial(&pk_1)
@@ -1630,13 +1630,13 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
-        let quota = Quota::per_second(NZU32!(1));
+        let cooldown = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: quota,
+            peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
 
@@ -1651,7 +1651,7 @@ mod tests {
             directory.release(super::Metadata::Dialer(pk_1.clone()));
 
             // next_query_at reflects the jittered next_dial_at (between 1x and 2x interval).
-            let interval = quota.replenish_interval();
+            let interval = cooldown;
             let dialable = directory.dialable();
             assert!(!dialable.peers.contains(&pk_1));
             let nqa = dialable.next_query_at.unwrap();
@@ -1666,13 +1666,13 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
-        let quota = Quota::per_second(NZU32!(5));
+        let cooldown = Duration::from_millis(200);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: quota,
+            peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
 
@@ -1693,13 +1693,13 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
-        let quota = Quota::per_second(NZU32!(5));
+        let cooldown = Duration::from_millis(200);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: quota,
+            peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(3600),
         };
 
@@ -1734,7 +1734,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: true, // Bypass IP check to simplify test
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1785,7 +1785,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1836,7 +1836,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1884,7 +1884,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1922,7 +1922,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1948,7 +1948,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1981,7 +1981,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -2024,7 +2024,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -2049,7 +2049,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 

@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Quota, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
 use rand::{seq::IteratorRandom, Rng};
@@ -38,8 +38,8 @@ pub struct Config {
     /// peers for its peer info again.
     pub dial_fail_limit: usize,
 
-    /// The rate limit for allowing reservations per-peer.
-    pub rate_limit: Quota,
+    /// The cooldown between reservations for a given peer.
+    pub peer_connection_cooldown: Duration,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -67,7 +67,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     block_duration: Duration,
 
     /// Minimum duration between reservations for a given peer.
-    rate_limit: Duration,
+    peer_connection_cooldown: Duration,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -120,7 +120,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             block_duration: cfg.block_duration,
-            rate_limit: cfg.rate_limit.replenish_interval(),
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
             sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
@@ -456,7 +456,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
-        match record.reserve(&mut self.context, self.rate_limit) {
+        match record.reserve(&mut self.context, self.peer_connection_cooldown) {
             ReserveResult::Reserved => {
                 self.metrics.reserved.inc();
                 Some(Reservation::new(metadata, self.releaser.clone()))
@@ -498,7 +498,7 @@ mod tests {
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt, NZU32};
+    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -540,7 +540,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -585,7 +585,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -670,7 +670,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -715,7 +715,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -814,7 +814,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -880,7 +880,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -955,7 +955,7 @@ mod tests {
             allow_dns: true,
             max_sets: 1, // Only keep 1 set so we can evict peers
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1055,7 +1055,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1136,7 +1136,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1193,7 +1193,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1249,7 +1249,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1302,7 +1302,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1370,7 +1370,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1436,7 +1436,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             dial_fail_limit: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 

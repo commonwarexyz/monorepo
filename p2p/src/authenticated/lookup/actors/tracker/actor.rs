@@ -69,7 +69,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
-            rate_limit: cfg.allowed_connection_rate_per_peer,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
@@ -281,9 +281,8 @@ mod tests {
     };
     use commonware_runtime::{
         deterministic::{self},
-        Clock, Quota, Runner,
+        Clock, Runner,
     };
-    use commonware_utils::NZU32;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -299,7 +298,7 @@ mod tests {
             Config {
                 crypto,
                 tracked_peer_sets: 2,
-                allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
+                peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
                 allow_dns: true,
                 bypass_ip_check,

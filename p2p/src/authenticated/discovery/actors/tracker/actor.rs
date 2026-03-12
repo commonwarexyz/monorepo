@@ -81,7 +81,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             allow_dns: cfg.allow_dns,
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
-            rate_limit: cfg.allowed_connection_rate_per_peer,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             block_duration: cfg.block_duration,
         };
 
@@ -293,8 +293,8 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_runtime::{deterministic, Clock, Quota, Runner};
-    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect, NZU32};
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect};
     use futures::future::Either;
     use std::{
         collections::HashSet,
@@ -317,7 +317,7 @@ mod tests {
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
+            peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,

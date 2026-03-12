@@ -37,10 +37,10 @@ pub struct Config<C: Signer> {
     /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
-    /// The maximum interval between tracker queries when the queue is empty. This is the
-    /// per-peer rate limit interval, since that is the soonest any peer could become
+    /// The maximum interval between tracker queries when the queue is empty. This tracks the
+    /// configured peer connection cooldown, since that is the soonest any peer could become
     /// reservable again.
-    pub max_query_interval: Duration,
+    pub peer_connection_cooldown: Duration,
 
     /// Whether to allow dialing private IP addresses after DNS resolution.
     pub allow_private_ips: bool,
@@ -57,7 +57,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
-    max_query_interval: Duration,
+    peer_connection_cooldown: Duration,
     allow_private_ips: bool,
 
     // ---------- Metrics ----------
@@ -82,7 +82,7 @@ impl<
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
-            max_query_interval: cfg.max_query_interval,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
@@ -181,7 +181,7 @@ impl<
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
-                    let max = (now + self.max_query_interval).max(min);
+                    let max = (now + self.peer_connection_cooldown).max(min);
                     next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
                     now + self.dial_frequency
@@ -239,7 +239,7 @@ mod tests {
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_frequency,
-                max_query_interval: Duration::from_secs(60),
+                peer_connection_cooldown: Duration::from_secs(60),
                 allow_private_ips: true,
             };
 

@@ -70,7 +70,7 @@ impl<
                 allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
-                allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
+                peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
@@ -192,10 +192,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                max_query_interval: self
-                    .cfg
-                    .allowed_connection_rate_per_peer
-                    .replenish_interval(),
+                peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );
