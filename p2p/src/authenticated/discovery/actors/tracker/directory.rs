@@ -376,17 +376,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
-        let mut next_query_at = self.blocked.peek().map(|(_, &blocked_until)| blocked_until);
-
+        let mut next_query_at: Option<SystemTime> = None;
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
-            if self.blocked.contains(peer) {
+            if let Some(blocked_until) = self.blocked.get(peer) {
+                next_query_at = Some(next_query_at.map_or(blocked_until, |c| c.min(blocked_until)));
                 continue;
             }
             match record.dialable(now, self.allow_private_ips, self.allow_dns) {
                 DialStatus::Now => peers.push(peer.clone()),
                 DialStatus::After(t) => {
-                    next_query_at = Some(next_query_at.map_or(t, |current| current.min(t)));
+                    next_query_at = Some(next_query_at.map_or(t, |c| c.min(t)));
                 }
                 DialStatus::Unavailable => {}
             }
