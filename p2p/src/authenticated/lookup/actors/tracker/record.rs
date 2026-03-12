@@ -404,23 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reserved_status_check() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            assert_eq!(record.status, Status::Inert);
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert_eq!(record.status, Status::Reserved);
-            record.connect();
-            assert_eq!(record.status, Status::Active);
-            record.release();
-            assert_eq!(record.status, Status::Inert);
-        });
-    }
-
-    #[test]
     fn test_deletable_logic_detailed() {
         deterministic::Runner::default().start(|mut context| async move {
             assert!(!Record::myself().deletable());

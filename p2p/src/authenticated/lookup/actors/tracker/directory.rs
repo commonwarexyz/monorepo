@@ -1664,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dialable_defaults_next_query_at_to_rate_limit_interval() {
+    fn test_dialable_empty() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1689,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dialable_next_query_at_capped_by_interval() {
+    fn test_dialable_next_query_at_includes_blocked() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -1710,10 +1710,10 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            // Block the only peer with a very long block_duration.
+            // Block the only peer. No peers are immediately dialable, but
+            // next_query_at should point to the blocked peer's unblock time
+            // so the dialer knows when to re-check.
             directory.block(&pk_1);
-
-            // next_query_at should reflect the blocked peer's unblock time.
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
             assert_eq!(
