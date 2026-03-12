@@ -173,14 +173,15 @@ impl<
             },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Set next deadline.
+                let min = self.context.current() + self.dial_frequency;
                 dial_deadline = if self.queue.is_empty() {
                     let max = self.context.current() + self.max_query_interval;
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(&mut self.context);
-                    dialable.next_query_at.map_or(max, |t| t.min(max))
+                    dialable.next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
-                    self.context.current() + self.dial_frequency
+                    min
                 };
 
                 // Pop through peers until we can reserve and dial one.
@@ -301,6 +302,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
+
             let dial_frequency = Duration::from_millis(500);
 
             let dialer = Actor::new(
@@ -324,9 +326,8 @@ mod tests {
             let _handle = dialer.start(tracker_mailbox, supervisor);
 
             // Tracker reports next_query_at=100ms, which is shorter than
-            // dial_frequency=500ms. The dialer should use the earlier time,
-            // giving us ~3 refreshes in 350ms instead of just 1 with
-            // dial_frequency alone.
+            // dial_frequency=500ms. The dialer should clamp to dial_frequency,
+            // so we only get 1 refresh in 350ms instead of 3-4.
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);
             loop {
@@ -342,9 +343,9 @@ mod tests {
                 }
             }
 
-            assert!(
-                (3..=4).contains(&refresh_count),
-                "expected 3-4 refreshes (tracker deadline < dial_frequency), got {}",
+            assert_eq!(
+                refresh_count, 1,
+                "expected 1 refresh (clamped to dial_frequency), got {}",
                 refresh_count
             );
         });
