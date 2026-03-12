@@ -71,13 +71,14 @@
 //!    +----------------------+
 //!    | Accumulate           |
 //!    | - leader known       |
-//!    | - each shard         |  <--- verified via C::check on receipt
-//!    |   verified on receipt|
-//!    | - valid shards added |  <--- stored in checked_shards
-//!    |   to checked_shards  |
+//!    | - leader's shard     |  <--- verified eagerly via C::check
+//!    |   verified eagerly   |
+//!    | - gossip shards      |  <--- buffered in pending_shards
+//!    |   buffered           |
 //!    +----------------------+
 //!               |
-//!               | checked_shards.len() >= minimum_shards
+//!               | checked + pending >= minimum_shards
+//!               | (batch verify pending shards in parallel)
 //!               v
 //!    +----------------------+
 //!    | Reconstruction       |
