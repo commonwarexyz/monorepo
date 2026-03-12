@@ -407,7 +407,7 @@ where
                         let round = work.entry(view).or_insert_with(|| self.new_round());
                         round.set_notarization(notarization.clone());
                         let forward_candidates = self.forwarding.is_enabled().then(|| {
-                            let candidates = round.missing_notarize_voters(&notarization.proposal);
+                            let candidates = round.missing_voters(&notarization.proposal);
                             (notarization.proposal.clone(), candidates)
                         });
                         voter
@@ -610,7 +610,7 @@ where
 
                     // Collect candidates while we still hold `round`.
                     if self.forwarding.is_enabled() {
-                        let candidates = round.missing_notarize_voters(&notarization.proposal);
+                        let candidates = round.missing_voters(&notarization.proposal);
                         forward_candidates = Some((notarization.proposal.clone(), candidates));
                     }
 
