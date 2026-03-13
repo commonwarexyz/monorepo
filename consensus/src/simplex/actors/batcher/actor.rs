@@ -74,6 +74,7 @@ where
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
     latest_vote: Family<Peer, Gauge>,
+    latest_seen_views: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
@@ -90,6 +91,8 @@ where
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
+        let participants = cfg.scheme.participants().clone();
+        let participant_count = participants.len();
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -112,7 +115,7 @@ where
             "view of latest vote received per peer",
             latest_vote.clone(),
         );
-        for participant in cfg.scheme.participants().iter() {
+        for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
         context.register(
@@ -139,7 +142,7 @@ where
             Self {
                 context: ContextCell::new(context),
 
-                participants: cfg.scheme.participants().clone(),
+                participants,
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
@@ -158,6 +161,7 @@ where
                 verified,
                 inbound_messages,
                 latest_vote,
+                latest_seen_views: vec![View::zero(); participant_count],
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -173,6 +177,23 @@ where
             self.blocker.clone(),
             self.reporter.clone(),
         )
+    }
+
+    /// Records the highest-view in-epoch message received from a participant.
+    fn note_message(&mut self, sender: &S::PublicKey, view: View) {
+        let Some(participant) = self.participants.index(sender) else {
+            return;
+        };
+        let latest_seen = &mut self.latest_seen_views[usize::from(participant)];
+        if *latest_seen < view {
+            *latest_seen = view;
+        }
+    }
+
+    /// Returns true if the leader has sent a recent message.
+    fn leader_recently_seen(&self, view: View, leader: Participant) -> bool {
+        let latest_seen = self.latest_seen_views[usize::from(leader)];
+        view.get().saturating_sub(latest_seen.get()) < self.skip_timeout.get()
     }
 
     /// Resolves the public keys of `missing` participants for a targeted
@@ -280,19 +301,7 @@ where
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
                     } else {
-                        let skip_timeout = self.skip_timeout.get() as usize;
-                        if
-                        // Ensure we have enough data to judge activity (none of this
-                        // data may be in the last skip_timeout views if we jumped ahead
-                        // to a new view)
-                        work.len() >= skip_timeout
-                            // Leader not active in any recent round
-                            && !work
-                                .iter()
-                                .rev()
-                                .take(skip_timeout)
-                                .any(|(_, round)| round.is_active(leader))
-                        {
+                        if !self.leader_recently_seen(current.view, leader) {
                             // If we are the leader, we should attempt to build even if we haven't
                             // been active recently
                             if am_leader {
@@ -361,6 +370,8 @@ where
                 ) {
                     continue;
                 }
+
+                self.note_message(&sender, view);
 
                 match message {
                     Certificate::Notarization(notarization) => {
@@ -470,6 +481,8 @@ where
                 if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
+
+                self.note_message(&sender, view);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);

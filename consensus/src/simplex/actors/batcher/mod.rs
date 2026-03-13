@@ -2437,8 +2437,9 @@ mod tests {
 
     /// Test that leader activity detection works correctly:
     /// 1. Early views (before skip_timeout) always return active
-    /// 2. With enough recent views, activity is determined by leader's votes
-    /// 3. With gaps in recent views (with sufficient data), returns inactive
+    /// 2. Once `skip_timeout` views have elapsed without a message, the leader is inactive
+    /// 3. Recent inbound messages keep the leader active
+    /// 4. Large view gaps no longer preserve activity
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -2565,15 +2566,13 @@ mod tests {
                 skip_timeout
             );
 
-            // Test 5: Jump far ahead to create a gap in recent views
-            // Skip from view 6 to view 100 (this creates a gap where we don't have
-            // data for views 7-99). The activity check looks at the last skip_timeout
-            // rounds we have data for, so the leader's vote in view 5 is still visible.
+            // Test 5: Jump far ahead. Activity now uses the latest seen message view
+            // rather than the last buffered rounds, so the leader becomes inactive again.
             let view = View::new(100);
             let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                nullify.is_none(),
-                "view 100 should be active (leader voted in view 5, still in last {skip_timeout} rounds)"
+                nullify.is_some(),
+                "view 100 should be inactive (leader was last seen in view {skip_timeout})"
             );
 
             // Test 6: local leader inactivity should not trigger a fast-timeout hint.
@@ -2728,6 +2727,149 @@ mod tests {
         leader_nullify_marks_active(bls12381_multisig::fixture::<MinSig, _>);
         leader_nullify_marks_active(ed25519::fixture);
         leader_nullify_marks_active(secp256r1::fixture);
+    }
+
+    /// Test that certificate relays keep a leader active for skip-timeout heuristics
+    /// even when the leader does not emit any vote.
+    fn leader_certificate_marks_active<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_certificate_activity_test".to_vec();
+        let epoch = Epoch::new(333);
+        let skip_timeout = 5u64;
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                relay: MockRelay::new(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(skip_timeout),
+                epoch,
+                mailbox_size: 128,
+                forwarding: ForwardingPolicy::Disabled,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let leader = Participant::new(1);
+            let leader_pk = participants[usize::from(leader)].clone();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(leader_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            for v in 1..skip_timeout {
+                let view = View::new(v);
+                let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
+                assert!(nullify.is_none(), "view {v} should be active before skip_timeout");
+            }
+
+            let active_view = View::new(skip_timeout);
+            let nullify = batcher_mailbox
+                .update(active_view, leader, View::zero())
+                .await;
+            assert!(
+                nullify.is_some(),
+                "leader should be inactive after {skip_timeout} silent views"
+            );
+
+            let round = Round::new(epoch, active_view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let finalization = build_finalization(&schemes, &proposal, quorum_size);
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Certificate::Finalization(finalization.clone()).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+            let output = voter_receiver.recv().await.unwrap();
+            assert!(
+                matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == active_view)
+            );
+
+            let next_view = active_view.next();
+            let nullify = batcher_mailbox
+                .update(next_view, leader, View::zero())
+                .await;
+            assert!(
+                nullify.is_none(),
+                "leader should remain active after relaying a certificate"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_leader_certificate_marks_active() {
+        leader_certificate_marks_active(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_certificate_marks_active(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_certificate_marks_active(bls12381_threshold_std::fixture::<MinPk, _>);
+        leader_certificate_marks_active(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_certificate_marks_active(bls12381_multisig::fixture::<MinPk, _>);
+        leader_certificate_marks_active(bls12381_multisig::fixture::<MinSig, _>);
+        leader_certificate_marks_active(ed25519::fixture);
+        leader_certificate_marks_active(secp256r1::fixture);
     }
 
     /// Test that if a leader nullify for `v+1` is buffered while current view is `v`,
@@ -3311,9 +3453,26 @@ mod tests {
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
+            let leader = Participant::new(1);
+            let warmup_vote = Nullify::sign::<Sha256Digest>(
+                &schemes[usize::from(leader)],
+                Round::new(epoch, View::new(1)),
+            )
+            .unwrap();
+            if let Some(ref mut sender) = participant_senders[usize::from(leader)] {
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::<S, Sha256Digest>::Nullify(warmup_vote).encode(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+            context.sleep(Duration::from_millis(50)).await;
+
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
-            let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(nullify.is_none());
 
