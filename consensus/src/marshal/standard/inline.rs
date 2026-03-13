@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_certify_reuses_completed_verify_result() {
+    fn test_certify_returns_immediately_after_verify_fetches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -623,21 +623,21 @@ mod tests {
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
-            // Complete verify first so certify has a cached local result to reuse.
+            // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should complete successfully before certify"
             );
 
-            // Certify should return from the recorded verify result instead of waiting on marshal.
+            // Certify should return immediately instead of waiting on marshal.
             let certify_rx = inline.certify(round, digest).await;
 
             select! {
                 result = certify_rx => {
                     assert!(
                         result.unwrap(),
-                        "certify should reuse the recorded local verify result"
+                        "certify should return immediately once verify has fetched the block"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
