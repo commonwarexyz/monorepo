@@ -455,7 +455,7 @@ where
 
     Ok(db::Db {
         any,
-        status,
+        status: Arc::new(status),
         grafted_mmr: Arc::new(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
@@ -539,7 +539,7 @@ where
 
     Ok(db::Db {
         any,
-        status,
+        status: Arc::new(status),
         grafted_mmr: Arc::new(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool: pool,

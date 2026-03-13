@@ -62,7 +62,11 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: BitMap<N>,
+    ///
+    /// Stored behind an `Arc` so that `to_snapshot` can cheaply share the
+    /// bitmap with speculative batches. `apply_batch` uses `Arc::make_mut`,
+    /// which clones only if a batch still holds a reference.
+    pub(super) status: Arc<BitMap<N>>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -182,8 +186,8 @@ where
             Vec::new(),
             // O(1): shares the grafted MMR Arc with the batch.
             mmr::batch::MerkleizedBatch::Base(Arc::clone(&self.grafted_mmr)),
-            // O(chunks): copies all bitmap chunks into a materialized snapshot.
-            Arc::new(super::batch::BitmapSnapshot::from_bitmap(&self.status)),
+            // O(1): shares the bitmap Arc with the batch.
+            super::batch::BitmapBatch::Base(Arc::clone(&self.status)),
         )
     }
 
@@ -195,7 +199,7 @@ where
     ) -> Result<OperationProof<H::Digest, N>, Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
-        OperationProof::new(hasher, &self.status, &storage, loc, ops_root).await
+        OperationProof::new(hasher, &*self.status, &storage, loc, ops_root).await
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -218,7 +222,7 @@ where
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
             hasher,
-            &self.status,
+            &*self.status,
             &storage,
             &self.any.log,
             start_loc,
@@ -376,14 +380,17 @@ where
         // 2. Push new bits FIRST. Must happen before clears because for chained batches, some
         //    clears target locations within the push range (ancestor-segment superseded ops that
         //    were pushed as active by an ancestor and then superseded by a descendant).
+        // Clones the entire bitmap if a batch currently holds a reference;
+        // otherwise mutates in place.
+        let status = Arc::make_mut(&mut self.status);
         for &bit in &batch.bitmap_pushes {
-            self.status.push(bit);
+            status.push(bit);
         }
 
         // 3. Clear superseded locations: previous commit inactivation, diff base_old_locs, and
         //    ancestor-segment superseded locations (chaining).
         for loc in &batch.bitmap_clears {
-            self.status.set_bit(**loc, false);
+            status.set_bit(**loc, false);
         }
 
         // 4. Apply precomputed grafted MMR changeset from merkleize().
@@ -393,7 +400,7 @@ where
         Arc::make_mut(&mut self.grafted_mmr).apply(batch.grafted_changeset)?;
 
         // 5. Prune bitmap chunks fully below the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc);
+        status.prune_to_bit(*self.any.inactivity_floor_loc);
 
         // 6. Prune the grafted MMR to match.
         let pruned_chunks = self.status.pruned_chunks() as u64;
