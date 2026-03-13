@@ -53,7 +53,7 @@ mod tests {
                 Activity, Certificate, Finalization, Finalize, Notarization, Notarize,
                 Nullification, Nullify, Proposal, Vote,
             },
-            Dissemination,
+            Plan,
         },
         types::{Participant, Round, View},
         Viewable,
@@ -95,10 +95,10 @@ mod tests {
     impl crate::Relay for MockRelay {
         type Digest = Sha256Digest;
         type PublicKey = PublicKey;
-        type Dissemination = Dissemination<PublicKey>;
+        type Plan = Plan<PublicKey>;
 
-        async fn broadcast(&mut self, payload: Sha256Digest, dissemination: Self::Dissemination) {
-            if let Dissemination::Forward { round, peers } = dissemination {
+        async fn broadcast(&mut self, payload: Sha256Digest, plan: Self::Plan) {
+            if let Plan::Forward { round, peers } = plan {
                 self.broadcasts.lock().push((payload, round, peers));
             }
         }

@@ -7,7 +7,7 @@ use crate::{
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
-        Dissemination,
+        Plan,
     },
     types::{Epoch, Participant, View, ViewDelta},
     Epochable, Relay, Reporter, Viewable,
@@ -86,7 +86,7 @@ where
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     Re: Reporter<Activity = Activity<S, D>>,
-    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
+    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
@@ -190,7 +190,7 @@ where
         self.relay
             .broadcast(
                 proposal.payload,
-                Dissemination::Forward {
+                Plan::Forward {
                     round: proposal.round,
                     peers,
                 },

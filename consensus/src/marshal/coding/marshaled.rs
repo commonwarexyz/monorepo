@@ -95,7 +95,7 @@ use crate::{
         },
         core, Update,
     },
-    simplex::{scheme::Scheme, types::Context, Dissemination},
+    simplex::{scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
@@ -932,11 +932,11 @@ where
 {
     type Digest = Commitment;
     type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
-    type Dissemination = Dissemination<Self::PublicKey>;
+    type Plan = Plan<Self::PublicKey>;
 
-    async fn broadcast(&mut self, commitment: Self::Digest, dissemination: Self::Dissemination) {
-        match dissemination {
-            Dissemination::Propose => {
+    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+        match plan {
+            Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
                     warn!("missing block to broadcast");
                     return;
@@ -958,7 +958,7 @@ where
                 );
                 self.shards.proposed(round, block).await;
             }
-            Dissemination::Forward { .. } => {
+            Plan::Forward { .. } => {
                 // Coding variant does not support targeted forwarding;
                 // peers reconstruct blocks from erasure-coded shards.
             }

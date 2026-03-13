@@ -381,8 +381,8 @@ pub(crate) fn interesting(
     true
 }
 
-/// Describes how a payload should be disseminated to the network.
-pub enum Dissemination<P: PublicKey> {
+/// Describes how a payload should be broadcast to the network.
+pub enum Plan<P: PublicKey> {
     /// Initial broadcast of a newly proposed block to all participants.
     Propose,
     /// Forward a block to a specific set of peers.
