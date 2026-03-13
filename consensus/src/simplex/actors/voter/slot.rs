@@ -117,11 +117,13 @@ where
         if self.status == Status::Equivocated {
             return Change::Skipped;
         }
+
+        // Recovered certificates authenticate the proposal, but they do not
+        // automatically confer verification status (which may require ensuring
+        // additional data is available).
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
-                // Recovered certificates authenticate the proposal, but they do not
-                // prove that we locally fetched or verified the block contents.
                 self.status = Status::Unverified;
                 Change::New
             }
