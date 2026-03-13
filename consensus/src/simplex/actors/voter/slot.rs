@@ -115,19 +115,12 @@ where
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
-                self.status = if recovered {
-                    Status::Verified
-                } else {
-                    Status::Unverified
-                };
+                // Recovered certificates authenticate the proposal, but they do not
+                // prove that we locally fetched or verified the block contents.
+                self.status = Status::Unverified;
                 Change::New
             }
-            Some(existing) if existing == proposal => {
-                if recovered {
-                    self.status = Status::Verified;
-                }
-                Change::Unchanged
-            }
+            Some(existing) if existing == proposal => Change::Unchanged,
             Some(existing) => {
                 let mut dropped = existing.clone();
                 let mut retained = proposal.clone();
@@ -226,6 +219,10 @@ mod tests {
 
         assert!(matches!(slot.update(&proposal, false), Change::New));
         assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
+        assert_eq!(slot.status(), Status::Unverified);
+
+        assert!(slot.mark_verified());
+        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
         assert_eq!(slot.status(), Status::Verified);
     }
 
@@ -262,14 +259,14 @@ mod tests {
 
         // Compromised node produces a certificate before our local propose returns.
         assert!(matches!(slot.update(&compromised, true), Change::New));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
         slot.built(honest);
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }
 

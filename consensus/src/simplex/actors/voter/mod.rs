@@ -5896,7 +5896,8 @@ mod tests {
     }
 
     /// Regression: when a proposal is first observed through a notarization certificate,
-    /// leader timeout must still be cleared for the current view.
+    /// leader timeout must still be cleared for the current view without emitting a
+    /// synthetic notarize vote before local verification.
     ///
     /// We require:
     /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
@@ -5964,30 +5965,18 @@ mod tests {
                 .recovered(Certificate::Notarization(notarization))
                 .await;
 
-            // Ensure certificate processing happened and proposal from certificate
-            // is treated as verified by checking that we notarize.
-            loop {
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // emit a notarize vote or nullify in this 2s window after certificate handling,
+            // even though leader timeout has elapsed.
+            let quiet_deadline = context.current() + Duration::from_secs(2);
+            while context.current() < quiet_deadline {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
-                            break;
+                            panic!(
+                                "unexpected notarize for view {target_view} from recovered certificate"
+                            );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("expected notarize vote for view {target_view} from recovered certificate");
-                    },
-                }
-            }
-
-            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
-            // see nullify in this 2s window after certificate handling, even though
-            // leader timeout has elapsed.
-            let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {

@@ -20,9 +20,9 @@
 //! usage with block types that implement [`crate::Block`] but not
 //! [`crate::CertifiableBlock`].
 //!
-//! Because verification is completed inline, the default
-//! [`CertifiableAutomaton::certify`] behavior (always `true`) is sufficient: no
-//! additional deferred verification state must be awaited at certify time.
+//! Because inline mode cannot recover consensus context from the block itself,
+//! certification reuses local `verify` results instead of performing deferred
+//! validation on recovered-only proposals.
 //!
 //! # Usage
 //!
@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::validation::LastBuilt,
+        application::{validation::LastBuilt, verification_tasks::VerificationTasks},
         core::Mailbox,
         standard::{
             validation::{
@@ -72,7 +72,7 @@ use commonware_utils::{
 };
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, warn};
 
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
@@ -105,6 +105,7 @@ where
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: LastBuilt<B>,
+    verification_tasks: VerificationTasks<B::Digest>,
 
     build_duration: Timed<E>,
 }
@@ -141,6 +142,7 @@ where
             marshal,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
+            verification_tasks: VerificationTasks::new(),
             build_duration,
         }
     }
@@ -316,34 +318,29 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let verification_tasks = self.verification_tasks.clone();
 
-        let (mut tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
+        let (task_tx, task_rx) = oneshot::channel();
+        verification_tasks.insert(context.round, digest, task_rx);
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
+                let (mut keepalive_tx, _keepalive_rx) = oneshot::channel();
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
-                let block = select! {
-                    _ = tx.closed() => {
+                let block = match block_request.await {
+                    Ok(block) => block,
+                    Err(_) => {
                         debug!(
-                            reason = "consensus dropped receiver",
+                            ?digest,
+                            reason = "failed to fetch block for verification",
                             "skipping verification"
                         );
                         return;
-                    },
-                    result = block_request => match result {
-                        Ok(block) => block,
-                        Err(_) => {
-                            debug!(
-                                ?digest,
-                                reason = "failed to fetch block for verification",
-                                "skipping verification"
-                            );
-                            return;
-                        }
-                    },
+                    }
                 };
 
                 // Shared pre-checks:
@@ -365,6 +362,7 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either an immediate reject or a valid
                         // re-proposal accepted without further ancestry checks.
+                        task_tx.send_lossy(valid);
                         tx.send_lossy(valid);
                         return;
                     }
@@ -373,31 +371,31 @@ where
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
                 // run application verification over the ancestry stream.
-                // The helper returns `None` when work should stop early (for example,
-                // receiver closed or parent unavailable).
                 let application_valid = match verify_with_parent(
                     runtime_context,
                     context,
                     block,
                     &mut application,
                     &mut marshal,
-                    &mut tx,
+                    &mut keepalive_tx,
                 )
                 .await
                 {
                     Some(valid) => valid,
                     None => return,
                 };
+                task_tx.send_lossy(application_valid);
                 tx.send_lossy(application_valid);
             });
         rx
     }
 }
 
-/// Inline mode relies on the default certification behavior.
+/// Inline mode certifies only after a local `verify` task has completed.
 ///
-/// Verification is completed during [`Automaton::verify`], so certify does not
-/// need additional wrapper-managed checks.
+/// Unlike deferred/coding modes, inline verification cannot recover consensus
+/// context from block contents. Recovered-only proposals therefore wait on a
+/// matching local `verify` result instead of defaulting to `true`.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -411,6 +409,33 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
+    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        if let Some(task) = self.verification_tasks.take(round, digest) {
+            return task;
+        }
+
+        let verification_tasks = self.verification_tasks.clone();
+        let (mut tx, rx) = oneshot::channel();
+        self.context
+            .with_label("inline_certify_wait")
+            .with_attribute("round", round)
+            .spawn(move |runtime_context| async move {
+                loop {
+                    if let Some(task) = verification_tasks.take(round, digest) {
+                        if let Ok(valid) = task.await {
+                            tx.send_lossy(valid);
+                        }
+                        return;
+                    }
+
+                    select! {
+                        _ = tx.closed() => return,
+                        _ = runtime_context.sleep(Duration::from_millis(10)) => {}
+                    }
+                }
+            });
+        rx
+    }
 }
 
 impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
@@ -463,6 +488,9 @@ where
 
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
+        if let Update::Tip(round, _, _) = &update {
+            self.verification_tasks.retain_after(round);
+        }
         self.application.report(update).await
     }
 }
@@ -471,12 +499,27 @@ where
 mod tests {
     use super::Inline;
     use crate::{
+        marshal::mocks::{
+            harness::{
+                default_leader, make_raw_block, setup_network, B, BLOCKS_PER_EPOCH, Ctx,
+                NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness, V,
+            },
+            verifying::MockVerifyingApp,
+        },
+        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        types::{Epoch, FixedEpocher, Height, Round, View},
         simplex::types::Context, Automaton, Block, CertifiableAutomaton, Relay,
         VerifyingApplication,
     };
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider, Scheme},
+        sha256::Sha256,
+        Digestible, Hasher as _,
+    };
+    use commonware_macros::{select, test_traced};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use rand::Rng;
+    use std::time::Duration;
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
@@ -500,5 +543,72 @@ mod tests {
         assert_automaton::<Inline<E, S, A, B, ES>>();
         assert_certifiable::<Inline<E, S, A, B, ES>>();
         assert_relay::<Inline<E, S, A, B, ES>>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_waits_for_verify_task() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            marshal.clone().proposed(parent_round, parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let certify_rx = inline.certify(round, digest).await;
+            let verify_rx = inline.verify(verify_context, digest).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(result.unwrap(), "certify should resolve once verify completes");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not hang once verify is started");
+                },
+            }
+            assert!(verify_rx.await.unwrap(), "verify should succeed");
+        });
     }
 }
