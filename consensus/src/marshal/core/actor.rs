@@ -167,7 +167,7 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<V: Variant> {
-    // The subscribers that are waiting for the block.
+    // The subscribers that are waiting for the block
     subscribers: Vec<oneshot::Sender<V::Block>>,
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,

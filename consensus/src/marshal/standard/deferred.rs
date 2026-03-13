@@ -461,6 +461,13 @@ where
                 .await
                 {
                     Decision::Complete(valid) => {
+                        if valid {
+                            // Valid re-proposal. Create a completed verification task for `certify`.
+                            let round = context.round;
+                            let (task_tx, task_rx) = oneshot::channel();
+                            task_tx.send_lossy(true);
+                            marshaled.verification_tasks.insert(round, digest, task_rx);
+                        }
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
