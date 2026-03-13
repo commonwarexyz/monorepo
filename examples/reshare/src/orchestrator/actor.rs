@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Dissemination},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -41,7 +41,7 @@ where
         + Relay<
             Digest = H::Digest,
             PublicKey = C::PublicKey,
-            Dissemination = Dissemination<C::PublicKey>,
+            Plan = Plan<C::PublicKey>,
         >,
     S: Scheme,
     L: Elector<S>,
@@ -73,7 +73,7 @@ where
         + Relay<
             Digest = H::Digest,
             PublicKey = C::PublicKey,
-            Dissemination = Dissemination<C::PublicKey>,
+            Plan = Plan<C::PublicKey>,
         >,
     S: Scheme,
     L: Elector<S>,
@@ -109,7 +109,7 @@ where
         + Relay<
             Digest = H::Digest,
             PublicKey = C::PublicKey,
-            Dissemination = Dissemination<C::PublicKey>,
+            Plan = Plan<C::PublicKey>,
         >,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
