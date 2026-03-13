@@ -742,6 +742,78 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_notarization_without_local_notarize() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
+
+        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Recover a certificate built entirely from remote votes.
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let certificate =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (accepted, equivocator) = round.add_notarization(certificate.clone());
+        assert!(accepted);
+        assert!(equivocator.is_none());
+
+        // Recovered certificates must not imply that we cast a local notarize vote.
+        assert!(!round.broadcast_notarize);
+        assert_eq!(round.construct_notarize(), None);
+
+        // But we should still broadcast the recovered certificate.
+        assert_eq!(round.broadcast_notarization(), Some(certificate));
+        assert!(!round.broadcast_notarize);
+        assert_eq!(round.broadcast_notarization(), None);
+    }
+
+    #[test]
+    fn broadcast_finalization_without_local_finalize() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([10u8; 32]));
+
+        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Recover a certificate built entirely from remote votes.
+        let finalization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let certificate =
+            Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                .unwrap();
+        let (accepted, equivocator) = round.add_finalization(certificate.clone());
+        assert!(accepted);
+        assert!(equivocator.is_none());
+
+        // Recovered certificates must not imply that we cast a local finalize vote.
+        assert!(!round.broadcast_finalize);
+        assert_eq!(round.construct_finalize(), None);
+
+        // But we should still broadcast the recovered certificate.
+        assert_eq!(round.broadcast_finalization(), Some(certificate));
+        assert!(!round.broadcast_finalize);
+        assert_eq!(round.broadcast_finalization(), None);
+    }
+
+    #[test]
     fn replay_message_sets_broadcast_flags() {
         let mut rng = test_rng();
         let namespace = b"ns";
