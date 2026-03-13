@@ -21,10 +21,9 @@
 //! [`crate::CertifiableBlock`].
 //!
 //! Because inline mode cannot recover consensus context from the block itself,
-//! certification prefers local `verify` results when available. It reuses an
-//! existing in-flight verification task, remembers completed local verification
-//! outcomes, and otherwise falls back to block availability in marshal without
-//! retrieving the full block.
+//! certification checks whether `verify` already fetched the block for the
+//! given round and digest. If so, it returns `true` immediately. Otherwise it
+//! falls back to block availability in marshal.
 //!
 //! # Usage
 //!
@@ -47,7 +46,7 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::{validation::LastBuilt, verification_tasks::VerificationTasks},
+        application::validation::LastBuilt,
         core::Mailbox,
         standard::{
             validation::{
@@ -74,8 +73,12 @@ use commonware_utils::{
 };
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tracing::{debug, warn};
+
+/// Tracks `(round, digest)` pairs for which `verify` has already fetched the
+/// block, so `certify` can return immediately without re-subscribing to marshal.
+type AvailableBlocks<D> = Arc<Mutex<BTreeSet<(Round, D)>>>;
 
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
 ///
@@ -107,7 +110,7 @@ where
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: LastBuilt<B>,
-    verification_tasks: VerificationTasks<B::Digest>,
+    available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed<E>,
 }
@@ -144,7 +147,7 @@ where
             marshal,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
-            verification_tasks: VerificationTasks::new(),
+            available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
         }
     }
@@ -320,11 +323,9 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let available_blocks = self.available_blocks.clone();
 
         let (tx, rx) = oneshot::channel();
-        let (task_tx, task_rx) = oneshot::channel();
-        self.verification_tasks
-            .insert(context.round, digest, task_rx);
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
@@ -343,6 +344,7 @@ where
                         return;
                     }
                 };
+                available_blocks.lock().insert((round, digest));
 
                 // Shared pre-checks:
                 // - Blocks are invalid if they are not in the expected epoch and are
@@ -361,9 +363,6 @@ where
                 .await
                 {
                     Decision::Complete(valid) => {
-                        // `Complete` means either an immediate reject or a valid
-                        // re-proposal accepted without further ancestry checks.
-                        task_tx.send_lossy(valid);
                         tx.send_lossy(valid);
                         return;
                     }
@@ -385,19 +384,17 @@ where
                     Some(valid) => valid,
                     None => return,
                 };
-                task_tx.send_lossy(application_valid);
                 tx.send_lossy(application_valid);
             });
         rx
     }
 }
 
-/// Inline mode certifies from local `verify` state when available.
+/// Inline mode certifies from local block availability when possible.
 ///
-/// Unlike deferred/coding modes, inline verification cannot recover consensus
-/// context from block contents. Certification therefore reuses local
-/// verification work when possible and otherwise falls back to marshal
-/// availability.
+/// If `verify` already fetched the block for the given round and digest,
+/// `certify` returns `true` immediately. Otherwise it falls back to
+/// subscribing to marshal for block availability.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -412,8 +409,10 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        if let Some(task) = self.verification_tasks.take(round, digest) {
-            return task;
+        if self.available_blocks.lock().contains(&(round, digest)) {
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(true);
+            return rx;
         }
 
         let block_rx = self
@@ -488,7 +487,9 @@ where
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
         if let Update::Tip(round, _, _) = &update {
-            self.verification_tasks.retain_after(round);
+            self.available_blocks
+                .lock()
+                .retain(|(r, _)| r > round);
         }
         self.application.report(update).await
     }
@@ -683,77 +684,4 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_certify_prefers_inflight_verify_result() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let me = participants[0].clone();
-            let setup = StandardHarness::setup_validator(
-                context.with_label("validator_0"),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::with_verify_result(genesis.clone(), false);
-            let mut inline = Inline::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-
-            let parent_round = Round::new(Epoch::zero(), View::new(1));
-            let parent_ctx = Ctx {
-                round: parent_round,
-                leader: default_leader(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_digest = parent.digest();
-            marshal.clone().proposed(parent_round, parent).await;
-
-            let round = Round::new(Epoch::zero(), View::new(2));
-            let verify_context = Ctx {
-                round,
-                leader: me,
-                parent: (View::new(1), parent_digest),
-            };
-            let block =
-                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
-            let digest = block.digest();
-            marshal.clone().proposed(round, block).await;
-
-            let verify_rx = inline.verify(verify_context, digest).await;
-            let certify_rx = inline.certify(round, digest).await;
-
-            assert!(
-                !verify_rx.await.unwrap(),
-                "verify should complete with the mocked rejection"
-            );
-
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        !result.unwrap(),
-                        "certify should use the in-flight verify result instead of marshal availability"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should resolve from the in-flight verify task");
-                },
-            }
-        });
-    }
 }
