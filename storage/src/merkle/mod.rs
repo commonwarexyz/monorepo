@@ -6,15 +6,16 @@
 //! logic lives here.
 
 pub mod hasher;
-pub mod location;
+mod location;
 pub mod mmb;
 pub mod mmr;
-pub mod position;
-pub mod proof;
+mod position;
+mod proof;
 
 use alloc::vec::Vec;
-pub use location::{Location, LocationRangeExt};
-pub use position::Position;
+use location::Location;
+pub use location::LocationRangeExt;
+use position::Position;
 use thiserror::Error;
 
 /// Marker trait for Merkle-family data structures.

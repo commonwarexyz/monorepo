@@ -118,7 +118,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, verification};
+    use crate::{
+        merkle::LocationRangeExt as _,
+        mmr::{mem::Mmr, verification},
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};

@@ -177,7 +177,5 @@ pub type Position = merkle::Position<Family>;
 /// A leaf index or leaf count in an MMB.
 pub type Location = merkle::Location<Family>;
 
-pub use crate::merkle::LocationRangeExt;
-
 /// Errors that can occur during MMB operations.
 pub type Error = merkle::Error<Family>;
