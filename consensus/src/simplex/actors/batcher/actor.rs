@@ -191,8 +191,17 @@ where
     }
 
     /// Returns true if the leader has sent a recent message.
-    fn leader_recently_seen(&self, view: View, leader: Participant) -> bool {
-        let latest_seen = self.latest_seen_views[usize::from(leader)];
+    fn is_active(
+        &self,
+        work: &BTreeMap<View, Round<S, B, D, Re>>,
+        view: View,
+        participant: Participant,
+    ) -> bool {
+        if work.len() < self.skip_timeout.get() as usize {
+            return true;
+        }
+
+        let latest_seen = self.latest_seen_views[usize::from(participant)];
         view.get().saturating_sub(latest_seen.get()) < self.skip_timeout.get()
     }
 
@@ -301,7 +310,7 @@ where
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
                     } else {
-                        if !self.leader_recently_seen(current.view, leader) {
+                        if !self.is_active(&work, current.view, leader) {
                             // If we are the leader, we should attempt to build even if we haven't
                             // been active recently
                             if am_leader {
