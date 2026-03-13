@@ -309,18 +309,10 @@ where
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
+                    } else if !am_leader && !self.is_active(&work, current.view, leader) {
+                        Some(TimeoutReason::Inactivity)
                     } else {
-                        if !self.is_active(&work, current.view, leader) {
-                            // If we are the leader, we should attempt to build even if we haven't
-                            // been active recently
-                            if am_leader {
-                                None
-                            } else {
-                                Some(TimeoutReason::Inactivity)
-                            }
-                        } else {
-                            None
-                        }
+                        None
                     };
                     if timeout_reason.is_some() {
                         current.timed_out = true;
