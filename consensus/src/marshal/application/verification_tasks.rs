@@ -4,13 +4,16 @@ use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 type VerificationTaskMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 
-/// A shared, thread-safe registry of local verification receivers.
+/// A shared, thread-safe registry of in-flight block verification tasks.
 ///
-/// Each `(Round, D)` entry stores the receiver that `certify()` should await.
-/// The receiver may still be pending, or it may already be resolved if local
-/// verification completed before certification asked for the result.
+/// Each task is keyed by `(Round, D)` where `D` is a commitment or digest
+/// identifying the block under verification. The associated
+/// [`oneshot::Receiver<bool>`] resolves to `true` when the block passes
+/// deferred verification, or `false` otherwise.
 ///
-/// Stale entries are pruned after finalization via [`retain_after`](Self::retain_after).
+/// Tasks are inserted when a block enters the verification pipeline and
+/// taken (consumed) when the marshal is ready to act on the result. Stale
+/// entries are pruned after finalization via [`retain_after`](Self::retain_after).
 #[derive(Clone)]
 pub(crate) struct VerificationTasks<D>
 where
@@ -39,17 +42,17 @@ where
         }
     }
 
-    /// Registers a verification receiver for `(round, digest)`.
+    /// Registers a verification task for the block identified by `(round, digest)`.
     pub(crate) fn insert(&self, round: Round, digest: D, task: oneshot::Receiver<bool>) {
         self.inner.lock().insert((round, digest), task);
     }
 
-    /// Removes and returns the verification receiver for `(round, digest)`, if present.
+    /// Removes and returns the verification task for `(round, digest)`, if present.
     pub(crate) fn take(&self, round: Round, digest: D) -> Option<oneshot::Receiver<bool>> {
         self.inner.lock().remove(&(round, digest))
     }
 
-    /// Discards all state whose round is at or before `finalized_round`.
+    /// Discards all tasks whose round is at or before `finalized_round`.
     pub(crate) fn retain_after(&self, finalized_round: &Round) {
         self.inner
             .lock()
