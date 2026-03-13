@@ -313,10 +313,10 @@ where
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
                     } else if !am_leader && !self.is_active(&work, current.view, leader) {
-                        // If we are not the leader, we should timeout if we haven't
-                        // been active recently.
                         Some(TimeoutReason::Inactivity)
                     } else {
+                        // If we are not the leader, we should timeout if we haven't
+                        // been active recently.
                         None
                     };
                     if timeout_reason.is_some() {
