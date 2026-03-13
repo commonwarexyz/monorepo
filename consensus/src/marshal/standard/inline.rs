@@ -325,14 +325,14 @@ where
         let epocher = self.epocher.clone();
         let available_blocks = self.available_blocks.clone();
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let round = context.round;
-                let (mut keepalive_tx, _keepalive_rx) = oneshot::channel();
-                let block_request = marshal.subscribe_by_digest(Some(round), digest).await;
+                let block_request = marshal
+                    .subscribe_by_digest(Some(context.round), digest)
+                    .await;
                 let block = match block_request.await {
                     Ok(block) => block,
                     Err(_) => {
@@ -344,7 +344,7 @@ where
                         return;
                     }
                 };
-                available_blocks.lock().insert((round, digest));
+                available_blocks.lock().insert((context.round, digest));
 
                 // Shared pre-checks:
                 // - Blocks are invalid if they are not in the expected epoch and are
@@ -363,6 +363,8 @@ where
                 .await
                 {
                     Decision::Complete(valid) => {
+                        // `Complete` means either an immediate reject or a valid
+                        // re-proposal accepted without further ancestry checks.
                         tx.send_lossy(valid);
                         return;
                     }
@@ -377,7 +379,7 @@ where
                     block,
                     &mut application,
                     &mut marshal,
-                    &mut keepalive_tx,
+                    &mut tx,
                 )
                 .await
                 {
@@ -415,10 +417,7 @@ where
             return rx;
         }
 
-        let block_rx = self
-            .marshal
-            .subscribe_by_digest(Some(round), digest)
-            .await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_certify")
@@ -487,9 +486,7 @@ where
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
         if let Update::Tip(round, _, _) = &update {
-            self.available_blocks
-                .lock()
-                .retain(|(r, _)| r > round);
+            self.available_blocks.lock().retain(|(r, _)| r > round);
         }
         self.application.report(update).await
     }
@@ -683,5 +680,4 @@ mod tests {
             }
         });
     }
-
 }
