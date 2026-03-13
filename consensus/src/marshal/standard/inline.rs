@@ -330,6 +330,7 @@ where
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
+                // If block can be fetched, mark it as available.
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
@@ -423,12 +424,14 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        // If block was already seen, return immediately.
         if self.available_blocks.lock().contains(&(round, digest)) {
             let (tx, rx) = oneshot::channel();
             tx.send_lossy(true);
             return rx;
         }
 
+        // Otherwise, subscribe to marshal for block availability.
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -443,6 +446,10 @@ where
                     tx.send_lossy(true);
                 }
             });
+
+        // We don't need to verify the block here because we could not have
+        // reached certification without a notarization (implying at least f+1
+        // honest validators have verified the block).
         rx
     }
 }
