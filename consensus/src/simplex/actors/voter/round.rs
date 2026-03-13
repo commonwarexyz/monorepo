@@ -509,9 +509,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // but does not require the proposal to have first passed the follower-side verify
         // path. This allows deferred/coded wrappers to certify recovered proposals using
         // fetched data while still preventing votes for equivocated proposals.
-        if self.proposal.proposal().is_none()
-            || self.proposal.status() == ProposalStatus::Equivocated
-        {
+        if !self.proposal.has_unequivocated_proposal() {
             return None;
         }
 

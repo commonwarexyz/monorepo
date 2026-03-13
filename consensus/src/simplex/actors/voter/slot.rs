@@ -60,6 +60,11 @@ where
         self.status
     }
 
+    /// Returns whether the slot contains a concrete proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.is_some() && self.status != Status::Equivocated
+    }
+
     pub const fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
@@ -330,5 +335,24 @@ mod tests {
         ));
         assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
         assert_eq!(slot.status(), Status::Equivocated);
+    }
+
+    #[test]
+    fn has_unequivocated_proposal_allows_recovered_unverified_and_blocks_equivocation() {
+        let round = Rnd::new(Epoch::new(30), View::new(10));
+        let proposal_a = Proposal::new(round, View::new(9), Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(9), Sha256Digest::from([22u8; 32]));
+
+        let mut slot = Slot::<Sha256Digest>::new();
+        assert!(!slot.has_unequivocated_proposal());
+
+        assert!(matches!(slot.update(&proposal_a, true), Change::New));
+        assert!(slot.has_unequivocated_proposal());
+
+        assert!(matches!(
+            slot.update(&proposal_b, false),
+            Change::Equivocated { .. }
+        ));
+        assert!(!slot.has_unequivocated_proposal());
     }
 }
