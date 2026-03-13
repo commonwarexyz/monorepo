@@ -667,6 +667,98 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_certify_reuses_mismatched_context_digest_rejection() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            let round_a = Round::new(Epoch::zero(), View::new(2));
+            let context_a = CodingCtx {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
+            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(block_a, coding_config, &Sequential);
+            let commitment_a = coded_block_a.commitment();
+
+            let round_b = Round::new(Epoch::zero(), View::new(3));
+            let context_b = CodingCtx {
+                round: round_b,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            assert!(
+                !verify_rx.await.unwrap(),
+                "mismatched context digest should be rejected during verify"
+            );
+
+            let certify_rx = marshaled.certify(round_b, commitment_a).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.unwrap(),
+                        "certify should reuse the prior mismatched-context rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not fall back after a local mismatched-context rejection");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
