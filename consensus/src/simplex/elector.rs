@@ -61,6 +61,11 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     ///
     /// Implementations should panic if `participants` is empty.
     fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector;
+
+    /// Returns whether this elector supports stable leaders (`term_length > 1`).
+    fn supports_stable_leader(&self) -> bool {
+        true
+    }
 }
 
 /// An initialized elector that can select leaders for consensus rounds.
@@ -199,6 +204,10 @@ where
             n: participants.len() as u32,
             _phantom: PhantomData,
         }
+    }
+
+    fn supports_stable_leader(&self) -> bool {
+        false
     }
 }
 
@@ -378,7 +387,7 @@ mod tests {
         let epoch = Epoch::new(0);
         for view in 1..=10 {
             let round = Round::new(epoch, View::new(view));
-            assert_eq!(elector1.elect(round, None), elector2.elect(round, None));
+            assert_eq!(elector1.elect(round, None), elector2.elect(round, None),);
         }
     }
 
@@ -475,6 +484,11 @@ mod tests {
     fn random_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
         let _: RandomElector<ThresholdScheme> = Random.build(&participants);
+    }
+
+    #[test]
+    fn random_does_not_support_stable_leader() {
+        assert!(!<Random as Config<ThresholdScheme>>::supports_stable_leader(&Random));
     }
 
     #[test]

@@ -39,7 +39,9 @@
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
-//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   and we have required nullification views between `v_parent` and `v` (every view from
+//!   `v_parent + 1` to the end of `v_parent`'s term, then the first view of each skipped term),
+//!   verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
@@ -52,7 +54,7 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//! * Enter `v+1`
+//! * Enter `next_term_start(v)` (equivalent to `v+1` when `term_length = 1`)
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
@@ -61,7 +63,7 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!    * Rebroadcast `nullify(v)` and the certificate that advanced us into view `v`
 //!
 //! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
@@ -71,7 +73,8 @@
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
+//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -129,6 +132,9 @@
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//! * With stable leaders (`term_length > 1`), if a participant has voted `nullify(v_n)` in a term, it will not vote
+//!   `finalize(c,v_f)` for later views in that same term unless it has observed a finalization certificate at or
+//!   above `v_n`.
 //!
 //! ## Protocol Properties
 //!
@@ -138,7 +144,8 @@
 //! certificate exists for `v`. This follows directly from the protocol rules:
 //!
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
-//!    and possess nullification certificates for every view between `v_p` and `v+k`.
+//!    and possess required nullification views from `v_p` to `v+k`: every view from
+//!    `v_p + 1` to the end of `v_p`'s term, then the first view of each skipped term.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
 //! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
 //!    or when certification fails.
@@ -347,6 +354,8 @@ pub mod mocks;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
+#[cfg(not(target_arch = "wasm32"))]
+use core::num::NonZeroU64;
 
 /// The minimum view we are tracking both in-memory and on-disk.
 #[cfg(not(target_arch = "wasm32"))]
@@ -354,16 +363,18 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
     last_finalized.saturating_sub(activity_timeout)
 }
 
-/// Whether or not a view is interesting to us. This is a function
-/// of both `min_active` and whether or not the view is too far
-/// in the future (based on the view we are currently in).
 #[cfg(not(target_arch = "wasm32"))]
+/// Whether or not a view is interesting to us.
+///
+/// This is a function of both `min_active` and whether `pending` is too far in
+/// the future relative to `current`.
 pub(crate) fn interesting(
     activity_timeout: ViewDelta,
     last_finalized: View,
     current: View,
     pending: View,
-    allow_future: bool,
+    allow_unbounded_future: bool,
+    term_length: NonZeroU64,
 ) -> bool {
     // If the view is genesis, skip it, genesis doesn't have votes
     if pending.is_zero() {
@@ -372,8 +383,16 @@ pub(crate) fn interesting(
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
-    if !allow_future && pending > current.next() {
-        return false;
+    // If we don't allow unbounded future views, we still find two future views interesting:
+    // - the next view
+    // - the first view of the next term (it may be the next view if the current view is nullified)
+    // For a term length of 1, these two views are the same
+    if !allow_unbounded_future && pending > current {
+        let next = current.next();
+        let next_term_start = current.next_term_start(term_length);
+        if pending != next && pending != next_term_start {
+            return false;
+        }
     }
     true
 }
@@ -452,85 +471,87 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
+        let term_length = commonware_utils::NZU64!(10);
 
-        // Genesis view is never interesting
         assert!(!interesting(
             activity_timeout,
             View::zero(),
             View::zero(),
             View::zero(),
-            false
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(1),
-            View::zero(),
-            true
+            false,
+            term_length,
         ));
 
-        // View below min_active is not interesting
+        // Below min_active
         assert!(!interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(5), // below min_active (10)
-            false
+            View::new(5),
+            false,
+            term_length,
         ));
 
-        // View at min_active boundary is interesting
+        // At min_active boundary
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(10), // exactly min_active
-            false
+            View::new(10),
+            false,
+            term_length,
         ));
 
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            true
-        ));
-
-        // View at current.next() is interesting
+        // strict mode allows only current.next and current.next_term_start above current
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
             View::new(26),
-            false
+            false,
+            term_length,
         ));
-
-        // View within valid range is interesting
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(22),
-            false
+            View::new(31),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(34),
+            false,
+            term_length,
         ));
 
-        // When last_finalized is 0 and activity_timeout would underflow
-        // min_active saturates at 0, so view 1 should still be interesting
+        // unbounded future still respects lower bound
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(9),
+            true,
+            term_length,
+        ));
         assert!(interesting(
             activity_timeout,
-            View::zero(),
-            View::new(5),
-            View::new(1),
-            false
+            View::new(20),
+            View::new(25),
+            View::new(10_000),
+            true,
+            term_length,
         ));
     }
 
@@ -756,6 +777,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1027,6 +1049,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1197,6 +1220,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1389,6 +1413,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1509,6 +1534,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
+                term_length: commonware_utils::NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1653,6 +1679,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1901,6 +1928,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2081,6 +2109,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2298,6 +2327,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2511,6 +2541,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2779,6 +2810,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2975,6 +3007,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3156,6 +3189,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3333,6 +3367,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3423,6 +3458,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
+                term_length: commonware_utils::NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3657,6 +3693,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3826,6 +3863,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4009,6 +4047,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4161,6 +4200,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4340,6 +4380,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
                 fetch_concurrent: 4,
+                term_length: commonware_utils::NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4567,6 +4608,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4923,6 +4965,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5144,6 +5187,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5164,13 +5208,18 @@ mod tests {
             // Encrypt message
             let ciphertext = schemes[0].encrypt(&mut context, target, *message);
 
-            // Wait for consensus to reach the target view and then decrypt
+            // Wait for consensus to produce the notarization that seeds `target`
+            // and then decrypt.
+            let seed_view = target
+                .view()
+                .previous()
+                .expect("target view must not be genesis");
             let reporter = monitor_reporter.lock().clone().unwrap();
             loop {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
                 let notarizations = reporter.notarizations.lock();
-                let Some(notarization) = notarizations.get(&target.view()) else {
+                let Some(notarization) = notarizations.get(&seed_view) else {
                     continue;
                 };
 
@@ -5294,6 +5343,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5390,6 +5440,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: commonware_utils::NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5892,6 +5943,7 @@ mod tests {
                             activity_timeout,
                             skip_timeout,
                             fetch_concurrent: 4,
+                            term_length: commonware_utils::NZU64!(1),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5960,6 +6012,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: commonware_utils::NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

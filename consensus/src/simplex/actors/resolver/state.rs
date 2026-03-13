@@ -6,7 +6,59 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
+use core::num::NonZeroU64;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+fn next_required_nullification_view(
+    cursor: View,
+    parent_term_end: View,
+    term_length: NonZeroU64,
+) -> View {
+    if cursor <= parent_term_end {
+        cursor.next()
+    } else {
+        cursor.next_term_start(term_length)
+    }
+}
+
+struct RequiredNullificationViews {
+    cursor: View,
+    end: View,
+    parent_term_end: View,
+    term_length: NonZeroU64,
+}
+
+impl Iterator for RequiredNullificationViews {
+    type Item = View;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.end {
+            return None;
+        }
+        let current = self.cursor;
+        self.cursor =
+            next_required_nullification_view(self.cursor, self.parent_term_end, self.term_length);
+        Some(current)
+    }
+}
+
+/// Returns the exact views that must have nullification certificates to justify
+/// progressing from `parent` to `view`.
+///
+/// This yields every view from `parent + 1` through the end of the parent's term,
+/// then the first view of each later skipped term, stopping before `view`.
+const fn required_nullification_views(
+    parent: View,
+    view: View,
+    term_length: NonZeroU64,
+) -> RequiredNullificationViews {
+    RequiredNullificationViews {
+        cursor: parent.next(),
+        end: view,
+        parent_term_end: parent.term_end(term_length),
+        term_length,
+    }
+}
 
 /// Tracks all known certificates from the last
 /// certified notarization or finalized view to the current view.
@@ -21,6 +73,8 @@ pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
+    /// Number of views in each leader term.
+    term_length: NonZeroU64,
     /// Next view to consider when fetching. Avoids re-scanning
     /// views we've already requested or have nullifications for.
     fetch_floor: View,
@@ -35,13 +89,14 @@ pub struct State<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub fn new(fetch_concurrent: usize, term_length: NonZeroU64) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
             fetch_concurrent,
+            term_length,
             fetch_floor: View::zero(),
             satisfied_by: HashMap::new(),
             failed_views: HashSet::new(),
@@ -184,15 +239,27 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
-        let start = self.fetch_floor.max(self.floor_view().next());
-        let views: Vec<_> = View::range(start, self.current_view)
-            .filter(|view| !self.nullifications.contains_key(view))
-            .take(self.fetch_concurrent)
-            .collect();
+        let floor = self.floor_view();
+        let floor_term_end = floor.term_end(self.term_length);
+        let start = self.fetch_floor.max(floor.next());
+
+        let mut views = Vec::with_capacity(self.fetch_concurrent);
+        for anchor in required_nullification_views(floor, self.current_view, self.term_length) {
+            if anchor < start {
+                continue;
+            }
+            if !self.nullifications.contains_key(&anchor) {
+                views.push(anchor);
+                if views.len() == self.fetch_concurrent {
+                    break;
+                }
+            }
+        }
 
         // Update the fetch floor to reduce duplicate iteration in the future.
         if let Some(&last) = views.last() {
-            self.fetch_floor = last.next();
+            self.fetch_floor =
+                next_required_nullification_view(last, floor_term_end, self.term_length);
         }
 
         // Send the requests to the resolver.
@@ -348,7 +415,7 @@ mod tests {
     #[test_async]
     async fn handle_nullification_requests_missing_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(2, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
@@ -395,9 +462,52 @@ mod tests {
     }
 
     #[test_async]
+    async fn fetch_requests_only_term_anchor_nullifications() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(10, commonware_utils::NZU64!(5));
+        let mut resolver = MockResolver::default();
+
+        // Encountering a certificate at view 14 should request only required anchors
+        // from floor=0: 1, 6, and 11.
+        let nullification_v14 = build_nullification(&schemes, &verifier, View::new(14));
+        state
+            .handle(
+                Certificate::Nullification(nullification_v14),
+                None,
+                &mut resolver,
+            )
+            .await;
+        assert_eq!(resolver.outstanding(), vec![1, 6, 11]);
+
+        // Once anchor 1 is present, only 6 and 11 remain needed.
+        let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
+        state
+            .handle(
+                Certificate::Nullification(nullification_v1),
+                None,
+                &mut resolver,
+            )
+            .await;
+        assert_eq!(resolver.outstanding(), vec![6, 11]);
+
+        // Then only 11 remains.
+        let nullification_v6 = build_nullification(&schemes, &verifier, View::new(6));
+        state
+            .handle(
+                Certificate::Nullification(nullification_v6),
+                None,
+                &mut resolver,
+            )
+            .await;
+        assert_eq!(resolver.outstanding(), vec![11]);
+    }
+
+    #[test_async]
     async fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(10, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         for view in 4..=6 {
@@ -444,7 +554,7 @@ mod tests {
     #[test_async]
     async fn produce_returns_floor_or_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(2, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         // Finalization sets floor
@@ -506,7 +616,8 @@ mod tests {
     #[test_async]
     async fn certification_failure_re_requests_satisfied_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(10, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
@@ -542,7 +653,8 @@ mod tests {
     #[test_async]
     async fn certification_success_clears_tracking() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(10, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
@@ -575,7 +687,8 @@ mod tests {
     #[test_async]
     async fn finalization_upgrades_certified_notarization_at_same_view() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(10, commonware_utils::NZU64!(1));
         let mut resolver = MockResolver::default();
 
         // Create and certify a notarization at view 5

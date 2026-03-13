@@ -71,7 +71,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
-                state: State::new(cfg.fetch_concurrent),
+                state: State::new(cfg.fetch_concurrent, cfg.term_length),
 
                 mailbox_receiver: receiver,
             },

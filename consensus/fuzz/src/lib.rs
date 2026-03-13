@@ -37,7 +37,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16, NZU64};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -45,7 +45,7 @@ pub use simplex::{
 };
 use std::{
     collections::HashMap,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     panic,
     sync::Arc,
     time::Duration,
@@ -124,6 +124,7 @@ async fn setup_degraded_network<E: Clock>(
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
+    pub term_length: NonZeroU64,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -153,6 +154,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+        let term_length = NZU64!(u.int_in_range(1..=5)?);
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -183,6 +185,7 @@ impl Arbitrary<'_> for FuzzInput {
             configuration,
             degraded_network,
             required_containers,
+            term_length,
             strategy,
         })
     }
@@ -339,8 +342,11 @@ fn spawn_honest_validator<
     ResolverReceiver,
 >(
     context: deterministic::Context,
-    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
-    participants: &[Ed25519PublicKey],
+    network: (
+        &Oracle<Ed25519PublicKey, deterministic::Context>,
+        &[Ed25519PublicKey],
+    ),
+    term_length: NonZeroU64,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -359,6 +365,7 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
+    let (oracle, participants) = network;
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
@@ -398,6 +405,7 @@ where
         activity_timeout: Delta::new(10),
         skip_timeout: Delta::new(5),
         fetch_concurrent: 1,
+        term_length,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -437,8 +445,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context.with_label(&format!("validator_{validator}"));
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                &oracle,
-                &participants,
+                (&oracle, &participants),
+                input.term_length,
                 schemes[i].clone(),
                 validator,
                 relay.clone(),
@@ -631,6 +639,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
                 fetch_concurrent: 1,
+                term_length: input.term_length,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -662,8 +671,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                &oracle,
-                participants.as_ref(),
+                (&oracle, participants.as_ref()),
+                input.term_length,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),

@@ -7,6 +7,7 @@ pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use core::num::NonZeroU64;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
@@ -24,4 +25,5 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: usize,
     pub fetch_concurrent: usize,
     pub fetch_timeout: Duration,
+    pub term_length: NonZeroU64,
 }
