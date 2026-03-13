@@ -204,7 +204,6 @@ where
         if work.len() < self.skip_timeout.get() as usize {
             return true;
         }
-
         let seen_view = self.latest_seen[usize::from(participant)];
         view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
     }
