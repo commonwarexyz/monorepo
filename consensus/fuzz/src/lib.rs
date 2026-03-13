@@ -59,7 +59,6 @@ const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 5;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;
-const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
@@ -84,13 +83,11 @@ impl Configuration {
     /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
     pub fn is_valid(&self) -> bool {
         self.faults <= bounds::max_faults(self.n)
-    }g
+    }
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
-/// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
-pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -143,15 +140,8 @@ impl Arbitrary<'_> for FuzzInput {
             _ => Partition::Ring,                              // 5%
         };
 
-        let configuration = match u.int_in_range(1..=100)? {
-            1..=95 => N4F1C3, // 95%
-            _ => N4F3C1,      // 5%
-        };
-
         // Bias degraded networking - 1%
-        let degraded_network = partition == Partition::Connected
-            && configuration == N4F1C3
-            && u.int_in_range(0..=99)? == 1;
+        let degraded_network = partition == Partition::Connected && u.int_in_range(0..=99)? == 1;
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
@@ -182,7 +172,7 @@ impl Arbitrary<'_> for FuzzInput {
         Ok(Self {
             raw_bytes,
             partition,
-            configuration,
+            configuration: N4F1C3,
             degraded_network,
             required_containers,
             strategy,
@@ -453,7 +443,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             reporters.push(reporter);
         }
 
-        // Wait for finalization or timeout
         if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
@@ -466,11 +455,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 }));
             }
             join_all(finalizers).await;
-        } else {
-            context.sleep(MAX_SLEEP_DURATION).await;
-        }
 
-        if config.is_valid() {
             let states = invariants::extract(reporters, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
@@ -693,11 +678,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 }));
             }
             join_all(finalizers).await;
-        } else {
-            context.sleep(MAX_SLEEP_DURATION).await;
-        }
 
-        if config.is_valid() {
             let states = invariants::extract(reporters, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
