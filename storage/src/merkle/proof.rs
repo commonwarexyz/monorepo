@@ -237,10 +237,9 @@ impl<D: Digest> Proof<D> {
             );
             if !bp.fold_prefix.is_empty() {
                 // Fold prefix peaks into accumulator (without the leaf count).
-                let first = node_digests
+                let mut acc = *node_digests
                     .get(&bp.fold_prefix[0])
                     .expect("must exist by construction");
-                let mut acc = *first;
                 for &pos in &bp.fold_prefix[1..] {
                     let d = node_digests.get(&pos).expect("must exist by construction");
                     acc = hasher.fold(&acc, d);
