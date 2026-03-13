@@ -21,8 +21,8 @@
 //! [`crate::CertifiableBlock`].
 //!
 //! Because inline mode cannot recover consensus context from the block itself,
-//! certification reuses local `verify` results instead of performing deferred
-//! validation on recovered-only proposals.
+//! certification reuses local `verify` results when available and otherwise
+//! falls back to waiting for block availability in marshal.
 //!
 //! # Usage
 //!
@@ -72,7 +72,7 @@ use commonware_utils::{
 };
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
@@ -391,11 +391,11 @@ where
     }
 }
 
-/// Inline mode certifies only after a local `verify` task has completed.
+/// Inline mode certifies from a local `verify` task when available.
 ///
 /// Unlike deferred/coding modes, inline verification cannot recover consensus
-/// context from block contents. Recovered-only proposals therefore wait on a
-/// matching local `verify` result instead of defaulting to `true`.
+/// context from block contents. If no local `verify` task exists, certification
+/// reduces to block availability in marshal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -414,24 +414,18 @@ where
             return task;
         }
 
-        let verification_tasks = self.verification_tasks.clone();
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("inline_certify_wait")
+            .with_label("inline_certify")
             .with_attribute("round", round)
-            .spawn(move |runtime_context| async move {
-                loop {
-                    if let Some(task) = verification_tasks.take(round, digest) {
-                        if let Ok(valid) = task.await {
-                            tx.send_lossy(valid);
-                        }
-                        return;
-                    }
-
-                    select! {
-                        _ = tx.closed() => return,
-                        _ = runtime_context.sleep(Duration::from_millis(10)) => {}
-                    }
+            .spawn(move |_| async move {
+                let available = select! {
+                    _ = tx.closed() => return,
+                    result = block_rx => result.is_ok(),
+                };
+                if available {
+                    tx.send_lossy(true);
                 }
             });
         rx
@@ -545,7 +539,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_certify_waits_for_verify_task() {
+    fn test_certify_succeeds_without_verify_task() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -598,17 +592,15 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let certify_rx = inline.certify(round, digest).await;
-            let verify_rx = inline.verify(verify_context, digest).await;
 
             select! {
                 result = certify_rx => {
-                    assert!(result.unwrap(), "certify should resolve once verify completes");
+                    assert!(result.unwrap(), "certify should resolve once block is available in marshal");
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should not hang once verify is started");
+                    panic!("certify should not hang when block is already available in marshal");
                 },
             }
-            assert!(verify_rx.await.unwrap(), "verify should succeed");
         });
     }
 }
