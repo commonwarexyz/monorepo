@@ -235,10 +235,7 @@ async fn setup_network<P: simplex::Simplex>(
     )
     .await;
 
-    if input.partition == Partition::Connected
-        && input.configuration == N4F1C3
-        && input.degraded_network
-    {
+    if input.partition == Partition::Connected && input.degraded_network {
         setup_degraded_network(&mut oracle, &participants).await;
     }
 
