@@ -124,7 +124,6 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub degraded_network: bool,
-    pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
 }
@@ -172,7 +171,6 @@ impl Arbitrary<'_> for FuzzInput {
         Ok(Self {
             raw_bytes,
             partition,
-            configuration: N4F1C3,
             degraded_network,
             required_containers,
             strategy,
@@ -220,7 +218,7 @@ async fn setup_network<P: simplex::Simplex>(
         schemes,
         verifier: _,
         ..
-    } = P::fixture(context, NAMESPACE, input.configuration.n);
+    } = P::fixture(context, NAMESPACE, N4F1C3.n);
 
     let registrations = register(&mut oracle, &participants).await;
 
@@ -412,7 +410,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
-        let config = input.configuration;
+        let config = N4F1C3;
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -486,7 +484,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
-        let config = input.configuration;
+        let config = N4F1C3;
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
         for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
