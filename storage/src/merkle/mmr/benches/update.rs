@@ -65,15 +65,15 @@ fn bench_update(c: &mut Criterion) {
                             // Append random elements to MMR
                             let mut mmr = Mmr::new(&mut h);
                             let changeset = {
-                                let mut builder = mmr.new_batch();
+                                let mut batch = mmr.new_batch();
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = builder.add(&mut h, &digest);
+                                    let pos = batch.add(&mut h, &digest);
                                     let loc = Location::try_from(pos).expect("leaf position");
                                     leaf_locations.push(loc);
                                 }
-                                builder.merkleize(&mut h).finalize()
+                                batch.merkleize(&mut h).finalize()
                             };
                             mmr.apply(changeset).unwrap();
 
@@ -104,12 +104,12 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let changeset = {
-                                        let mut builder = mmr.new_batch();
+                                        let mut batch = mmr.new_batch();
                                         if let Some(ref p) = pool {
-                                            builder = builder.with_pool(Some(p.clone()));
+                                            batch = batch.with_pool(Some(p.clone()));
                                         }
-                                        builder.update_leaf_batched(&updates).unwrap();
-                                        builder.merkleize(&mut h).finalize()
+                                        batch.update_leaf_batched(&updates).unwrap();
+                                        batch.merkleize(&mut h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();
                                 }

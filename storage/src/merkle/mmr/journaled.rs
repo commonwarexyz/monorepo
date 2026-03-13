@@ -811,10 +811,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
     /// Create a [`batch::UnmerkleizedBatch`] to accumulate mutations on the current state.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<D> {
-        let builder = self.to_snapshot().new_batch();
+        let batch = self.to_snapshot().new_batch();
         #[cfg(feature = "std")]
-        let builder = builder.with_pool(self.pool());
-        builder
+        let batch = batch.with_pool(self.pool());
+        batch
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.

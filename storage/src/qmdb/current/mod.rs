@@ -5,10 +5,10 @@
 //!
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
-//! let snapshot = db.new_batch()
+//! let merkleized = db.new_batch()
 //!     .write(key, Some(value))
 //!     .merkleize(None).await?;
-//! let changeset = snapshot.finalize();
+//! let changeset = merkleized.finalize();
 //! db.apply_batch(changeset).await?;
 //! db.commit().await?;
 //!

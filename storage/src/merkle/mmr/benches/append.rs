@@ -27,11 +27,11 @@ fn bench_append(c: &mut Criterion) {
                     let mut h = StandardHasher::<Sha256>::new();
                     let mut mmr = Mmr::new(&mut h);
                     let changeset = {
-                        let mut builder = mmr.new_batch();
+                        let mut batch = mmr.new_batch();
                         for digest in &elements {
-                            builder.add(&mut h, digest);
+                            batch.add(&mut h, digest);
                         }
-                        builder.merkleize(&mut h).finalize()
+                        batch.merkleize(&mut h).finalize()
                     };
                     mmr.apply(changeset).unwrap();
                     mmr

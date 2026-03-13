@@ -21,13 +21,13 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
             let changeset = {
-                let mut builder = mmr.new_batch();
+                let mut batch = mmr.new_batch();
                 for i in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    builder.add(&mut hasher, &element);
+                    batch.add(&mut hasher, &element);
                     elements.push((i, element));
                 }
-                builder.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
         });

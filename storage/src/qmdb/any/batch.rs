@@ -401,8 +401,8 @@ where
         let commit_loc = Location::new(self.base_size + ops.len() as u64);
         ops.push(Operation::CommitFloor(metadata, floor));
 
-        // Merkleize the journal builder.
-        // The journal builder was created eagerly at batch construction time and its
+        // Merkleize the journal batch.
+        // The journal batch was created eagerly at batch construction time and its
         // parent already contains all prior batches' MMR state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.

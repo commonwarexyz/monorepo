@@ -24,13 +24,13 @@ fn bench_prove_many_elements(c: &mut Criterion) {
 
         block_on(async {
             let changeset = {
-                let mut builder = mmr.new_batch();
+                let mut batch = mmr.new_batch();
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    builder.add(&mut hasher, &element);
+                    batch.add(&mut hasher, &element);
                     elements.push(element);
                 }
-                builder.merkleize(&mut hasher).finalize()
+                batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
         });

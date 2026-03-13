@@ -34,11 +34,11 @@ fn bench_append_additional(c: &mut Criterion) {
                         let mut mmr = Mmr::new(&mut h);
                         block_on(async {
                             let changeset = {
-                                let mut builder = mmr.new_batch();
+                                let mut batch = mmr.new_batch();
                                 for digest in &elements {
-                                    builder.add(&mut h, digest);
+                                    batch.add(&mut h, digest);
                                 }
-                                builder.merkleize(&mut h).finalize()
+                                batch.merkleize(&mut h).finalize()
                             };
                             mmr.apply(changeset).unwrap();
                         });
@@ -47,11 +47,11 @@ fn bench_append_additional(c: &mut Criterion) {
                     |mmr| {
                         let mut h = StandardHasher::<Sha256>::new();
                         block_on(async {
-                            let mut builder = mmr.new_batch();
+                            let mut batch = mmr.new_batch();
                             for digest in &additional {
-                                builder.add(&mut h, digest);
+                                batch.add(&mut h, digest);
                             }
-                            builder.merkleize(&mut h);
+                            batch.merkleize(&mut h);
                         });
                     },
                     criterion::BatchSize::SmallInput,

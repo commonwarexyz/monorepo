@@ -969,7 +969,7 @@ mod tests {
 
     /// MerkleizedBatch -> new_batch -> more mutations -> merkleize -> verify.
     #[test]
-    fn test_builder_roundtrip() {
+    fn test_batch_roundtrip() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
