@@ -516,11 +516,12 @@ mod tests {
 
             // Initialize batcher actor (participant 0)
             let me = participants[0].clone();
+            let relay = MockRelay::new();
             let batcher_cfg = Config {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
-                relay: MockRelay::new(),
+                relay: relay.clone(),
                 strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
@@ -610,6 +611,12 @@ mod tests {
             // Should receive notarization certificate from quorum of votes
             let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view));
+
+            // ForwardingPolicy::Disabled must not produce any broadcasts
+            assert!(
+                relay.broadcasts.lock().is_empty(),
+                "disabled forwarding should produce no broadcasts"
+            );
         });
     }
 
@@ -1159,6 +1166,191 @@ mod tests {
         forward_emitted_for_network_notarization(bls12381_multisig::fixture::<MinSig, _>);
         forward_emitted_for_network_notarization(ed25519::fixture);
         forward_emitted_for_network_notarization(secp256r1::fixture);
+    }
+
+    /// When votes reach quorum AND a network notarization arrives for the same
+    /// view, only one forward should be emitted (whichever path fires first
+    /// sets `has_notarization`, blocking the other).
+    fn no_double_forward_on_duplicate_notarization<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_no_double_forward".to_vec();
+        let epoch = Epoch::new(777);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor (participant 0)
+            let me = participants[0].clone();
+            let relay = MockRelay::new();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                relay: relay.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+                forwarding: ForwardingPolicy::All,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Register network participants and set up links
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::new();
+            for (i, pk) in participants.iter().enumerate() {
+                if i == 0 {
+                    participant_senders.push(None);
+                    continue;
+                }
+                let (sender, _receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(pk.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            // Injector for sending certificates
+            let injector_pk = PrivateKey::from_seed(2_000_000).public_key();
+            let (mut injector_sender, _injector_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(injector_pk.clone(), me.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Start the batcher
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
+
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"payload"));
+
+            // Send full quorum of votes (will trigger construction path)
+            for i in 1..quorum_size {
+                let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Vote::Notarize(vote).encode(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+            let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
+
+            // Also inject a network notarization for the same view
+            let notarization = build_notarization(&schemes, &proposal, quorum_size);
+            injector_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Certificate::Notarization(notarization).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            // Wait for everything to be processed
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Drain voter messages
+            loop {
+                let output = select! {
+                    output = voter_receiver.recv() => output,
+                    _ = context.sleep(Duration::from_millis(50)) => None,
+                };
+                if output.is_none() {
+                    break;
+                }
+            }
+
+            // Only one forward should have been emitted despite both paths
+            // having enough data to trigger forwarding.
+            let broadcasts = relay.broadcasts.lock();
+            assert_eq!(
+                broadcasts.len(),
+                1,
+                "expected exactly one targeted broadcast, got {broadcasts:?}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_double_forward_on_duplicate_notarization() {
+        no_double_forward_on_duplicate_notarization(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_double_forward_on_duplicate_notarization(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        no_double_forward_on_duplicate_notarization(bls12381_threshold_std::fixture::<MinPk, _>);
+        no_double_forward_on_duplicate_notarization(bls12381_threshold_std::fixture::<MinSig, _>);
+        no_double_forward_on_duplicate_notarization(bls12381_multisig::fixture::<MinPk, _>);
+        no_double_forward_on_duplicate_notarization(bls12381_multisig::fixture::<MinSig, _>);
+        no_double_forward_on_duplicate_notarization(ed25519::fixture);
+        no_double_forward_on_duplicate_notarization(secp256r1::fixture);
     }
 
     /// Regression: a peer that voted for a conflicting proposal still needs the
