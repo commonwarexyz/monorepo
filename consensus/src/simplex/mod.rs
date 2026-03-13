@@ -327,6 +327,9 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
+use crate::types::Round;
+use commonware_cryptography::PublicKey;
+
 pub mod elector;
 pub mod scheme;
 pub mod types;
@@ -376,6 +379,19 @@ pub(crate) fn interesting(
         return false;
     }
     true
+}
+
+/// Describes how a payload should be disseminated to the network.
+pub enum Dissemination<P: PublicKey> {
+    /// Initial broadcast of a newly proposed block to all participants.
+    Propose,
+    /// Forward a block to a specific set of peers.
+    Forward {
+        /// The round in which the forwarded block was proposed.
+        round: Round,
+        /// The peers to forward the block to.
+        peers: Vec<P>,
+    },
 }
 
 /// Convenience alias for [`N3f1::quorum`].

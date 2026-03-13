@@ -13,9 +13,10 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
+        Dissemination,
     },
     types::{Round as Rnd, View},
-    CertifiableAutomaton, Dissemination, Relay, Reporter, Viewable, LATENCY,
+    CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -127,7 +128,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
 {

@@ -86,10 +86,10 @@ use crate::{
         },
         Update,
     },
-    simplex::types::Context,
+    simplex::{types::Context, Dissemination},
     types::{Epoch, Epocher, Round},
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Dissemination, Epochable,
-    Relay, Reporter, VerifyingApplication,
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
+    VerifyingApplication,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
@@ -606,6 +606,7 @@ where
 {
     type Digest = B::Digest;
     type PublicKey = S::PublicKey;
+    type Dissemination = Dissemination<S::PublicKey>;
 
     async fn broadcast(
         &mut self,

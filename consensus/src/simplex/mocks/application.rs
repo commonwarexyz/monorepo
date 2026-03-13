@@ -3,9 +3,9 @@
 
 use super::relay::Relay;
 use crate::{
-    simplex::types::Context,
+    simplex::{types::Context, Dissemination},
     types::{Epoch, Round},
-    Automaton as Au, CertifiableAutomaton as CAu, Dissemination, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -114,6 +114,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
 impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
     type PublicKey = P;
+    type Dissemination = Dissemination<P>;
 
     async fn broadcast(&mut self, payload: Self::Digest, _dissemination: Dissemination<P>) {
         self.sender.send_lossy(Message::Broadcast { payload }).await;

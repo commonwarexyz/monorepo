@@ -7,9 +7,10 @@ use crate::{
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
+        Dissemination,
     },
     types::{Epoch, Participant, View, ViewDelta},
-    Dissemination, Epochable, Relay, Reporter, Viewable,
+    Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -85,7 +86,7 @@ where
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     Re: Reporter<Activity = Activity<S, D>>,
-    Rl: Relay<Digest = D, PublicKey = S::PublicKey>,
+    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {

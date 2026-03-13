@@ -175,19 +175,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Describes how a payload should be disseminated to the network.
-    pub enum Dissemination<P: PublicKey> {
-        /// Initial broadcast of a newly proposed block to all participants.
-        Propose,
-        /// Forward a block to a specific set of peers.
-        Forward {
-            /// The round in which the forwarded block was proposed.
-            round: Round,
-            /// The peers to forward the block to.
-            peers: Vec<P>,
-        },
-    }
-
     /// Relay is the interface responsible for broadcasting payloads to the network.
     ///
     /// The consensus engine is only aware of a payload's digest, not its contents. It is up
@@ -199,11 +186,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Identity key of a network participant.
         type PublicKey: PublicKey;
 
+        /// Strategy for how a payload should be disseminated.
+        ///
+        /// Consensus mechanisms that need rich dissemination control (e.g. distinguishing
+        /// proposals from targeted forwards) define a custom enum here. Mechanisms that
+        /// treat every broadcast identically can set this to `()`.
+        type Dissemination: Send;
+
         /// Broadcast a payload to the given recipients.
         fn broadcast(
             &mut self,
             payload: Self::Digest,
-            dissemination: Dissemination<Self::PublicKey>,
+            dissemination: Self::Dissemination,
         ) -> impl Future<Output = ()> + Send;
     }
 

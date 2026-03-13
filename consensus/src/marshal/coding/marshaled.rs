@@ -95,10 +95,10 @@ use crate::{
         },
         core, Update,
     },
-    simplex::{scheme::Scheme, types::Context},
+    simplex::{scheme::Scheme, types::Context, Dissemination},
     types::{coding::Commitment, Epoch, Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Dissemination,
-    Epochable, Heightable, Relay, Reporter, VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
+    Relay, Reporter, VerifyingApplication,
 };
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
@@ -932,12 +932,9 @@ where
 {
     type Digest = Commitment;
     type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
+    type Dissemination = Dissemination<Self::PublicKey>;
 
-    async fn broadcast(
-        &mut self,
-        commitment: Self::Digest,
-        dissemination: Dissemination<Self::PublicKey>,
-    ) {
+    async fn broadcast(&mut self, commitment: Self::Digest, dissemination: Self::Dissemination) {
         match dissemination {
             Dissemination::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {

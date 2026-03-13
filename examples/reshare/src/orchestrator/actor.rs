@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Dissemination},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -38,7 +38,11 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey>,
+        + Relay<
+            Digest = H::Digest,
+            PublicKey = C::PublicKey,
+            Dissemination = Dissemination<C::PublicKey>,
+        >,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -66,7 +70,11 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey>,
+        + Relay<
+            Digest = H::Digest,
+            PublicKey = C::PublicKey,
+            Dissemination = Dissemination<C::PublicKey>,
+        >,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -98,7 +106,11 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey>,
+        + Relay<
+            Digest = H::Digest,
+            PublicKey = C::PublicKey,
+            Dissemination = Dissemination<C::PublicKey>,
+        >,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,

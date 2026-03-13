@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity, Dissemination},
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -24,7 +24,7 @@ pub struct Config<
     B: Blocker,
     D: Digest,
     A: CertifiableAutomaton,
-    R: Relay<Digest = D, PublicKey = S::PublicKey>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub scheme: S,
