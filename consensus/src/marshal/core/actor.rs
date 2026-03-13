@@ -21,7 +21,7 @@ use commonware_cryptography::{
     Digestible,
     certificate::{Provider, Scheme as CertificateScheme},
 };
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
@@ -654,21 +654,6 @@ where
                         )
                         .await;
                     }
-                    Message::SubscribeAvailableByDigest {
-                        round,
-                        digest,
-                        response,
-                    } => {
-                        self.handle_subscribe_available(
-                            round,
-                            digest,
-                            response,
-                            &mut resolver,
-                            &mut waiters,
-                            &mut buffer,
-                        )
-                        .await;
-                    }
                     Message::SubscribeByCommitment {
                         round,
                         commitment,
@@ -923,40 +908,6 @@ where
                 });
             }
         }
-    }
-
-    /// Handle a local subscription request for block availability by digest.
-    async fn handle_subscribe_available<Buf: Buffer<V>>(
-        &mut self,
-        round: Option<Round>,
-        digest: <V::Block as Digestible>::Digest,
-        mut response: oneshot::Sender<()>,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
-        waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
-        buffer: &mut Buf,
-    ) {
-        let (block_tx, block_rx) = oneshot::channel();
-        self.handle_subscribe(
-            round,
-            BlockSubscriptionKey::Digest(digest),
-            block_tx,
-            resolver,
-            waiters,
-            buffer,
-        )
-        .await;
-        self.context
-            .with_label("availability_subscription")
-            .spawn(move |_| async move {
-                select! {
-                    _ = response.closed() => (),
-                    result = block_rx => {
-                        if result.is_ok() {
-                            response.send_lossy(());
-                        }
-                    },
-                }
-            });
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled

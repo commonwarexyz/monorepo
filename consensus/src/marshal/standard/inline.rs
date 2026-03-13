@@ -418,7 +418,7 @@ where
 
         let block_rx = self
             .marshal
-            .subscribe_available_by_digest(Some(round), digest)
+            .subscribe_by_digest(Some(round), digest)
             .await;
         let (mut tx, rx) = oneshot::channel();
         self.context
