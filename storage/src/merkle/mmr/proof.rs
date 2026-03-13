@@ -701,7 +701,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let mmr = Mmr::new(&mut hasher);
         let root = mmr.root();
-        let proof = Proof::default();
+        let proof: Proof<Family, Digest> = Proof::default();
         assert!(proof.verify_range_inclusion(
             &mut hasher,
             &[] as &[Digest],
