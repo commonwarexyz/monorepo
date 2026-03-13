@@ -461,13 +461,11 @@ where
                 .await
                 {
                     Decision::Complete(valid) => {
-                        if valid {
-                            // Valid re-proposal. Create a completed verification task for `certify`.
-                            let round = context.round;
-                            let (task_tx, task_rx) = oneshot::channel();
-                            task_tx.send_lossy(true);
-                            marshaled.verification_tasks.insert(round, digest, task_rx);
-                        }
+                        // Record the local verification verdict so `certify`
+                        // can reuse it without re-fetching the block.
+                        marshaled
+                            .verification_tasks
+                            .insert_resolved(context.round, digest, valid);
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
                         tx.send_lossy(valid);
@@ -490,6 +488,9 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
+                    marshaled
+                        .verification_tasks
+                        .insert_resolved(context.round, digest, false);
                     tx.send_lossy(false);
                     return;
                 }

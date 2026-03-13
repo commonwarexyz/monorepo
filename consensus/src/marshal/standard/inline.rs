@@ -320,11 +320,10 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let verification_tasks = self.verification_tasks.clone();
 
         let (tx, rx) = oneshot::channel();
         let (task_tx, task_rx) = oneshot::channel();
-        verification_tasks.insert(context.round, digest, task_rx);
+        self.verification_tasks.insert(context.round, digest, task_rx);
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
@@ -365,7 +364,6 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either an immediate reject or a valid
                         // re-proposal accepted without further ancestry checks.
-                        verification_tasks.finish(round, digest, valid);
                         task_tx.send_lossy(valid);
                         tx.send_lossy(valid);
                         return;
@@ -388,7 +386,6 @@ where
                     Some(valid) => valid,
                     None => return,
                 };
-                verification_tasks.finish(round, digest, application_valid);
                 task_tx.send_lossy(application_valid);
                 tx.send_lossy(application_valid);
             });
@@ -420,16 +417,11 @@ where
             return task;
         }
 
-        let (mut tx, rx) = oneshot::channel();
-        if let Some(result) = self.verification_tasks.outcome(round, &digest) {
-            tx.send_lossy(result);
-            return rx;
-        }
-
         let block_rx = self
             .marshal
             .subscribe_available_by_digest(Some(round), digest)
             .await;
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_certify")
             .with_attribute("round", round)

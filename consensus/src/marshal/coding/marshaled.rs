@@ -683,6 +683,8 @@ where
                 }
             }
 
+            self.verification_tasks
+                .insert_resolved(consensus_context.round, payload, false);
             let (tx, rx) = oneshot::channel();
             tx.send_lossy(false);
             return rx;
