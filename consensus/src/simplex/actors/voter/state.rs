@@ -39,6 +39,11 @@ enum ParentPayloadError {
         proposal_view: View,
         parent_view: View,
     },
+    #[error("intra-term proposal view {proposal_view} skips views between parent view {parent_view} and itself")]
+    IntraTermProposalSkipsViews {
+        proposal_view: View,
+        parent_view: View,
+    },
     #[error(
         "proposal view {proposal_view} references parent view {parent_view} below last finalized view {last_finalized}"
     )]
@@ -68,7 +73,9 @@ impl ParentPayloadError {
     /// Returns whether the ancestry error permanently invalidates the proposal.
     const fn invalid_proposal(self) -> bool {
         match self {
-            Self::ParentNotBeforeProposal { .. } | Self::ParentBeforeFinalized { .. } => true,
+            Self::ParentNotBeforeProposal { .. }
+            | Self::IntraTermProposalSkipsViews { .. }
+            | Self::ParentBeforeFinalized { .. } => true,
             Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
         }
     }
@@ -832,6 +839,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 proposal_view: view,
                 parent_view: parent,
                 last_finalized: self.last_finalized,
+            });
+        }
+
+        // Check that intra-term proposals do not skip any views.
+        if view != view.term_start(self.term_length) && view != parent.next() {
+            return Err(ParentPayloadError::IntraTermProposalSkipsViews {
+                proposal_view: view,
+                parent_view: parent,
             });
         }
 
