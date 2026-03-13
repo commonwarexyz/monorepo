@@ -505,10 +505,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Even if we've already seen a finalization, we are still willing to broadcast
         // our finalize vote in case someone is recording our activity.
 
-        // Finalization requires a concrete proposal and a successful certification result,
-        // but does not require the proposal to have first passed the follower-side verify
-        // path. This allows deferred/coded wrappers to certify recovered proposals using
-        // fetched data while still preventing votes for equivocated proposals.
+        // If we have a proposal and we have not yet detected equivocation, we are willing
+        // to consider constructing a finalize vote.
         if !self.proposal.has_unequivocated_proposal() {
             return None;
         }
@@ -517,6 +515,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.notarization.as_ref()?;
 
         // If we haven't certified the proposal, return None.
+        //
+        // Note, this does not require verification.
         if !self.is_certified() {
             return None;
         }
