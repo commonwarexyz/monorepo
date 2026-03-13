@@ -1363,42 +1363,50 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     ) {
         let required_commitments = info.required_commitments::<M>() as usize;
         let transcript = transcript_for_round(info);
-        let mut valid = 0;
-        let mut unknown = Vec::new();
-        let mut unknown_in_required_prefix = 0usize;
 
-        for (index, (dealer, log)) in self.logs.iter().enumerate() {
+        // Create a pending batch, which we try and optimistically size as small as
+        // possible, to avoid verifying more dealers than we need, if they're all
+        // honest.
+        let mut need = required_commitments;
+        let mut pending = Vec::new();
+        let mut iter = self.logs.iter();
+        while need > 0 {
+            let Some((dealer, log)) = iter.next() else {
+                break;
+            };
             match self.known.get(dealer) {
-                Some(true) => valid += 1,
+                Some(true) => need -= 1,
                 Some(false) => {}
                 None => {
-                    if index < required_commitments {
-                        unknown_in_required_prefix += 1;
-                    }
-                    unknown.push((dealer, log));
+                    need -= 1;
+                    pending.push((dealer, log));
                 }
             }
         }
 
-        let needed = required_commitments.saturating_sub(valid);
-        let first_group_len = needed.max(unknown_in_required_prefix).min(unknown.len());
-        let (first_group, remaining_group) = unknown.split_at(first_group_len);
-
-        let first_results = Self::check_dealers::<B>(info, rng, strategy, &transcript, first_group);
-        for (dealer, is_valid) in first_results {
+        let pending_results = Self::check_dealers::<B>(info, rng, strategy, &transcript, &pending);
+        let mut all_pending_valid = true;
+        for (dealer, is_valid) in pending_results {
             self.known.insert(dealer, is_valid);
-            if is_valid {
-                valid += 1;
-            }
+            all_pending_valid &= is_valid;
         }
 
-        if valid >= required_commitments {
+        if all_pending_valid {
             return;
         }
 
-        let remaining_results =
-            Self::check_dealers::<B>(info, rng, strategy, &transcript, remaining_group);
-        for (dealer, is_valid) in remaining_results {
+        // We could jump back to the start of the function to recalculate the minimal pending set,
+        // hoping that they would all be valid again. However, in this case, we're
+        // dealing with some dealers that are malicious, and they might be trying to
+        // slow down verification as much as possible by making us waste our time with
+        // undue optimism. We instead adopt a pessimistic approach, assuming the
+        // worst: that we might need to check all of the remaining dealers
+        // to find the honest ones we need.
+        let remaining: Vec<_> = iter
+            .filter(|(dealer, _)| !self.known.contains_key(*dealer))
+            .collect();
+        let results = Self::check_dealers::<B>(info, rng, strategy, &transcript, &remaining);
+        for (dealer, is_valid) in results {
             self.known.insert(dealer, is_valid);
         }
     }
@@ -2973,9 +2981,285 @@ mod test {
     use super::{test_plan::*, *};
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_invariants::minifuzz;
     use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, N3f1};
+    use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1};
     use core::num::NonZeroI32;
+
+    const PRE_VERIFY_DEALERS: usize = 8;
+    type PreVerifyLog = DealerLog<MinPk, ed25519::PublicKey>;
+    type PreVerifyLogs = Logs<MinPk, ed25519::PublicKey, QuorumTwo>;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct QuorumTwo;
+
+    impl Faults for QuorumTwo {
+        fn max_faults(n: impl num_traits::ToPrimitive) -> u32 {
+            let n = n
+                .to_u32()
+                .expect("n must be a non-negative integer that fits in u32");
+            assert!(n >= 2, "n must be at least 2");
+            n - 2
+        }
+    }
+
+    struct PreVerifyDealer {
+        key: ed25519::PublicKey,
+        valid: PreVerifyLog,
+        invalid: PreVerifyLog,
+    }
+
+    struct PreVerifyFixture {
+        info: Info<MinPk, ed25519::PublicKey>,
+        dealers: Vec<PreVerifyDealer>,
+    }
+
+    impl PreVerifyFixture {
+        fn new() -> Self {
+            fn pre_verify_test_keys() -> Vec<ed25519::PrivateKey> {
+                (0..PRE_VERIFY_DEALERS as u64)
+                    .map(ed25519::PrivateKey::from_seed)
+                    .collect()
+            }
+
+            fn pre_verify_test_info(
+                keys: &[ed25519::PrivateKey],
+                round: u64,
+            ) -> Info<MinPk, ed25519::PublicKey> {
+                let dealers: Set<_> = keys
+                    .iter()
+                    .map(|sk| sk.public_key())
+                    .try_collect()
+                    .expect("dealers must be unique");
+                Info::<MinPk, _>::new::<QuorumTwo>(
+                    b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+                    round,
+                    None,
+                    Default::default(),
+                    dealers.clone(),
+                    dealers,
+                )
+                .expect("info must be valid")
+            }
+
+            fn generate_dealer_log(
+                info: &Info<MinPk, ed25519::PublicKey>,
+                keys: &[ed25519::PrivateKey],
+                dealer_index: usize,
+                seed: u64,
+            ) -> DealerLog<MinPk, ed25519::PublicKey> {
+                let mut players: BTreeMap<_, _> = keys
+                    .iter()
+                    .cloned()
+                    .map(|sk| {
+                        let pk = sk.public_key();
+                        (
+                            pk,
+                            Player::<MinPk, _>::new(info.clone(), sk)
+                                .expect("player initialization must succeed"),
+                        )
+                    })
+                    .collect();
+
+                let dealer_sk = keys[dealer_index].clone();
+                let dealer_pk = dealer_sk.public_key();
+                let mut rng = test_rng_seeded(seed);
+                let (mut dealer, pub_msg, priv_msgs) =
+                    Dealer::start::<QuorumTwo>(&mut rng, info.clone(), dealer_sk, None)
+                        .expect("dealer initialization must succeed");
+                for (player_pk, priv_msg) in priv_msgs {
+                    let ack = players
+                        .get_mut(&player_pk)
+                        .expect("player should exist")
+                        .dealer_message::<QuorumTwo>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+                        .expect("dealer message must succeed");
+                    dealer
+                        .receive_player_ack(player_pk, ack)
+                        .expect("ack handling must succeed");
+                }
+                dealer
+                    .finalize::<QuorumTwo>()
+                    .check(info)
+                    .expect("signed dealer log must verify against its own info")
+                    .1
+            }
+
+            let keys = pre_verify_test_keys();
+            let info = pre_verify_test_info(&keys, 0);
+            let wrong_info = pre_verify_test_info(&keys, 1);
+            let mut logs_by_key: BTreeMap<_, _> = keys
+                .iter()
+                .enumerate()
+                .map(|(dealer_index, sk)| {
+                    let key = sk.public_key();
+                    let seed = dealer_index as u64;
+                    let valid = generate_dealer_log(&info, &keys, dealer_index, seed);
+                    let invalid = generate_dealer_log(&wrong_info, &keys, dealer_index, seed);
+                    assert_eq!(
+                        valid.pub_msg, invalid.pub_msg,
+                        "wrong-info log generation should only change transcript-bound signatures"
+                    );
+                    (key, (valid, invalid))
+                })
+                .collect();
+            let dealers = info
+                .dealers
+                .iter()
+                .cloned()
+                .map(|key| {
+                    let (valid, invalid) = logs_by_key
+                        .remove(&key)
+                        .expect("fixture should include every dealer");
+                    PreVerifyDealer {
+                        key,
+                        valid,
+                        invalid,
+                    }
+                })
+                .collect();
+            Self { info, dealers }
+        }
+
+        fn required_commitments(&self) -> usize {
+            self.info.required_commitments::<QuorumTwo>() as usize
+        }
+
+        fn expected(&self, valid: &[bool]) -> Set<ed25519::PublicKey> {
+            assert_eq!(
+                valid.len(),
+                self.dealers.len(),
+                "fixture size should match case"
+            );
+            self.dealers
+                .iter()
+                .zip(valid.iter().copied())
+                .filter(|(_, is_valid)| *is_valid)
+                .take(self.required_commitments())
+                .map(|(dealer, _)| dealer.key.clone())
+                .try_collect()
+                .expect("dealers must be unique")
+        }
+
+        fn record(&self, logs: &mut PreVerifyLogs, dealer_index: usize, is_valid: bool) {
+            let dealer = &self.dealers[dealer_index];
+            let log = if is_valid {
+                dealer.valid.clone()
+            } else {
+                dealer.invalid.clone()
+            };
+            logs.record(dealer.key.clone(), log);
+        }
+
+        fn logs(&self, valid: &[bool]) -> PreVerifyLogs {
+            assert_eq!(
+                valid.len(),
+                self.dealers.len(),
+                "fixture size should match case"
+            );
+            let mut logs = PreVerifyLogs::default();
+            for (dealer_index, &is_valid) in valid.iter().enumerate() {
+                self.record(&mut logs, dealer_index, is_valid);
+            }
+            logs
+        }
+    }
+
+    #[derive(Debug)]
+    struct IncrementalPreVerifyCase {
+        valid: [bool; PRE_VERIFY_DEALERS],
+        batches: Vec<Vec<usize>>,
+    }
+
+    impl<'a> Arbitrary<'a> for IncrementalPreVerifyCase {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            let mut valid = [false; PRE_VERIFY_DEALERS];
+            for is_valid in &mut valid {
+                *is_valid = u.arbitrary()?;
+            }
+
+            let mut order: Vec<_> = (0..valid.len()).collect();
+            for index in 0..valid.len() {
+                let last = order.len() - 1;
+                order.swap(index, u.int_in_range(index..=last)?);
+            }
+
+            let mut batches = Vec::new();
+            let mut start = 0;
+            while start < order.len() {
+                let batch_size = u.int_in_range(1..=order.len() - start)?;
+                batches.push(order[start..start + batch_size].to_vec());
+                start += batch_size;
+            }
+
+            Ok(Self { valid, batches })
+        }
+    }
+
+    impl IncrementalPreVerifyCase {
+        fn run(self, fixture: &PreVerifyFixture) -> arbitrary::Result<()> {
+            let required_commitments = fixture.required_commitments();
+            let expected = fixture.expected(&self.valid);
+            let fresh = fixture.logs(&self.valid);
+
+            let mut incremental = PreVerifyLogs::default();
+            let mut incremental_rng = test_rng();
+            for batch in &self.batches {
+                for &dealer_index in batch {
+                    fixture.record(&mut incremental, dealer_index, self.valid[dealer_index]);
+                }
+                incremental.pre_verify::<ed25519::Batch>(
+                    &fixture.info,
+                    &mut incremental_rng,
+                    &Sequential,
+                );
+            }
+
+            let mut fresh_rng = test_rng();
+            let fresh_selected = fresh
+                .select::<ed25519::Batch>(&fixture.info, &mut fresh_rng, &Sequential)
+                .map(|selection| selection.keys().clone());
+            let incremental_selected = incremental
+                .select::<ed25519::Batch>(&fixture.info, &mut incremental_rng, &Sequential)
+                .map(|selection| selection.keys().clone());
+
+            match &fresh_selected {
+                Ok(selected) => assert_eq!(
+                    selected, &expected,
+                    "all-at-once selection disagreed with validity mask: {:?}",
+                    self
+                ),
+                Err(_) => assert!(
+                    expected.len() < required_commitments,
+                    "all-at-once selection failed despite quorum-sized expected set: {:?}",
+                    self
+                ),
+            }
+
+            match (fresh_selected, incremental_selected) {
+                (Err(_), Err(_)) => {}
+                (Ok(fresh_selected), Ok(incremental_selected)) => assert_eq!(
+                    incremental_selected, fresh_selected,
+                    "incremental selection disagreed with all-at-once selection: {:?}",
+                    self
+                ),
+                (Ok(fresh_selected), Err(err)) => panic!(
+                    "incremental selection failed with {err:?} but all-at-once selected {fresh_selected:?}: {self:?}"
+                ),
+                (Err(err), Ok(incremental_selected)) => panic!(
+                    "incremental selection returned {incremental_selected:?} but all-at-once failed with {err:?}: {self:?}"
+                ),
+            }
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn incremental_pre_verify_preserves_dealer_order() {
+        let fixture = PreVerifyFixture::new();
+        minifuzz::test(move |u| u.arbitrary::<IncrementalPreVerifyCase>()?.run(&fixture));
+    }
 
     #[test]
     fn single_round() -> anyhow::Result<()> {
