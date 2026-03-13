@@ -323,16 +323,15 @@ where
 
         let (tx, rx) = oneshot::channel();
         let (task_tx, task_rx) = oneshot::channel();
-        self.verification_tasks.insert(context.round, digest, task_rx);
+        self.verification_tasks
+            .insert(context.round, digest, task_rx);
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 let round = context.round;
                 let (mut keepalive_tx, _keepalive_rx) = oneshot::channel();
-                let block_request = marshal
-                    .subscribe_by_digest(Some(round), digest)
-                    .await;
+                let block_request = marshal.subscribe_by_digest(Some(round), digest).await;
                 let block = match block_request.await {
                     Ok(block) => block,
                     Err(_) => {
