@@ -179,8 +179,12 @@ where
         )
     }
 
-    /// Records the highest-view in-epoch message received from a participant.
-    fn note_message(&mut self, sender: &S::PublicKey, view: View) {
+    /// Records the latest view message received from a participant.
+    ///
+    /// This mechanism is not resistant to malicious validators (nor is
+    /// it meant to be). If a peer sends us a certificate very far in the future,
+    /// we will record that as their latest activity (and not attempt to skip them).
+    fn record_activity(&mut self, sender: &S::PublicKey, view: View) {
         let Some(participant) = self.participants.index(sender) else {
             return;
         };
@@ -190,7 +194,7 @@ where
         }
     }
 
-    /// Returns true if the leader has sent a recent message.
+    /// Returns true if the participant has sent a recent message.
     fn is_active(
         &self,
         work: &BTreeMap<View, Round<S, B, D, Re>>,
@@ -371,8 +375,7 @@ where
                 ) {
                     continue;
                 }
-
-                self.note_message(&sender, view);
+                self.record_activity(&sender, view);
 
                 match message {
                     Certificate::Notarization(notarization) => {
@@ -482,8 +485,7 @@ where
                 if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
-
-                self.note_message(&sender, view);
+                self.record_activity(&sender, view);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
