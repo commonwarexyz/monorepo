@@ -44,6 +44,10 @@ pub trait Hasher: Clone + Send + Sync {
     }
 
     /// Computes the root for an MMR given its leaf count and peak digests in canonical order.
+    ///
+    /// The root digest is computed as `Hash(leaves || fold(peak_digests))`, where `fold` is
+    /// defined as `fold(acc, peak) = Hash(acc || peak)`. The `peak_digests` are assumed to be
+    /// in canonical order.
     fn root<'a>(
         &mut self,
         leaves: Location,
