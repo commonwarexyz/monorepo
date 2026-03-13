@@ -172,7 +172,7 @@ impl ExactSizeIterator for PeakIterator {}
 /// Compute the birth leaves of both children of a parent with the given birth leaf and height.
 ///
 /// Returns `(left_leaf, right_leaf)`. The left child is always the older (lower leaf index) child.
-const fn child_leaves(parent_leaf: Location, height: u32) -> (Location, Location) {
+pub(super) const fn child_leaves(parent_leaf: Location, height: u32) -> (Location, Location) {
     let parent_leaf = parent_leaf.as_u64();
     if height == 1 {
         (Location::new(parent_leaf - 1), Location::new(parent_leaf))
@@ -198,7 +198,7 @@ const fn child_leaves(parent_leaf: Location, height: u32) -> (Location, Location
 /// `birth_leaf` where no parent was actually birthed, it blindly returns the position of the next
 /// appended leaf instead. It is the caller's responsibility to ensure a parent node functionally
 /// exists at the provided `birth_leaf`.
-const fn birthed_node_pos(birth_leaf: Location, is_leaf: bool) -> Position {
+pub(super) const fn birthed_node_pos(birth_leaf: Location, is_leaf: bool) -> Position {
     if is_leaf {
         size_for_leaves(birth_leaf)
     } else {
@@ -257,7 +257,7 @@ pub(crate) fn children(pos: Position, height: u32) -> (Position, Position) {
 ///
 /// For a height-0 peak (bare leaf), the birth leaf equals the last leaf index. For a taller peak,
 /// the birth leaf is `last_leaf + 2^(h-1) - 1`.
-const fn peak_birth_leaf(last_leaf: Location, height: u32) -> Location {
+pub(super) const fn peak_birth_leaf(last_leaf: Location, height: u32) -> Location {
     let last_leaf = last_leaf.as_u64();
     if height == 0 {
         Location::new(last_leaf)
