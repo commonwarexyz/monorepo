@@ -583,6 +583,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
+            // Seed the parent and child blocks in marshal so verify can fetch locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = Ctx {
                 round: parent_round,
@@ -604,12 +605,14 @@ mod tests {
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
+            // Complete verify first so certify has a cached local result to reuse.
             let verify_rx = inline.verify(verify_context, digest).await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should complete successfully before certify"
             );
 
+            // Certify should return from the recorded verify result instead of waiting on marshal.
             let certify_rx = inline.certify(round, digest).await;
 
             select! {
@@ -656,6 +659,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
+            // Seed the parent and child blocks in marshal without starting a verify task.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = Ctx {
                 round: parent_round,
@@ -677,6 +681,7 @@ mod tests {
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
+            // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;
 
             select! {

@@ -2816,12 +2816,15 @@ mod tests {
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
+            // Advance through the early views with no leader traffic. The skip-timeout
+            // heuristic should not fire before the threshold is reached.
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
                 assert!(nullify.is_none(), "view {v} should be active before skip_timeout");
             }
 
+            // Enter the threshold view with no activity and confirm that we fast-timeout.
             let active_view = View::new(skip_timeout);
             let nullify = batcher_mailbox
                 .update(active_view, leader, View::zero())
@@ -2831,6 +2834,8 @@ mod tests {
                 "leader should be inactive after {skip_timeout} silent views"
             );
 
+            // Deliver a certificate from the leader on the certificate channel. Even
+            // without any vote traffic, that relay should count as fresh activity.
             let round = Round::new(epoch, active_view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
             let finalization = build_finalization(&schemes, &proposal, quorum_size);
@@ -2849,6 +2854,8 @@ mod tests {
                 matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == active_view)
             );
 
+            // The next view should still consider the leader active because of the
+            // relayed certificate we just processed.
             let next_view = active_view.next();
             let nullify = batcher_mailbox
                 .update(next_view, leader, View::zero())

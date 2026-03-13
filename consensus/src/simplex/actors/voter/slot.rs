@@ -345,12 +345,16 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(9), Sha256Digest::from([21u8; 32]));
         let proposal_b = Proposal::new(round, View::new(9), Sha256Digest::from([22u8; 32]));
 
+        // Empty slots should not report a usable proposal.
         let mut slot = Slot::<Sha256Digest>::new();
         assert!(!slot.has_unequivocated_proposal());
 
+        // Recovering a proposal from a certificate makes it available for finalize
+        // gating even before the follower-side verify path runs.
         assert!(matches!(slot.update(&proposal_a, true), Change::New));
         assert!(slot.has_unequivocated_proposal());
 
+        // A conflicting proposal immediately revokes that property.
         assert!(matches!(
             slot.update(&proposal_b, false),
             Change::Equivocated { .. }

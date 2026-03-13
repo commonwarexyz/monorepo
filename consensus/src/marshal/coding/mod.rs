@@ -708,6 +708,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.clone(), cfg);
 
+            // Seed the parent block so marshal can resolve the child against a real ancestry.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = CodingCtx {
                 round: parent_round,
@@ -730,6 +731,7 @@ mod tests {
                 CodedBlock::new(block_a, coding_config, &Sequential);
             let commitment_a = coded_block_a.commitment();
 
+            // Ask verify to evaluate `commitment_a` against a different consensus context.
             let round_b = Round::new(Epoch::zero(), View::new(3));
             let context_b = CodingCtx {
                 round: round_b,
@@ -743,6 +745,8 @@ mod tests {
                 "mismatched context digest should be rejected during verify"
             );
 
+            // A later certify for the same `(round, digest)` should reuse that rejection
+            // rather than falling back to marshal availability.
             let certify_rx = marshaled.certify(round_b, commitment_a).await;
             select! {
                 result = certify_rx => {
