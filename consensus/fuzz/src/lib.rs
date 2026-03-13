@@ -79,10 +79,12 @@ impl Configuration {
         Self { n, faults, correct }
     }
 
-    /// Returns true if this configuration can make progress (liveness).
-    pub fn is_quorum_feasible(&self) -> bool {
+    /// Returns true if this configuration is valid:
+    /// number of faulty and correct nodes satisfy the protocol fault tolerance constraints.
+    /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
+    pub fn is_valid(&self) -> bool {
         self.faults <= bounds::max_faults(self.n)
-    }
+    }g
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
@@ -452,7 +454,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.is_quorum_feasible() {
+        if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -468,7 +470,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        if config.is_quorum_feasible() {
+        if config.is_valid() {
             let states = invariants::extract(reporters, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
@@ -679,7 +681,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.is_quorum_feasible() {
+        if input.partition == Partition::Connected && config.is_valid() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -695,7 +697,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        if config.is_quorum_feasible() {
+        if config.is_valid() {
             let states = invariants::extract(reporters, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
