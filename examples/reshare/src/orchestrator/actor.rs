@@ -38,11 +38,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<
-            Digest = H::Digest,
-            PublicKey = C::PublicKey,
-            Plan = Plan<C::PublicKey>,
-        >,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -70,11 +66,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<
-            Digest = H::Digest,
-            PublicKey = C::PublicKey,
-            Plan = Plan<C::PublicKey>,
-        >,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
@@ -106,11 +98,7 @@ where
     C: Signer,
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<
-            Digest = H::Digest,
-            PublicKey = C::PublicKey,
-            Plan = Plan<C::PublicKey>,
-        >,
+        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,
