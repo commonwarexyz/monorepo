@@ -20,17 +20,15 @@ fn bench_bte_partial_decrypt(c: &mut Criterion) {
         let tx_domain = Domain::new(batch_size);
 
         let mut dealer = Dealer::new(batch_size, n, t, &mut rng);
-        let (crs, sk_shares) = dealer.setup(&mut rng);
-        let pk = dealer.get_pk();
+        let (crs, pk, sk_shares) = dealer.setup(&mut rng);
 
         let hid = G1::generator() * &Scalar::random(&mut rng);
 
-        // Encrypt batch_size ciphertexts
         let ct: Vec<_> = (0..batch_size)
             .map(|i| {
                 let msg = [i as u8; 32];
                 let x = tx_domain.element(i);
-                encrypt(msg, x, hid, crs.htau, pk, &mut rng)
+                encrypt(msg, x, hid, &pk, &mut rng)
             })
             .collect();
 

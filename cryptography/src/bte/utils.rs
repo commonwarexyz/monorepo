@@ -219,7 +219,7 @@ mod tests {
 
         let mut dealer =
             super::super::dealer::Dealer::new(domain_size, 1 << 5, domain_size / 2 - 1, &mut rng);
-        let (crs, _) = dealer.setup(&mut rng);
+        let (crs, _, _) = dealer.setup(&mut rng);
 
         let f: Vec<Scalar> = (0..domain_size).map(|_| Scalar::random(&mut rng)).collect();
 

@@ -1,7 +1,7 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1, G2, GT};
 use commonware_cryptography::bte::{
     dealer::Dealer,
-    decryption::{aggregate_partial_decryptions, decrypt_all, SecretKey},
+    decryption::{aggregate_partial_decryptions, batch_verify, decrypt_all, SecretKey},
     encryption::encrypt,
     utils::{open_all_values, Domain},
 };
@@ -21,11 +21,9 @@ fn bench_bte_breakdown(c: &mut Criterion) {
         let tx_domain = Domain::new(batch_size);
 
         let mut dealer = Dealer::new(batch_size, n, t, &mut rng);
-        let (crs, sk_shares) = dealer.setup(&mut rng);
-        let pk = dealer.get_pk();
+        let (crs, pk, sk_shares) = dealer.setup(&mut rng);
         let hid = G1::generator() * &Scalar::random(&mut rng);
 
-        // Prepare ciphertexts
         let msgs: Vec<[u8; 32]> = (0..batch_size)
             .map(|i| {
                 let mut m = [0u8; 32];
@@ -35,10 +33,9 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             .collect();
 
         let ct: Vec<_> = (0..batch_size)
-            .map(|i| encrypt(msgs[i], tx_domain.element(i), hid, crs.htau, pk, &mut rng))
+            .map(|i| encrypt(msgs[i], tx_domain.element(i), hid, &pk, &mut rng))
             .collect();
 
-        // Prepare data for isolated benchmarks
         let fevals: Vec<Scalar> = (0..batch_size)
             .map(|_| Scalar::random(&mut rng))
             .collect();
@@ -104,7 +101,7 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 6. Pointwise G1 * Scalar (as in open_all_values) ---
+        // --- 6. Pointwise G1 * Scalar ---
         c.bench_function(
             &format!(
                 "{}/op=pointwise_g1_scalar batch_size={batch_size}",
@@ -132,18 +129,16 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 8. Multi-pairing (3-way, single) ---
+        // --- 8. Multi-pairing (2-way, single) ---
         let g1a = G1::generator() * &Scalar::random(&mut rng);
         let g1b = G1::generator() * &Scalar::random(&mut rng);
-        let g1c = G1::generator() * &Scalar::random(&mut rng);
         let g2a = G2::generator() * &Scalar::random(&mut rng);
         let g2b = G2::generator() * &Scalar::random(&mut rng);
-        let g2c = G2::generator() * &Scalar::random(&mut rng);
         c.bench_function(
-            &format!("{}/op=multi_pairing_3way batch_size={batch_size}", module_path!()),
+            &format!("{}/op=multi_pairing_2way batch_size={batch_size}", module_path!()),
             |b| {
                 b.iter(|| {
-                    black_box(GT::multi_pairing(&[(g1a, g2a), (g1b, g2b), (g1c, g2c)]));
+                    black_box(GT::multi_pairing(&[(g1a, g2a), (g1b, g2b)]));
                 });
             },
         );
@@ -162,18 +157,12 @@ fn bench_bte_breakdown(c: &mut Criterion) {
                             G2::generator() * &Scalar::random(&mut rng),
                             G1::generator() * &Scalar::random(&mut rng),
                             G2::generator() * &Scalar::random(&mut rng),
-                            G1::generator() * &Scalar::random(&mut rng),
-                            G2::generator() * &Scalar::random(&mut rng),
                         )
                     })
                     .collect();
                 b.iter(|| {
-                    for (g1a, g2a, g1b, g2b, g1c, g2c) in &pairs {
-                        black_box(GT::multi_pairing(&[
-                            (*g1a, *g2a),
-                            (*g1b, *g2b),
-                            (*g1c, *g2c),
-                        ]));
+                    for (g1a, g2a, g1b, g2b) in &pairs {
+                        black_box(GT::multi_pairing(&[(*g1a, *g2a), (*g1b, *g2b)]));
                     }
                 });
             },
@@ -202,7 +191,7 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 12. Full decrypt_all (for reference) ---
+        // --- 12. Full decrypt_all ---
         let num_parties = n / 2;
         let mut partial_decryptions = BTreeMap::new();
         for i in 0..num_parties {
@@ -216,7 +205,18 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             &format!("{}/op=full_decrypt_all batch_size={batch_size}", module_path!()),
             |b| {
                 b.iter(|| {
-                    black_box(decrypt_all(sigma, &ct, hid, &crs));
+                    black_box(decrypt_all(sigma, &ct, &crs));
+                });
+            },
+        );
+
+        // --- 13. Batch verify ---
+        let decrypted = decrypt_all(sigma, &ct, &crs);
+        c.bench_function(
+            &format!("{}/op=batch_verify batch_size={batch_size}", module_path!()),
+            |b| {
+                b.iter(|| {
+                    black_box(batch_verify(&ct, &decrypted, hid, &pk, &mut rng));
                 });
             },
         );

@@ -15,8 +15,7 @@ fn bench_bte_encrypt(c: &mut Criterion) {
         let tx_domain = Domain::new(batch_size);
 
         let mut dealer = Dealer::new(batch_size, n, t, &mut rng);
-        let (crs, _) = dealer.setup(&mut rng);
-        let pk = dealer.get_pk();
+        let (_, pk, _) = dealer.setup(&mut rng);
 
         let msg = [1u8; 32];
         let x = tx_domain.group_gen();
@@ -26,7 +25,7 @@ fn bench_bte_encrypt(c: &mut Criterion) {
             &format!("{}/batch_size={batch_size}", module_path!()),
             |b| {
                 b.iter(|| {
-                    black_box(encrypt(msg, x.clone(), hid, crs.htau, pk, &mut rng));
+                    black_box(encrypt(msg, x.clone(), hid, &pk, &mut rng));
                 });
             },
         );

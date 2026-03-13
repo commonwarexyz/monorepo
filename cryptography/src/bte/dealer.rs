@@ -5,15 +5,28 @@ use std::iter;
 
 use super::utils::{lagrange_interp_eval, Domain};
 
-/// Common Reference String for batch threshold encryption.
+/// Common Reference String (KZG parameters) for batch threshold encryption.
+///
+/// Reusable across different committees/public keys.
 #[derive(Clone)]
 pub struct CRS {
-    /// Powers of g: [g, g*tau, g*tau^2, ...].
+    /// Powers of g in G1: [g, g*tau, g*tau^2, ...].
     pub powers_of_g: Vec<G1>,
     /// h * tau in G2.
     pub htau: G2,
     /// Preprocessed Toeplitz matrix for FK22 amortized KZG openings.
     pub y: Vec<G1>,
+}
+
+/// Committee public key for batch threshold encryption.
+///
+/// Derived from a committee secret key `sk` and the KZG trapdoor `tau`.
+#[derive(Clone, Copy)]
+pub struct PublicKey {
+    /// [sk]_2 = h * sk.
+    pub hsk: G2,
+    /// [sk*tau]_2 = h * (sk * tau).
+    pub hsk_tau: G2,
 }
 
 /// Dealer sets up the CRS and distributes secret shares.
@@ -42,7 +55,7 @@ impl Dealer {
         G2::generator() * &self.sk
     }
 
-    pub fn setup(&mut self, rng: &mut impl CryptoRngCore) -> (CRS, Vec<Scalar>) {
+    pub fn setup(&mut self, rng: &mut impl CryptoRngCore) -> (CRS, PublicKey, Vec<Scalar>) {
         // Sample tau and compute its powers
         let tau = Scalar::random(&mut *rng);
         let powers_of_tau: Vec<Scalar> =
@@ -88,13 +101,18 @@ impl Dealer {
 
         let sk_shares = lagrange_interp_eval(&eval_domain, &share_domain, &sk_poly);
 
+        let hsk = h * &self.sk;
         let crs = CRS {
             powers_of_g,
             htau: h * &tau,
             y,
         };
+        let pk = PublicKey {
+            hsk,
+            hsk_tau: hsk * &tau,
+        };
 
-        (crs, sk_shares)
+        (crs, pk, sk_shares)
     }
 }
 
@@ -111,7 +129,7 @@ mod tests {
         let t = n / 2 - 1;
 
         let mut dealer = Dealer::new(batch_size, n, t, &mut rng);
-        let (crs, sk_shares) = dealer.setup(&mut rng);
+        let (crs, pk, sk_shares) = dealer.setup(&mut rng);
 
         let share_domain: Vec<Scalar> = (1..=n)
             .map(|i| Scalar::from_u64(i as u64))
@@ -120,9 +138,8 @@ mod tests {
             lagrange_interp_eval(&share_domain, &[Scalar::zero()], &sk_shares)[0].clone();
         assert_eq!(dealer.sk, should_be_sk);
 
-        let pk = dealer.get_pk();
         let should_be_pk = G2::generator() * &should_be_sk;
-        assert_eq!(pk, should_be_pk);
+        assert_eq!(pk.hsk, should_be_pk);
 
         let g_sk_shares: Vec<G2> = sk_shares
             .iter()
@@ -131,7 +148,7 @@ mod tests {
 
         let interp_pk =
             lagrange_interp_eval(&share_domain, &[Scalar::zero()], &g_sk_shares)[0];
-        assert_eq!(pk, interp_pk);
+        assert_eq!(pk.hsk, interp_pk);
 
         assert_eq!(crs.powers_of_g.len(), batch_size);
         assert_eq!(sk_shares.len(), n);
