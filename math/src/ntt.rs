@@ -66,10 +66,19 @@ where
             w.exp(&[(1 << lg_rows) - 1])
         }
     };
-    let half = if FORWARD {
+    // For the inverse NTT, we defer normalization (the 1/2 per stage) to a
+    // single 1/n pass at the end. This reduces the inverse butterfly from 3
+    // scalar multiplications to 1 (matching the forward butterfly).
+    let inv_n = if FORWARD {
         None
     } else {
-        Some((F::one() + &F::one()).inv())
+        // rows = 2^lg_rows, so compute n by repeated doubling of 1.
+        let two = F::one() + &F::one();
+        let mut n = F::one();
+        for _ in 0..lg_rows {
+            n *= &two;
+        }
+        Some(n.inv())
     };
     // The inverse algorithm consists of carefully undoing the work of the
     // standard algorithm, so we describe that in detail.
@@ -154,20 +163,28 @@ where
                         matrix[(index_a, k)] = a.clone() + &w_j_b;
                         matrix[(index_b, k)] = a - &w_j_b;
                     } else {
-                        // To check the math, convince yourself that applying the forward
-                        // transformation, and then this transformation, with w_j being the
-                        // inverse of the value above, that you get (a, b).
-                        // (a + w_j * b) + (a - w_j * b) = 2 * a
-                        let half_ref = half.as_ref().expect("half set when FORWARD is false");
-                        matrix[(index_a, k)] = (a.clone() + &b) * half_ref;
-                        // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
-                        // w_j in this branch is the inverse of w_j in the other branch.
-                        matrix[(index_b, k)] = ((a - &b) * &w_j) * half_ref;
+                        // Inverse butterfly without per-stage normalization.
+                        // We compute: a' = a + b, b' = (a - b) * w_j^{-1}
+                        // The 1/n normalization is applied once at the end.
+                        let diff_w = (a.clone() - &b) * &w_j;
+                        matrix[(index_a, k)] = a + &b;
+                        matrix[(index_b, k)] = diff_w;
                     }
                 }
                 w_j *= &w;
             }
             i += 2 * skip;
+        }
+    }
+
+    // For inverse NTT, apply the deferred 1/n normalization in a single pass.
+    if !FORWARD {
+        let inv_n_ref = inv_n.as_ref().expect("inv_n set when FORWARD is false");
+        for i in 0..rows {
+            for k in 0..cols {
+                let val = matrix[(i, k)].clone() * inv_n_ref;
+                matrix[(i, k)] = val;
+            }
         }
     }
 }

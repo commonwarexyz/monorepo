@@ -4,6 +4,7 @@ mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
 mod batch_to_affine;
 mod batch_verify_same_signer;
+mod bte_breakdown;
 mod bte_decrypt_all;
 mod bte_encrypt;
 mod bte_partial_decrypt;
@@ -25,6 +26,7 @@ mod tle_encrypt;
 
 criterion_main!(
     batch_to_affine::benches,
+    bte_breakdown::benches,
     bte_decrypt_all::benches,
     bte_encrypt::benches,
     bte_partial_decrypt::benches,
