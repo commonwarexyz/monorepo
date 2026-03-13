@@ -654,8 +654,7 @@ where
     // Fold prefix peaks into a single accumulator (without the leaf count, which is always
     // hashed into the final root independently).
     if !bp.fold_prefix.is_empty() {
-        let first = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
-        let mut acc = first;
+        let mut acc = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
         for &pos in &bp.fold_prefix[1..] {
             let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
             acc = hasher.fold(&acc, &d);
