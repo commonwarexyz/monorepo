@@ -20,10 +20,10 @@
 //! usage with block types that implement [`crate::Block`] but not
 //! [`crate::CertifiableBlock`].
 //!
-//! Because inline mode cannot recover consensus context from the block itself,
-//! certification checks whether `verify` already fetched the block for the
-//! given round and digest. If so, it returns `true` immediately. Otherwise it
-//! falls back to block availability in marshal.
+//! Because verification is completed inline, the default
+//! [`CertifiableAutomaton::certify`] behavior (always `true`) is sufficient: no
+//! additional deferred verification state must be awaited at certify time.
+//! `certify` only waits for block availability in marshal.
 //!
 //! # Usage
 //!
@@ -405,11 +405,7 @@ where
     }
 }
 
-/// Inline mode certifies from local block availability when possible.
-///
-/// If `verify` already fetched the block for the given round and digest,
-/// `certify` returns `true` immediately. Otherwise it falls back to
-/// subscribing to marshal for block availability.
+/// Inline mode only waits for block availability during certification.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
