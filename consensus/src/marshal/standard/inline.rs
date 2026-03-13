@@ -382,6 +382,9 @@ where
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
                 // run application verification over the ancestry stream.
+                //
+                // The helper returns `None` when work should stop early (for example,
+                // receiver closed or parent unavailable).
                 let application_valid = match verify_with_parent(
                     runtime_context,
                     context,
