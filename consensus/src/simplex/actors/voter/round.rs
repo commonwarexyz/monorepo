@@ -478,8 +478,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
-        // Even if we've already seen a notarization, we still broadcast our notarize vote
-        // in case it is useful (in the worst case it lets others observe we are alive).
+        // Even if we've already seen a notarization, we are still willing to broadcast
+        // our notarize vote in case someone is recording our activity.
 
         // If we don't have a verified proposal, return None.
         //
@@ -502,8 +502,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
-        // Even if we've already seen a finalization, we still broadcast our finalize vote
-        // in case it is useful (in the worst case it lets others observe we are alive).
+        // Even if we've already seen a finalization, we are still willing to broadcast
+        // our finalize vote in case someone is recording our activity.
 
         // Finalization requires a concrete proposal and a successful certification result,
         // but does not require the proposal to have first passed the follower-side verify
