@@ -2439,7 +2439,7 @@ mod tests {
     /// 1. Early views (before skip_timeout) always return active
     /// 2. Once `skip_timeout` views have elapsed without a message, the leader is inactive
     /// 3. Recent inbound messages keep the leader active
-    /// 4. Large view gaps no longer preserve activity
+    /// 4. Large view gaps cause earlier activity to expire
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -2530,8 +2530,8 @@ mod tests {
                 assert!(nullify.is_none(), "view {v} should be active (before skip_timeout)");
             }
 
-            // Test 2: At view skip_timeout, we now have skip_timeout entries (views 1-5)
-            // and the leader hasn't voted, so they should be marked inactive
+            // Test 2: At view skip_timeout, the leader has been silent for
+            // skip_timeout tracked views and should be marked inactive.
             let view = View::new(skip_timeout);
             let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
@@ -2566,8 +2566,8 @@ mod tests {
                 skip_timeout
             );
 
-            // Test 5: Jump far ahead. Activity now uses the latest seen message view
-            // rather than the last buffered rounds, so the leader becomes inactive again.
+            // Test 5: Jump far ahead. The last seen message is now outside the
+            // skip window, so the leader becomes inactive again.
             let view = View::new(100);
             let nullify = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
