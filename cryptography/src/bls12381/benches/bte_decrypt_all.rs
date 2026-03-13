@@ -46,7 +46,7 @@ fn bench_bte_decrypt_all(c: &mut Criterion) {
         let mut partial_decryptions = BTreeMap::new();
         for i in 0..num_parties {
             let sk = SecretKey::new(sk_shares[i].clone());
-            let pd = sk.partial_decrypt(&ct, hid, pk, &crs);
+            let pd = sk.partial_decrypt(&ct, hid, &crs);
             partial_decryptions.insert(i + 1, pd); // shares at points 1..=n
         }
 

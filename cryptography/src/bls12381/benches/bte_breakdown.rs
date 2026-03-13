@@ -179,19 +179,7 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 10. Ciphertext verification (batch_size verifications) ---
-        c.bench_function(
-            &format!("{}/op=ct_verify batch_size={batch_size}", module_path!()),
-            |b| {
-                b.iter(|| {
-                    for i in 0..batch_size {
-                        black_box(ct[i].verify(crs.htau, pk));
-                    }
-                });
-            },
-        );
-
-        // --- 11. Single G1 scalar mul ---
+        // --- 10. Single G1 scalar mul ---
         let g1_point = G1::generator() * &Scalar::random(&mut rng);
         let scalar = Scalar::random(&mut rng);
         c.bench_function(
@@ -203,7 +191,7 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 12. Single G2 scalar mul ---
+        // --- 11. Single G2 scalar mul ---
         let g2_point = G2::generator() * &Scalar::random(&mut rng);
         c.bench_function(
             &format!("{}/op=g2_scalar_mul batch_size={batch_size}", module_path!()),
@@ -214,12 +202,12 @@ fn bench_bte_breakdown(c: &mut Criterion) {
             },
         );
 
-        // --- 13. Full decrypt_all (for reference) ---
+        // --- 12. Full decrypt_all (for reference) ---
         let num_parties = n / 2;
         let mut partial_decryptions = BTreeMap::new();
         for i in 0..num_parties {
             let sk = SecretKey::new(sk_shares[i].clone());
-            let pd = sk.partial_decrypt(&ct, hid, pk, &crs);
+            let pd = sk.partial_decrypt(&ct, hid, &crs);
             partial_decryptions.insert(i + 1, pd);
         }
         let sigma = aggregate_partial_decryptions(&partial_decryptions);

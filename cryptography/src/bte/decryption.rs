@@ -28,11 +28,8 @@ impl SecretKey {
     }
 
     /// Compute a partial decryption for a batch of ciphertexts.
-    pub fn partial_decrypt(&self, ct: &[Ciphertext], hid: G1, pk: G2, crs: &CRS) -> G1 {
+    pub fn partial_decrypt(&self, ct: &[Ciphertext], hid: G1, crs: &CRS) -> G1 {
         let batch_size = crs.powers_of_g.len();
-        for i in 0..batch_size {
-            ct[i].verify(crs.htau, pk);
-        }
 
         let tx_domain = Domain::new(batch_size);
 
@@ -133,7 +130,7 @@ mod tests {
 
         let mut partial_decryptions: BTreeMap<usize, G1> = BTreeMap::new();
         for i in 0..n / 2 {
-            let partial = secret_keys[i].partial_decrypt(&ct, hid, pk, &crs);
+            let partial = secret_keys[i].partial_decrypt(&ct, hid, &crs);
             partial_decryptions.insert(i + 1, partial);
         }
 

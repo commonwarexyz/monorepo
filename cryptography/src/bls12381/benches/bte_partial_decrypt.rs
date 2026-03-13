@@ -40,7 +40,7 @@ fn bench_bte_partial_decrypt(c: &mut Criterion) {
             &format!("{}/batch_size={batch_size}", module_path!()),
             |b| {
                 b.iter(|| {
-                    black_box(secret_key.partial_decrypt(&ct, hid, pk, &crs));
+                    black_box(secret_key.partial_decrypt(&ct, hid, &crs));
                 });
             },
         );
