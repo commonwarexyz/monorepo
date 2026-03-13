@@ -684,7 +684,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -844,7 +844,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1023,7 +1023,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1221,7 +1221,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1401,7 +1401,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
@@ -1620,7 +1620,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(5),
                 epoch,
                 mailbox_size: 128,
-                forwarding: ForwardingPolicy::All,
+                forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 

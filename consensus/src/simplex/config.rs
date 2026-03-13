@@ -26,8 +26,8 @@ pub enum ForwardingPolicy {
     /// Do nothing when notified of missing voters.
     #[default]
     Disabled,
-    /// Forward the block to all active participants that did not vote.
-    All,
+    /// Forward the block to all participants that did not vote.
+    Silent,
 }
 
 impl ForwardingPolicy {
@@ -38,7 +38,7 @@ impl ForwardingPolicy {
 
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
-        matches!(self, Self::All)
+        matches!(self, Self::Silent)
     }
 }
 
