@@ -501,15 +501,14 @@ mod tests {
     use crate::{
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network, B, BLOCKS_PER_EPOCH, Ctx,
-                NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness, V,
+                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
+                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
             verifying::MockVerifyingApp,
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
-        simplex::types::Context, Automaton, Block, CertifiableAutomaton, Relay,
-        VerifyingApplication,
+        Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme},
@@ -591,7 +590,8 @@ mod tests {
                 leader: me,
                 parent: (View::new(1), parent_digest),
             };
-            let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
