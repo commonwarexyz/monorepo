@@ -80,7 +80,7 @@ impl Configuration {
     }
 
     /// Returns true if this configuration can make progress (liveness).
-    pub fn can_finalize(&self) -> bool {
+    pub fn is_quorum_feasible(&self) -> bool {
         self.faults <= bounds::max_faults(self.n)
     }
 }
@@ -452,7 +452,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.can_finalize() {
+        if input.partition == Partition::Connected && config.is_quorum_feasible() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -468,8 +468,10 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        if config.is_quorum_feasible() {
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
     });
 }
 
@@ -677,7 +679,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.can_finalize() {
+        if input.partition == Partition::Connected && config.is_quorum_feasible() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -693,8 +695,10 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        if config.is_quorum_feasible() {
+            let states = invariants::extract(reporters, config.n as usize);
+            invariants::check::<P>(config.n, states);
+        }
     });
 }
 

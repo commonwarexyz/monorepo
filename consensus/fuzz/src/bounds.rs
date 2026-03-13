@@ -128,19 +128,19 @@ mod tests {
         use crate::{Configuration, N4F1C3, N4F3C1};
 
         // N4F1C3: 4 nodes, 1 faulty - can finalize (1 <= 1)
-        assert!(N4F1C3.can_finalize());
+        assert!(N4F1C3.is_quorum_feasible());
 
         // N4F3C1: 4 nodes, 3 faulty - cannot finalize (3 > 1)
-        assert!(!N4F3C1.can_finalize());
+        assert!(!N4F3C1.is_quorum_feasible());
 
         // Edge cases
         let zero_faults = Configuration::new(4, 0, 4);
-        assert!(zero_faults.can_finalize()); // 0 <= 1
+        assert!(zero_faults.is_quorum_feasible()); // 0 <= 1
 
         let exact_max = Configuration::new(4, 1, 3);
-        assert!(exact_max.can_finalize()); // 1 <= 1
+        assert!(exact_max.is_quorum_feasible()); // 1 <= 1
 
         let over_max = Configuration::new(4, 2, 2);
-        assert!(!over_max.can_finalize()); // 2 > 1
+        assert!(!over_max.is_quorum_feasible()); // 2 > 1
     }
 }
