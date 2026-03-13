@@ -16,8 +16,8 @@ use std::{num::NonZeroUsize, time::Duration};
 /// that did not vote in a notarization certificate.
 ///
 /// Forwarding is a best-effort liveness aid: when enabled, the batcher
-/// broadcasts immediately to all active missing peers once a notarization
-/// is accepted or constructed.
+/// broadcasts immediately to all silent peers once a notarization is
+/// accepted or constructed.
 ///
 /// While currently only two options are available, this type is reserved
 /// as an enum to allow for more sophisticated policies in the future.

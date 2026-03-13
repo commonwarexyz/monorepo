@@ -1664,10 +1664,9 @@ mod tests {
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
-            // View 2: participants 0..quorum notarize, participant 6 sends
-            // a finalize (implying they already have the block), and
-            // participant 5 is truly missing. Only participant 5 should
-            // appear in the forwarding set.
+            // View 2: participants 0..4 notarize, participant 6 sends a
+            // finalize (implying they already have the block). Only
+            // participant 5 should appear in the forwarding set.
             let view2 = View::new(2);
             let leader2 = Participant::new(1);
             batcher_mailbox.update(view2, leader2, View::zero()).await;
@@ -1675,22 +1674,8 @@ mod tests {
             let round2 = Round::new(epoch, view2);
             let proposal = Proposal::new(round2, View::new(1), Sha256::hash(b"payload"));
 
-            // Send finalize and nullify BEFORE notarize votes so they are
-            // processed before quorum is reached and missing_voters is called.
-            // Participant 5 sends a nullify (establishes activity but no block)
-            let nullify_vote = Nullify::sign::<Sha256Digest>(&schemes[5], round2).unwrap();
-            if let Some(ref mut sender) = participant_senders[5] {
-                sender
-                    .send(
-                        Recipients::One(me.clone()),
-                        Vote::<S, Sha256Digest>::Nullify(nullify_vote).encode(),
-                        true,
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            // Participant 6 sends a finalize vote for the same proposal
+            // Send finalize BEFORE notarize votes so it is processed before
+            // quorum is reached and missing_voters is called.
             let finalize_vote = Finalize::sign(&schemes[6], proposal.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[6] {
                 sender
@@ -1703,7 +1688,7 @@ mod tests {
                     .unwrap();
             }
 
-            // Wait for finalize and nullify to be delivered and processed
+            // Wait for finalize to be delivered and processed
             context.sleep(Duration::from_millis(5)).await;
 
             // Send notarize votes from participants 1..5 (quorum = 5 for n=7)
