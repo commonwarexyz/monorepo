@@ -72,7 +72,7 @@ hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 
 ["commonware_storage::merkle::mmr::conformance::MmrRootStability"]
 n_cases = 200
-hash = "d9de2d71a41b1c656744b4ff9b1bd8e3a1b7d9da65de654b7551912431eb02d7"
+hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
 
 ["commonware_storage::merkle::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536

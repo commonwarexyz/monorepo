@@ -92,17 +92,18 @@ impl<D: Digest> ProofStore<D> {
 
         let mut digests: Vec<D> = Vec::new();
         if !bp.fold_prefix.is_empty() {
-            let mut acc = self
-                .fold_acc
-                .unwrap_or_else(|| hasher.digest(&leaves.to_be_bytes()));
+            // Start from the stored fold accumulator (which does not include the leaf count).
+            let mut acc = self.fold_acc;
             // Fold in peaks beyond those already covered by the stored accumulator.
             for &pos in bp.fold_prefix.iter().skip(self.num_fold_peaks) {
                 match self.digests.get(&pos) {
-                    Some(d) => acc = hasher.fold(&acc, d),
+                    Some(d) => {
+                        acc = Some(acc.map_or(*d, |a| hasher.fold(&a, d)));
+                    }
                     None => return Err(Error::ElementPruned(pos)),
                 }
             }
-            digests.push(acc);
+            digests.push(acc.expect("fold_prefix is non-empty so acc must be set"));
         }
 
         for &pos in &bp.fetch_nodes {
@@ -186,14 +187,12 @@ pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage
 
     let mut digests: Vec<D> = Vec::new();
     if !bp.fold_prefix.is_empty() {
-        let mut acc = hasher.digest(&leaves.to_be_bytes());
         let node_futures = bp.fold_prefix.iter().map(|&pos| mmr.get_node(pos));
         let results = try_join_all(node_futures).await?;
-        for (i, result) in results.into_iter().enumerate() {
-            match result {
-                Some(d) => acc = hasher.fold(&acc, &d),
-                None => return Err(Error::ElementPruned(bp.fold_prefix[i])),
-            }
+        let mut acc = results[0].ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
+        for (i, &result) in results.iter().enumerate().skip(1) {
+            let d = result.ok_or(Error::ElementPruned(bp.fold_prefix[i]))?;
+            acc = hasher.fold(&acc, &d);
         }
         digests.push(acc);
     }

@@ -43,18 +43,23 @@ pub trait Hasher: Clone + Send + Sync {
         self.hash([acc.as_ref(), peak.as_ref()])
     }
 
-    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
-    /// decreasing order of height.
+    /// Computes the root for an MMR given its leaf count and peak digests in canonical order.
+    ///
+    /// The root digest is computed as `Hash(leaves || fold(peak_digests))`, where `fold` is
+    /// defined as `fold(acc, peak) = Hash(acc || peak)`. The `peak_digests` are assumed to be
+    /// in canonical order.
     fn root<'a>(
         &mut self,
         leaves: Location,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
-        let mut acc = self.digest(&leaves.to_be_bytes());
-        for digest in peak_digests {
-            acc = self.fold(&acc, digest);
-        }
-        acc
+        let mut iter = peak_digests.into_iter();
+        let Some(first) = iter.next() else {
+            return self.digest(&leaves.to_be_bytes());
+        };
+        let acc = iter.fold(*first, |acc, digest| self.fold(&acc, digest));
+
+        self.hash([leaves.to_be_bytes().as_slice(), acc.as_ref()])
     }
 }
 
