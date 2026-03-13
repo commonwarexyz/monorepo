@@ -44,7 +44,7 @@ where
     immutable: &'a Immutable<E, K, V, H, T>,
 
     /// Journal batch for computing the speculative MMR root.
-    journal_builder: authenticated::UnmerkleizedBatch<H, Operation<K, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<K, V>>,
 
     /// Pending mutations.
     mutations: BTreeMap<K, V>,
@@ -79,7 +79,7 @@ pub struct MerkleizedBatch<D: Digest, K: Array, V: VariableValue> {
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: crate::journal::authenticated::Changeset<D, Operation<K, V>>,
+    pub(super) journal: crate::journal::authenticated::Changeset<D, Operation<K, V>>,
 
     /// Snapshot mutations to apply, in order.
     pub(super) snapshot_diffs: Vec<SnapshotDiff<K>>,
@@ -103,7 +103,7 @@ where
     pub(super) fn new(immutable: &'a Immutable<E, K, V, H, T>, journal_size: u64) -> Self {
         Self {
             immutable,
-            journal_builder: immutable.journal.to_snapshot().new_batch::<H>(),
+            journal_batch: immutable.journal.to_snapshot().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_size: journal_size,
@@ -134,7 +134,7 @@ where
         self.immutable.get(key).await
     }
 
-    /// Resolve mutations into operations, merkleize, and return an [`MerkleizedBatch`].
+    /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
     pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<H::Digest, K, V> {
         let base = self.base_size;
 
@@ -153,11 +153,11 @@ where
         let total_size = base + ops.len() as u64;
 
         // Add operations to the journal batch and merkleize.
-        let mut journal_builder = self.journal_builder;
+        let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_builder.add(op.clone());
+            journal_batch.add(op.clone());
         }
-        let journal = journal_builder.merkleize();
+        let journal = journal_batch.merkleize();
 
         // Merge parent diff entries that weren't overridden by this batch.
         let base_diff = Arc::try_unwrap(self.base_diff).unwrap_or_else(|arc| (*arc).clone());
@@ -192,7 +192,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
     {
         UnmerkleizedBatch {
             immutable: db,
-            journal_builder: self.journal.new_batch::<H>(),
+            journal_batch: self.journal.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
             base_size: self.total_size,
@@ -229,7 +229,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
             .collect();
 
         Changeset {
-            journal_finalized: self.journal.into_finalize(),
+            journal: self.journal.into_finalize(),
             snapshot_diffs,
             total_size: self.total_size,
             db_size: self.db_size,
@@ -257,7 +257,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
         );
         let items_to_skip = current_db_size - self.db_size;
         Changeset {
-            journal_finalized: self.journal.into_finalize_from(mmr_base, items_to_skip),
+            journal: self.journal.into_finalize_from(mmr_base, items_to_skip),
             snapshot_diffs,
             total_size: self.total_size,
             db_size: current_db_size,

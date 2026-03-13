@@ -407,7 +407,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         let start_loc = Location::new(journal_size);
 
         // Write all operations to the authenticated journal + apply MMR changeset.
-        self.journal.apply_batch(batch.journal_finalized).await?;
+        self.journal.apply_batch(batch.journal).await?;
 
         // Apply snapshot diffs.
         let bounds = self.journal.reader().await.bounds();

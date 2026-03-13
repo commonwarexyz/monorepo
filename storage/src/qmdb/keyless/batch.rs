@@ -27,7 +27,7 @@ where
     keyless: &'a Keyless<E, V, H>,
 
     /// Journal batch for computing the speculative MMR root.
-    journal_builder: authenticated::UnmerkleizedBatch<H, Operation<V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<V>>,
 
     /// Pending appends.
     appends: Vec<V>,
@@ -59,7 +59,7 @@ pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: crate::journal::authenticated::Changeset<D, Operation<V>>,
+    pub(super) journal: crate::journal::authenticated::Changeset<D, Operation<V>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
@@ -78,7 +78,7 @@ where
     pub(super) fn new(keyless: &'a Keyless<E, V, H>, journal_size: u64) -> Self {
         Self {
             keyless,
-            journal_builder: keyless.journal.to_snapshot().new_batch::<H>(),
+            journal_batch: keyless.journal.to_snapshot().new_batch::<H>(),
             appends: Vec::new(),
             base_operations: Vec::new(),
             base_size: journal_size,
@@ -136,11 +136,11 @@ where
         let total_size = base + ops.len() as u64;
 
         // Add operations to the journal batch and merkleize.
-        let mut journal_builder = self.journal_builder;
+        let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_builder.add(op.clone());
+            journal_batch.add(op.clone());
         }
-        let journal = journal_builder.merkleize();
+        let journal = journal_batch.merkleize();
 
         MerkleizedBatch {
             journal,
@@ -179,7 +179,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     {
         UnmerkleizedBatch {
             keyless: db,
-            journal_builder: self.journal.new_batch::<H>(),
+            journal_batch: self.journal.new_batch::<H>(),
             appends: Vec::new(),
             base_operations: self.journal.items_chain.clone(),
             base_size: self.total_size,
@@ -215,7 +215,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     /// Consume this batch, producing an owned [`Changeset`].
     pub fn finalize(self) -> Changeset<D, V> {
         Changeset {
-            journal_finalized: self.journal.into_finalize(),
+            journal: self.journal.into_finalize(),
             total_size: self.total_size,
             db_size: self.db_size,
         }
@@ -232,7 +232,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
         );
         let items_to_skip = current_db_size - self.db_size;
         Changeset {
-            journal_finalized: self.journal.into_finalize_from(mmr_base, items_to_skip),
+            journal: self.journal.into_finalize_from(mmr_base, items_to_skip),
             total_size: self.total_size,
             db_size: current_db_size,
         }

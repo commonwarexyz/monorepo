@@ -133,7 +133,7 @@ where
     db: &'a Db<E, C, I, H, U>,
 
     /// Journal batch for computing the speculative MMR root.
-    journal_builder: authenticated::UnmerkleizedBatch<H, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
 
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
@@ -161,7 +161,7 @@ where
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<K, D: Digest, Item: Send> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    journal_finalized: crate::journal::authenticated::Changeset<D, Item>,
+    journal: crate::journal::authenticated::Changeset<D, Item>,
 
     /// Snapshot mutations to apply, in order.
     snapshot_diffs: Vec<SnapshotDiff<K>>,
@@ -195,7 +195,7 @@ where
     Operation<U>: Codec,
 {
     db: &'a Db<E, C, I, H, U>,
-    journal_builder: authenticated::UnmerkleizedBatch<H, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
     base_operations: Vec<Arc<Vec<Operation<U>>>>,
     base_size: u64,
@@ -407,9 +407,9 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         for op in &ops {
-            self.journal_builder.add(op.clone());
+            self.journal_batch.add(op.clone());
         }
-        let journal = self.journal_builder.merkleize();
+        let journal = self.journal_batch.merkleize();
 
         // Merge with base diff: entries not overridden by this batch.
         // try_unwrap avoids cloning when no sibling batches share the parent diff.
@@ -461,7 +461,7 @@ where
             self.mutations,
             Merkleizer {
                 db: self.db,
-                journal_builder: self.journal_builder,
+                journal_batch: self.journal_batch,
                 base_diff: self.base_diff,
                 base_operations: self.base_operations,
                 base_size: self.base_size,
@@ -891,7 +891,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
             db: self,
-            journal_builder: self.log.to_snapshot().new_batch::<H>(),
+            journal_batch: self.log.to_snapshot().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_operations: Vec::new(),
@@ -935,7 +935,7 @@ where
         let start_loc = Location::new(journal_size);
 
         // 1. Write all operations to the authenticated journal + apply MMR changeset.
-        self.log.apply_batch(batch.journal_finalized).await?;
+        self.log.apply_batch(batch.journal).await?;
 
         // 2. Apply snapshot diffs to the in-memory index.
         for diff in batch.snapshot_diffs {
@@ -1036,7 +1036,7 @@ where
     {
         UnmerkleizedBatch {
             db,
-            journal_builder: self.journal.new_batch::<H>(),
+            journal_batch: self.journal.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
             base_operations: self.journal.items_chain.clone(),
@@ -1105,7 +1105,7 @@ where
             .sum::<isize>();
 
         Changeset {
-            journal_finalized: self.journal.into_finalize(),
+            journal: self.journal.into_finalize(),
             snapshot_diffs,
             active_keys_delta,
             new_inactivity_floor_loc: self.inactivity_floor_loc,
@@ -1209,7 +1209,7 @@ where
         let mmr_base = crate::mmr::Position::try_from(Location::new(current_db_size))
             .expect("valid leaf count");
         Changeset {
-            journal_finalized: self.journal.into_finalize_from(mmr_base, items_to_skip),
+            journal: self.journal.into_finalize_from(mmr_base, items_to_skip),
             snapshot_diffs,
             active_keys_delta,
             new_inactivity_floor_loc: self.inactivity_floor_loc,

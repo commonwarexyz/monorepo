@@ -314,7 +314,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         let start_loc = self.last_commit_loc + 1;
 
         // Write all operations to the authenticated journal + apply MMR changeset.
-        self.journal.apply_batch(batch.journal_finalized).await?;
+        self.journal.apply_batch(batch.journal).await?;
 
         // Update state.
         self.last_commit_loc = Location::new(batch.total_size - 1);
