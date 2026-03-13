@@ -74,7 +74,7 @@ pub mod proof;
 pub mod read;
 
 use crate::merkle;
-pub use crate::merkle::{hasher, location, position, LocationRangeExt};
+pub use crate::merkle::hasher;
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 pub use read::Readable;

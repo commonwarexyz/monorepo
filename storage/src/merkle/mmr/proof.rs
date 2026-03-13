@@ -684,8 +684,8 @@ mod tests {
     use super::*;
     use crate::merkle::{
         self as merkle,
-        location::LocationRangeExt as _,
         mmr::{mem::Mmr, StandardHasher as Standard},
+        LocationRangeExt as _,
     };
     use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

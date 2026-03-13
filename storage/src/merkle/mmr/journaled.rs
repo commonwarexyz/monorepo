@@ -946,11 +946,8 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::hasher::Hasher as _,
-        mmr::{
-            conformance::build_test_mmr, location::LocationRangeExt as _, mem, Location,
-            StandardHasher as Standard,
-        },
+        merkle::{hasher::Hasher as _, LocationRangeExt as _},
+        mmr::{conformance::build_test_mmr, mem, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{
         sha256::{self, Digest},

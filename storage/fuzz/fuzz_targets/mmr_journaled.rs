@@ -3,9 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
-use commonware_storage::mmr::{
-    journaled::{Config, Mmr, SyncConfig},
-    mem, Error, Location, LocationRangeExt, Position, StandardHasher as Standard,
+use commonware_storage::{
+    merkle::LocationRangeExt as _,
+    mmr::{
+        journaled::{Config, Mmr, SyncConfig},
+        mem, Error, Location, Position, StandardHasher as Standard,
+    },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
