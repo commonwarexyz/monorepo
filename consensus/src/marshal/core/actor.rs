@@ -1,51 +1,52 @@
 use super::{
-    Buffer, IntoBlock, Variant, cache,
+    cache,
     mailbox::{Mailbox, Message},
+    Buffer, IntoBlock, Variant,
 };
 use crate::{
-    Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Identifier as BlockID, Update,
         resolver::handler::{self, Request},
         store::{Blocks, Certificates},
+        Config, Identifier as BlockID, Update,
     },
     simplex::{
         scheme::Scheme,
-        types::{Finalization, Notarization, Subject, verify_certificates},
+        types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
+    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    Digestible,
     certificate::{Provider, Scheme as CertificateScheme},
+    Digestible,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
-    telemetry::metrics::status::GaugeExt,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
     metadata::{self, Metadata},
 };
 use commonware_utils::{
-    Acknowledgement, BoxedError,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
+    Acknowledgement, BoxedError,
 };
-use futures::{FutureExt, future::join_all, try_join};
+use futures::{future::join_all, try_join, FutureExt};
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{BTreeMap, VecDeque, btree_map::Entry},
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -203,10 +204,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-            BlockDigest = <V::Block as Digestible>::Digest,
-            Commitment = V::Commitment,
-            Scheme = P::Scheme,
-        >,
+        BlockDigest = <V::Block as Digestible>::Digest,
+        Commitment = V::Commitment,
+        Scheme = P::Scheme,
+    >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -268,10 +269,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-            BlockDigest = <V::Block as Digestible>::Digest,
-            Commitment = V::Commitment,
-            Scheme = P::Scheme,
-        >,
+        BlockDigest = <V::Block as Digestible>::Digest,
+        Commitment = V::Commitment,
+        Scheme = P::Scheme,
+    >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -368,9 +369,9 @@ where
     ) -> Handle<()>
     where
         R: Resolver<
-                Key = handler::Request<V::Commitment>,
-                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-            >,
+            Key = handler::Request<V::Commitment>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
@@ -384,9 +385,9 @@ where
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
-                Key = handler::Request<V::Commitment>,
-                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-            >,
+            Key = handler::Request<V::Commitment>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         // Create a local pool for waiter futures.
