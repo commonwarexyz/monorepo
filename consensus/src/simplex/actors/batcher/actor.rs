@@ -74,7 +74,7 @@ where
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
     latest_vote: Family<Peer, Gauge>,
-    latest_seen_views: Vec<View>,
+    latest_seen: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
@@ -161,7 +161,7 @@ where
                 verified,
                 inbound_messages,
                 latest_vote,
-                latest_seen_views: vec![View::zero(); participant_count],
+                latest_seen: vec![View::zero(); participant_count],
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -188,9 +188,9 @@ where
         let Some(participant) = self.participants.index(sender) else {
             return;
         };
-        let latest_seen = &mut self.latest_seen_views[usize::from(participant)];
-        if *latest_seen < view {
-            *latest_seen = view;
+        let seen_view = &mut self.latest_seen[usize::from(participant)];
+        if *seen_view < view {
+            *seen_view = view;
         }
     }
 
@@ -205,8 +205,8 @@ where
             return true;
         }
 
-        let latest_seen = self.latest_seen_views[usize::from(participant)];
-        view.get().saturating_sub(latest_seen.get()) < self.skip_timeout.get()
+        let seen_view = self.latest_seen[usize::from(participant)];
+        view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
     }
 
     /// Resolves the public keys of `missing` participants for a targeted
