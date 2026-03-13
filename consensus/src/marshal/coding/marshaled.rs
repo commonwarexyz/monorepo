@@ -961,6 +961,8 @@ where
             Plan::Forward { .. } => {
                 // Coding variant does not support targeted forwarding;
                 // peers reconstruct blocks from erasure-coded shards.
+                //
+                // TODO(#3389): Support checked data forwarding for PhasedScheme.
             }
         }
     }
