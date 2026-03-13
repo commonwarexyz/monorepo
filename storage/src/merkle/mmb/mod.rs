@@ -117,6 +117,8 @@
 //! ```
 
 pub mod iterator;
+pub mod mem;
+pub mod proof;
 
 use crate::merkle;
 
@@ -177,5 +179,42 @@ pub type Position = merkle::Position<Family>;
 /// A leaf index or leaf count in an MMB.
 pub type Location = merkle::Location<Family>;
 
+pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
+
 /// Errors that can occur during MMB operations.
-pub type Error = merkle::Error<Family>;
+#[derive(Debug)]
+pub enum Error {
+    /// Empty input where at least one element was required.
+    Empty,
+    /// A range end exceeds the number of leaves.
+    RangeOutOfBounds(Location),
+    /// A required node was not available (e.g. pruned).
+    ElementPruned(Position),
+    /// Location exceeds the valid range.
+    LocationOverflow(Location),
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "empty"),
+            Self::RangeOutOfBounds(loc) => {
+                write!(
+                    f,
+                    "range out of bounds: end location {loc} exceeds MMB size"
+                )
+            }
+            Self::ElementPruned(pos) => write!(f, "element pruned: {pos}"),
+            Self::LocationOverflow(loc) => write!(f, "location {loc} > MAX_LOCATION"),
+        }
+    }
+}
+
+impl From<merkle::Error<Family>> for Error {
+    fn from(e: merkle::Error<Family>) -> Self {
+        match e {
+            merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
+            _ => panic!("unexpected merkle error: {e}"),
+        }
+    }
+}
