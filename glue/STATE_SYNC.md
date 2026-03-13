@@ -1,9 +1,12 @@
 # State Sync Design
 
-**Status: PLANNED** -- Not yet implemented.
+**Status: PARTIAL** -- Orchestration layer implemented, QMDB integration pending.
 
-This document outlines the work required to integrate QMDB state sync into
-the `stateful` module's `Stateful` wrapper.
+This document outlines the design for integrating QMDB state sync into
+the `stateful` module's `Stateful` wrapper. The sync coordinator
+(`sync.rs`), readiness gate, target forwarding, and wrapper integration
+are implemented. Concrete `SyncableDb` implementations for QMDB database
+types are not yet implemented (blocked on QMDB API changes).
 
 ## Background
 
@@ -168,16 +171,25 @@ by syncing to a recent-enough target and accepting a small replay window).
 
 ### Interaction with `ManagedDb` Trait
 
-The `ManagedDb` trait may need a sync-related extension or a separate
-`SyncableDb` trait that exposes:
+The `SyncableDb` trait (in `db.rs`) extends `ManagedDb` with a single
+entry point:
 
-- A method to run the sync engine given a resolver and initial target.
-- A way to update the sync target mid-flight.
-- A completion signal with the synced database state.
+```rust
+fn spawn_sync<E>(
+    database: Arc<AsyncRwLock<Self>>,
+    context: E,
+    sync_config: Self::SyncConfig,
+    sync_resolver: Self::SyncResolver,
+    initial_target: Self::SyncTarget,
+    target_updates: mpsc::Receiver<Self::SyncTarget>,
+) -> Result<oneshot::Receiver<Result<(), Self::SyncError>>, Self::SyncError>
+```
 
-Alternatively, sync could be handled entirely outside the trait system as
-a one-time bootstrap step that produces initialized `ManagedDb` instances,
-which are then installed into `Stateful` once ready.
+This covers the full sync lifecycle: initial target, mid-flight updates
+via the `mpsc` receiver, and a completion signal via the `oneshot`
+receiver. `SyncableDatabaseSet` composes multiple `SyncableDb` instances
+(including tuple implementations up to arity 8) and fans out target
+updates to per-database channels.
 
 ### Interaction with Engine Lifecycle
 
@@ -193,13 +205,25 @@ The orchestrator starts immediately -- it does not need to be deferred.
 
 ## Dependencies
 
+### Completed
+
+- **Sync orchestration**: `sync::Coordinator`, `Readiness` gate,
+  coalescing `TargetForwarder`, and `wrapper::Stateful` integration
+  (propose/verify gating, report-driven target forwarding).
+- **Trait layer**: `SyncableDb`, `SyncableDatabaseSet`, `SyncHandle`,
+  and tuple implementations in `db.rs`.
+- **Pending state recovery**: Phase 3 (replay) via `rebuild_pending`.
+
+### Remaining
+
 - **QMDB lifetime removal**: Sync produces an initialized database that
   must be usable with the batch traits. Requires the `'a` lifetime
   removal on batch types (see `stateful/mod.rs` TODO).
 - **QMDB parent type erasure**: Same prerequisite as the core batch
   lifecycle (see `stateful/mod.rs` TODO).
-- **Pending state recovery**: Phase 3 (replay) relies on the existing
-  `rebuild_pending` lazy recovery path, which is already implemented.
+- **Concrete `SyncableDb` implementations**: Implement `SyncableDb` for
+  QMDB `any`, `current`, and `immutable` database wrappers in
+  `commonware-storage`.
 
 ## References
 
