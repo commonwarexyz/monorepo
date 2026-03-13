@@ -24,7 +24,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
     ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -327,6 +327,7 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
+                term_length: NZU64!(1),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
             },

@@ -20,7 +20,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32, NZU64};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -260,6 +260,7 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
+                term_length: NZU64!(1),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
             },
