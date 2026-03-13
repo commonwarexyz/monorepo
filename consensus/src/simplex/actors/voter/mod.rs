@@ -5895,9 +5895,8 @@ mod tests {
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
     }
 
-    /// Regression: when a proposal is first observed through a notarization certificate,
-    /// leader timeout must still be cleared for the current view without emitting a
-    /// synthetic notarize vote before local verification.
+    /// Regression: proposals recovered from notarization certificates must clear the
+    /// current view's leader timeout without emitting a local notarize vote.
     ///
     /// We require:
     /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
