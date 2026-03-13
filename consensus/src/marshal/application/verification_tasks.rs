@@ -1,8 +1,5 @@
 use crate::types::Round;
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
-};
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 type VerificationTaskMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
@@ -45,13 +42,6 @@ where
     /// Registers a verification receiver for `(round, digest)`.
     pub(crate) fn insert(&self, round: Round, digest: D, task: oneshot::Receiver<bool>) {
         self.inner.lock().insert((round, digest), task);
-    }
-
-    /// Registers an already-completed verification result for `(round, digest)`.
-    pub(crate) fn insert_resolved(&self, round: Round, digest: D, result: bool) {
-        let (tx, rx) = oneshot::channel();
-        tx.send_lossy(result);
-        self.insert(round, digest, rx);
     }
 
     /// Removes and returns the verification receiver for `(round, digest)`, if present.
