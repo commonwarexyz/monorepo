@@ -3460,6 +3460,8 @@ mod tests {
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
+            // Prime leader activity before jumping straight to view 5 so the
+            // inactivity heuristic does not interfere with the metric assertions.
             let leader = Participant::new(1);
             let warmup_vote = Nullify::sign::<Sha256Digest>(
                 &schemes[usize::from(leader)],
