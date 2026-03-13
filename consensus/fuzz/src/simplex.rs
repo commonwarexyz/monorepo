@@ -132,7 +132,6 @@ mod tests {
         FuzzInput {
             raw_bytes: seed.to_be_bytes().to_vec(),
             partition: Partition::Connected,
-            configuration: N4F1C3,
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
