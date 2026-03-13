@@ -266,7 +266,10 @@ pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
+    use crate::{
+        merkle::LocationRangeExt as _,
+        mmr::{mem::Mmr, StandardHasher as Standard},
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
