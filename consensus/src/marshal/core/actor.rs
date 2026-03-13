@@ -1,52 +1,51 @@
 use super::{
-    cache,
+    Buffer, IntoBlock, Variant, cache,
     mailbox::{Mailbox, Message},
-    Buffer, IntoBlock, Variant,
 };
 use crate::{
+    Block, Epochable, Heightable, Reporter,
     marshal::{
+        Config, Identifier as BlockID, Update,
         resolver::handler::{self, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Update,
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{Finalization, Notarization, Subject, verify_certificates},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
     Digestible,
+    certificate::{Provider, Scheme as CertificateScheme},
 };
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
+    telemetry::metrics::status::GaugeExt,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
     metadata::{self, Metadata},
 };
 use commonware_utils::{
+    Acknowledgement, BoxedError,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join, FutureExt};
+use futures::{FutureExt, future::join_all, try_join};
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -167,10 +166,8 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<V: Variant> {
-    // The subscribers that are waiting for the block contents.
-    block_subscribers: Vec<oneshot::Sender<V::Block>>,
-    // The subscribers that only care that the block exists.
-    availability_subscribers: Vec<oneshot::Sender<()>>,
+    // The subscribers that are waiting for the block.
+    subscribers: Vec<oneshot::Sender<V::Block>>,
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,
 }
@@ -206,10 +203,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -271,10 +268,10 @@ where
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
-        BlockDigest = <V::Block as Digestible>::Digest,
-        Commitment = V::Commitment,
-        Scheme = P::Scheme,
-    >,
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
     FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
@@ -371,9 +368,9 @@ where
     ) -> Handle<()>
     where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+                Key = handler::Request<V::Commitment>,
+                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
@@ -387,9 +384,9 @@ where
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+                Key = handler::Request<V::Commitment>,
+                PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         // Create a local pool for waiter futures.
@@ -419,9 +416,8 @@ where
             on_start => {
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain(|_, bs| {
-                    bs.block_subscribers.retain(|tx| !tx.is_closed());
-                    bs.availability_subscribers.retain(|tx| !tx.is_closed());
-                    !bs.block_subscribers.is_empty() || !bs.availability_subscribers.is_empty()
+                    bs.subscribers.retain(|tx| !tx.is_closed());
+                    !bs.subscribers.is_empty()
                 });
             },
             on_stopped => {
@@ -648,7 +644,7 @@ where
                         digest,
                         response,
                     } => {
-                        self.handle_subscribe_block(
+                        self.handle_subscribe(
                             round,
                             BlockSubscriptionKey::Digest(digest),
                             response,
@@ -678,7 +674,7 @@ where
                         commitment,
                         response,
                     } => {
-                        self.handle_subscribe_block(
+                        self.handle_subscribe(
                             round,
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
@@ -846,7 +842,7 @@ where
     }
 
     /// Handle a local subscription request for a block.
-    async fn handle_subscribe_block<Buf: Buffer<V>>(
+    async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
         round: Option<Round>,
         key: BlockSubscriptionKeyFor<V>,
@@ -905,7 +901,7 @@ where
         }
         match self.block_subscriptions.entry(key) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().block_subscribers.push(response);
+                entry.get_mut().subscribers.push(response);
             }
             Entry::Vacant(entry) => {
                 let rx = match key {
@@ -922,8 +918,7 @@ where
                         .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
                 });
                 entry.insert(BlockSubscription {
-                    block_subscribers: vec![response],
-                    availability_subscribers: Vec::new(),
+                    subscribers: vec![response],
                     _aborter: aborter,
                 });
             }
@@ -935,46 +930,33 @@ where
         &mut self,
         round: Option<Round>,
         digest: <V::Block as Digestible>::Digest,
-        response: oneshot::Sender<()>,
+        mut response: oneshot::Sender<()>,
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
-        if self.find_block_by_digest(buffer, digest).await.is_some() {
-            response.send_lossy(());
-            return;
-        }
-
-        if let Some(round) = round {
-            if round < self.last_processed_round {
-                return;
-            }
-            debug!(?round, ?digest, "requested block availability missing");
-            resolver
-                .fetch(Request::<V::Commitment>::Notarized { round })
-                .await;
-        }
-
-        let key = BlockSubscriptionKey::Digest(digest);
-        debug!(?round, ?digest, "registering availability subscriber");
-        match self.block_subscriptions.entry(key) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().availability_subscribers.push(response);
-            }
-            Entry::Vacant(entry) => {
-                let rx = buffer.subscribe_by_digest(digest).await;
-                let waiter_key = key;
-                let aborter = waiters.push(async move {
-                    rx.await
-                        .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
-                });
-                entry.insert(BlockSubscription {
-                    block_subscribers: Vec::new(),
-                    availability_subscribers: vec![response],
-                    _aborter: aborter,
-                });
-            }
-        }
+        let (block_tx, block_rx) = oneshot::channel();
+        self.handle_subscribe(
+            round,
+            BlockSubscriptionKey::Digest(digest),
+            block_tx,
+            resolver,
+            waiters,
+            buffer,
+        )
+        .await;
+        self.context
+            .with_label("availability_subscription")
+            .spawn(move |_| async move {
+                select! {
+                    _ = response.closed() => (),
+                    result = block_rx => {
+                        if result.is_ok() {
+                            response.send_lossy(());
+                        }
+                    },
+                }
+            });
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled
@@ -1245,22 +1227,16 @@ where
             .block_subscriptions
             .remove(&BlockSubscriptionKey::Digest(block.digest()))
         {
-            for subscriber in bs.block_subscribers.drain(..) {
+            for subscriber in bs.subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
-            }
-            for subscriber in bs.availability_subscribers.drain(..) {
-                subscriber.send_lossy(());
             }
         }
         if let Some(mut bs) = self
             .block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(V::commitment(block)))
         {
-            for subscriber in bs.block_subscribers.drain(..) {
+            for subscriber in bs.subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
-            }
-            for subscriber in bs.availability_subscribers.drain(..) {
-                subscriber.send_lossy(());
             }
         }
     }
