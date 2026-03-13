@@ -432,6 +432,8 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
+        //
+        // TODO(#3393): Avoid fetching the block just to check if it's available.
         let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
         self.context
