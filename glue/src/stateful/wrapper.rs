@@ -177,13 +177,13 @@ where
             return;
         }
 
-        let Some(finalized_block) = block_provider.fetch_block(payload.into()).await else {
-            return;
-        };
+        let finalized_block = block_provider
+            .fetch_block(payload.into())
+            .await
+            .expect("state sync requires finalized block availability while startup sync is pending");
 
-        let Some(sync_targets) = A::sync_targets(&finalized_block) else {
-            return;
-        };
+        let sync_targets = A::sync_targets(&finalized_block)
+            .expect("state sync requires finalized blocks to expose per-database sync targets");
 
         sync.update_targets(sync_targets).await;
     }
@@ -379,5 +379,322 @@ where
             self.pending
                 .retain(|_, (round, _)| *round > finalized_round);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stateful::db::{DatabaseSet, SyncHandle, SyncableDatabaseSet};
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_consensus::{
+        marshal::ancestry::BlockProvider,
+        types::{Epoch, Height, View},
+        Block as ConsensusBlock,
+        CertifiableBlock,
+        Heightable,
+    };
+    use commonware_cryptography::{sha256, Digest as _, Digestible};
+    use commonware_runtime::{deterministic, Buf, BufMut, Runner as _};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct MockContext {
+        epoch: Epoch,
+        view: View,
+    }
+
+    impl Epochable for MockContext {
+        fn epoch(&self) -> Epoch {
+            self.epoch
+        }
+    }
+
+    impl Viewable for MockContext {
+        fn view(&self) -> View {
+            self.view
+        }
+    }
+
+    impl Write for MockContext {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.epoch.write(buf);
+            self.view.write(buf);
+        }
+    }
+
+    impl EncodeSize for MockContext {
+        fn encode_size(&self) -> usize {
+            self.epoch.encode_size() + self.view.encode_size()
+        }
+    }
+
+    impl Read for MockContext {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+            Ok(Self {
+                epoch: Epoch::read(buf)?,
+                view: View::read(buf)?,
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MockDatabases;
+
+    impl DatabaseSet for MockDatabases {
+        type Unmerkleized = ();
+        type Merkleized = ();
+
+        async fn new_batches(&self) -> Self::Unmerkleized {}
+
+        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+
+        async fn finalize(&self, _batches: Self::Merkleized) {}
+    }
+
+    impl SyncableDatabaseSet for MockDatabases {
+        type SyncConfigs = ();
+        type SyncResolvers = ();
+        type SyncTargets = u64;
+        type SyncError = ();
+
+        fn start_sync<E>(
+            &self,
+            _context: E,
+            _sync_configs: Self::SyncConfigs,
+            _sync_resolvers: Self::SyncResolvers,
+            _initial_targets: Self::SyncTargets,
+        ) -> Result<SyncHandle<Self::SyncTargets, Self::SyncError>, Self::SyncError>
+        where
+            E: Rng + Spawner + Metrics + Clock,
+        {
+            panic!("sync startup should not be reached in these tests")
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TestBlock {
+        context: MockContext,
+        parent: sha256::Digest,
+        height: Height,
+        digest: sha256::Digest,
+    }
+
+    impl TestBlock {
+        fn new(
+            context: MockContext,
+            parent: sha256::Digest,
+            height: Height,
+            digest: sha256::Digest,
+        ) -> Self {
+            Self {
+                context,
+                parent,
+                height,
+                digest,
+            }
+        }
+    }
+
+    impl Write for TestBlock {
+        fn write(&self, writer: &mut impl BufMut) {
+            self.context.write(writer);
+            self.parent.write(writer);
+            self.height.write(writer);
+            self.digest.write(writer);
+        }
+    }
+
+    impl Read for TestBlock {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+            Ok(Self {
+                context: MockContext::read(buf)?,
+                parent: sha256::Digest::read(buf)?,
+                height: Height::read(buf)?,
+                digest: sha256::Digest::read(buf)?,
+            })
+        }
+    }
+
+    impl EncodeSize for TestBlock {
+        fn encode_size(&self) -> usize {
+            self.context.encode_size()
+                + self.parent.encode_size()
+                + self.height.encode_size()
+                + self.digest.encode_size()
+        }
+    }
+
+    impl Digestible for TestBlock {
+        type Digest = sha256::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl Heightable for TestBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    impl ConsensusBlock for TestBlock {
+        fn parent(&self) -> Self::Digest {
+            self.parent
+        }
+    }
+
+    impl CertifiableBlock for TestBlock {
+        type Context = MockContext;
+
+        fn context(&self) -> Self::Context {
+            self.context
+        }
+    }
+
+    #[derive(Clone)]
+    struct MissingTargetsApp;
+
+    impl Application<deterministic::Context> for MissingTargetsApp {
+        type SigningScheme = commonware_consensus::simplex::scheme::ed25519::Scheme;
+        type Context = MockContext;
+        type Payload = sha256::Digest;
+        type Block = TestBlock;
+        type Databases = MockDatabases;
+        type InputProvider = ();
+
+        fn payload(block: &Self::Block) -> Self::Payload {
+            block.digest()
+        }
+
+        fn parent_payload(block: &Self::Block) -> Self::Payload {
+            block.parent()
+        }
+
+        fn sync_targets(
+            _block: &Self::Block,
+        ) -> Option<<Self::Databases as SyncableDatabaseSet>::SyncTargets> {
+            None
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(
+                MockContext {
+                    epoch: Epoch::new(0),
+                    view: View::new(0),
+                },
+                sha256::Digest::EMPTY,
+                Height::new(1),
+                sha256::Digest::from([1; 32]),
+            )
+        }
+
+        async fn propose<BP: BlockProvider<Block = Self::Block>>(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: AncestorStream<BP, Self::Block>,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<(Self::Block, <Self::Databases as DatabaseSet>::Merkleized)> {
+            None
+        }
+
+        async fn verify<BP: BlockProvider<Block = Self::Block>>(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: AncestorStream<BP, Self::Block>,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet>::Merkleized> {
+            None
+        }
+
+        async fn replay(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet>::Merkleized {
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticBlockProvider {
+        block: Option<TestBlock>,
+    }
+
+    impl BlockProvider for StaticBlockProvider {
+        type Block = TestBlock;
+
+        async fn fetch_block(
+            self,
+            digest: <Self::Block as Digestible>::Digest,
+        ) -> Option<Self::Block> {
+            self.block.filter(|block| block.digest() == digest)
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "state sync requires finalized block availability while startup sync is pending"
+    )]
+    fn forward_sync_target_update_panics_when_finalized_block_is_missing() {
+        deterministic::Runner::default().start(|context| async move {
+            let coordinator = sync::Coordinator::new(
+                context.clone(),
+                MockDatabases,
+                Some(sync::Config {
+                    sync_configs: (),
+                    sync_resolvers: (),
+                    initial_targets: None,
+                }),
+            );
+
+            Stateful::<deterministic::Context, MissingTargetsApp, StaticBlockProvider>::forward_sync_target_update(
+                coordinator,
+                StaticBlockProvider { block: None },
+                sha256::Digest::from([9; 32]),
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "state sync requires finalized blocks to expose per-database sync targets"
+    )]
+    fn forward_sync_target_update_panics_when_sync_targets_are_missing() {
+        deterministic::Runner::default().start(|context| async move {
+            let coordinator = sync::Coordinator::new(
+                context.clone(),
+                MockDatabases,
+                Some(sync::Config {
+                    sync_configs: (),
+                    sync_resolvers: (),
+                    initial_targets: None,
+                }),
+            );
+
+            let block = TestBlock::new(
+                MockContext {
+                    epoch: Epoch::new(0),
+                    view: View::new(1),
+                },
+                sha256::Digest::EMPTY,
+                Height::new(1),
+                sha256::Digest::from([7; 32]),
+            );
+            let payload = block.digest();
+
+            Stateful::<deterministic::Context, MissingTargetsApp, StaticBlockProvider>::forward_sync_target_update(
+                coordinator,
+                StaticBlockProvider { block: Some(block) },
+                payload,
+            )
+            .await;
+        });
     }
 }

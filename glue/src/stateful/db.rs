@@ -17,6 +17,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{
     channel::{mpsc, oneshot},
+    futures::Pool,
     sync::AsyncRwLock,
 };
 use rand::Rng;
@@ -323,11 +324,10 @@ macro_rules! impl_syncable_database_set {
             where
                 E: Rng + Spawner + Metrics + Clock,
             {
-                let channels = ($({
-                    let _ = stringify!($idx);
-                    mpsc::channel(TARGET_UPDATE_CHANNEL_CAPACITY)
-                },)+);
-                let completions = (
+                let channels = ($(
+                    mpsc::channel::<$T::SyncTarget>(TARGET_UPDATE_CHANNEL_CAPACITY),
+                )+);
+                let completion_receivers = (
                     $(
                         $T::spawn_sync(
                             self.$idx.clone(),
@@ -363,19 +363,28 @@ macro_rules! impl_syncable_database_set {
                     .with_label("stateful_sync_completion")
                     .spawn(move |_| async move {
                         let result = (async {
+                            let mut completion_tasks = Pool::default();
                             $(
-                                match completions.$idx.await {
+                                completion_tasks.push(async move {
+                                    (stringify!($idx), completion_receivers.$idx.await)
+                                });
+                            )+
+
+                            while !completion_tasks.is_empty() {
+                                let (index, completion) = completion_tasks.next_completed().await;
+                                match completion {
                                     Ok(Ok(())) => {}
                                     Ok(Err(err)) => return Err(err),
                                     Err(err) => {
                                         panic!(
                                             "stateful per-database sync completion closed (index {}): {}",
-                                            stringify!($idx),
+                                            index,
                                             err
                                         );
                                     }
                                 }
-                            )+
+                            }
+
                             Ok(())
                         })
                         .await;

@@ -25,10 +25,17 @@ pub struct Config<D: SyncableDatabaseSet> {
     pub initial_targets: Option<D::SyncTargets>,
 }
 
+/// One-shot readiness gate shared by all `Stateful` clones.
+///
+/// Before sync completion, `wait_until_ready` pends cheaply on `signal`.
+/// After completion, the atomic fast-path returns immediately.
 #[derive(Clone)]
 struct Readiness {
+    /// Fast-path readiness check used on every propose/verify call.
     ready: Arc<AtomicBool>,
+    /// One-shot waiter for calls that arrive before readiness.
     signal: Signal,
+    /// One-shot signaler consumed when transitioning to ready.
     signaler: Arc<Mutex<Option<Signaler>>>,
 }
 
@@ -74,23 +81,77 @@ impl Readiness {
     }
 }
 
+/// Captured values needed to launch sync when the first target appears.
 #[derive(Clone)]
 struct LaunchConfig<D: SyncableDatabaseSet> {
     sync_configs: D::SyncConfigs,
     sync_resolvers: D::SyncResolvers,
 }
 
+/// Coalesces target updates while the forwarding task is busy.
+///
+/// We keep only the latest pending target to avoid backpressuring `report()`.
+struct TargetForwarder<T> {
+    /// Active sender into the running sync engine.
+    sender: Option<mpsc::Sender<T>>,
+    /// Latest not-yet-forwarded target.
+    pending: Option<T>,
+    /// Whether a flush task is currently draining `pending`.
+    flushing: bool,
+}
+
+impl<T> Default for TargetForwarder<T> {
+    fn default() -> Self {
+        Self {
+            sender: None,
+            pending: None,
+            flushing: false,
+        }
+    }
+}
+
+impl<T> TargetForwarder<T> {
+    /// Install the sender for a running sync session and clear transient state.
+    fn transition_to_running(&mut self, sender: mpsc::Sender<T>) {
+        self.sender = Some(sender);
+        self.pending = None;
+        self.flushing = false;
+    }
+
+    /// Clear all forwarding state when sync stops or completes.
+    fn transition_to_idle(&mut self) {
+        self.sender = None;
+        self.pending = None;
+        self.flushing = false;
+    }
+
+    /// Consume the next pending target and stop the flush loop if empty.
+    fn take_pending_for_flush(&mut self) -> Option<T> {
+        let target = self.pending.take();
+        if target.is_none() {
+            self.flushing = false;
+        }
+        target
+    }
+}
+
+/// Lifecycle for startup sync orchestration.
 enum State<D: SyncableDatabaseSet> {
+    /// Sync is disabled; readiness is permanently true.
     Disabled,
+    /// Sync is configured but has not started yet.
     Waiting(LaunchConfig<D>),
-    Running(mpsc::Sender<D::SyncTargets>),
+    /// Sync is running and readiness is still false.
+    Running,
+    /// Sync completed successfully; readiness is permanently true.
     Ready,
 }
 
+/// Work extracted from the state lock so async sends happen lock-free.
 enum UpdateAction<T, E> {
     None,
     Started(oneshot::Receiver<Result<(), E>>),
-    Forward(mpsc::Sender<T>),
+    Forward(T),
 }
 
 /// Shared sync coordinator used by all [`Stateful`](super::wrapper::Stateful) clones.
@@ -104,6 +165,7 @@ where
     databases: D,
     readiness: Readiness,
     state: Arc<Mutex<State<D>>>,
+    target_forwarder: Arc<Mutex<TargetForwarder<D::SyncTargets>>>,
 }
 
 impl<E, D> Coordinator<E, D>
@@ -129,6 +191,7 @@ where
             databases,
             readiness,
             state: Arc::new(Mutex::new(state)),
+            target_forwarder: Arc::new(Mutex::new(TargetForwarder::default())),
         };
 
         if let Some(initial_targets) = initial_targets {
@@ -139,7 +202,8 @@ where
                 };
 
                 let sync_handle = coordinator.launch_sync(launch_config, initial_targets);
-                *state = State::Running(sync_handle.target_updates.clone());
+                coordinator.set_target_sender(sync_handle.target_updates);
+                *state = State::Running;
                 sync_handle.completion
             };
             coordinator.spawn_completion_watcher(completion);
@@ -168,12 +232,67 @@ where
                 launch_config.sync_resolvers.clone(),
                 initial_targets,
             )
-            .unwrap_or_else(|err| panic!("state sync failed to start: {err:?}"))
+            .expect("state sync failed to start")
+    }
+
+    fn set_target_sender(&self, sender: mpsc::Sender<D::SyncTargets>) {
+        let mut forwarder = self.target_forwarder.lock();
+        forwarder.transition_to_running(sender);
+    }
+
+    /// Spawn a best-effort forwarding loop for coalesced target updates.
+    fn spawn_target_flush(&self, sender: mpsc::Sender<D::SyncTargets>) {
+        let forwarder = self.target_forwarder.clone();
+
+        self.context
+            .clone()
+            .with_label("stateful_sync_target_flush")
+            .spawn(move |_| async move {
+                loop {
+                    let target = {
+                        let mut forwarder = forwarder.lock();
+                        match forwarder.take_pending_for_flush() {
+                            Some(target) => target,
+                            None => return,
+                        }
+                    };
+
+                    if sender.send(target).await.is_err() {
+                        let mut forwarder = forwarder.lock();
+                        forwarder.transition_to_idle();
+                        return;
+                    }
+                }
+            });
+    }
+
+    /// Queue a target update without blocking the caller.
+    ///
+    /// If a flush is already in flight, this overwrites the pending value so
+    /// sync chases the latest finalized tip.
+    fn enqueue_target_update(&self, targets: D::SyncTargets) {
+        let sender = {
+            let mut forwarder = self.target_forwarder.lock();
+            let Some(sender) = forwarder.sender.clone() else {
+                return;
+            };
+
+            // Keep only the latest update while a flush is in flight.
+            forwarder.pending = Some(targets);
+            if forwarder.flushing {
+                return;
+            }
+            forwarder.flushing = true;
+            sender
+        };
+
+        self.spawn_target_flush(sender);
     }
 
     fn spawn_completion_watcher(&self, completion: oneshot::Receiver<Result<(), D::SyncError>>) {
         let readiness = self.readiness.clone();
         let state = self.state.clone();
+        let target_forwarder = self.target_forwarder.clone();
 
         self.context
             .clone()
@@ -183,6 +302,8 @@ where
                     Ok(Ok(())) => {
                         readiness.mark_ready();
                         *state.lock() = State::Ready;
+                        let mut forwarder = target_forwarder.lock();
+                        forwarder.transition_to_idle();
                     }
                     Ok(Err(err)) => panic!("state sync failed: {err:?}"),
                     Err(err) => panic!("state sync completion channel closed: {err}"),
@@ -201,23 +322,18 @@ where
                 State::Disabled | State::Ready => UpdateAction::None,
                 State::Waiting(launch_config) => {
                     let sync_handle = self.launch_sync(launch_config, targets.clone());
-                    *state = State::Running(sync_handle.target_updates.clone());
+                    self.set_target_sender(sync_handle.target_updates);
+                    *state = State::Running;
                     UpdateAction::Started(sync_handle.completion)
                 }
-                State::Running(target_updates) => UpdateAction::Forward(target_updates.clone()),
+                State::Running => UpdateAction::Forward(targets),
             }
         };
 
         match action {
             UpdateAction::None => {}
             UpdateAction::Started(completion) => self.spawn_completion_watcher(completion),
-            UpdateAction::Forward(target_updates) => {
-                let send_result = target_updates.send(targets).await;
-                assert!(
-                    send_result.is_ok() || self.readiness.is_ready(),
-                    "state sync target channel closed before readiness"
-                );
-            }
+            UpdateAction::Forward(targets) => self.enqueue_target_update(targets),
         }
     }
 }
@@ -346,7 +462,12 @@ mod tests {
             assert_eq!(databases.started_with(), vec![10]);
 
             coordinator.update_targets(11).await;
-            context.sleep(Duration::from_millis(1)).await;
+            for _ in 0..5 {
+                if databases.forwarded_updates() == vec![11] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
             assert_eq!(databases.forwarded_updates(), vec![11]);
 
             databases.complete_sync();
@@ -356,6 +477,78 @@ mod tests {
                 _ = coordinator.wait_until_ready() => {},
                 _ = context.sleep(Duration::from_millis(1)) => {
                     panic!("readiness was not signaled after sync completion");
+                },
+            }
+        });
+    }
+
+    #[derive(Clone, Default)]
+    struct MockBackpressuredDatabaseSet {
+        started_with: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl DatabaseSet for MockBackpressuredDatabaseSet {
+        type Unmerkleized = ();
+        type Merkleized = ();
+
+        async fn new_batches(&self) -> Self::Unmerkleized {}
+
+        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+
+        async fn finalize(&self, _batches: Self::Merkleized) {}
+    }
+
+    impl SyncableDatabaseSet for MockBackpressuredDatabaseSet {
+        type SyncConfigs = ();
+        type SyncResolvers = ();
+        type SyncTargets = u64;
+        type SyncError = MockSyncError;
+
+        fn start_sync<RT>(
+            &self,
+            _context: RT,
+            _sync_configs: Self::SyncConfigs,
+            _sync_resolvers: Self::SyncResolvers,
+            initial_targets: Self::SyncTargets,
+        ) -> Result<SyncHandle<Self::SyncTargets, Self::SyncError>, Self::SyncError>
+        where
+            RT: Rng + Spawner + Metrics + Clock,
+        {
+            self.started_with.lock().push(initial_targets);
+            let (target_updates, _target_updates_rx) = mpsc::channel(1);
+            let (_completion_sender, completion) = oneshot::channel();
+
+            Ok(SyncHandle {
+                target_updates,
+                completion,
+            })
+        }
+    }
+
+    #[test]
+    fn sync_target_updates_do_not_block_report_path_under_backpressure() {
+        deterministic::Runner::default().start(|context| async move {
+            let databases = MockBackpressuredDatabaseSet::default();
+            let coordinator = Coordinator::new(
+                context.clone(),
+                databases,
+                Some(Config {
+                    sync_configs: (),
+                    sync_resolvers: (),
+                    initial_targets: None,
+                }),
+            );
+
+            coordinator.update_targets(10).await;
+
+            // Fill the bounded target-update channel.
+            coordinator.update_targets(11).await;
+            context.sleep(Duration::from_millis(1)).await;
+
+            select! {
+                _ = coordinator.update_targets(12) => {},
+                _ = context.sleep(Duration::from_millis(1)) => {
+                    panic!("target update blocked while channel was backpressured");
                 },
             }
         });

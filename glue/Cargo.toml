@@ -21,6 +21,9 @@ commonware-utils.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 
+[dev-dependencies]
+commonware-codec.workspace = true
+
 [features]
 mocks = [
 	"commonware-consensus/mocks",

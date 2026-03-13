@@ -1386,6 +1386,7 @@ dependencies = [
 name = "commonware-glue"
 version = "2026.3.0"
 dependencies = [
+ "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
