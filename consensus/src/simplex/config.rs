@@ -16,8 +16,8 @@ use std::{num::NonZeroUsize, time::Duration};
 /// that did not vote in a notarization certificate.
 ///
 /// Forwarding is a best-effort liveness aid: when enabled, the batcher
-/// broadcasts immediately to all active missing peers once a notarization
-/// is accepted or constructed.
+/// broadcasts immediately to all silent peers once a notarization is
+/// accepted or constructed.
 ///
 /// While currently only two options are available, this type is reserved
 /// as an enum to allow for more sophisticated policies in the future.
@@ -26,19 +26,14 @@ pub enum ForwardingPolicy {
     /// Do nothing when notified of missing voters.
     #[default]
     Disabled,
-    /// Forward the block to all active participants that did not vote.
-    All,
+    /// Forward the block to all participants that did not vote.
+    Silent,
 }
 
 impl ForwardingPolicy {
-    /// Returns true if the policy is disabled.
-    pub const fn is_disabled(&self) -> bool {
-        matches!(self, Self::Disabled)
-    }
-
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
-        matches!(self, Self::All)
+        matches!(self, Self::Silent)
     }
 }
 

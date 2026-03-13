@@ -186,18 +186,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Identity key of a network participant.
         type PublicKey: PublicKey;
 
-        /// Strategy for how a payload should be disseminated.
+        /// Directive for how a payload should be broadcast.
         ///
-        /// Consensus mechanisms that need rich dissemination control (e.g. distinguishing
-        /// proposals from targeted forwards) define a custom enum here. Mechanisms that
+        /// Consensus mechanisms that need broadcast control (e.g. distinguishing
+        /// initial broadcast from rebroadcasts) define a custom enum here. Mechanisms that
         /// treat every broadcast identically can set this to `()`.
-        type Dissemination: Send;
+        type Plan: Send;
 
         /// Broadcast a payload to the given recipients.
         fn broadcast(
             &mut self,
             payload: Self::Digest,
-            dissemination: Self::Dissemination,
+            plan: Self::Plan,
         ) -> impl Future<Output = ()> + Send;
     }
 

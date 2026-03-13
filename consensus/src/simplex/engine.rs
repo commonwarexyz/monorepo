@@ -5,7 +5,7 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{
-    simplex::{scheme::Scheme, Dissemination},
+    simplex::{scheme::Scheme, Plan},
     CertifiableAutomaton, Relay, Reporter,
 };
 use commonware_cryptography::Digest;
@@ -26,7 +26,7 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
@@ -49,7 +49,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
     > Engine<E, S, L, B, D, A, R, F, T>

@@ -7,7 +7,7 @@ use crate::{
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
-        Dissemination,
+        Plan,
     },
     types::{Epoch, Participant, View, ViewDelta},
     Epochable, Relay, Reporter, Viewable,
@@ -86,7 +86,7 @@ where
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     Re: Reporter<Activity = Activity<S, D>>,
-    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Dissemination = Dissemination<S::PublicKey>>,
+    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
@@ -177,7 +177,7 @@ where
 
     /// Resolves the public keys of `missing` participants for a targeted
     /// block forward. Returns `None` when no peers need the block.
-    fn forwarding_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
+    fn resolve_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
         let peers: Vec<_> = missing
             .iter()
             .filter_map(|&p| self.participants.key(p).cloned())
@@ -185,48 +185,20 @@ where
         (!peers.is_empty()).then_some(peers)
     }
 
-    /// Broadcasts a targeted block forward to the selected peers.
-    async fn broadcast_forward(&mut self, proposal: Proposal<D>, peers: Vec<S::PublicKey>) {
+    /// Forwards a proposal to the requested peers.
+    async fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
+        let Some(peers) = self.resolve_peers(&missing) else {
+            return;
+        };
         self.relay
             .broadcast(
                 proposal.payload,
-                Dissemination::Forward {
+                Plan::Forward {
                     round: proposal.round,
                     peers,
                 },
             )
             .await;
-    }
-
-    /// Returns missing voters that have been active recently enough to justify
-    /// a targeted forward.
-    fn active_missing_voters(
-        &self,
-        work: &BTreeMap<View, Round<S, B, D, Re>>,
-        candidates: Vec<Participant>,
-    ) -> Vec<Participant> {
-        let skip_timeout = self.skip_timeout.get() as usize;
-        candidates
-            .into_iter()
-            .filter(|&participant| {
-                work.iter()
-                    .rev()
-                    .take(skip_timeout)
-                    .any(|(_, round)| round.is_active(participant))
-            })
-            .collect()
-    }
-
-    /// Broadcasts a block forward for a notarized proposal to all active
-    /// missing peers.
-    async fn forward_notarization(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
-        if self.forwarding.is_disabled() || missing.is_empty() {
-            return;
-        }
-        let Some(peers) = self.forwarding_peers(&missing) else {
-            return;
-        };
-        self.broadcast_forward(proposal, peers).await;
     }
 
     /// Returns true if the leader has nullified the current view
@@ -407,16 +379,17 @@ where
                         // Store and forward to voter
                         let round = work.entry(view).or_insert_with(|| self.new_round());
                         round.set_notarization(notarization.clone());
-                        let forward_candidates = self.forwarding.is_enabled().then(|| {
-                            let candidates = round.missing_voters(&notarization.proposal);
-                            (notarization.proposal.clone(), candidates)
+                        let missing_voters = self.forwarding.is_enabled().then(|| {
+                            let participants = round.missing_voters(&notarization.proposal);
+                            (notarization.proposal.clone(), participants)
                         });
                         voter
                             .recovered(Certificate::Notarization(notarization))
                             .await;
-                        if let Some((proposal, candidates)) = forward_candidates {
-                            let missing = self.active_missing_voters(&work, candidates);
-                            self.forward_notarization(proposal, missing).await;
+
+                        // Forward proposal to missing voters
+                        if let Some((proposal, participants)) = missing_voters {
+                            self.forward_proposal(proposal, participants).await;
                         }
                     }
                     Certificate::Nullification(nullification) => {
@@ -602,19 +575,20 @@ where
                 }
 
                 // Try to construct and forward certificates
-                let mut forward_candidates = None;
+                let mut missing_voters = None;
                 if let Some(notarization) = self
                     .recover_latency
                     .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
                 {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
-                    // Collect candidates while we still hold `round`.
+                    // Collect missing voters for proposal forwarding
                     if self.forwarding.is_enabled() {
-                        let candidates = round.missing_voters(&notarization.proposal);
-                        forward_candidates = Some((notarization.proposal.clone(), candidates));
+                        let participants = round.missing_voters(&notarization.proposal);
+                        missing_voters = Some((notarization.proposal.clone(), participants));
                     }
 
+                    // Forward notarization to voter
                     voter
                         .recovered(Certificate::Notarization(notarization))
                         .await;
@@ -638,10 +612,9 @@ where
                         .await;
                 }
 
-                // Filter candidates and emit forwarding.
-                if let Some((proposal, candidates)) = forward_candidates {
-                    let missing = self.active_missing_voters(&work, candidates);
-                    self.forward_notarization(proposal, missing).await;
+                // Forward proposal to missing voters
+                if let Some((proposal, participants)) = missing_voters {
+                    self.forward_proposal(proposal, participants).await;
                 }
 
                 // Drop any rounds that are no longer interesting

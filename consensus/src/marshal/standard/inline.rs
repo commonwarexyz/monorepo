@@ -55,7 +55,7 @@ use crate::{
         },
         Update,
     },
-    simplex::{types::Context, Dissemination},
+    simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
     VerifyingApplication,
@@ -423,15 +423,11 @@ where
 {
     type Digest = B::Digest;
     type PublicKey = S::PublicKey;
-    type Dissemination = Dissemination<S::PublicKey>;
+    type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(
-        &mut self,
-        digest: Self::Digest,
-        dissemination: Dissemination<S::PublicKey>,
-    ) {
-        match dissemination {
-            Dissemination::Propose => {
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+        match plan {
+            Plan::Propose => {
                 let Some((round, block)) = self.last_built.lock().take() else {
                     warn!("missing block to broadcast");
                     return;
@@ -447,7 +443,7 @@ where
                 }
                 self.marshal.proposed(round, block).await;
             }
-            Dissemination::Forward { round, peers } => {
+            Plan::Forward { round, peers } => {
                 self.marshal.forwarded(round, digest, peers).await;
             }
         }

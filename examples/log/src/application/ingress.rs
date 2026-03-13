@@ -1,5 +1,5 @@
 use commonware_consensus::{
-    simplex::{types::Context, Dissemination},
+    simplex::{types::Context, Plan},
     types::Epoch,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
@@ -83,9 +83,9 @@ impl<D: Digest> CAu for Mailbox<D> {
 impl<D: Digest> Re for Mailbox<D> {
     type Digest = D;
     type PublicKey = PublicKey;
-    type Dissemination = Dissemination<PublicKey>;
+    type Plan = Plan<PublicKey>;
 
-    async fn broadcast(&mut self, _: Self::Digest, _: Self::Dissemination) {
+    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd
