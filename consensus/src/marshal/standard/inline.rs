@@ -440,12 +440,25 @@ where
             .with_label("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
-                let available = select! {
-                    _ = tx.closed() => return,
-                    result = block_rx => result.is_ok(),
-                };
-                if available {
-                    tx.send_lossy(true);
+                select! {
+                    _ = tx.closed() => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping certification"
+                        );
+                    },
+                    result = block_rx => match result {
+                        Ok(_) => {
+                            tx.send_lossy(true);
+                        }
+                        Err(_) => {
+                            debug!(
+                                ?digest,
+                                reason = "failed to fetch block for certification",
+                                "skipping certification"
+                            );
+                        }
+                    },
                 }
             });
 
