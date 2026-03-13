@@ -333,16 +333,25 @@ where
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
-                let block = match block_request.await {
-                    Ok(block) => block,
-                    Err(_) => {
+                let block = select! {
+                    _ = tx.closed() => {
                         debug!(
-                            ?digest,
-                            reason = "failed to fetch block for verification",
+                            reason = "consensus dropped receiver",
                             "skipping verification"
                         );
                         return;
-                    }
+                    },
+                    result = block_request => match result {
+                        Ok(block) => block,
+                        Err(_) => {
+                            debug!(
+                                ?digest,
+                                reason = "failed to fetch block for verification",
+                                "skipping verification"
+                            );
+                            return;
+                        }
+                    },
                 };
                 available_blocks.lock().insert((context.round, digest));
 
