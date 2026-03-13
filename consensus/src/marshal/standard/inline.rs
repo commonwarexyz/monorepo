@@ -21,8 +21,10 @@
 //! [`crate::CertifiableBlock`].
 //!
 //! Because inline mode cannot recover consensus context from the block itself,
-//! certification reuses local `verify` results when available and otherwise
-//! falls back to waiting for block availability in marshal.
+//! certification prefers local `verify` results when available. It reuses an
+//! existing in-flight verification task, remembers completed local verification
+//! outcomes, and otherwise falls back to block availability in marshal without
+//! retrieving the full block.
 //!
 //! # Usage
 //!
@@ -327,9 +329,10 @@ where
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
+                let round = context.round;
                 let (mut keepalive_tx, _keepalive_rx) = oneshot::channel();
                 let block_request = marshal
-                    .subscribe_by_digest(Some(context.round), digest)
+                    .subscribe_by_digest(Some(round), digest)
                     .await;
                 let block = match block_request.await {
                     Ok(block) => block,
@@ -362,6 +365,7 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either an immediate reject or a valid
                         // re-proposal accepted without further ancestry checks.
+                        verification_tasks.finish(round, digest, valid);
                         task_tx.send_lossy(valid);
                         tx.send_lossy(valid);
                         return;
@@ -384,6 +388,7 @@ where
                     Some(valid) => valid,
                     None => return,
                 };
+                verification_tasks.finish(round, digest, application_valid);
                 task_tx.send_lossy(application_valid);
                 tx.send_lossy(application_valid);
             });
@@ -391,11 +396,12 @@ where
     }
 }
 
-/// Inline mode certifies from a local `verify` task when available.
+/// Inline mode certifies from local `verify` state when available.
 ///
 /// Unlike deferred/coding modes, inline verification cannot recover consensus
-/// context from block contents. If no local `verify` task exists, certification
-/// reduces to block availability in marshal.
+/// context from block contents. Certification therefore reuses local
+/// verification work when possible and otherwise falls back to marshal
+/// availability.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -414,8 +420,16 @@ where
             return task;
         }
 
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let (mut tx, rx) = oneshot::channel();
+        if let Some(result) = self.verification_tasks.outcome(round, &digest) {
+            tx.send_lossy(result);
+            return rx;
+        }
+
+        let block_rx = self
+            .marshal
+            .subscribe_available_by_digest(Some(round), digest)
+            .await;
         self.context
             .with_label("inline_certify")
             .with_attribute("round", round)
@@ -539,6 +553,79 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_certify_reuses_completed_verify_result() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            marshal.clone().proposed(parent_round, parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            let verify_rx = inline.verify(verify_context, digest).await;
+            assert!(
+                verify_rx.await.unwrap(),
+                "verify should complete successfully before certify"
+            );
+
+            let certify_rx = inline.certify(round, digest).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify should reuse the recorded local verify result"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not hang after local verify completed");
+                },
+            }
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_certify_succeeds_without_verify_task() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -589,16 +676,91 @@ mod tests {
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
-            context.sleep(Duration::from_millis(10)).await;
-
             let certify_rx = inline.certify(round, digest).await;
 
             select! {
                 result = certify_rx => {
-                    assert!(result.unwrap(), "certify should resolve once block is available in marshal");
+                    assert!(
+                        result.unwrap(),
+                        "certify should resolve once block availability is known"
+                    );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("certify should not hang when block is already available in marshal");
+                },
+            }
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_prefers_inflight_verify_result() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> =
+                MockVerifyingApp::with_verify_result(genesis.clone(), false);
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            marshal.clone().proposed(parent_round, parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            let verify_rx = inline.verify(verify_context, digest).await;
+            let certify_rx = inline.certify(round, digest).await;
+
+            assert!(
+                !verify_rx.await.unwrap(),
+                "verify should complete with the mocked rejection"
+            );
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.unwrap(),
+                        "certify should use the in-flight verify result instead of marshal availability"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve from the in-flight verify task");
                 },
             }
         });

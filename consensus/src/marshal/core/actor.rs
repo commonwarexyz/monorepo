@@ -167,8 +167,10 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<V: Variant> {
-    // The subscribers that are waiting for the block
-    subscribers: Vec<oneshot::Sender<V::Block>>,
+    // The subscribers that are waiting for the block contents.
+    block_subscribers: Vec<oneshot::Sender<V::Block>>,
+    // The subscribers that only care that the block exists.
+    availability_subscribers: Vec<oneshot::Sender<()>>,
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,
 }
@@ -417,8 +419,9 @@ where
             on_start => {
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain(|_, bs| {
-                    bs.subscribers.retain(|tx| !tx.is_closed());
-                    !bs.subscribers.is_empty()
+                    bs.block_subscribers.retain(|tx| !tx.is_closed());
+                    bs.availability_subscribers.retain(|tx| !tx.is_closed());
+                    !bs.block_subscribers.is_empty() || !bs.availability_subscribers.is_empty()
                 });
             },
             on_stopped => {
@@ -645,9 +648,24 @@ where
                         digest,
                         response,
                     } => {
-                        self.handle_subscribe(
+                        self.handle_subscribe_block(
                             round,
                             BlockSubscriptionKey::Digest(digest),
+                            response,
+                            &mut resolver,
+                            &mut waiters,
+                            &mut buffer,
+                        )
+                        .await;
+                    }
+                    Message::SubscribeAvailableByDigest {
+                        round,
+                        digest,
+                        response,
+                    } => {
+                        self.handle_subscribe_available(
+                            round,
+                            digest,
                             response,
                             &mut resolver,
                             &mut waiters,
@@ -660,7 +678,7 @@ where
                         commitment,
                         response,
                     } => {
-                        self.handle_subscribe(
+                        self.handle_subscribe_block(
                             round,
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
@@ -828,7 +846,7 @@ where
     }
 
     /// Handle a local subscription request for a block.
-    async fn handle_subscribe<Buf: Buffer<V>>(
+    async fn handle_subscribe_block<Buf: Buffer<V>>(
         &mut self,
         round: Option<Round>,
         key: BlockSubscriptionKeyFor<V>,
@@ -887,7 +905,7 @@ where
         }
         match self.block_subscriptions.entry(key) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().subscribers.push(response);
+                entry.get_mut().block_subscribers.push(response);
             }
             Entry::Vacant(entry) => {
                 let rx = match key {
@@ -904,7 +922,55 @@ where
                         .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
                 });
                 entry.insert(BlockSubscription {
-                    subscribers: vec![response],
+                    block_subscribers: vec![response],
+                    availability_subscribers: Vec::new(),
+                    _aborter: aborter,
+                });
+            }
+        }
+    }
+
+    /// Handle a local subscription request for block availability by digest.
+    async fn handle_subscribe_available<Buf: Buffer<V>>(
+        &mut self,
+        round: Option<Round>,
+        digest: <V::Block as Digestible>::Digest,
+        response: oneshot::Sender<()>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
+        buffer: &mut Buf,
+    ) {
+        if self.find_block_by_digest(buffer, digest).await.is_some() {
+            response.send_lossy(());
+            return;
+        }
+
+        if let Some(round) = round {
+            if round < self.last_processed_round {
+                return;
+            }
+            debug!(?round, ?digest, "requested block availability missing");
+            resolver
+                .fetch(Request::<V::Commitment>::Notarized { round })
+                .await;
+        }
+
+        let key = BlockSubscriptionKey::Digest(digest);
+        debug!(?round, ?digest, "registering availability subscriber");
+        match self.block_subscriptions.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().availability_subscribers.push(response);
+            }
+            Entry::Vacant(entry) => {
+                let rx = buffer.subscribe_by_digest(digest).await;
+                let waiter_key = key;
+                let aborter = waiters.push(async move {
+                    rx.await
+                        .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
+                });
+                entry.insert(BlockSubscription {
+                    block_subscribers: Vec::new(),
+                    availability_subscribers: vec![response],
                     _aborter: aborter,
                 });
             }
@@ -1179,16 +1245,22 @@ where
             .block_subscriptions
             .remove(&BlockSubscriptionKey::Digest(block.digest()))
         {
-            for subscriber in bs.subscribers.drain(..) {
+            for subscriber in bs.block_subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
+            }
+            for subscriber in bs.availability_subscribers.drain(..) {
+                subscriber.send_lossy(());
             }
         }
         if let Some(mut bs) = self
             .block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(V::commitment(block)))
         {
-            for subscriber in bs.subscribers.drain(..) {
+            for subscriber in bs.block_subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
+            }
+            for subscriber in bs.availability_subscribers.drain(..) {
+                subscriber.send_lossy(());
             }
         }
     }
