@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -65,15 +65,15 @@ fn bench_update(c: &mut Criterion) {
                             // Append random elements to MMR
                             let mut mmr = Mmr::new(&mut h);
                             let changeset = {
-                                let mut batch = UnmerkleizedBatch::new(&mmr);
+                                let mut builder = mmr.new_batch();
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = batch.add(&mut h, &digest);
+                                    let pos = builder.add(&mut h, &digest);
                                     let loc = Location::try_from(pos).expect("leaf position");
                                     leaf_locations.push(loc);
                                 }
-                                batch.merkleize(&mut h).finalize()
+                                builder.merkleize(&mut h).finalize()
                             };
                             mmr.apply(changeset).unwrap();
 
@@ -104,12 +104,12 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let changeset = {
-                                        let mut batch = UnmerkleizedBatch::new(&mmr);
+                                        let mut builder = mmr.new_batch();
                                         if let Some(ref p) = pool {
-                                            batch = batch.with_pool(Some(p.clone()));
+                                            builder = builder.with_pool(Some(p.clone()));
                                         }
-                                        batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&mut h).finalize()
+                                        builder.update_leaf_batched(&updates).unwrap();
+                                        builder.merkleize(&mut h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();
                                 }

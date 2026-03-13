@@ -5,11 +5,11 @@
 //!
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
-//! let merkleized = db.new_batch()
+//! let snapshot = db.new_batch()
 //!     .write(key, Some(value))
 //!     .merkleize(None).await?;
-//! let finalized = merkleized.finalize();
-//! db.apply_batch(finalized).await?;
+//! let changeset = snapshot.finalize();
+//! db.apply_batch(changeset).await?;
 //! db.commit().await?;
 //!
 //! // Use `sync()` instead of `commit()` if you want the stronger durability
@@ -23,11 +23,11 @@
 //!     .write(key_a, Some(val_a))
 //!     .merkleize(None).await?;
 //!
-//! let child_a = parent.new_batch()
+//! let child_a = parent.new_batch(&db)
 //!     .write(key_b, Some(val_b))
 //!     .merkleize(None).await?;
 //!
-//! let child_b = parent.new_batch()
+//! let child_b = parent.new_batch(&db)
 //!     .write(key_c, Some(val_c))
 //!     .merkleize(None).await?;
 //!
@@ -39,23 +39,25 @@
 //! ```ignore
 //! // Advanced usage: while the previous batch is being committed, concurrently build a child
 //! // batch from the newly published state.
-//! let parent_finalized = db.new_batch()
+//! let parent_changeset = db.new_batch()
 //!     .write(key_a, Some(val_a))
-//!     .merkleize(None).await?.finalize();
-//! db.apply_batch(parent_finalized).await?;
+//!     .merkleize(None).await?
+//!     .finalize();
+//! db.apply_batch(parent_changeset).await?;
 //!
-//! let (child_finalized, commit_result) = futures::join!(
+//! let (child_changeset, commit_result) = futures::join!(
 //!     async {
 //!         db.new_batch()
 //!             .write(key_b, Some(val_b))
-//!             .merkleize(None).await.map(|batch| batch.finalize())
+//!             .merkleize(None).await
+//!             .map(|snap| snap.finalize())
 //!     },
 //!     db.commit(),
 //! );
-//! let child_finalized = child_finalized?;
+//! let child_changeset = child_changeset?;
 //! commit_result?;
 //!
-//! db.apply_batch(child_finalized).await?;
+//! db.apply_batch(child_changeset).await?;
 //! db.commit().await?;
 //! ```
 //!
@@ -249,7 +251,10 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
 pub mod batch;
 pub mod db;
@@ -451,7 +456,7 @@ where
     Ok(db::Db {
         any,
         status,
-        grafted_mmr,
+        grafted_mmr: Arc::new(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -535,7 +540,7 @@ where
     Ok(db::Db {
         any,
         status,
-        grafted_mmr,
+        grafted_mmr: Arc::new(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool: pool,
         root,
@@ -1427,9 +1432,9 @@ pub mod tests {
             batch = batch.write(kb, Some(vb));
             let merkleized = batch.merkleize(None).await.unwrap();
 
-            assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
-            assert_eq!(merkleized.get(&kb).await.unwrap(), Some(vb));
-            assert_eq!(merkleized.get(&kc).await.unwrap(), None);
+            assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
+            assert_eq!(merkleized.get(&kb, &db).await.unwrap(), Some(vb));
+            assert_eq!(merkleized.get(&kc, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1455,7 +1460,7 @@ pub mod tests {
             let parent_m = parent.merkleize(None).await.unwrap();
 
             // Child batch writes keys 5..10 and overrides key 0.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             for i in 5..10 {
                 child = child.write(key(i), Some(val(i)));
             }
@@ -1465,9 +1470,9 @@ pub mod tests {
             let child_root = child_m.root();
 
             // Child get reads through all layers.
-            assert_eq!(child_m.get(&key(0)).await.unwrap(), Some(val(999)));
-            assert_eq!(child_m.get(&key(3)).await.unwrap(), Some(val(3)));
-            assert_eq!(child_m.get(&key(7)).await.unwrap(), Some(val(7)));
+            assert_eq!(child_m.get(&key(0), &db).await.unwrap(), Some(val(999)));
+            assert_eq!(child_m.get(&key(3), &db).await.unwrap(), Some(val(3)));
+            assert_eq!(child_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
             let finalized = child_m.finalize();
             db.apply_batch(finalized).await.unwrap();
@@ -1546,7 +1551,7 @@ pub mod tests {
                     assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
                     let mut child = db.new_batch();
                     child = child.write(key(1), Some(val(1)));
-                    child.merkleize(None).await.map(|batch| batch.finalize())
+                    child.merkleize(None).await.map(|snap| snap.finalize())
                 },
                 db.commit(),
             );

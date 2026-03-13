@@ -448,6 +448,145 @@ pub(crate) mod test {
         is_send(db.get_span(&key));
     }
 
+    /// Parent inserts a key, child inserts another; commit parent then
+    /// apply child via `finalize_from`. Verifies next-key pointers
+    /// are correct after both commits.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Seed with initial data so the ordered index is non-trivial.
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_snapshot();
+
+            // Parent batch: insert key_a.
+            let key_a = Digest::random(&mut test_rng_seeded(800));
+            let val_a = vec![1u8; 10];
+            let parent_snap = {
+                let batch = base.new_batch(&db).write(key_a, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child batch: insert key_b.
+            let key_b = Digest::random(&mut test_rng_seeded(801));
+            let val_b = vec![2u8; 10];
+            let child_snap = {
+                let batch = parent_snap.new_batch(&db).write(key_b, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_snap.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_snap.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // Both keys should be readable.
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Parent inserts key_x, child deletes key_x. After committing parent
+    /// then child via `finalize_from`, key_x should be gone and the
+    /// next-key ring should exclude it.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_delete_after_insert() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_snapshot();
+
+            let key_x = Digest::random(&mut test_rng_seeded(810));
+            let val_x = vec![10u8; 8];
+            let parent_snap = {
+                let batch = base.new_batch(&db).write(key_x, Some(val_x.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            let child_snap = {
+                let batch = parent_snap.new_batch(&db).write(key_x, None);
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_snap.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_snap.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // key_x should be deleted.
+            assert!(db.get(&key_x).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Parent and child both modify the same key. After committing parent
+    /// then child via `finalize_from`, the child's value wins.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_overlapping_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_snapshot();
+
+            let key_x = Digest::random(&mut test_rng_seeded(820));
+            let val_a = vec![10u8; 8];
+            let parent_snap = {
+                let batch = base.new_batch(&db).write(key_x, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            let val_b = vec![20u8; 8];
+            let child_snap = {
+                let batch = parent_snap.new_batch(&db).write(key_x, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_snap.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_snap.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;

@@ -1340,10 +1340,10 @@ pub(crate) mod test {
             batch = batch.write(kc, Some(vc));
             let merkleized = batch.merkleize(None).await.unwrap();
 
-            assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
-            assert_eq!(merkleized.get(&kb).await.unwrap(), None);
-            assert_eq!(merkleized.get(&kc).await.unwrap(), Some(vc));
-            assert_eq!(merkleized.get(&kd).await.unwrap(), None);
+            assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
+            assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
+            assert_eq!(merkleized.get(&kc, &db).await.unwrap(), Some(vc));
+            assert_eq!(merkleized.get(&kd, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1363,7 +1363,7 @@ pub(crate) mod test {
             batch = batch.write(ka, Some(val(0)));
             let merkleized = batch.merkleize(None).await.unwrap();
 
-            let mut child = merkleized.new_batch();
+            let mut child = merkleized.new_batch(&db);
             assert_eq!(child.get(&ka).await.unwrap(), Some(val(0)));
 
             child = child.write(ka, Some(val(100)));
@@ -1392,12 +1392,12 @@ pub(crate) mod test {
             let mut parent = db.new_batch();
             parent = parent.write(ka, None);
             let parent_m = parent.merkleize(None).await.unwrap();
-            assert_eq!(parent_m.get(&ka).await.unwrap(), None);
+            assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
 
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             child = child.write(ka, Some(val(200)));
             let child_m = child.merkleize(None).await.unwrap();
-            assert_eq!(child_m.get(&ka).await.unwrap(), Some(val(200)));
+            assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
             let finalized = child_m.finalize();
             db.apply_batch(finalized).await.unwrap();

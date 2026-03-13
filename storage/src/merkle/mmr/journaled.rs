@@ -14,7 +14,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        batch::{self, UnmerkleizedBatch},
+        batch::{self, MerkleizedBatch},
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
@@ -37,6 +37,7 @@ use core::ops::Range;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 use tracing::{debug, error, warn};
 
@@ -45,7 +46,11 @@ struct Inner<D: Digest> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D>,
+    ///
+    /// Stored behind an `Arc` so that [`Mmr::to_snapshot`] can cheaply create a
+    /// [`MerkleizedBatch::Base`] without cloning the entire tree. Mutation sites use
+    /// [`Arc::make_mut`] which is a no-op when the refcount is 1.
+    mem_mmr: Arc<MemMmr<D>>,
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
@@ -230,7 +235,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             )?;
             return Ok(Self {
                 inner: RwLock::new(Inner {
-                    mem_mmr,
+                    mem_mmr: Arc::new(mem_mmr),
                     pruned_to_pos: Position::new(0),
                 }),
                 journal,
@@ -363,7 +368,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                mem_mmr,
+                mem_mmr: Arc::new(mem_mmr),
                 pruned_to_pos: effective_prune_pos,
             }),
             journal,
@@ -475,7 +480,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                mem_mmr,
+                mem_mmr: Arc::new(mem_mmr),
                 pruned_to_pos: prune_pos,
             }),
             journal,
@@ -539,7 +544,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         let journal_size = Position::new(self.journal.size().await);
 
-        // Snapshot nodes in the mem_mmr that are missing from the journal, along with the pinned
+        // Nodes in the mem_mmr that are missing from the journal, along with the pinned
         // node set for the current pruning boundary.
         let (sync_target_leaves, missing_nodes, pinned_nodes) = {
             let inner = self.inner.read();
@@ -584,11 +589,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // appends between the read lock above and this write lock.
         {
             let mut inner = self.inner.write();
-            inner
-                .mem_mmr
-                .prune(sync_target_leaves)
+            // Clones the entire in-memory MMR if a snapshot (from `to_snapshot`)
+            // currently holds a reference. No-op when refcount is 1.
+            let mmr = Arc::make_mut(&mut inner.mem_mmr);
+            mmr.prune(sync_target_leaves)
                 .expect("captured leaves is in bounds");
-            inner.mem_mmr.add_pinned_nodes(pinned_nodes);
+            mmr.add_pinned_nodes(pinned_nodes);
         }
 
         Ok(())
@@ -622,7 +628,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         self.journal.prune(*pos).await?;
         let inner = self.inner.get_mut();
-        inner.mem_mmr.add_pinned_nodes(pinned_nodes);
+        // Clones the entire in-memory MMR if a snapshot currently holds a
+        // reference. No-op when refcount is 1 (the common case after sync).
+        Arc::make_mut(&mut inner.mem_mmr).add_pinned_nodes(pinned_nodes);
         inner.pruned_to_pos = pos;
 
         Ok(())
@@ -795,13 +803,26 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// the same parent for speculative execution, but only one may be applied.
     /// Applying a stale changeset returns [`Error::StaleChangeset`].
     pub fn apply(&mut self, changeset: batch::Changeset<D>) -> Result<(), Error> {
-        self.inner.get_mut().mem_mmr.apply(changeset)?;
+        // Clones the entire in-memory MMR if a snapshot currently holds a
+        // reference. No-op when refcount is 1.
+        Arc::make_mut(&mut self.inner.get_mut().mem_mmr).apply(changeset)?;
         Ok(())
     }
 
-    /// Create a new speculative batch with this MMR as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, D, Self> {
-        UnmerkleizedBatch::new(self).with_pool(self.pool())
+    /// Create a [`batch::UnmerkleizedBatch`] to accumulate mutations on the current state.
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<D> {
+        let builder = self.to_snapshot().new_batch();
+        #[cfg(feature = "std")]
+        let builder = builder.with_pool(self.pool());
+        builder
+    }
+
+    /// Create an owned [`MerkleizedBatch`] representing the current committed state.
+    ///
+    /// This is O(1) -- it clones the `Arc` around the in-memory MMR, not the
+    /// MMR itself.
+    pub fn to_snapshot(&self) -> MerkleizedBatch<D> {
+        MerkleizedBatch::Base(Arc::clone(&self.inner.read().mem_mmr))
     }
 
     /// Return the thread pool, if any.
@@ -860,7 +881,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         if new_size
             >= Position::try_from(inner.mem_mmr.bounds().start).expect("valid mem bounds start")
         {
-            inner.mem_mmr.truncate(new_size, hasher);
+            // Clones the entire in-memory MMR if a snapshot currently holds a
+            // reference. No-op when refcount is 1.
+            Arc::make_mut(&mut inner.mem_mmr).truncate(new_size, hasher);
         } else {
             let mut pinned_nodes = Vec::new();
             for pos in nodes_to_pin(new_size) {
@@ -868,9 +891,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                     Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
                 );
             }
-            inner.mem_mmr = MemMmr::from_components(hasher, vec![], destination_loc, pinned_nodes)?;
+            // Replaces the MMR entirely; old snapshots retain the previous Arc.
+            inner.mem_mmr = Arc::new(MemMmr::from_components(
+                hasher,
+                vec![],
+                destination_loc,
+                pinned_nodes,
+            )?);
+            // Refcount is 1 here (just created), so this is always in-place.
             Self::add_extra_pinned_nodes(
-                &mut inner.mem_mmr,
+                Arc::make_mut(&mut inner.mem_mmr),
                 &self.metadata,
                 &self.journal,
                 inner.pruned_to_pos,
@@ -2867,7 +2897,6 @@ mod tests {
 
             // Flatten and apply.
             let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.root(), expected_root);
 

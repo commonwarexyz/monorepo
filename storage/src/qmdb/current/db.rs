@@ -38,6 +38,7 @@ use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, 
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
+use std::sync::Arc;
 use tracing::{error, warn};
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
@@ -68,7 +69,12 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
+    ///
+    /// Stored behind an `Arc` so that `new_batch` / `to_snapshot` can
+    /// cheaply share the MMR with speculative snapshots. `apply_batch` uses
+    /// `Arc::make_mut`, which clones the entire grafted MMR only if a
+    /// snapshot currently holds a reference; otherwise it mutates in place.
+    pub(super) grafted_mmr: Arc<mmr::mem::Mmr<H::Digest>>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -144,7 +150,7 @@ where
     /// height, the ops MMR is used.
     fn grafted_storage(&self) -> impl mmr::storage::Storage<Digest = H::Digest> + '_ {
         grafting::Storage::new(
-            &self.grafted_mmr,
+            self.grafted_mmr.as_ref(),
             grafting::height::<N>(),
             &self.any.log.mmr,
         )
@@ -168,28 +174,16 @@ where
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(
-        &self,
-    ) -> super::batch::UnmerkleizedBatch<
-        '_,
-        E,
-        C,
-        I,
-        H,
-        U,
-        mmr::journaled::Mmr<E, H::Digest>,
-        mmr::mem::Mmr<H::Digest>,
-        BitMap<N>,
-        N,
-    > {
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, E, C, I, H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
             self,
             Vec::new(),
             Vec::new(),
-            &self.grafted_mmr,
-            &self.status,
+            // O(1): shares the grafted MMR Arc with the batch.
+            mmr::batch::MerkleizedBatch::Base(Arc::clone(&self.grafted_mmr)),
+            // O(chunks): copies all bitmap chunks into a materialized snapshot.
+            Arc::new(super::batch::BitmapSnapshot::from_bitmap(&self.status)),
         )
     }
 
@@ -393,7 +387,10 @@ where
         }
 
         // 4. Apply precomputed grafted MMR changeset from merkleize().
-        self.grafted_mmr.apply(batch.grafted_changeset)?;
+        // Clones the entire grafted MMR if a snapshot currently holds a
+        // reference (i.e. speculative batches are still alive). No-op when
+        // refcount is 1.
+        Arc::make_mut(&mut self.grafted_mmr).apply(batch.grafted_changeset)?;
 
         // 5. Prune bitmap chunks fully below the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc);
@@ -403,7 +400,8 @@ where
         if pruned_chunks > 0 {
             let prune_loc = Location::new(pruned_chunks);
             if prune_loc > self.grafted_mmr.bounds().start {
-                self.grafted_mmr.prune(prune_loc)?;
+                // Same clone-on-shared semantics as the apply above.
+                Arc::make_mut(&mut self.grafted_mmr).prune(prune_loc)?;
             }
         }
 

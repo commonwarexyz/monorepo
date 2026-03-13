@@ -19,11 +19,11 @@
 //! let _ = parent.append(value_a);
 //! let parent = parent.merkleize(None);
 //!
-//! let mut child_a = parent.new_batch();
+//! let mut child_a = parent.new_batch(&db);
 //! let _ = child_a.append(value_b);
 //! let child_a = child_a.merkleize(None);
 //!
-//! let mut child_b = parent.new_batch();
+//! let mut child_b = parent.new_batch(&db);
 //! let _ = child_b.append(value_c);
 //! let child_b = child_b.merkleize(None);
 //!
@@ -61,10 +61,7 @@ use crate::{
             Contiguous, Reader,
         },
     },
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, Proof,
-    },
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{any::VariableValue, operation::Committable, Error},
 };
 use commonware_cryptography::Hasher;
@@ -285,17 +282,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, H::Digest>> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H> {
         let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch {
-            keyless: self,
-            journal_batch: self.journal.new_batch(),
-            appends: Vec::new(),
-            base_operations: Vec::new(),
-            base_size: journal_size,
-            db_size: journal_size,
-        }
+        batch::UnmerkleizedBatch::new(self, journal_size)
     }
 
     /// Apply a changeset to the database.
@@ -1232,7 +1221,7 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
 
             // Child appends v2.
@@ -1338,18 +1327,18 @@ mod test {
 
             // Read base DB value through merkleized batch.
             assert_eq!(
-                merkleized.get(Location::new(1)).await.unwrap(),
+                merkleized.get(Location::new(1), &db).await.unwrap(),
                 Some(base_val),
             );
 
             // Read this batch's append from the operation chain.
             assert_eq!(
-                merkleized.get(Location::new(3)).await.unwrap(),
+                merkleized.get(Location::new(3), &db).await.unwrap(),
                 Some(new_val),
             );
 
             // Commit op returns None (no metadata).
-            assert_eq!(merkleized.get(Location::new(4)).await.unwrap(), None);
+            assert_eq!(merkleized.get(Location::new(4), &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1377,7 +1366,7 @@ mod test {
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             let loc2 = child.append(v2.clone());
             let loc3 = child.append(v3.clone());
             let child_m = child.merkleize(None);
@@ -1554,26 +1543,26 @@ mod test {
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             let loc2 = child.append(v2.clone());
             let child_m = child.merkleize(None);
 
             // Child's MerkleizedBatch can read all three layers:
             // base DB value
             assert_eq!(
-                child_m.get(base_loc).await.unwrap(),
+                child_m.get(base_loc, &db).await.unwrap(),
                 Some(base_val),
                 "should read base DB value"
             );
             // parent chain value
             assert_eq!(
-                child_m.get(loc1).await.unwrap(),
+                child_m.get(loc1, &db).await.unwrap(),
                 Some(v1),
                 "should read parent chain value"
             );
             // child's own value
             assert_eq!(
-                child_m.get(loc2).await.unwrap(),
+                child_m.get(loc2, &db).await.unwrap(),
                 Some(v2),
                 "should read child's own value"
             );
@@ -1687,12 +1676,12 @@ mod test {
 
             // Fork two children from the same parent.
             let child_a = {
-                let mut batch = parent_m.new_batch();
+                let mut batch = parent_m.new_batch(&db);
                 batch.append(vec![2]);
                 batch.merkleize(None).finalize()
             };
             let child_b = {
-                let mut batch = parent_m.new_batch();
+                let mut batch = parent_m.new_batch(&db);
                 batch.append(vec![3]);
                 batch.merkleize(None).finalize()
             };
@@ -1723,7 +1712,7 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             child.append(vec![2]);
             let child_changeset = child.merkleize(None).finalize();
 
@@ -1756,7 +1745,7 @@ mod test {
 
             // Child batch. Finalize both before applying either so the
             // borrow on `db` through `parent_m` is released.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             child.append(vec![2]);
             let child_changeset = child.merkleize(None).finalize();
             let parent_changeset = parent_m.finalize();

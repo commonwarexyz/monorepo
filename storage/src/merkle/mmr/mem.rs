@@ -18,24 +18,6 @@ use core::ops::Range;
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
-/// Sealed trait for MMR state types.
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid batch state types.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
-
-/// Marker type for a batch whose root digest has been computed.
-#[derive(Clone, Copy, Debug)]
-pub struct Clean<D: Digest> {
-    /// The root digest of the MMR after this batch has been applied.
-    pub root: D,
-}
-
-impl<D: Digest> private::Sealed for Clean<D> {}
-impl<D: Digest> State<D> for Clean<D> {}
-
 /// Marker type for an unmerkleized batch (root digest not computed).
 #[derive(Clone, Debug, Default)]
 pub struct Dirty {
@@ -44,9 +26,6 @@ pub struct Dirty {
     /// This is a set of tuples of the form (node_pos, height).
     dirty_nodes: BTreeSet<(Position, u32)>,
 }
-
-impl private::Sealed for Dirty {}
-impl<D: Digest> State<D> for Dirty {}
 
 impl Dirty {
     /// Insert a dirty node. Returns true if newly inserted.
@@ -94,8 +73,8 @@ pub struct Config<D: Digest> {
 /// # Mutation
 ///
 /// The MMR is always merkleized (its root is always computed). Mutations go through the
-/// batch API: create an [`super::batch::UnmerkleizedBatch`] via [`Self::new_batch`],
-/// accumulate changes, then apply the resulting [`super::batch::Changeset`] via [`Self::apply`].
+/// batch API: create a [`super::batch::UnmerkleizedBatch`] via [`Self::new_batch`], accumulate
+/// changes, then apply the resulting [`super::batch::Changeset`] via [`Self::apply`].
 #[derive(Clone, Debug)]
 pub struct Mmr<D: Digest> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -431,9 +410,23 @@ impl<D: Digest> Mmr<D> {
         self.pinned_nodes.clone()
     }
 
-    /// Create a new speculative batch with this MMR as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, D, Self> {
-        super::batch::UnmerkleizedBatch::new(self)
+    /// Create a new speculative [`super::batch::UnmerkleizedBatch`] with this MMR as its parent.
+    ///
+    /// This clones the entire MMR into an `Arc`. Prefer
+    /// [`new_batch_shared`](Self::new_batch_shared) when the MMR is already
+    /// behind an `Arc` to avoid the copy.
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<D> {
+        let snap = super::batch::MerkleizedBatch::Base(alloc::sync::Arc::new(self.clone()));
+        super::batch::UnmerkleizedBatch::new(snap)
+    }
+
+    /// Create a new speculative [`super::batch::UnmerkleizedBatch`] when this MMR is
+    /// already behind an [`Arc`](alloc::sync::Arc).
+    ///
+    /// This is O(1) -- it only clones the `Arc`.
+    pub fn new_batch_shared(self: &alloc::sync::Arc<Self>) -> super::batch::UnmerkleizedBatch<D> {
+        let snap = super::batch::MerkleizedBatch::Base(alloc::sync::Arc::clone(self));
+        super::batch::UnmerkleizedBatch::new(snap)
     }
 
     /// Apply a changeset produced by [`super::batch::MerkleizedBatch::finalize`].

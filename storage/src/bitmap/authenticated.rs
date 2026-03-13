@@ -13,7 +13,6 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        batch::UnmerkleizedBatch,
         hasher::Hasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr, MIN_TO_PARALLELIZE},
@@ -23,6 +22,7 @@ use crate::{
         Location, Position, Proof,
     },
 };
+use alloc::sync::Arc;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
@@ -128,7 +128,10 @@ pub struct BitMap<
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<D>,
+    ///
+    /// Stored behind an `Arc` so that [`Mmr::new_batch_shared`] can create a
+    /// [`crate::mmr::batch::UnmerkleizedBatch`] without cloning the entire tree.
+    mmr: Arc<Mmr<D>>,
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
@@ -327,7 +330,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
                 authenticated_len: 0,
-                mmr,
+                mmr: Arc::new(mmr),
                 pool,
                 metadata,
                 state: Merkleized { root: cached_root },
@@ -365,7 +368,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             bitmap,
             // Pruned chunks are already authenticated in the MMR
             authenticated_len: pruned_chunks,
-            mmr,
+            mmr: Arc::new(mmr),
             pool,
             metadata,
             state: Merkleized { root: cached_root },
@@ -423,7 +426,10 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         // Update authenticated length
         self.authenticated_len = self.complete_chunks();
 
-        self.mmr.prune(Location::new(chunk as u64))?;
+        // Clones the entire chunk-level MMR if a batch::UnmerkleizedBatch (from
+        // new_batch_shared) currently holds a reference. No-op when
+        // refcount is 1.
+        Arc::make_mut(&mut self.mmr).prune(Location::new(chunk as u64))?;
         Ok(())
     }
 
@@ -480,7 +486,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         }
 
         let range = chunk_loc..chunk_loc + 1;
-        let mut proof = verification::range_proof(hasher, &self.mmr, range).await?;
+        let mut proof = verification::range_proof(hasher, self.mmr.as_ref(), range).await?;
         proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
@@ -559,7 +565,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
-        let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
+        let mut batch = self.mmr.new_batch_shared().with_pool(self.pool.clone());
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
@@ -605,7 +611,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
 
         // Merkleize and apply.
         let changeset = batch.merkleize(hasher).finalize();
-        self.mmr.apply(changeset)?;
+        // Clones the entire chunk-level MMR if a batch::UnmerkleizedBatch currently holds
+        // a reference. No-op when refcount is 1.
+        Arc::make_mut(&mut self.mmr).apply(changeset)?;
 
         // Compute the bitmap root.
         let mmr_root = *self.mmr.root();

@@ -70,7 +70,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -250,7 +250,7 @@ where
     let current_db = db::Db {
         any,
         status,
-        grafted_mmr,
+        grafted_mmr: Arc::new(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
