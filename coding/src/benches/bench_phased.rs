@@ -1,4 +1,4 @@
-use commonware_coding::{Config, Scheme};
+use commonware_coding::{Config, PhasedScheme};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, NZU16};
 use criterion::{criterion_main, BatchSize, Criterion};
@@ -6,11 +6,10 @@ use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use shard_selection::SELECTIONS;
 
-mod reed_solomon;
 mod shard_selection;
-mod zoda;
+mod zoda_phased;
 
-pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
@@ -27,13 +26,11 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                     |b| {
                         b.iter_batched(
                             || {
-                                // Generate random data
                                 let mut data = vec![0u8; data_length];
                                 rng.fill_bytes(&mut data);
                                 data
                             },
                             |data| {
-                                // Encode data
                                 if conc > 1 {
                                     S::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
@@ -49,7 +46,7 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
@@ -70,48 +67,67 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                         |b| {
                             b.iter_batched(
                                 || {
-                                    // Generate random data
                                     let mut data = vec![0u8; data_length];
                                     rng.fill_bytes(&mut data);
 
-                                    // Encode data
-                                    let (commitment, shards) = if conc > 1 {
+                                    let (commitment, mut shards) = if conc > 1 {
                                         S::encode(&config, data.as_slice(), &strategy).unwrap()
                                     } else {
                                         S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                     };
 
+                                    let my_shard = shards.pop().unwrap();
                                     let indices = selection.indices(min);
-                                    let selected_shards: Vec<(u16, _)> = indices
+                                    let mut opt_shards: Vec<Option<_>> =
+                                        shards.into_iter().map(Some).collect();
+                                    let weak_shards: Vec<(u16, _)> = indices
                                         .iter()
                                         .map(|&i| {
-                                            (i, shards[i as usize].clone())
+                                            let shard = opt_shards[i as usize].take().unwrap();
+                                            let (_, _, weak_shard) =
+                                                S::weaken(&config, &commitment, i, shard).unwrap();
+                                            (i, weak_shard)
                                         })
                                         .collect();
 
-                                    let checked_shards: Vec<_> = selected_shards
-                                        .iter()
-                                        .map(|(idx, shard)| {
-                                            S::check(&config, &commitment, *idx, shard).unwrap()
-                                        })
-                                        .collect();
+                                    let my_index =
+                                        config.minimum_shards.get() + config.extra_shards.get() - 1;
+                                    let (checking_data, my_checked_shard, _) =
+                                        S::weaken(&config, &commitment, my_index, my_shard)
+                                            .unwrap();
 
-                                    (commitment, checked_shards)
+                                    (commitment, checking_data, my_checked_shard, weak_shards)
                                 },
-                                |(commitment, checked_shards)| {
-                                    // Decode data
+                                |(commitment, checking_data, my_checked_shard, weak_shards)| {
+                                    let mut checked_shards = weak_shards
+                                        .into_iter()
+                                        .map(|(idx, weak_shard)| {
+                                            S::check(
+                                                &config,
+                                                &commitment,
+                                                &checking_data,
+                                                idx,
+                                                weak_shard,
+                                            )
+                                            .unwrap()
+                                        })
+                                        .collect::<Vec<_>>();
+                                    checked_shards.push(my_checked_shard);
+
                                     if conc > 1 {
                                         S::decode(
                                             &config,
                                             &commitment,
+                                            checking_data,
                                             checked_shards.iter(),
                                             &strategy,
                                         )
-                                            .unwrap()
+                                        .unwrap()
                                     } else {
                                         S::decode(
                                             &config,
                                             &commitment,
+                                            checking_data,
                                             checked_shards.iter(),
                                             &Sequential,
                                         )
@@ -128,4 +144,4 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-criterion_main!(reed_solomon::benches, zoda::benches);
+criterion_main!(zoda_phased::benches);

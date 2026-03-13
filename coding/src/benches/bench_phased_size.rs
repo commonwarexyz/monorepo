@@ -1,5 +1,5 @@
 use commonware_codec::EncodeSize as _;
-use commonware_coding::{Config, PhasedAsScheme, ReedSolomon, Scheme, Zoda};
+use commonware_coding::{Config, PhasedScheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 
 const STRATEGY: Sequential = Sequential;
 
-fn bench_size<S: Scheme>(name: &str) {
+fn bench_size<S: PhasedScheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 22, 23, 24].map(|i| 2usize.pow(i));
 
@@ -26,14 +26,25 @@ fn bench_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (_, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-            let shard = &shards[0];
+            let (commitment, mut shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            let strong_shard = shards.pop().unwrap();
+            let my_index = config.minimum_shards.get() + config.extra_shards.get() - 1;
+            let (_, _, weak_shard) =
+                S::weaken(&config, &commitment, my_index, strong_shard.clone()).unwrap();
+
             println!(
-                "{} (shard)/msg_len={} chunks={}: {} B",
+                "{} (strong_shard)/msg_len={} chunks={}: {} B",
                 name,
                 data_length,
                 chunks,
-                shard.encode_size()
+                strong_shard.encode_size()
+            );
+            println!(
+                "{} (weak_shard)/msg_len={} chunks={}: {} B",
+                name,
+                data_length,
+                chunks,
+                weak_shard.encode_size()
             );
             println!();
         }
@@ -41,6 +52,5 @@ fn bench_size<S: Scheme>(name: &str) {
 }
 
 fn main() {
-    bench_size::<ReedSolomon<Sha256>>("reed_solomon size");
-    bench_size::<PhasedAsScheme<Zoda<Sha256>>>("zoda size");
+    bench_size::<Zoda<Sha256>>("zoda phased size");
 }
