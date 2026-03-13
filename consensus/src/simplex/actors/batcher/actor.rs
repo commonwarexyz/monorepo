@@ -74,6 +74,7 @@ where
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
     latest_vote: Family<Peer, Gauge>,
+    latest_seen: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
@@ -90,6 +91,8 @@ where
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
+        let participants = cfg.scheme.participants().clone();
+        let participant_count = participants.len();
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -112,7 +115,7 @@ where
             "view of latest vote received per peer",
             latest_vote.clone(),
         );
-        for participant in cfg.scheme.participants().iter() {
+        for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
         context.register(
@@ -139,7 +142,7 @@ where
             Self {
                 context: ContextCell::new(context),
 
-                participants: cfg.scheme.participants().clone(),
+                participants,
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
@@ -158,6 +161,7 @@ where
                 verified,
                 inbound_messages,
                 latest_vote,
+                latest_seen: vec![View::zero(); participant_count],
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -173,6 +177,36 @@ where
             self.blocker.clone(),
             self.reporter.clone(),
         )
+    }
+
+    /// Records the latest view message received from a participant.
+    ///
+    /// This mechanism is not resistant to malicious validators (nor is
+    /// it meant to be). If a peer sends us a certificate very far in the future,
+    /// we will record that as their latest activity (and not attempt to skip them).
+    fn record_activity(&mut self, sender: &S::PublicKey, view: View) {
+        let Some(participant) = self.participants.index(sender) else {
+            return;
+        };
+        let seen_view = &mut self.latest_seen[usize::from(participant)];
+        if *seen_view < view {
+            *seen_view = view;
+        }
+    }
+
+    /// Returns true if the participant has sent a recent message.
+    fn is_active(
+        &self,
+        work: &BTreeMap<View, Round<S, B, D, Re>>,
+        view: View,
+        participant: Participant,
+    ) -> bool {
+        if work.len() < self.skip_timeout.get() as usize {
+            return true;
+        }
+
+        let seen_view = self.latest_seen[usize::from(participant)];
+        view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
     }
 
     /// Resolves the public keys of `missing` participants for a targeted
@@ -279,30 +313,10 @@ where
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
+                    } else if !am_leader && !self.is_active(&work, current.view, leader) {
+                        Some(TimeoutReason::Inactivity)
                     } else {
-                        let skip_timeout = self.skip_timeout.get() as usize;
-                        if
-                        // Ensure we have enough data to judge activity (none of this
-                        // data may be in the last skip_timeout views if we jumped ahead
-                        // to a new view)
-                        work.len() >= skip_timeout
-                            // Leader not active in any recent round
-                            && !work
-                                .iter()
-                                .rev()
-                                .take(skip_timeout)
-                                .any(|(_, round)| round.is_active(leader))
-                        {
-                            // If we are the leader, we should attempt to build even if we haven't
-                            // been active recently
-                            if am_leader {
-                                None
-                            } else {
-                                Some(TimeoutReason::Inactivity)
-                            }
-                        } else {
-                            None
-                        }
+                        None
                     };
                     if timeout_reason.is_some() {
                         current.timed_out = true;
@@ -361,6 +375,7 @@ where
                 ) {
                     continue;
                 }
+                self.record_activity(&sender, view);
 
                 match message {
                     Certificate::Notarization(notarization) => {
@@ -470,6 +485,7 @@ where
                 if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
+                self.record_activity(&sender, view);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);

@@ -23,6 +23,7 @@
 //! Because verification is completed inline, the default
 //! [`CertifiableAutomaton::certify`] behavior (always `true`) is sufficient: no
 //! additional deferred verification state must be awaited at certify time.
+//! `certify` only waits for block availability in marshal.
 //!
 //! # Usage
 //!
@@ -72,8 +73,12 @@ use commonware_utils::{
 };
 use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tracing::{debug, warn};
+
+/// Tracks `(round, digest)` pairs for which `verify` has already fetched the
+/// block, so `certify` can return immediately without re-subscribing to marshal.
+type AvailableBlocks<D> = Arc<Mutex<BTreeSet<(Round, D)>>>;
 
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
 ///
@@ -105,6 +110,7 @@ where
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: LastBuilt<B>,
+    available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed<E>,
 }
@@ -141,6 +147,7 @@ where
             marshal,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
+            available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
         }
     }
@@ -316,12 +323,14 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let available_blocks = self.available_blocks.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
+                // If block can be fetched, mark it as available.
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
@@ -345,6 +354,7 @@ where
                         }
                     },
                 };
+                available_blocks.lock().insert((context.round, digest));
 
                 // Shared pre-checks:
                 // - Blocks are invalid if they are not in the expected epoch and are
@@ -373,6 +383,7 @@ where
 
                 // Non-reproposal path: fetch expected parent, validate ancestry, then
                 // run application verification over the ancestry stream.
+                //
                 // The helper returns `None` when work should stop early (for example,
                 // receiver closed or parent unavailable).
                 let application_valid = match verify_with_parent(
@@ -394,10 +405,7 @@ where
     }
 }
 
-/// Inline mode relies on the default certification behavior.
-///
-/// Verification is completed during [`Automaton::verify`], so certify does not
-/// need additional wrapper-managed checks.
+/// Inline mode only waits for block availability during certification.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -411,6 +419,50 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
+    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        // If block was already seen, return immediately.
+        if self.available_blocks.lock().contains(&(round, digest)) {
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(true);
+            return rx;
+        }
+
+        // Otherwise, subscribe to marshal for block availability.
+        //
+        // TODO(#3393): Avoid fetching the block just to check if it's available.
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let (mut tx, rx) = oneshot::channel();
+        self.context
+            .with_label("inline_certify")
+            .with_attribute("round", round)
+            .spawn(move |_| async move {
+                select! {
+                    _ = tx.closed() => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping certification"
+                        );
+                    },
+                    result = block_rx => match result {
+                        Ok(_) => {
+                            tx.send_lossy(true);
+                        }
+                        Err(_) => {
+                            debug!(
+                                ?digest,
+                                reason = "failed to fetch block for certification",
+                                "skipping certification"
+                            );
+                        }
+                    },
+                }
+            });
+
+        // We don't need to verify the block here because we could not have
+        // reached certification without a notarization (implying at least f+1
+        // honest validators have verified the block).
+        rx
+    }
 }
 
 impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
@@ -463,6 +515,9 @@ where
 
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
+        if let Update::Tip(round, _, _) = &update {
+            self.available_blocks.lock().retain(|(r, _)| r > round);
+        }
         self.application.report(update).await
     }
 }
@@ -471,12 +526,26 @@ where
 mod tests {
     use super::Inline;
     use crate::{
-        simplex::types::Context, Automaton, Block, CertifiableAutomaton, Relay,
-        VerifyingApplication,
+        marshal::mocks::{
+            harness::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
+                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+            },
+            verifying::MockVerifyingApp,
+        },
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+        types::{Epoch, FixedEpocher, Height, Round, View},
+        Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider, Scheme},
+        sha256::Sha256,
+        Digestible, Hasher as _,
+    };
+    use commonware_macros::{select, test_traced};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use rand::Rng;
+    use std::time::Duration;
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
@@ -500,5 +569,150 @@ mod tests {
         assert_automaton::<Inline<E, S, A, B, ES>>();
         assert_certifiable::<Inline<E, S, A, B, ES>>();
         assert_relay::<Inline<E, S, A, B, ES>>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_returns_immediately_after_verify_fetches_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Seed the parent and child blocks in marshal so verify can fetch locally.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            marshal.clone().proposed(parent_round, parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            // Complete verify first so the block is already available locally.
+            let verify_rx = inline.verify(verify_context, digest).await;
+            assert!(
+                verify_rx.await.unwrap(),
+                "verify should complete successfully before certify"
+            );
+
+            // Certify should return immediately instead of waiting on marshal.
+            let certify_rx = inline.certify(round, digest).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify should return immediately once verify has fetched the block"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not hang after local verify completed");
+                },
+            }
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_succeeds_without_verify_task() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut inline = Inline::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Seed the parent and child blocks in marshal without starting a verify task.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            marshal.clone().proposed(parent_round, parent).await;
+
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            // Certify should still resolve by waiting on marshal block availability directly.
+            let certify_rx = inline.certify(round, digest).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify should resolve once block availability is known"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should not hang when block is already available in marshal");
+                },
+            }
+        });
     }
 }
