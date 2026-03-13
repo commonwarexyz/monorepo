@@ -2,9 +2,7 @@ use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
-        interesting,
         metrics::{Leader, Timeout, TimeoutReason},
-        min_active,
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -171,20 +169,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.last_finalized
     }
 
-    /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
-    pub const fn min_active(&self) -> View {
-        min_active(self.activity_timeout, self.last_finalized)
+    /// Returns the lowest view that must remain in memory for activity tracking.
+    pub const fn activity_floor(&self) -> View {
+        self.last_finalized.saturating_sub(self.activity_timeout)
     }
 
-    /// Returns whether `pending` is still relevant for progress, optionally allowing future views.
-    pub fn is_interesting(&self, pending: View, allow_future: bool) -> bool {
-        interesting(
-            self.activity_timeout,
-            self.last_finalized,
-            self.view,
-            pending,
-            allow_future,
-        )
+    /// Returns whether a vote for `pending` is still relevant for progress.
+    pub fn is_interesting_vote(&self, pending: View) -> bool {
+        if pending.is_zero() {
+            return false;
+        }
+        if pending < self.activity_floor() {
+            return false;
+        }
+        pending <= self.view.next()
+    }
+
+    /// Returns whether a certificate for `pending` is relevant for progress.
+    pub fn is_interesting_certificate(&self, pending: View) -> bool {
+        if pending.is_zero() {
+            return false;
+        }
+        pending >= self.activity_floor()
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -631,7 +637,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
-        let min = self.min_active();
+        let min = self.activity_floor();
         let kept = self.views.split_off(&min);
         let removed = replace(&mut self.views, kept).into_keys().collect();
 
@@ -857,6 +863,48 @@ mod tests {
             assert!(state.broadcast_finalization(finalize_view).is_some());
             assert!(state.broadcast_finalization(finalize_view).is_none());
             assert!(state.finalization(finalize_view).is_some());
+        });
+    }
+
+    #[test]
+    fn interesting_helpers_enforce_floor_and_ceiling() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(11),
+                    activity_timeout: ViewDelta::new(2),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // floor = 20 - 2 = 18, vote ceiling = current.next() = 26
+            state.last_finalized = View::new(20);
+            state.view = View::new(25);
+
+            // Genesis is never interesting.
+            assert!(!state.is_interesting_vote(View::zero()));
+            assert!(!state.is_interesting_certificate(View::zero()));
+
+            // Floor applies to both vote and certificate paths.
+            assert!(!state.is_interesting_vote(View::new(17)));
+            assert!(!state.is_interesting_certificate(View::new(17)));
+            assert!(state.is_interesting_vote(View::new(18)));
+            assert!(state.is_interesting_certificate(View::new(18)));
+
+            // Vote path is ceiling-bounded; certificate path is not.
+            assert!(state.is_interesting_vote(View::new(26)));
+            assert!(!state.is_interesting_vote(View::new(27)));
+            assert!(state.is_interesting_certificate(View::new(27)));
+            assert!(state.is_interesting_certificate(View::new(10_000)));
         });
     }
 
@@ -1262,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn round_prunes_with_min_active() {
+    fn round_prunes_with_activity_floor() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();

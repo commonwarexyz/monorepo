@@ -345,38 +345,8 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::types::{View, ViewDelta};
-
-/// The minimum view we are tracking both in-memory and on-disk.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-    last_finalized.saturating_sub(activity_timeout)
-}
-
-/// Whether or not a view is interesting to us. This is a function
-/// of both `min_active` and whether or not the view is too far
-/// in the future (based on the view we are currently in).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn interesting(
-    activity_timeout: ViewDelta,
-    last_finalized: View,
-    current: View,
-    pending: View,
-    allow_future: bool,
-) -> bool {
-    // If the view is genesis, skip it, genesis doesn't have votes
-    if pending.is_zero() {
-        return false;
-    }
-    if pending < min_active(activity_timeout, last_finalized) {
-        return false;
-    }
-    if !allow_future && pending > current.next() {
-        return false;
-    }
-    true
-}
+#[cfg(test)]
+use crate::types::View;
 
 /// Convenience alias for [`N3f1::quorum`].
 #[cfg(test)]
@@ -410,7 +380,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Round},
+        types::{Epoch, Round, ViewDelta},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -448,91 +418,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    #[test]
-    fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
-
-        // Genesis view is never interesting
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::zero(),
-            View::zero(),
-            false
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(1),
-            View::zero(),
-            true
-        ));
-
-        // View below min_active is not interesting
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(5), // below min_active (10)
-            false
-        ));
-
-        // View at min_active boundary is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10), // exactly min_active
-            false
-        ));
-
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            true
-        ));
-
-        // View at current.next() is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(26),
-            false
-        ));
-
-        // View within valid range is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(22),
-            false
-        ));
-
-        // When last_finalized is 0 and activity_timeout would underflow
-        // min_active saturates at 0, so view 1 should still be interesting
-        assert!(interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(5),
-            View::new(1),
-            false
-        ));
-    }
 
     /// Register a validator with the oracle.
     async fn register_validator(

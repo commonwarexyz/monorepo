@@ -224,7 +224,7 @@ impl<
         }
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(self.state.min_active().get())
+                .prune(self.state.activity_floor().get())
                 .await
                 .expect("unable to prune journal");
         }
@@ -992,7 +992,7 @@ impl<
                 match msg {
                     Message::Proposal(proposal) => {
                         view = proposal.view();
-                        if !self.state.is_interesting(view, false) {
+                        if !self.state.is_interesting_vote(view) {
                             trace!(%view, "proposal is not interesting");
                             continue;
                         }
@@ -1004,7 +1004,7 @@ impl<
                     Message::Verified(certificate, from_resolver) => {
                         // Certificates can come from future views (they advance our view)
                         view = certificate.view();
-                        if !self.state.is_interesting(view, true) {
+                        if !self.state.is_interesting_certificate(view) {
                             trace!(%view, "certificate is not interesting");
                             continue;
                         }

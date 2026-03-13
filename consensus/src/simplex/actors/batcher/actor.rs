@@ -2,7 +2,6 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     simplex::{
         actors::voter,
-        interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
@@ -82,6 +81,21 @@ impl<
         T: Strategy,
     > Actor<E, S, B, D, R, T>
 {
+    fn is_interesting_vote(&self, finalized: View, current: View, pending: View) -> bool {
+        if pending.is_zero() {
+            return false;
+        }
+        let floor = finalized.saturating_sub(self.activity_timeout);
+        pending >= floor && pending <= current.next()
+    }
+
+    fn is_interesting_certificate(&self, finalized: View, pending: View) -> bool {
+        if pending.is_zero() {
+            return false;
+        }
+        pending >= finalized.saturating_sub(self.activity_timeout)
+    }
+
     pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
@@ -280,7 +294,7 @@ impl<
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                    if !self.is_interesting_vote(finalized, current.view, view) {
                         continue;
                     }
 
@@ -317,13 +331,7 @@ impl<
 
                 // Allow future certificates (they advance our view)
                 let view = message.view();
-                if !interesting(
-                    self.activity_timeout,
-                    finalized,
-                    current.view,
-                    view,
-                    true, // allow future
-                ) {
+                if !self.is_interesting_certificate(finalized, view) {
                     continue;
                 }
 
@@ -424,7 +432,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                if !self.is_interesting_vote(finalized, current.view, view) {
                     continue;
                 }
 
@@ -562,7 +570,7 @@ impl<
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.view, view, false)
+                    !self.is_interesting_vote(finalized, current.view, view)
                 }) {
                     work.pop_first();
                 }
