@@ -272,10 +272,18 @@ impl<D: Digest> Mmb<D> {
             });
         }
 
+        // 1. Overwrite: write modified digests into surviving base nodes.
+        for (pos, digest) in changeset.overwrites {
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+        }
+
+        // 2. Append: push new nodes onto the end.
         for digest in changeset.appended {
             self.nodes.push_back(digest);
         }
 
+        // 3. Update derived state.
         self.leaves = Location::try_from(self.size()).expect("invalid mmb size");
         self.refresh_pinned_nodes();
         self.root = changeset.root;
@@ -415,6 +423,8 @@ impl<D: Digest> super::batch::BatchChainInfo for Mmb<D> {
     fn base_size(&self) -> Position {
         self.size()
     }
+
+    fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 #[cfg(test)]
@@ -1019,5 +1029,154 @@ mod tests {
             matches!(result, Err(Error::StaleChangeset { .. })),
             "expected StaleChangeset for parent after child applied, got {result:?}"
         );
+    }
+
+    #[test]
+    fn test_update_leaf() {
+        let (mut hasher, mut mmb) = build_mmb(11);
+        let root_before = *mmb.root();
+
+        // Update leaf 5 with new data.
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            batch
+                .update_leaf(&mut hasher, Location::new(5), b"updated-5")
+                .unwrap();
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
+
+        // Root should change.
+        assert_ne!(*mmb.root(), root_before, "root should change after update");
+
+        // Size and leaves should not change.
+        assert_eq!(*mmb.leaves(), 11);
+
+        // The updated leaf should be provable with the new data.
+        let proof = mmb.proof(&mut hasher, Location::new(5)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(&mut hasher, b"updated-5", Location::new(5), mmb.root()),
+            "updated leaf should verify with new data"
+        );
+
+        // The old data should no longer verify.
+        assert!(
+            !proof.verify_element_inclusion(
+                &mut hasher,
+                &5u64.to_be_bytes(),
+                Location::new(5),
+                mmb.root()
+            ),
+            "old data should not verify"
+        );
+
+        // Other leaves should still verify with their original data.
+        for i in [0u64, 3, 7, 10] {
+            let p = mmb.proof(&mut hasher, Location::new(i)).unwrap();
+            assert!(
+                p.verify_element_inclusion(
+                    &mut hasher,
+                    &i.to_be_bytes(),
+                    Location::new(i),
+                    mmb.root()
+                ),
+                "leaf {i} should still verify with original data"
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_leaf_every_position() {
+        // Update each leaf one at a time and verify the entire tree after each update.
+        let n = 20u64;
+        let (mut hasher, mut mmb) = build_mmb(n);
+
+        for update_loc in 0..n {
+            let changeset = {
+                let mut batch = mmb.new_batch();
+                batch
+                    .update_leaf(&mut hasher, Location::new(update_loc), b"new-value")
+                    .unwrap();
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmb.apply(changeset).unwrap();
+
+            // The updated leaf should verify.
+            let proof = mmb.proof(&mut hasher, Location::new(update_loc)).unwrap();
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    b"new-value",
+                    Location::new(update_loc),
+                    mmb.root()
+                ),
+                "update at {update_loc} should verify"
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_leaf_errors() {
+        let (mut hasher, mut mmb) = build_mmb(10);
+
+        // Out of bounds.
+        {
+            let mut batch = mmb.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, Location::new(10), b"x"),
+                Err(Error::LeafOutOfBounds(_))
+            ));
+        }
+
+        // Pruned leaf.
+        mmb.prune(Location::new(5)).unwrap();
+        {
+            let mut batch = mmb.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, Location::new(3), b"x"),
+                Err(Error::ElementPruned(_))
+            ));
+            // Boundary leaf should succeed.
+            assert!(batch
+                .update_leaf(&mut hasher, Location::new(5), b"x")
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn test_update_leaf_with_append() {
+        let (mut hasher, mut mmb) = build_mmb(8);
+
+        // Update an existing leaf and append new ones in the same batch.
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            batch
+                .update_leaf(&mut hasher, Location::new(3), b"updated-3")
+                .unwrap();
+            batch.add(&mut hasher, &100u64.to_be_bytes());
+            batch.add(&mut hasher, &101u64.to_be_bytes());
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.leaves(), 10);
+
+        // Updated leaf verifies.
+        let proof = mmb.proof(&mut hasher, Location::new(3)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            b"updated-3",
+            Location::new(3),
+            mmb.root()
+        ));
+
+        // New leaves verify.
+        let proof = mmb.proof(&mut hasher, Location::new(8)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            &100u64.to_be_bytes(),
+            Location::new(8),
+            mmb.root()
+        ));
     }
 }
