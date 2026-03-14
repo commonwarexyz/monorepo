@@ -428,7 +428,7 @@ where
                 .collect();
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             proof.verify_proof_and_pinned_nodes(
-                &mut self.hasher,
+                &self.hasher,
                 &elements,
                 start_loc,
                 nodes,
@@ -436,7 +436,7 @@ where
             )
         } else {
             qmdb::verify_proof(
-                &mut self.hasher,
+                &self.hasher,
                 &proof,
                 start_loc,
                 &operations,

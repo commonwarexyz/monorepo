@@ -597,13 +597,13 @@ pub(crate) mod test {
             }
         }
 
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
+            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -686,9 +686,9 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         assert!(verify_proof(
-            &mut hasher,
+            &hasher,
             &historical_proof,
             start_loc,
             &historical_ops,
@@ -716,7 +716,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof2.digests, regular_proof.digests);
         assert_eq!(historical_ops2, regular_ops);
         assert!(verify_proof(
-            &mut hasher,
+            &hasher,
             &historical_proof2,
             start_loc,
             &historical_ops2,
@@ -758,7 +758,7 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), 4);
 
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
 
         // Changing the proof digests should cause verification to fail
         {
@@ -766,7 +766,7 @@ pub(crate) mod test {
             tampered_proof.digests[0] = Sha256::hash(b"invalid");
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -780,7 +780,7 @@ pub(crate) mod test {
             tampered_proof.digests.push(Sha256::hash(b"invalid"));
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -796,7 +796,7 @@ pub(crate) mod test {
             if tampered_ops.len() >= 2 {
                 tampered_ops.swap(0, 1);
                 assert!(!verify_proof(
-                    &mut hasher,
+                    &hasher,
                     &proof,
                     Location::new(1),
                     &tampered_ops,
@@ -811,7 +811,7 @@ pub(crate) mod test {
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &tampered_ops,
@@ -823,7 +823,7 @@ pub(crate) mod test {
         {
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(2),
                 &ops,
@@ -835,7 +835,7 @@ pub(crate) mod test {
         {
             let invalid_root = Sha256::hash(b"invalid");
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &ops,
@@ -849,7 +849,7 @@ pub(crate) mod test {
             tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,

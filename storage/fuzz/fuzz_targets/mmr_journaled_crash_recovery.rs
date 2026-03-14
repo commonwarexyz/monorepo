@@ -114,7 +114,7 @@ struct ExpectedBounds {
 
 async fn run_operations(
     mmr: &mut Mmr,
-    hasher: &mut StandardHasher<Sha256>,
+    hasher: &StandardHasher<Sha256>,
     operations: &[MmrOperation],
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
@@ -244,10 +244,10 @@ fn fuzz(input: FuzzInput) {
         let partition_suffix = partition_suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             let mut mmr = Mmr::init(
                 ctx.with_label("mmr"),
-                &mut hasher,
+                &hasher,
                 mmr_config(
                     &partition_suffix,
                     &ctx,
@@ -267,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
 
-            run_operations(&mut mmr, &mut hasher, &operations).await
+            run_operations(&mut mmr, &hasher, &operations).await
         }
     });
 
@@ -276,10 +276,10 @@ fn fuzz(input: FuzzInput) {
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let mut mmr = Mmr::init(
             ctx.with_label("recovered"),
-            &mut hasher,
+            &hasher,
             mmr_config(
                 &partition_suffix,
                 &ctx,
@@ -338,8 +338,8 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let changeset = {
             let mut batch = mmr.new_batch();
-            batch.add(&mut hasher, &test_data);
-            batch.merkleize(&mut hasher).finalize()
+            batch.add(&hasher, &test_data);
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         mmr.destroy().await.expect("Should be able to destroy MMR");
