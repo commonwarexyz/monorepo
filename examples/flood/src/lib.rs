@@ -1,4 +1,9 @@
-//! Spam peers deployed to AWS EC2 with random messages.
+//! This example demonstrates how to build an application that employs
+//! [commonware_p2p::authenticated::discovery] to flood peers deployed to AWS EC2 with random
+//! messages and measure delivery latency. Peers are identified using
+//! [commonware_cryptography::ed25519] key pairs and deployed across multiple AWS regions using
+//! [commonware_deployer]. Performance is tracked via Prometheus metrics and visualized with a
+//! Grafana dashboard.
 //!
 //! # Setup
 //!
