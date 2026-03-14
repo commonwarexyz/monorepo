@@ -33,8 +33,8 @@
 //! - Node 5 (a height-1 parent) has a birth leaf of 3 (it is appended immediately after Leaf 3).
 //! - Node 7 (a height-2 parent) has a birth leaf of 4 (it is appended immediately after Leaf 4).
 //!
-//! The _root digest_ (or just _root_) is computed by left-folding the peak digests from oldest to
-//! newest, starting from the hash of the leaf count.
+//! The _root digest_ (or just _root_) is computed as `Hash(leaves || fold(peaks))`, where `fold`
+//! left-folds peak digests from oldest to newest using `Hash(acc || peak)`.
 //!
 //! # Construction
 //!
@@ -101,26 +101,27 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The root hash is computed by left-folding the peaks from oldest to newest:
+//! The root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
 //!
 //! ```text
-//! acc_0 = Hash(8)                                             // leaf count
-//! acc_1 = Hash(acc_0,
-//!   Hash(7,                                                   // oldest peak (height 2)
-//!     Hash(2, Hash(0, element_0), Hash(1, element_1)),
-//!     Hash(5, Hash(3, element_2), Hash(4, element_3))
-//!   ))
-//! acc_2 = Hash(acc_1,
-//!   Hash(9, Hash(6, element_4), Hash(8, element_5)))          // middle peak (height 1)
-//! root  = Hash(acc_2,
-//!   Hash(12, Hash(10, element_6), Hash(11, element_7)))       // newest peak (height 1)
+//! peak1 = Hash(7,                                             // oldest peak (height 2)
+//!           Hash(2, Hash(0, element_0), Hash(1, element_1)),
+//!           Hash(5, Hash(3, element_2), Hash(4, element_3)))
+//! peak2 = Hash(9, Hash(6, element_4), Hash(8, element_5))    // middle peak (height 1)
+//! peak3 = Hash(12, Hash(10, element_6), Hash(11, element_7)) // newest peak (height 1)
+//!
+//! acc   = fold(peak1, peak2, peak3)
+//!       = Hash(Hash(peak1 || peak2) || peak3)
+//! root  = Hash(8 || acc)                                     // 8 = leaf count
 //! ```
 
+pub mod batch;
 pub mod iterator;
 pub mod mem;
 pub mod proof;
 
 use crate::merkle;
+pub use batch::{Changeset, MerkleizedBatch, Readable, UnmerkleizedBatch};
 
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
@@ -186,26 +187,45 @@ pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
 pub enum Error {
     /// Empty input where at least one element was required.
     Empty,
+    /// The requested MMB size is invalid.
+    InvalidSize(u64),
     /// A range end exceeds the number of leaves.
     RangeOutOfBounds(Location),
+    /// A requested leaf location exceeds the current leaf count.
+    LeafOutOfBounds(Location),
     /// A required node was not available (e.g. pruned).
     ElementPruned(Position),
+    /// The provided pinned node list does not match the expected pruning boundary.
+    InvalidPinnedNodes,
     /// Location exceeds the valid range.
     LocationOverflow(Location),
+    /// Changeset was created against a different MMB state.
+    StaleChangeset {
+        /// The size the changeset was built against.
+        expected: Position,
+        /// The current MMB size.
+        actual: Position,
+    },
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => write!(f, "empty"),
+            Self::InvalidSize(size) => write!(f, "invalid size: {size}"),
             Self::RangeOutOfBounds(loc) => {
                 write!(
                     f,
                     "range out of bounds: end location {loc} exceeds MMB size"
                 )
             }
+            Self::LeafOutOfBounds(loc) => write!(f, "leaf location out of bounds: {loc}"),
             Self::ElementPruned(pos) => write!(f, "element pruned: {pos}"),
+            Self::InvalidPinnedNodes => write!(f, "invalid pinned nodes"),
             Self::LocationOverflow(loc) => write!(f, "location {loc} > MAX_LOCATION"),
+            Self::StaleChangeset { expected, actual } => {
+                write!(f, "stale changeset: expected size {expected}, got {actual}")
+            }
         }
     }
 }
