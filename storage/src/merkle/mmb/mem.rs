@@ -1179,4 +1179,52 @@ mod tests {
             mmb.root()
         ));
     }
+
+    #[test]
+    fn test_add_then_update_leaf() {
+        // Regression test: calling add() before update_leaf() where the updated
+        // leaf falls within the merge parent's subtree must still produce correct
+        // roots. Previously, add() only marked the merge parent dirty, and
+        // mark_ancestors() returned early upon finding a dirty node, leaving
+        // intermediate ancestors unmarked.
+        let (mut hasher, mut mmb) = build_mmb(7);
+
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            // First, add a new leaf. This creates a merge parent.
+            batch.add(&mut hasher, &100u64.to_be_bytes());
+            // Then update an existing leaf within the merge parent's subtree.
+            batch
+                .update_leaf(&mut hasher, Location::new(6), b"updated-6")
+                .unwrap();
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.leaves(), 8);
+
+        // The updated leaf should verify.
+        let proof = mmb.proof(&mut hasher, Location::new(6)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(
+                &mut hasher,
+                b"updated-6",
+                Location::new(6),
+                mmb.root()
+            ),
+            "updated leaf 6 should verify"
+        );
+
+        // The new leaf should verify.
+        let proof = mmb.proof(&mut hasher, Location::new(7)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(
+                &mut hasher,
+                &100u64.to_be_bytes(),
+                Location::new(7),
+                mmb.root()
+            ),
+            "new leaf 7 should verify"
+        );
+    }
 }

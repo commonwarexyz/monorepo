@@ -272,7 +272,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     }
 
     /// Walk from a peak down to the target leaf, inserting each internal node on the path
-    /// into the dirty set. Stops early if a node is already dirty (its ancestors must be too).
+    /// into the dirty set.
     fn mark_ancestors(
         &mut self,
         pos: Position,
@@ -284,9 +284,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             return; // at the leaf itself
         }
 
-        if !self.state.insert(pos, height) {
-            return; // already dirty, ancestors must be too
-        }
+        self.state.insert(pos, height);
 
         let mid_leaf = leaf_start + (1u64 << (height - 1));
         let (left_leaf, right_leaf) = child_leaves(
