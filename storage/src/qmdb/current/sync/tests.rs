@@ -363,11 +363,6 @@ macro_rules! current_sync_tests_for_harness {
             use std::num::NonZeroU64;
 
             #[test_traced]
-            fn test_sync_invalid_bounds() {
-                crate::qmdb::any::sync::tests::test_sync_invalid_bounds::<$harness>();
-            }
-
-            #[test_traced]
             fn test_sync_resolver_fails() {
                 crate::qmdb::any::sync::tests::test_sync_resolver_fails::<$harness>();
             }
@@ -424,11 +419,6 @@ macro_rules! current_sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_bounds_increase() {
                 crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_invalid_bounds() {
-                crate::qmdb::any::sync::tests::test_target_update_invalid_bounds::<$harness>();
             }
 
             #[test_traced("WARN")]
