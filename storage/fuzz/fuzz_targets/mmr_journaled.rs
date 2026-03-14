@@ -94,14 +94,14 @@ fn historical_root(
     leaves: &[Vec<u8>],
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
-    let hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::Mmr::new(&hasher);
+    let mut hasher = Standard::<Sha256>::new();
+    let mut mmr = mem::Mmr::new(&mut hasher);
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch = batch.add(&hasher, element);
+            batch.add(&mut hasher, element);
         }
-        batch.merkleize(&hasher).finalize()
+        batch.merkleize(&mut hasher).finalize()
     };
     mmr.apply(changeset).unwrap();
     *mmr.root()
@@ -112,10 +112,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut leaves = Vec::new();
-        let hasher = Standard::<Sha256>::new();
+        let mut hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::init(
             context.clone(),
-            &hasher,
+            &mut hasher,
             test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
@@ -139,15 +139,16 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let changeset = mmr
-                        .new_batch()
-                        .add(&hasher, limited_data)
-                        .merkleize(&hasher)
-                        .finalize();
+                    let (loc, changeset) = {
+                        let mut batch = mmr.new_batch();
+                        let loc = batch.add(&mut hasher, limited_data);
+                        (loc, batch.merkleize(&mut hasher).finalize())
+                    };
                     mmr.apply(changeset).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
+                    assert_eq!(mmr.leaves() - 1, loc);
                 }
 
                 MmrJournaledOperation::AddBatched { items } => {
@@ -168,21 +169,23 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let leaves_before = mmr.leaves();
-                    let changeset = {
+                    let (locations, changeset) = {
                         let mut batch = mmr.new_batch();
-                        for item in &items {
-                            batch = batch.add(&hasher, item);
-                        }
-                        batch.merkleize(&hasher).finalize()
+                        let locations: Vec<_> = items
+                            .iter()
+                            .map(|item| batch.add(&mut hasher, item))
+                            .collect();
+                        (locations, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
 
-                    for (i, item) in items.iter().enumerate() {
+                    for (item, loc) in items.iter().zip(&locations) {
                         leaves.push(item.to_vec());
-                        historical_sizes.push(leaves_before + i as u64 + 1);
+                        // +1 for count.
+                        historical_sizes.push(*loc + 1);
                     }
+                    assert_eq!(mmr.leaves() - 1, *locations.last().unwrap());
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
@@ -197,10 +200,14 @@ fn fuzz(input: FuzzInput) {
                         if bounds.contains(&location) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                            if let Ok(proof) = mmr.proof(&hasher, location).await {
+                            if let Ok(proof) = mmr.proof(&mut hasher, location).await {
                                 let root = mmr.root();
-                                assert!(proof
-                                    .verify_element_inclusion(&hasher, element, location, &root,));
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    element,
+                                    location,
+                                    &root,
+                                ));
                             }
                         }
                     }
@@ -217,10 +224,10 @@ fn fuzz(input: FuzzInput) {
                             && end_loc < mmr.leaves()
                             && mmr.bounds().contains(&range.start)
                         {
-                            if let Ok(proof) = mmr.range_proof(&hasher, range.clone()).await {
+                            if let Ok(proof) = mmr.range_proof(&mut hasher, range.clone()).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_range_inclusion(
-                                    &hasher,
+                                    &mut hasher,
                                     &leaves[range.to_usize_range()],
                                     Location::new(start_loc),
                                     &root
@@ -244,13 +251,13 @@ fn fuzz(input: FuzzInput) {
                     let expected_root = historical_root(&leaves, requested_leaves);
 
                     let result = mmr
-                        .historical_range_proof(&hasher, requested_leaves, range.clone())
+                        .historical_range_proof(&mut hasher, requested_leaves, range.clone())
                         .await;
                     match result {
                         Ok(historical_proof) => {
-                            let verify_hasher = Standard::<Sha256>::new();
+                            let mut verify_hasher = Standard::<Sha256>::new();
                             assert!(historical_proof.verify_range_inclusion(
-                                &verify_hasher,
+                                &mut verify_hasher,
                                 &leaves[range.to_usize_range()],
                                 range.start,
                                 &expected_root
@@ -317,7 +324,7 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
-                        &hasher,
+                        &mut hasher,
                         test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
@@ -353,7 +360,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("sync")
                             .with_attribute("instance", restarts),
                         sync_config,
-                        &hasher,
+                        &mut hasher,
                     )
                     .await
                     {

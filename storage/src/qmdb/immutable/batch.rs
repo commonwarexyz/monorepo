@@ -3,11 +3,8 @@
 use super::Immutable;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    mmr::{
-        self,
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::BatchChainInfo,
+    mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, immutable::operation::Operation, Error},
     translator::Translator,
 };
@@ -39,7 +36,7 @@ where
     H: CHasher,
     T: Translator,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -75,7 +72,7 @@ where
     H: CHasher,
     T: Translator,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -120,7 +117,7 @@ where
     H: CHasher,
     T: Translator,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Set a key to a value.
@@ -200,7 +197,7 @@ where
     H: CHasher,
     T: Translator,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Return the speculative root.

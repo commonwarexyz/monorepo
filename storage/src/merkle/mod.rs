@@ -5,6 +5,7 @@
 //! its own constants and conversion formulas, while the shared arithmetic, codec, and comparison
 //! logic lives here.
 
+pub mod batch;
 pub mod hasher;
 mod location;
 pub mod mmb;
@@ -52,6 +53,10 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Compute positions of nodes that must be pinned when pruning to `prune_pos`
     /// in a structure of the given `size`.
     fn nodes_to_pin(size: Position<Self>, prune_pos: Position<Self>) -> Vec<Position<Self>>;
+
+    /// Return the positions of the left and right children of the node at `pos` with the
+    /// given `height`. The caller guarantees `height > 0` (leaves have no children).
+    fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
 }
 
 /// Errors from converting between `Position` and `Location`.
