@@ -199,10 +199,15 @@ where
     async fn run(mut self) {
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
+        let consumer = self.sender.clone();
 
         select_loop! {
             self.context,
             on_start => {
+                if self.sender.is_closed() {
+                    break;
+                }
+
                 // Drain completed decode tasks when:
                 // - the pool is at capacity (backpressure), or
                 // - the network receiver closed and we're flushing remaining tasks
@@ -214,22 +219,33 @@ where
                         saw_error = true;
                         break;
                     };
-                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
+                    if !Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await {
+                        break;
+                    }
                 }
                 if saw_error || (receiver_closed && decode_pool.is_empty()) {
                     break;
                 }
             },
             on_stopped => {},
+            _ = consumer.closed() => {
+                break;
+            },
             // Process decode completions as they arrive
             Ok(result) = decode_pool.next_completed() else break => {
-                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
+                if !Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await {
+                    break;
+                }
             },
             // Receive raw bytes and spawn a decode task on a shared (CPU) thread
             Ok((peer, bytes)) = self.receiver.recv() else {
                 receiver_closed = true;
                 continue;
             } => {
+                if self.sender.is_closed() {
+                    break;
+                }
+
                 let config = self.codec_config.clone();
                 let handle = self.context.clone().shared(true).spawn(|_| async move {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
@@ -244,14 +260,19 @@ where
         blocker: &mut B,
         sender: &mut mpsc::Sender<(P, V)>,
         result: (P, Result<V, commonware_codec::Error>),
-    ) {
+    ) -> bool {
+        if sender.is_closed() {
+            return false;
+        }
+
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                sender.send_lossy((peer, value)).await;
+                sender.send_lossy((peer, value)).await
             }
             Err(err) => {
                 crate::block!(blocker, peer, ?err, "received invalid message");
+                true
             }
         }
     }
@@ -269,9 +290,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
+    use commonware_runtime::{Clock, deterministic, IoBuf, Metrics, Quota, Runner};
     use std::{io, num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
@@ -651,6 +672,34 @@ mod tests {
             values.sort_unstable();
 
             assert_eq!(values, (0..count).collect::<Vec<u32>>());
+        });
+    }
+
+    #[test_traced]
+    fn test_stops_when_consumer_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (tx, receiver) = mpsc::unbounded_channel();
+            let (bg, rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+                context.with_label("bg"),
+                MockReceiver { receiver },
+                (),
+                NoopBlocker,
+                16,
+                &Sequential,
+            );
+            let handle = bg.start();
+
+            // Keep upstream open to ensure shutdown is driven by consumer closure only.
+            let _tx_guard = tx;
+            drop(rx);
+
+            select! {
+                _ = handle => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("background receiver did not stop after consumer drop");
+                },
+            }
         });
     }
 }
