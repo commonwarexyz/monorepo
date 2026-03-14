@@ -214,7 +214,10 @@ mod tests {
 
     #[test]
     fn test_range_invalid() {
-        let range: Range<u32> = 20..10;
+        let range = Range {
+            start: 20u32,
+            end: 10u32,
+        };
         let encoded = range.encode();
         assert!(matches!(
             Range::<u32>::decode(encoded),
@@ -224,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_range_inclusive_invalid() {
-        let range: RangeInclusive<u32> = 20..=10;
+        let range = RangeInclusive::new(20u32, 10u32);
         let encoded = range.encode();
         assert!(matches!(
             RangeInclusive::<u32>::decode(encoded),
