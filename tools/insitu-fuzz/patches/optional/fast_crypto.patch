@@ -1,0 +1,273 @@
+# Fast Crypto Bypass Patch
+#
+# This patch bypasses cryptographic signing, verification, and threshold
+# signature recovery when FAST_TEST_MODE=1 environment variable is set.
+#
+# Purpose: Speed up test execution by skipping expensive crypto operations
+# while preserving test logic and message flow.
+#
+# Speedup: ~3-5x on consensus tests
+#   - simplex::test_all_online: 55s -> 16s (3.4x)
+#   - aggregation::test_all_online: 4.7s -> 1.0s (4.7x)
+#   - ordered_broadcast::test_all_online: 27s -> 8.7s (3.1x)
+#
+# Usage:
+#   git apply patches/fast_crypto.patch
+#   FAST_TEST_MODE=1 cargo test ...
+#
+# Summary of all bypasses:
+#
+#   BLS12-381 (ops.rs, variant.rs):
+#   +---------------------------------+----------------------------------+
+#   | Function                        | Bypass                           |
+#   +---------------------------------+----------------------------------+
+#   | sign()                          | Returns V::Signature::one()      |
+#   | verify()                        | Returns Ok(())                   |
+#   | MinPk::verify()                 | Returns Ok(())                   |
+#   | MinSig::verify()                | Returns Ok(())                   |
+#   | MinPk::batch_verify()           | Returns Ok(())                   |
+#   | MinSig::batch_verify()          | Returns Ok(())                   |
+#   | partial_verify_*()              | Returns Ok(())                   |
+#   | threshold_signature_recover()   | Returns Ok(V::Signature::one())  |
+#   | threshold_signature_recover_*() | Returns Ok(V::Signature::one())  |
+#   | aggregate_verify_*()            | Returns Ok(())                   |
+#   +---------------------------------+----------------------------------+
+#
+#   Ed25519 (scheme.rs):
+#   +---------------------------------+----------------------------------+
+#   | Function                        | Bypass                           |
+#   +---------------------------------+----------------------------------+
+#   | PrivateKey::sign()              | Returns fixed 64-byte signature  |
+#   | PublicKey::verify()             | Returns true                     |
+#   | Batch::verify()                 | Returns true                     |
+#   +---------------------------------+----------------------------------+
+#
+#   Call chain coverage:
+#   - partial_sign_message() -> sign_message() -> sign() [BYPASSED]
+#   - partial_sign_proof_of_possession() -> sign() [BYPASSED]
+#
+# Note: Signatures become dummy values (generator point for BLS, fixed bytes
+# for Ed25519). This is safe because verification is also bypassed.
+
+diff --git a/cryptography/src/bls12381/primitives/ops.rs b/cryptography/src/bls12381/primitives/ops.rs
+index c39e5c1c0..8f3618c6a 100644
+--- a/cryptography/src/bls12381/primitives/ops.rs
++++ b/cryptography/src/bls12381/primitives/ops.rs
+@@ -7,6 +7,14 @@
+ //! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
+ //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
+ 
++use std::sync::OnceLock;
++
++static FAST_MODE: OnceLock<bool> = OnceLock::new();
++
++fn is_fast_mode() -> bool {
++    *FAST_MODE.get_or_init(|| std::env::var("FAST_TEST_MODE").is_ok())
++}
++
+ use super::{
+     group::{self, Element, Point, Scalar, Share, DST},
+     poly::{self, Eval, PartialSignature, Weight},
+@@ -60,6 +68,9 @@ pub fn hash_message_namespace<V: Variant>(
+ 
+ /// Signs the provided message with the private key.
+ pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
++    // [PATCH] Skip signing in fast mode - return generator point
++    if is_fast_mode() { return V::Signature::one(); }
++
+     let mut hm = hash_message::<V>(dst, message);
+     hm.mul(private);
+     hm
+@@ -81,6 +92,9 @@ pub fn verify<V: Variant>(
+     message: &[u8],
+     signature: &V::Signature,
+ ) -> Result<(), Error> {
++    // [PATCH] Skip hash_message when bypassing crypto
++    if is_fast_mode() { return Ok(()); }
++
+     // Create hashed message `hm`
+     let hm = hash_message::<V>(dst, message);
+ 
+@@ -243,6 +257,9 @@ where
+     J: IntoIterator<Item = &'a PartialSignature<V>>,
+     V::Signature: 'a,
+ {
++    // [PATCH] Skip all computation when bypassing crypto
++    if is_fast_mode() { return Ok(()); }
++
+     // Aggregate the partial signatures
+     let (parsed_index, signature) =
+         partial_aggregate_signatures::<V, _>(signatures).ok_or(Error::InvalidSignature)?;
+@@ -331,6 +348,9 @@ where
+     V: Variant,
+     I: IntoIterator<Item = &'a PartialSignature<V>>,
+ {
++    // [PATCH] Skip all verification when bypassing crypto
++    if is_fast_mode() { return Ok(()); }
++
+     // Ensure all partial signatures are associated with a signer
+     let partials = partials.into_iter();
+     let mut pending = Vec::with_capacity(partials.size_hint().0);
+@@ -362,6 +382,9 @@ where
+     V: Variant,
+     I: IntoIterator<Item = &'a PartialSignature<V>>,
+ {
++    // [PATCH] Skip all verification when bypassing crypto
++    if is_fast_mode() { return Ok(()); }
++
+     // Evaluate public polynomial to compute signer public keys
+     let pending = partials
+         .into_iter()
+@@ -421,6 +444,9 @@ where
+     I: IntoIterator<Item = &'a PartialSignature<V>>,
+     V::Signature: 'a,
+ {
++    // [PATCH] Skip MSM interpolation in fast mode
++    if is_fast_mode() { return Ok(V::Signature::one()); }
++
+     msm_interpolate(weights, partials)
+ }
+ 
+@@ -443,6 +469,9 @@ where
+     I: IntoIterator<Item = &'a PartialSignature<V>>,
+     V::Signature: 'a,
+ {
++    // [PATCH] Skip Lagrange interpolation in fast mode - return generator point
++    if is_fast_mode() { return Ok(V::Signature::one()); }
++
+     // Prepare evaluations
+     let evals = prepare_evaluations(threshold, partials)?;
+ 
+@@ -479,6 +508,11 @@ where
+     I: IntoIterator<Item = &'a PartialSignature<V>>,
+     V::Signature: 'a,
+ {
++    // [PATCH] Skip Lagrange interpolation in fast mode - return generator points
++    if is_fast_mode() {
++        return Ok(vec![V::Signature::one(); many_evals.len()]);
++    }
++
+     // Process first set of evaluations
+     let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
+     let evals = prepare_evaluations(threshold, evals)?;
+@@ -659,6 +693,9 @@ where
+     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+     I::IntoIter: Send + Sync,
+ {
++    // [PATCH] Skip all hash-to-curve and verification when bypassing crypto
++    if is_fast_mode() { return Ok(()); }
++
+     #[cfg(not(feature = "std"))]
+     let hm_sum = compute_hm_sum::<V, I>(messages);
+ 
+diff --git a/cryptography/src/bls12381/primitives/variant.rs b/cryptography/src/bls12381/primitives/variant.rs
+index 72fb75832..142683342 100644
+--- a/cryptography/src/bls12381/primitives/variant.rs
++++ b/cryptography/src/bls12381/primitives/variant.rs
+@@ -1,5 +1,13 @@
+ //! Different variants of the BLS signature scheme.
+ 
++use std::sync::OnceLock;
++
++static FAST_MODE: OnceLock<bool> = OnceLock::new();
++
++fn is_fast_mode() -> bool {
++    *FAST_MODE.get_or_init(|| std::env::var("FAST_TEST_MODE").is_ok())
++}
++
+ use super::{
+     group::{
+         Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
+@@ -72,6 +80,9 @@ impl Variant for MinPk {
+         hm: &Self::Signature,
+         signature: &Self::Signature,
+     ) -> Result<(), Error> {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return Ok(()); }
++
+         // Create a pairing context
+         //
+         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+@@ -133,6 +144,9 @@ impl Variant for MinPk {
+         hms: &[Self::Signature],
+         signatures: &[Self::Signature],
+     ) -> Result<(), Error> {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return Ok(()); }
++
+         // Ensure there is an equal number of public keys, messages, and signatures.
+         assert_eq!(publics.len(), hms.len());
+         assert_eq!(publics.len(), signatures.len());
+@@ -218,6 +232,9 @@ impl Variant for MinSig {
+         hm: &Self::Signature,
+         signature: &Self::Signature,
+     ) -> Result<(), Error> {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return Ok(()); }
++
+         // Create a pairing context
+         //
+         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+@@ -279,6 +296,9 @@ impl Variant for MinSig {
+         hms: &[Self::Signature],
+         signatures: &[Self::Signature],
+     ) -> Result<(), Error> {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return Ok(()); }
++
+         // Ensure there is an equal number of public keys, messages, and signatures.
+         assert_eq!(publics.len(), hms.len());
+         assert_eq!(publics.len(), signatures.len());
+diff --git a/cryptography/src/ed25519/scheme.rs b/cryptography/src/ed25519/scheme.rs
+index e00072854..154bbe148 100644
+--- a/cryptography/src/ed25519/scheme.rs
++++ b/cryptography/src/ed25519/scheme.rs
+@@ -7,6 +7,14 @@ cfg_if::cfg_if! {
+         use alloc::borrow::{Cow, ToOwned};
+     }
+ }
++
++use std::sync::OnceLock;
++
++static FAST_MODE: OnceLock<bool> = OnceLock::new();
++
++fn is_fast_mode() -> bool {
++    *FAST_MODE.get_or_init(|| std::env::var("FAST_TEST_MODE").is_ok())
++}
+ use bytes::{Buf, BufMut};
+ use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+ use commonware_utils::{hex, union_unique, Span};
+@@ -53,6 +61,13 @@ impl crate::Signer for PrivateKey {
+ impl PrivateKey {
+     #[inline(always)]
+     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
++        // [PATCH] Skip signing in fast mode - return dummy signature
++        if is_fast_mode() {
++            let raw = [1u8; SIGNATURE_LENGTH];
++            let signature = ed25519_consensus::Signature::from(raw);
++            return Signature { raw, signature };
++        }
++
+         let payload = namespace
+             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+             .unwrap_or_else(|| Cow::Borrowed(msg));
+@@ -191,6 +206,9 @@ impl crate::Verifier for PublicKey {
+ impl PublicKey {
+     #[inline(always)]
+     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return true; }
++
+         let payload = namespace
+             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+             .unwrap_or_else(|| Cow::Borrowed(msg));
+@@ -401,6 +419,9 @@ impl BatchVerifier<PublicKey> for Batch {
+     }
+
+     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
++        // [PATCH] Bypass crypto for fast testing
++        if is_fast_mode() { return true; }
++
+         self.verifier.verify(rng).is_ok()
+     }
+ }

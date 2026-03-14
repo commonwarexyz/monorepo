@@ -1,0 +1,136 @@
+# Patched by insitu-fuzz: workspace deps replaced with explicit path/version refs
+[package]
+name = "commonware-consensus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4.1", features = ["derive"] }
+commonware-codec = { path = "../../codec" }
+commonware-consensus = { path = "../../consensus", features = ["mocks", "arbitrary"] }
+commonware-cryptography = { path = "../../cryptography" }
+commonware-macros = { path = "../../macros" }
+commonware-math = { path = "../../math" }
+commonware-p2p = { path = "../../p2p" }
+commonware-parallel = { path = "../../parallel" }
+commonware-runtime = { path = "../../runtime" }
+commonware-utils = { path = "../../utils", features = ["arbitrary"] }
+futures = "0.3.31"
+libfuzzer-sys = "0.4.9"
+rand = { version = "0.8.5", default-features = false }
+rand_core = "0.6.4"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+
+[dev-dependencies]
+proptest = "1.8.0"
+rand_core = "0.6.4"
+
+[[bin]]
+name = "simplex_elector"
+path = "fuzz_targets/simplex_elector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_messages"
+path = "fuzz_targets/simplex_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attributable_map"
+path = "fuzz_targets/attributable_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519"
+path = "fuzz_targets/simplex_ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_twin"
+path = "fuzz_targets/simplex_ed25519_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig_twin"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_twin"
+path = "fuzz_targets/simplex_secp256r1_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1"
+path = "fuzz_targets/simplex_secp256r1.rs"
+test = false
+doc = false
+bench = false
