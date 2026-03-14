@@ -33,7 +33,7 @@ use crate::merkle::{
         mem::find_merge_pair,
         proof, Error, Family, Location, Position,
     },
-    proof::Proof,
+    Proof, Readable,
 };
 use alloc::vec::Vec;
 use commonware_cryptography::Digest;
@@ -41,64 +41,6 @@ use core::ops::Range;
 
 /// MMB-specific type alias for `merkle::proof::Proof`.
 pub type MmbProof<D> = Proof<Family, D>;
-
-/// Read-only interface for a merkleized MMB.
-pub trait Readable: Send + Sync {
-    /// The digest type used by this MMB.
-    type Digest: Digest;
-
-    /// Total number of nodes (retained + pruned).
-    fn size(&self) -> Position;
-
-    /// Digest of the node at `pos`, or `None` if pruned / out of bounds.
-    fn get_node(&self, pos: Position) -> Option<Self::Digest>;
-
-    /// Root digest of the MMB.
-    fn root(&self) -> Self::Digest;
-
-    /// Items before this position have been pruned.
-    fn pruned_to_pos(&self) -> Position;
-
-    /// Total number of leaves.
-    fn leaves(&self) -> Location {
-        Location::try_from(self.size()).expect("invalid mmb size")
-    }
-
-    /// Iterator over (peak_position, height) in newest-to-oldest order.
-    fn peak_iterator(&self) -> PeakIterator {
-        PeakIterator::new(self.size())
-    }
-
-    /// [start, end) range of retained node positions.
-    fn bounds(&self) -> Range<Position> {
-        self.pruned_to_pos()..self.size()
-    }
-
-    /// Inclusion proof for the element at `loc`.
-    fn proof(
-        &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = Self::Digest>,
-        loc: Location,
-    ) -> Result<MmbProof<Self::Digest>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
-            _ => e,
-        })
-    }
-
-    /// Inclusion proof for all elements in `range`.
-    fn range_proof(
-        &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = Self::Digest>,
-        range: Range<Location>,
-    ) -> Result<MmbProof<Self::Digest>, Error> {
-        let leaves = self.leaves();
-        proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
-    }
-}
 
 /// Information needed to flatten a chain of batches into a single [`Changeset`].
 pub trait BatchChainInfo: Send + Sync {
@@ -111,7 +53,12 @@ pub trait BatchChainInfo: Send + Sync {
 }
 
 /// A batch of mutations against a parent MMB.
-pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
+pub struct Batch<
+    'a,
+    D: Digest,
+    P: Readable<Family = Family, Digest = D, Error = Error>,
+    S: State<D> = Dirty,
+> {
     /// The parent MMB.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
@@ -166,7 +113,9 @@ pub struct Changeset<D: Digest> {
     pub(crate) base_size: Position,
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>, S: State<D>>
+    Batch<'a, D, P, S>
+{
     /// The total number of nodes visible through this batch.
     fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -185,7 +134,9 @@ impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    UnmerkleizedBatch<'a, D, P>
+{
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location {
         Location::try_from(self.size()).expect("invalid mmb size")
@@ -261,8 +212,13 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Readable
+    for MerkleizedBatch<'a, D, P>
+{
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -279,10 +235,39 @@ impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D,
     fn pruned_to_pos(&self) -> Position {
         self.parent.pruned_to_pos()
     }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<MmbProof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: Range<Location>,
+    ) -> Result<MmbProof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
+    }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchChainInfo
-    for MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
+    > BatchChainInfo for MerkleizedBatch<'a, D, P>
 {
     type Digest = D;
 
@@ -291,7 +276,9 @@ impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchC
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    MerkleizedBatch<'a, D, P>
+{
     /// Create a child batch on top of this merkleized batch.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, D, Self> {
         UnmerkleizedBatch::new(self)
@@ -307,8 +294,11 @@ impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
-    MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
+    > MerkleizedBatch<'a, D, P>
 {
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMB.

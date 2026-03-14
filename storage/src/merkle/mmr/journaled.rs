@@ -18,6 +18,7 @@ use crate::{
         batch::{self, UnmerkleizedBatch},
         iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
+        proof,
         read::{BatchChainInfo, Readable},
         storage::Storage,
         verification, Error, Family, Location, Position, Proof,
@@ -888,7 +889,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 /// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
 /// leaves that have been synced out of memory with [`Error::ElementPruned`].
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -904,6 +908,37 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
 
     fn pruned_to_pos(&self) -> Position {
         self.inner.read().mem_mmr.pruned_to_pos()
+    }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        proof::build_range_proof(hasher, self.leaves(), loc..loc + 1, |pos| {
+            <Self as Readable>::get_node(self, pos)
+        })
+        .map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| {
+            <Self as Readable>::get_node(self, pos)
+        })
     }
 }
 

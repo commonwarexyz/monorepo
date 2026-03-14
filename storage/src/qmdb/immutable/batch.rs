@@ -4,6 +4,7 @@ use super::Immutable;
 use crate::{
     journal::authenticated::{self, BatchChain},
     mmr::{
+        self,
         read::{BatchChainInfo, Readable},
         Location,
     },
@@ -37,7 +38,7 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
@@ -73,7 +74,7 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
@@ -118,7 +119,7 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
@@ -198,7 +199,7 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + BatchChainInfo<Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {

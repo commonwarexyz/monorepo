@@ -11,18 +11,22 @@ pub mod mmb;
 pub mod mmr;
 mod position;
 mod proof;
+mod read;
 
 use alloc::vec::Vec;
+use core::fmt::Debug;
 use location::Location;
 pub use location::LocationRangeExt;
 use position::Position;
+pub use proof::Proof;
+pub use read::Readable;
 use thiserror::Error;
 
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures).
-pub trait Family: Copy + Clone + Send + Sync + 'static {
+pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Maximum valid `Position` value (the largest valid node count / size).
     const MAX_POSITION: Position<Self>;
 

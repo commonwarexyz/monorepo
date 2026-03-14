@@ -3,7 +3,7 @@
 use crate::merkle::{
     hasher::Hasher,
     mmr::{
-        iterator::{nodes_to_pin, PeakIterator},
+        iterator::PeakIterator,
         proof,
         read::{BatchChainInfo, Readable},
         Error, Family, Location, Position, Proof,
@@ -154,20 +154,16 @@ impl<D: Digest> Mmr<D> {
         }
 
         // Validate and populate pinned nodes
-        let mut pinned_nodes = BTreeMap::new();
-        let mut expected_pinned_nodes = 0;
-        for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
-            expected_pinned_nodes += 1;
-            if i >= config.pinned_nodes.len() {
-                return Err(Error::InvalidPinnedNodes);
-            }
-            pinned_nodes.insert(pos, config.pinned_nodes[i]);
-        }
-
-        // Check for too many pinned nodes
-        if config.pinned_nodes.len() != expected_pinned_nodes {
+        let expected_pinned_positions =
+            <Family as crate::merkle::Family>::nodes_to_pin(size, pruned_to_pos);
+        if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
+
+        let pinned_nodes = expected_pinned_positions
+            .into_iter()
+            .zip(config.pinned_nodes)
+            .collect();
 
         let nodes = VecDeque::from(config.nodes);
         let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
@@ -191,25 +187,16 @@ impl<D: Digest> Mmr<D> {
         hasher: &mut impl Hasher<Family = Family, Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location,
-        pinned_nodes_vec: Vec<D>,
+        pinned_nodes: Vec<D>,
     ) -> Result<Self, Error> {
-        let pruned_to_pos = Position::try_from(pruned_to)?;
-        let expected_count = nodes_to_pin(pruned_to_pos).count();
-        if pinned_nodes_vec.len() != expected_count {
-            return Err(Error::InvalidPinnedNodes);
-        }
-        let pinned_nodes: BTreeMap<Position, D> = nodes_to_pin(pruned_to_pos)
-            .enumerate()
-            .map(|(i, pos)| (pos, pinned_nodes_vec[i]))
-            .collect();
-        let nodes = VecDeque::from(nodes);
-        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
-        Ok(Self {
-            nodes,
-            pruned_to_pos,
-            pinned_nodes,
-            root,
-        })
+        Self::init(
+            Config {
+                nodes,
+                pruned_to,
+                pinned_nodes,
+            },
+            hasher,
+        )
     }
 
     /// Compute the root digest from the current peaks.
@@ -320,7 +307,8 @@ impl<D: Digest> Mmr<D> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
-        nodes_to_pin(prune_pos)
+        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), prune_pos)
+            .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -428,7 +416,8 @@ impl<D: Digest> Mmr<D> {
     /// this MMR when pruned to position `prune_pos`.
     #[cfg(test)]
     pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
-        nodes_to_pin(start_pos)
+        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), start_pos)
+            .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }
@@ -477,7 +466,10 @@ impl<D: Digest> Mmr<D> {
 }
 
 impl<D: Digest> Readable for Mmr<D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -493,6 +485,26 @@ impl<D: Digest> Readable for Mmr<D> {
 
     fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
+    }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        self.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        self.range_proof(hasher, range)
     }
 }
 
