@@ -22,6 +22,14 @@ hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"
 n_cases = 65536
 hash = "b1c8eabae0c05f93904545dc12b0bf3619997048bf4cb66801c63f884f372229"
 
+["commonware_utils::range::tests::conformance::CodecConformance<NonEmptyRange<u32>>"]
+n_cases = 65536
+hash = "8774a58c91305fc9bf1a9780d269f3f880185f7407aa8c732f7369e35af75c02"
+
+["commonware_utils::range::tests::conformance::CodecConformance<NonEmptyRange<u64>>"]
+n_cases = 65536
+hash = "325e95b11c01813a05e248096ac421c3224dd0ca5b9af362291bd568b473a4fc"
+
 ["commonware_utils::rng::tests::conformance::FuzzRngConformance"]
 n_cases = 1024
 hash = "d0183ff92294532c435ef0bdb5735f25d16ec633adc7324f885d8b8117389134"
