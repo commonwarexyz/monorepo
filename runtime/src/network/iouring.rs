@@ -25,6 +25,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
+    network::proxy::ProxyConfig,
     Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
@@ -67,6 +68,11 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     pub read_buffer_size: usize,
+    /// Optional [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) configuration.
+    ///
+    /// When set, connections from trusted proxy IPs will have PROXY headers
+    /// parsed to obtain the real client address.
+    pub proxy: Option<ProxyConfig>,
 }
 
 impl Default for Config {
@@ -76,6 +82,7 @@ impl Default for Config {
             so_linger: None,
             iouring_config: iouring::Config::default(),
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            proxy: None,
         }
     }
 }
@@ -94,6 +101,8 @@ pub struct Network {
     recv_submitter: iouring::Submitter,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    proxy: Option<ProxyConfig>,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -136,6 +145,7 @@ impl Network {
             send_submitter,
             recv_submitter,
             read_buffer_size: cfg.read_buffer_size,
+            proxy: cfg.proxy,
             pool,
         })
     }
@@ -155,6 +165,7 @@ impl crate::Network for Network {
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
             read_buffer_size: self.read_buffer_size,
+            proxy: self.proxy.clone(),
             pool: self.pool.clone(),
         })
     }
@@ -216,6 +227,8 @@ pub struct Listener {
     recv_submitter: iouring::Submitter,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    proxy: Option<ProxyConfig>,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -225,7 +238,7 @@ impl crate::Listener for Listener {
     type Sink = Sink;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (stream, remote_addr) = self
+        let (stream, tcp_addr) = self
             .inner
             .accept()
             .await
@@ -254,16 +267,28 @@ impl crate::Listener for Listener {
             .map_err(|_| Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
+        let mut io_stream = Stream::new(
+            fd.clone(),
+            self.recv_submitter.clone(),
+            self.read_buffer_size,
+            self.pool.clone(),
+        );
+
+        // Parse PROXY header if configured and connection is from trusted proxy
+        let client_addr = if let Some(ref proxy_cfg) = self.proxy {
+            if proxy_cfg.is_trusted(tcp_addr.ip()) {
+                io_stream.parse_proxy_header().await?
+            } else {
+                tcp_addr
+            }
+        } else {
+            tcp_addr
+        };
 
         Ok((
-            remote_addr,
-            Sink::new(fd.clone(), self.send_submitter.clone()),
-            Stream::new(
-                fd,
-                self.recv_submitter.clone(),
-                self.read_buffer_size,
-                self.pool.clone(),
-            ),
+            client_addr,
+            Sink::new(fd, self.send_submitter.clone()),
+            io_stream,
         ))
     }
 
@@ -553,6 +578,31 @@ impl Stream {
         unsafe { self.buffer.set_len(self.buffer_len) };
         Ok(self.buffer_len)
     }
+
+    /// Replace the internal buffer with already-received payload bytes.
+    fn restore_prefetched(&mut self, bytes: &[u8]) {
+        if bytes.len() > self.buffer.capacity() {
+            self.buffer = self.pool.alloc(bytes.len());
+        }
+        // SAFETY: We ensure `bytes.len() <= self.buffer.capacity()` above.
+        unsafe { self.buffer.set_len(bytes.len()) };
+        self.buffer.as_mut()[..bytes.len()].copy_from_slice(bytes);
+        self.buffer_pos = 0;
+        self.buffer_len = bytes.len();
+    }
+
+    /// Parse a PROXY header from this stream and preserve bytes after the header.
+    async fn parse_proxy_header(&mut self) -> Result<SocketAddr, Error> {
+        let mut parser = crate::network::proxy::IncrementalParser::new();
+        loop {
+            self.fill_buffer().await?;
+            let mut remaining = &self.buffer.as_ref()[..self.buffer_len];
+            if let Some(addr) = parser.push_buf(&mut remaining)? {
+                self.restore_prefetched(remaining);
+                return Ok(addr);
+            }
+        }
+    }
 }
 
 impl crate::Stream for Stream {
@@ -606,6 +656,7 @@ mod tests {
         iouring,
         network::{
             iouring::{Config, Network},
+            proxy::ProxyConfig,
             tests,
         },
         BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _, Stream as _,
@@ -868,5 +919,62 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_trusted_source_parses_header() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = Network::start(
+            Config {
+                proxy: Some(proxy_config),
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Use a channel to coordinate send/recv ordering
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the proxied address, not 127.0.0.1
+            assert_eq!(client_addr.ip().to_string(), "192.168.1.100");
+            assert_eq!(client_addr.port(), 56789);
+
+            // Read first message
+            let data1 = stream.recv(5).await.unwrap();
+            assert_eq!(data1.coalesce(), b"hello");
+
+            // Signal that first read is done, second send can proceed
+            tx.send(()).unwrap();
+
+            // Read second message (sent after first read completed)
+            let data2 = stream.recv(5).await.unwrap();
+            assert_eq!(data2.coalesce(), b"world");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+
+        // Send PROXY header in pieces to test partial read handling
+        sink.send(b"PROXY TCP4 ").await.unwrap();
+        sink.send(b"192.168.1.100 10.0.0.1 ").await.unwrap();
+        sink.send(b"56789 443\r\n").await.unwrap();
+        sink.send(b"hello").await.unwrap();
+
+        // Wait for server to read first message
+        rx.await.unwrap();
+
+        // Send second message
+        sink.send(b"world").await.unwrap();
+
+        server.await.unwrap();
     }
 }

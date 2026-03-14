@@ -141,6 +141,30 @@ fn test_stability_scope_with_cfg() {
     assert_eq!(s.value, 555);
 }
 
+// Test stability_scope! with multi-level fallback arms.
+stability_scope!(ALPHA {
+    const fn multi_level_scope_fn() -> u8 {
+        0
+    }
+} else BETA {
+    const fn multi_level_scope_fn() -> u8 {
+        1
+    }
+} else GAMMA {
+    const fn multi_level_scope_fn() -> u8 {
+        2
+    }
+} else {
+    const fn multi_level_scope_fn() -> u8 {
+        3
+    }
+});
+
+#[test]
+fn test_stability_scope_multi_level_fallback_default_path() {
+    assert_eq!(multi_level_scope_fn(), 0);
+}
+
 // Test stability_scope! with cfg at GAMMA level
 #[stability(BETA)]
 mod stability_scope_with_cfg_level_2_tests {

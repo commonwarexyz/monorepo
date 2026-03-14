@@ -4,6 +4,9 @@ stability_scope!(ALPHA {
     pub(crate) mod audited;
     pub(crate) mod deterministic;
 });
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    pub mod proxy;
+});
 stability_scope!(BETA {
     pub(crate) mod metered;
 });
