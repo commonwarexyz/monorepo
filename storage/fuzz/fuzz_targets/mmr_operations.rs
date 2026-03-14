@@ -25,7 +25,7 @@ struct FuzzInput {
 
 // Simple reference that tracks basic MMR state
 struct ReferenceMmr {
-    leaf_positions: Vec<Position>,
+    leaf_locations: Vec<Location>,
     leaf_data: Vec<Vec<u8>>,
     total_nodes_added: u64,
     pruned_to_pos: Position,
@@ -34,18 +34,18 @@ struct ReferenceMmr {
 impl ReferenceMmr {
     fn new() -> Self {
         Self {
-            leaf_positions: Vec::new(),
+            leaf_locations: Vec::new(),
             leaf_data: Vec::new(),
             total_nodes_added: 0,
             pruned_to_pos: Position::new(0),
         }
     }
 
-    fn add(&mut self, leaf_pos: Position, data: Vec<u8>) {
-        self.leaf_positions.push(leaf_pos);
+    fn add(&mut self, leaf_loc: Location, data: Vec<u8>) {
+        self.leaf_locations.push(leaf_loc);
         self.leaf_data.push(data);
         // Track nodes added (leaf + any parent nodes)
-        let nodes_after = self.calculate_mmr_size(self.leaf_positions.len());
+        let nodes_after = self.calculate_mmr_size(self.leaf_locations.len());
         self.total_nodes_added = nodes_after;
     }
 
@@ -56,7 +56,7 @@ impl ReferenceMmr {
     }
 
     fn leaf_count(&self) -> usize {
-        self.leaf_positions.len()
+        self.leaf_locations.len()
     }
 
     fn expected_size(&self) -> u64 {
@@ -131,13 +131,13 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let (mmr_pos, changeset) = {
+                    let (mmr_loc, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let mmr_pos_inner = batch.add(&mut hasher, limited_data);
-                        (mmr_pos_inner, batch.merkleize(&mut hasher).finalize())
+                        let mmr_loc_inner = batch.add(&mut hasher, limited_data);
+                        (mmr_loc_inner, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
-                    reference.add(mmr_pos, limited_data.to_vec());
+                    reference.add(mmr_loc, limited_data.to_vec());
 
                     // Basic checks
                     assert!(
@@ -146,11 +146,12 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     assert_eq!(
-                        Some(Position::try_from(mmr.leaves() - 1).unwrap()),
-                        Some(mmr_pos),
-                        "Operation {op_idx}: Last leaf position should be the added position"
+                        Some(mmr.leaves() - 1),
+                        Some(mmr_loc),
+                        "Operation {op_idx}: Last leaf position should be the added location"
                     );
 
+                    let mmr_pos = Position::try_from(mmr_loc).unwrap();
                     assert!(
                         mmr.get_node(mmr_pos).is_some(),
                         "Operation {op_idx}: Should be able to get added node"
@@ -158,9 +159,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrOperation::UpdateLeaf { location, new_data } => {
-                    if !reference.leaf_positions.is_empty() {
-                        let location = (*location as usize) % reference.leaf_positions.len();
-                        let pos = reference.leaf_positions[location];
+                    if !reference.leaf_locations.is_empty() {
+                        let location = (*location as usize) % reference.leaf_locations.len();
+                        let leaf_loc = reference.leaf_locations[location];
 
                         let limited_data = if new_data.len() > 16 {
                             &new_data[0..16]
@@ -175,8 +176,6 @@ fn fuzz(input: FuzzInput) {
                         let size_before = mmr.size();
                         let root_before = *mmr.root();
 
-                        let leaf_loc =
-                            Location::try_from(pos).expect("leaf position should map to location");
                         let mut batch = mmr.new_batch();
                         batch.update_leaf(&mut hasher, leaf_loc, limited_data).unwrap();
                         mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
@@ -242,14 +241,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrOperation::Proof { location } => {
-                    if reference.leaf_positions.is_empty() {
+                    if reference.leaf_locations.is_empty() {
                         return;
                     }
-                    let location_idx = (*location as usize) % reference.leaf_positions.len();
-                    let test_element_pos = reference.leaf_positions[location_idx];
-                    let loc = Location::new(location_idx as u64);
+                    let location_idx = (*location as usize) % reference.leaf_locations.len();
+                    let loc = reference.leaf_locations[location_idx];
                     let pruned_to_pos = Position::try_from(mmr.bounds().start).unwrap();
-                    if test_element_pos >= mmr.size() || test_element_pos < pruned_to_pos {
+                    let leaf_pos = Position::try_from(loc).unwrap();
+
+                    if leaf_pos >= mmr.size() || leaf_pos < pruned_to_pos {
                         continue;
                     }
 

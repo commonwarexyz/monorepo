@@ -170,6 +170,10 @@ impl merkle::Family for Family {
         iterator::nodes_to_pin(size, prune_pos)
     }
 
+    fn children(pos: Position, height: u32) -> (Position, Position) {
+        iterator::children(pos, height)
+    }
+
     fn is_valid_size(size: Position) -> bool {
         iterator::leaves_for_size(size).is_some()
     }

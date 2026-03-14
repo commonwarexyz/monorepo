@@ -6,12 +6,8 @@ use crate::{
         authenticated::{self, BatchChain},
         contiguous::{Contiguous, Mutable, Reader},
     },
-    mmr::{
-        self,
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::BatchChainInfo,
+    mmr::{self, journaled::Mmr, Location, Readable},
     qmdb::{
         any::{
             db::Db,
@@ -131,7 +127,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
@@ -175,7 +171,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
@@ -243,7 +239,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     db: &'a Db<E, C, I, H, U>,
@@ -265,7 +261,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Read an operation at a given location from the correct source.
@@ -500,7 +496,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
@@ -546,7 +542,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Read through: mutations -> base diff -> committed DB.
@@ -572,7 +568,7 @@ where
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -694,7 +690,7 @@ where
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -958,7 +954,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Read through: diff -> committed DB.
@@ -979,7 +975,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Return the speculative root.
@@ -1016,7 +1012,7 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
@@ -1184,9 +1180,12 @@ fn extract_update_value<U: update::Update>(op: &Operation<U>) -> U::Value {
 #[cfg(any(test, feature = "test-traits"))]
 mod trait_impls {
     use super::*;
-    use crate::qmdb::any::traits::{
-        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-        UnmerkleizedBatch as UnmerkleizedBatchTrait,
+    use crate::{
+        merkle::batch::BatchChainInfo,
+        qmdb::any::traits::{
+            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+            UnmerkleizedBatch as UnmerkleizedBatchTrait,
+        },
     };
     use std::future::Future;
 
@@ -1201,7 +1200,7 @@ mod trait_impls {
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<Digest = H::Digest>
+            + BatchChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
     {
         type K = K;
@@ -1235,7 +1234,7 @@ mod trait_impls {
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<Digest = H::Digest>
+            + BatchChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
     {
         type K = K;
@@ -1265,7 +1264,7 @@ mod trait_impls {
         H: Hasher,
         Operation<U>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<Digest = H::Digest>
+            + BatchChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<U>>,
     {
         type Digest = H::Digest;

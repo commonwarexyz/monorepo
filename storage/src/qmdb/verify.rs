@@ -143,13 +143,11 @@ mod tests {
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -248,13 +246,11 @@ mod tests {
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3, 4];
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -297,13 +293,11 @@ mod tests {
             // Add some operations to the MMR
             let op_count = 15;
             let operations: Vec<u64> = (0..op_count).collect();
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -346,13 +340,11 @@ mod tests {
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -499,13 +491,11 @@ mod tests {
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..10).collect();
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -592,13 +582,11 @@ mod tests {
 
             // Add operations to the MMR
             let operations = vec![1, 2, 3];
-            let mut positions = Vec::new();
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    let pos = batch.add(&mut hasher, &encoded);
-                    positions.push(pos);
+                    batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }

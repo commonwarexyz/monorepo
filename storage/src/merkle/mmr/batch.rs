@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! A [`Batch`] borrows a parent MMR ([`Readable`]) immutably and records mutations -- append
+//! A batch borrows a parent MMR ([`Readable`]) immutably and records mutations -- append
 //! and leaf updates -- without mutating the parent. Multiple batches can coexist on the same
 //! parent, and batches can be stacked (Base <- A <- B <- ...) to arbitrary depth.
 //!
@@ -51,134 +51,37 @@
 //! mmr.apply(changeset).unwrap();
 //! ```
 
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::pos_to_height;
-use crate::{
-    merkle::hasher::Hasher,
+use crate::merkle::{
+    batch::{self, Clean, Dirty},
+    hasher::Hasher,
     mmr::{
         iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-        mem::{Clean, Dirty, State},
-        proof,
-        read::{BatchChainInfo, Readable},
-        Error, Family, Location, Position, Proof,
+        proof, Error, Family, Location, Position, Proof, Readable,
     },
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::pos_to_height;
+use alloc::vec::Vec;
 use commonware_cryptography::Digest;
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use commonware_parallel::ThreadPool;
-        use rayon::prelude::*;
-    }
-}
-
-/// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<
-    'a,
-    D: Digest,
-    P: Readable<Family = Family, Digest = D, Error = Error>,
-    S: State<D> = Dirty,
-> {
-    /// The parent MMR.
-    parent: &'a P,
-    /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
-    appended: Vec<D>,
-    /// Overwritten nodes at positions < parent.size(). Shadows parent data; later writes win.
-    overwrites: BTreeMap<Position, D>,
-    /// Type-state: Dirty (mutable, no root) or `Clean<D>` (immutable, has root).
-    state: S,
-    /// Thread pool for parallel merkleization.
-    #[cfg(feature = "std")]
-    pool: Option<ThreadPool>,
-}
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
+pub type UnmerkleizedBatch<'a, D, P> = batch::UnmerkleizedBatch<'a, Family, D, P>;
 
 /// A batch whose root digest has been computed.
-pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
+pub type MerkleizedBatch<'a, D, P> = batch::MerkleizedBatch<'a, Family, D, P>;
 
 /// Owned set of changes against a base MMR.
-/// Apply via [`super::mem::Mmr::apply`].
-pub struct Changeset<D: Digest> {
-    /// Nodes appended after the base MMR's existing nodes.
-    pub(crate) appended: Vec<D>,
-    /// Overwritten nodes within the base MMR's range.
-    pub(crate) overwrites: BTreeMap<Position, D>,
-    /// Root digest after applying the changeset.
-    pub(crate) root: D,
-    /// Size of the base MMR when this changeset was created.
-    pub(crate) base_size: Position,
-}
-
-impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>, S: State<D>>
-    Batch<'a, D, P, S>
-{
-    /// The total number of nodes visible through this batch.
-    pub(crate) fn size(&self) -> Position {
-        Position::new(*self.parent.size() + self.appended.len() as u64)
-    }
-
-    /// Resolve a node: overwrites -> appended -> parent.
-    fn get_node(&self, pos: Position) -> Option<D> {
-        if pos >= self.size() {
-            return None;
-        }
-        if let Some(d) = self.overwrites.get(&pos) {
-            return Some(*d);
-        }
-        if pos >= self.parent.size() {
-            let index = (*pos - *self.parent.size()) as usize;
-            return self.appended.get(index).copied();
-        }
-        self.parent.get_node(pos)
-    }
-
-    /// Store a digest to the given storage location.
-    fn store_node(&mut self, pos: Position, digest: D) {
-        if pos >= self.parent.size() {
-            let index = (*pos - *self.parent.size()) as usize;
-            self.appended[index] = digest;
-        } else {
-            self.overwrites.insert(pos, digest);
-        }
-    }
-}
+pub type Changeset<D> = batch::Changeset<Family, D>;
 
 impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     UnmerkleizedBatch<'a, D, P>
 {
-    /// The number of leaves visible through this batch.
-    pub fn leaves(&self) -> Location {
-        Location::try_from(self.size()).expect("invalid mmr size")
-    }
-
-    /// Create a new batch borrowing `parent` immutably.
-    /// O(1) time and space.
-    pub fn new(parent: &'a P) -> Self {
-        Self {
-            parent,
-            appended: Vec::new(),
-            overwrites: BTreeMap::new(),
-            state: Dirty::default(),
-            #[cfg(feature = "std")]
-            pool: None,
-        }
-    }
-
-    /// Set a thread pool for parallel merkleization.
-    #[cfg(feature = "std")]
-    pub fn with_pool(mut self, pool: Option<ThreadPool>) -> Self {
-        self.pool = pool;
-        self
-    }
-
-    /// Add a pre-computed leaf digest. Returns the leaf's position.
-    pub fn add_leaf_digest(&mut self, digest: D) -> Position {
+    /// Add a pre-computed leaf digest. Returns the leaf's location.
+    pub fn add_leaf_digest(&mut self, digest: D) -> Location {
+        let loc = self.leaves();
         let nodes_needing_parents = nodes_needing_parents(PeakIterator::new(self.size()))
             .into_iter()
             .rev();
-        let leaf_pos = self.size();
         self.appended.push(digest);
 
         let mut height = 1;
@@ -189,15 +92,15 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             height += 1;
         }
 
-        leaf_pos
+        loc
     }
 
-    /// Hash `element` and add it as a leaf. Returns the leaf's position.
+    /// Hash `element` and add it as a leaf. Returns the leaf's location.
     pub fn add(
         &mut self,
         hasher: &mut impl Hasher<Family = Family, Digest = D>,
         element: &[u8],
-    ) -> Position {
+    ) -> Location {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -274,24 +177,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         mut self,
         hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) -> MerkleizedBatch<'a, D, P> {
-        let dirty = self.state.take_sorted_by_height();
-
-        #[cfg(feature = "std")]
-        if let Some(pool) = self.pool.take() {
-            use crate::mmr::mem::MIN_TO_PARALLELIZE;
-
-            if dirty.len() >= MIN_TO_PARALLELIZE {
-                self.merkleize_parallel(hasher, &pool, &dirty);
-            } else {
-                self.merkleize_serial(hasher, &dirty);
-            }
-            self.pool = Some(pool);
-        } else {
-            self.merkleize_serial(hasher, &dirty);
-        }
-
-        #[cfg(not(feature = "std"))]
-        self.merkleize_serial(hasher, &dirty);
+        self.merkleize_dirty(hasher);
 
         // Compute root from peaks.
         let leaves = Location::try_from(self.size()).expect("invalid mmr size");
@@ -300,96 +186,13 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        Batch {
+        batch::Batch {
             parent: self.parent,
             appended: self.appended,
             overwrites: self.overwrites,
             state: Clean { root },
             #[cfg(feature = "std")]
             pool: self.pool,
-        }
-    }
-
-    /// Compute digests for dirty internal nodes, bottom-up by height.
-    fn merkleize_serial(
-        &mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
-        dirty: &[(Position, u32)],
-    ) {
-        for &(pos, height) in dirty {
-            let left = pos - (1 << height);
-            let right = pos - 1;
-            let left_d = self.get_node(left).expect("left child missing");
-            let right_d = self.get_node(right).expect("right child missing");
-            let digest = hasher.node_digest(pos, &left_d, &right_d);
-            self.store_node(pos, digest);
-        }
-    }
-
-    /// Process dirty nodes in parallel, grouping by height. Falls back to `merkleize_serial`
-    /// when the remaining count drops below MIN_TO_PARALLELIZE.
-    #[cfg(feature = "std")]
-    fn merkleize_parallel(
-        &mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
-        pool: &ThreadPool,
-        dirty: &[(Position, u32)],
-    ) {
-        use crate::mmr::mem::MIN_TO_PARALLELIZE;
-
-        let mut same_height = Vec::new();
-        let mut current_height = 1;
-        for (i, &(pos, height)) in dirty.iter().enumerate() {
-            if height == current_height {
-                same_height.push(pos);
-                continue;
-            }
-            if same_height.len() < MIN_TO_PARALLELIZE {
-                self.merkleize_serial(hasher, &dirty[i - same_height.len()..]);
-                return;
-            }
-            self.update_node_digests(hasher, pool, &same_height, current_height);
-            same_height.clear();
-            current_height += 1;
-            same_height.push(pos);
-        }
-
-        if same_height.len() < MIN_TO_PARALLELIZE {
-            self.merkleize_serial(hasher, &dirty[dirty.len() - same_height.len()..]);
-            return;
-        }
-
-        self.update_node_digests(hasher, pool, &same_height, current_height);
-    }
-
-    /// Compute digests for nodes at the same height in parallel, then apply sequentially.
-    #[cfg(feature = "std")]
-    fn update_node_digests(
-        &mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
-        pool: &ThreadPool,
-        same_height: &[Position],
-        height: u32,
-    ) {
-        let two_h = 1 << height;
-        let computed: Vec<(Position, D)> = pool.install(|| {
-            same_height
-                .par_iter()
-                .map_init(
-                    || hasher.clone(),
-                    |hasher, &pos| {
-                        let left = pos - two_h;
-                        let right = pos - 1;
-                        let left_d = self.get_node(left).expect("left child missing");
-                        let right_d = self.get_node(right).expect("right child missing");
-                        let digest = hasher.node_digest(pos, &left_d, &right_d);
-                        (pos, digest)
-                    },
-                )
-                .collect()
-        });
-        for (pos, digest) in computed {
-            self.store_node(pos, digest);
         }
     }
 
@@ -469,29 +272,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
     }
 }
 
-impl<
-        'a,
-        D: Digest,
-        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
-    > BatchChainInfo for MerkleizedBatch<'a, D, P>
-{
-    type Digest = D;
-
-    fn base_size(&self) -> Position {
-        self.parent.base_size()
-    }
-
-    fn collect_overwrites(&self, into: &mut BTreeMap<Position, D>) {
-        self.parent.collect_overwrites(into);
-        let base_size = self.parent.base_size();
-        for (&pos, &digest) in &self.overwrites {
-            if pos < base_size {
-                into.insert(pos, digest);
-            }
-        }
-    }
-}
-
 impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     MerkleizedBatch<'a, D, P>
 {
@@ -499,12 +279,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
         self.parent
-    }
-
-    /// Access the thread pool.
-    #[cfg(feature = "std")]
-    pub(crate) fn pool(&self) -> Option<ThreadPool> {
-        self.pool.clone()
     }
 
     /// Create a child batch on top of this merkleized batch.
@@ -517,7 +291,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
 
     /// Convert back to a dirty batch for further mutations.
     pub fn into_dirty(self) -> UnmerkleizedBatch<'a, D, P> {
-        Batch {
+        batch::Batch {
             parent: self.parent,
             appended: self.appended,
             overwrites: self.overwrites,
@@ -528,44 +302,10 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     }
 }
 
-impl<
-        'a,
-        D: Digest,
-        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
-    > MerkleizedBatch<'a, D, P>
-{
-    /// Flatten this batch chain into a single [`Changeset`] relative to the
-    /// ultimate base MMR.
-    pub fn finalize(self) -> Changeset<D> {
-        let base_size = self.parent.base_size();
-        let effective = self.size();
-
-        // Resolve nodes at [base_size, effective).
-        let mut appended = Vec::with_capacity((*effective - *base_size) as usize);
-        for i in *base_size..*effective {
-            appended.push(self.get_node(Position::new(i)).expect("node in range"));
-        }
-
-        // Collect overwrites from entire chain, filtered to positions < base_size.
-        let mut overwrites = BTreeMap::new();
-        self.collect_overwrites(&mut overwrites);
-        overwrites.retain(|&pos, _| pos < base_size);
-
-        Changeset {
-            appended,
-            overwrites,
-            root: self.state.root,
-            base_size,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr, mem::Mmr, read::Readable, StandardHasher as Standard,
-    };
+    use crate::mmr::{conformance::build_test_mmr, mem::Mmr, Readable, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 

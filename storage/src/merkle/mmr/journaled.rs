@@ -12,16 +12,15 @@ use crate::{
         },
         Error as JError,
     },
-    merkle::hasher::Hasher,
+    merkle::{batch::BatchChainInfo, hasher::Hasher},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::{self, UnmerkleizedBatch},
         iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
         proof,
-        read::{BatchChainInfo, Readable},
         storage::Storage,
-        verification, Error, Family, Location, Position, Proof,
+        verification, Error, Family, Location, Position, Proof, Readable,
     },
 };
 use commonware_codec::DecodeExt;
@@ -942,7 +941,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo<Family> for Mmr<E, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {

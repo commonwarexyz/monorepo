@@ -1,6 +1,7 @@
 //! A basic, no_std compatible MMB where all nodes are stored in-memory.
 
 use crate::merkle::{
+    batch::BatchChainInfo,
     hasher::Hasher,
     mmb::{iterator::PeakIterator, proof, Error, Family, Location, Position},
     proof::Proof,
@@ -11,14 +12,6 @@ use alloc::{
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
-
-/// Find the rightmost pair of adjacent same-height peaks. Returns the index of the left element
-/// in the pair, or `None` if no such pair exists.
-pub(super) fn find_merge_pair(peaks: &[(Position, u32)]) -> Option<usize> {
-    (0..peaks.len().saturating_sub(1))
-        .rev()
-        .find(|&i| peaks[i].1 == peaks[i + 1].1)
-}
 
 /// Configuration for initializing an [Mmb].
 pub struct Config<D: Digest> {
@@ -417,7 +410,7 @@ impl<D: Digest> crate::merkle::Readable for Mmb<D> {
     }
 }
 
-impl<D: Digest> super::batch::BatchChainInfo for Mmb<D> {
+impl<D: Digest> BatchChainInfo<Family> for Mmb<D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -1178,5 +1171,51 @@ mod tests {
             Location::new(8),
             mmb.root()
         ));
+    }
+
+    /// Regression: add then update_leaf in the same batch where the updated leaf falls within the
+    /// merge parent's subtree. The add only marks the merge parent dirty (not its descendants), so
+    /// mark_dirty must not early-exit when it encounters that parent while walking toward the leaf.
+    #[test]
+    fn test_update_leaf_under_merge_parent() {
+        // Start with 2 leaves so the next add triggers a merge of the two height-0 peaks.
+        // After adding leaf 2, the merge creates a height-1 parent. Then we update leaf 0,
+        // which is a child of that merge parent.
+        let (mut hasher, mut mmb) = build_mmb(2);
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            batch.add(&mut hasher, &2u64.to_be_bytes());
+            batch
+                .update_leaf(&mut hasher, Location::new(0), b"updated-0")
+                .unwrap();
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
+
+        // Build a reference MMB with the same operations applied separately.
+        let (mut ref_hasher, mut ref_mmb) = build_mmb(2);
+        let cs = {
+            let mut batch = ref_mmb.new_batch();
+            batch.add(&mut ref_hasher, &2u64.to_be_bytes());
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mmb.apply(cs).unwrap();
+        let cs = {
+            let mut batch = ref_mmb.new_batch();
+            batch
+                .update_leaf(&mut ref_hasher, Location::new(0), b"updated-0")
+                .unwrap();
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mmb.apply(cs).unwrap();
+
+        assert_eq!(*mmb.root(), *ref_mmb.root(), "roots must match");
+
+        // Updated leaf should verify.
+        let proof = mmb.proof(&mut hasher, Location::new(0)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(&mut hasher, b"updated-0", Location::new(0), mmb.root()),
+            "updated leaf should verify"
+        );
     }
 }
