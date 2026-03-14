@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
 /// The [`Family`](Self::Family) associated type determines which Merkle family (MMR, MMB, etc.)
-/// this hasher targets, and consequently which [`Position`] and [`Location`] types appear in
+/// this hasher targets, and consequently which `Position` and `Location` types appear in
 /// method signatures. Default implementations are provided for all methods except `hash()`.
 pub trait Hasher: Clone + Send + Sync {
     /// The Merkle family this hasher targets.

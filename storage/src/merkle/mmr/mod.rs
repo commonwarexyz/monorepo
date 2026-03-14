@@ -22,8 +22,8 @@
 //!
 //! The _height_ of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
 //!
-//! The _root digest_ (or just _root_) of an MMR is the result of hashing together the size of the
-//! MMR and the digests of every peak in decreasing order of height.
+//! The _root digest_ (or just _root_) of an MMR is computed as `Hash(leaves || fold(peaks))`,
+//! where `fold` left-folds peak digests in decreasing order of height using `Hash(acc || peak)`.
 //!
 //! # Examples
 //!
@@ -47,24 +47,22 @@
 //! Location 0   1 2   3  4   5  6   7  8   9 10
 //! ```
 //!
-//! The root hash in this example is computed as:
+//! The root hash in this example is computed as `Hash(11 || fold(peak1, peak2, peak3))`:
 //!
 //! ```text
+//! peak1 = Hash(14,                                            // tallest peak
+//!           Hash(6,
+//!             Hash(2, Hash(0, element_0), Hash(1, element_1)),
+//!             Hash(5, Hash(3, element_2), Hash(4, element_3))),
+//!           Hash(13,
+//!             Hash(9, Hash(7, element_4), Hash(8, element_5)),
+//!             Hash(12, Hash(10, element_6), Hash(11, element_7))))
+//! peak2 = Hash(17, Hash(15, element_8), Hash(16, element_9))  // middle peak
+//! peak3 = Hash(18, element_10)                                // shortest peak
 //!
-//! Hash(19,
-//!   Hash(14,                                                  // first peak
-//!     Hash(6,
-//!       Hash(2, Hash(0, element_0), Hash(1, element_1)),
-//!       Hash(5, Hash(3, element_2), Hash(4, element_3))
-//!     )
-//!     Hash(13,
-//!       Hash(9, Hash(7, element_4), Hash(8, element_5)),
-//!       Hash(12, Hash(10, element_6), Hash(11, element_7))
-//!     )
-//!   )
-//!   Hash(17, Hash(15, element_8), Hash(16, element_9))        // second peak
-//!   Hash(18, element_10)                                      // third peak
-//! )
+//! acc   = fold(peak1, peak2, peak3)
+//!       = Hash(Hash(peak1 || peak2) || peak3)
+//! root  = Hash(11 || acc)                                     // 11 = leaf count
 //! ```
 
 pub mod batch;
@@ -80,7 +78,7 @@ pub use proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 pub use read::Readable;
 use thiserror::Error;
 
-/// MMR-specific type alias for [merkle::proof::Proof].
+/// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
 
 #[cfg(test)]

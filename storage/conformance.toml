@@ -74,7 +74,7 @@ hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 n_cases = 200
 hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
 
-["commonware_storage::merkle::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
+["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family, Sha256Digest>>"]
 n_cases = 65536
 hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
 

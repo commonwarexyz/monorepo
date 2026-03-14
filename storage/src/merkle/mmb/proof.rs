@@ -119,11 +119,12 @@ impl<D: Digest> Proof<Family, D> {
         let after_digests = &self.digests[prefix_count..sibling_start];
         let mut sibling_iter = self.digests[sibling_start..].iter();
 
-        // Start fold accumulator.
-        let mut acc = if num_before > 0 {
-            self.digests[0]
+        // Fold all peaks into an accumulator (without the leaf count, which is hashed in at the
+        // end to prevent malleability via the `leaves` field).
+        let mut acc: Option<D> = if num_before > 0 {
+            Some(self.digests[0])
         } else {
-            hasher.digest(&self.leaves.to_be_bytes())
+            None
         };
 
         // Fold range-containing peaks (reconstructed from elements + siblings).
@@ -138,7 +139,7 @@ impl<D: Digest> Proof<Family, D> {
                 &mut elem_iter,
                 &mut sibling_iter,
             )?;
-            acc = hasher.fold(&acc, &peak_d);
+            acc = Some(acc.map_or(peak_d, |a| hasher.fold(&a, &peak_d)));
         }
 
         if elem_iter.next().is_some() {
@@ -150,10 +151,15 @@ impl<D: Digest> Proof<Family, D> {
 
         // Fold after-peak digests in oldest-to-newest order (matching the proof layout).
         for after_d in after_digests.iter() {
-            acc = hasher.fold(&acc, after_d);
+            acc = Some(acc.map_or(*after_d, |a| hasher.fold(&a, after_d)));
         }
 
-        Ok(acc)
+        // Hash the leaf count into the final result.
+        Ok(if let Some(peaks_acc) = acc {
+            hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()])
+        } else {
+            hasher.digest(&self.leaves.to_be_bytes())
+        })
     }
 }
 
@@ -309,10 +315,11 @@ where
     let mut digests =
         Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
 
-    // Fold prefix peaks into a single accumulator.
+    // Fold prefix peaks into a single accumulator (without the leaf count, which is always
+    // hashed into the final root independently).
     if !bp.fold_prefix.is_empty() {
-        let mut acc = hasher.digest(&leaves.to_be_bytes());
-        for &pos in &bp.fold_prefix {
+        let mut acc = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
+        for &pos in &bp.fold_prefix[1..] {
             let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
             acc = hasher.fold(&acc, &d);
         }
@@ -414,9 +421,14 @@ mod tests {
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
         let mut hasher = H::new();
         let mut mmb = Mmb::new(&mut hasher);
-        for i in 0..n {
-            mmb.append(&mut hasher, &i.to_be_bytes());
-        }
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            for i in 0..n {
+                batch.add(&mut hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
         (hasher, mmb)
     }
 

@@ -1,6 +1,6 @@
 //! Shared types for Merkle-family data structures (MMR, MMB).
 //!
-//! This module provides generic [`Position<F>`] and [`Location<F>`] types parameterized by a
+//! This module provides generic `Position<F>` and `Location<F>` types parameterized by a
 //! [`Family`] marker trait. Each Merkle family (e.g. MMR, MMB) implements the trait with
 //! its own constants and conversion formulas, while the shared arithmetic, codec, and comparison
 //! logic lives here.
@@ -23,10 +23,10 @@ use thiserror::Error;
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures).
 pub trait Family: Copy + Clone + Send + Sync + 'static {
-    /// Maximum valid [Position] value (the largest valid node count / size).
+    /// Maximum valid `Position` value (the largest valid node count / size).
     const MAX_POSITION: Position<Self>;
 
-    /// Maximum valid [Location] value (the largest valid leaf count).
+    /// Maximum valid `Location` value (the largest valid leaf count).
     const MAX_LOCATION: Location<Self>;
 
     /// Convert a leaf location (0-based leaf index) to its node position.
@@ -50,7 +50,7 @@ pub trait Family: Copy + Clone + Send + Sync + 'static {
     fn nodes_to_pin(size: Position<Self>, prune_pos: Position<Self>) -> Vec<Position<Self>>;
 }
 
-/// Errors from converting between [Position] and [Location].
+/// Errors from converting between `Position` and `Location`.
 #[derive(Debug, Clone, Copy, Error)]
 pub enum Error<F: Family> {
     /// The position does not correspond to a leaf node.

@@ -2,7 +2,7 @@
 //!
 //! Provides functions for building and verifying inclusion proofs against MMR root digests.
 //! Also provides lower-level functions for building verifiers against new or extended proof types.
-//! These lower-level functions are kept outside of the [Proof] structure and not re-exported by the
+//! These lower-level functions are kept outside of the `Proof` structure and not re-exported by the
 //! parent module.
 
 use crate::merkle::{
@@ -129,9 +129,11 @@ impl<D: Digest> Proof<Family, D> {
                 if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
             );
             if !bp.fold_prefix.is_empty() {
-                // Fold prefix peaks into accumulator
-                let mut acc = hasher.digest(&self.leaves.to_be_bytes());
-                for &pos in &bp.fold_prefix {
+                // Fold prefix peaks into accumulator (without the leaf count).
+                let mut acc = *node_digests
+                    .get(&bp.fold_prefix[0])
+                    .expect("must exist by construction");
+                for &pos in &bp.fold_prefix[1..] {
                     let d = node_digests.get(&pos).expect("must exist by construction");
                     acc = hasher.fold(&acc, d);
                 }
@@ -243,13 +245,17 @@ impl<D: Digest> Proof<Family, D> {
             .zip(pinned_nodes.iter().copied())
             .collect();
 
-        // Verify fold-prefix pinned nodes by recomputing the accumulator.
+        // Verify fold-prefix pinned nodes by recomputing the accumulator (without the leaf
+        // count, which is hashed into the final root independently).
         if !bp.fold_prefix.is_empty() {
             if self.digests.is_empty() {
                 return false;
             }
-            let mut acc = hasher.digest(&self.leaves.to_be_bytes());
-            for pos in &bp.fold_prefix {
+            let Some(first) = pinned_map.remove(&bp.fold_prefix[0]) else {
+                return false;
+            };
+            let mut acc = first;
+            for pos in &bp.fold_prefix[1..] {
                 let Some(digest) = pinned_map.remove(pos) else {
                     return false;
                 };
@@ -355,12 +361,12 @@ impl<D: Digest> Proof<Family, D> {
         let after_end = after_start + after_peaks.len();
         let siblings = &self.digests[after_end..];
 
-        // Start fold accumulator.
-        let mut acc = if has_prefix {
-            // The first digest is the pre-folded prefix accumulator.
-            self.digests[0]
+        // Fold all peaks into an accumulator (without the leaf count, which is hashed in at the
+        // end to prevent malleability via the `leaves` field).
+        let mut acc: Option<D> = if has_prefix {
+            Some(self.digests[0])
         } else {
-            hasher.digest(&self.leaves.to_be_bytes())
+            None
         };
 
         // Reconstruct each range peak and fold into acc.
@@ -383,7 +389,7 @@ impl<D: Digest> Proof<Family, D> {
             if let Some(ref mut cd) = collected_digests {
                 cd.push((peak_pos, peak_digest));
             }
-            acc = hasher.fold(&acc, &peak_digest);
+            acc = Some(acc.map_or(peak_digest, |a| hasher.fold(&a, &peak_digest)));
         }
 
         // Fold after-peak digests.
@@ -392,7 +398,7 @@ impl<D: Digest> Proof<Family, D> {
             if let Some(ref mut cd) = collected_digests {
                 cd.push((after_peak_pos, digest));
             }
-            acc = hasher.fold(&acc, &digest);
+            acc = Some(acc.map_or(digest, |a| hasher.fold(&a, &digest)));
         }
 
         // Verify all elements were consumed.
@@ -405,7 +411,12 @@ impl<D: Digest> Proof<Family, D> {
             return Err(ReconstructionError::ExtraDigests);
         }
 
-        Ok(acc)
+        // Hash the leaf count into the final result.
+        Ok(if let Some(peaks_acc) = acc {
+            hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()])
+        } else {
+            hasher.digest(&self.leaves.to_be_bytes())
+        })
     }
 }
 
@@ -534,10 +545,11 @@ where
     let mut digests =
         Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
 
-    // Fold prefix peaks into a single accumulator.
+    // Fold prefix peaks into a single accumulator (without the leaf count, which is always
+    // hashed into the final root independently).
     if !bp.fold_prefix.is_empty() {
-        let mut acc = hasher.digest(&leaves.to_be_bytes());
-        for &pos in &bp.fold_prefix {
+        let mut acc = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
+        for &pos in &bp.fold_prefix[1..] {
             let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
             acc = hasher.fold(&acc, &d);
         }
@@ -1719,6 +1731,43 @@ mod tests {
                 root,
             ),
             "wrong fold-prefix digest should fail"
+        );
+    }
+
+    /// Regression test: mutating only the `leaves` field in a proof must invalidate it.
+    /// Before the fix, when a fold prefix existed, the leaf count was baked into the
+    /// pre-folded accumulator but not independently checked during verification, so a
+    /// different `leaves` value with a compatible peak structure would still verify.
+    #[test]
+    fn test_proof_leaves_malleability() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&mut hasher);
+
+        // 252 leaves. Leaf 240 sits in a peak preceded by 4 prefix peaks.
+        let elements: Vec<Digest> = (0..252u16)
+            .map(|i| Sha256::hash(&i.to_be_bytes()))
+            .collect();
+        let changeset = {
+            let mut batch = mmr.new_batch();
+            for e in &elements {
+                batch.add(&mut hasher, e);
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmr.apply(changeset).unwrap();
+        let root = mmr.root();
+
+        let loc = Location::new(240);
+        let proof = mmr.proof(&mut hasher, loc).unwrap();
+        assert!(proof.verify_element_inclusion(&mut hasher, &elements[240], loc, root));
+
+        // Tamper with the leaves field (249 has the same peak layout for leaf 240).
+        let mut tampered = proof.clone();
+        tampered.leaves = Location::new(249);
+        assert_ne!(tampered, proof);
+        assert!(
+            !tampered.verify_element_inclusion(&mut hasher, &elements[240], loc, root),
+            "proof with tampered leaves field must not verify"
         );
     }
 

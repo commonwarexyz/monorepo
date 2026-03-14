@@ -35,7 +35,7 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
+//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
 //! [crate::Persistable].
 //!
 //! # Acknowledgments
