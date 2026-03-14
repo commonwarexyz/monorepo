@@ -51,18 +51,16 @@
 //! mmr.apply(changeset).unwrap();
 //! ```
 
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::pos_to_height;
-use crate::{
-    merkle::hasher::Hasher,
+use crate::merkle::{
+    batch::{BatchChainInfo, Clean, Dirty, State},
+    hasher::Hasher,
     mmr::{
         iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-        mem::{Clean, Dirty, State},
-        proof,
-        read::{BatchChainInfo, Readable},
-        Error, Family, Location, Position, Proof,
+        proof, Error, Family, Location, Position, Proof, Readable,
     },
 };
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::pos_to_height;
 use alloc::{collections::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
 cfg_if::cfg_if! {
@@ -77,7 +75,7 @@ pub struct Batch<
     'a,
     D: Digest,
     P: Readable<Family = Family, Digest = D, Error = Error>,
-    S: State<D> = Dirty,
+    S: State<D> = Dirty<Family>,
 > {
     /// The parent MMR.
     parent: &'a P,
@@ -93,23 +91,13 @@ pub struct Batch<
 }
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
+pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty<Family>>;
 
 /// A batch whose root digest has been computed.
 pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 
 /// Owned set of changes against a base MMR.
-/// Apply via [`super::mem::Mmr::apply`].
-pub struct Changeset<D: Digest> {
-    /// Nodes appended after the base MMR's existing nodes.
-    pub(crate) appended: Vec<D>,
-    /// Overwritten nodes within the base MMR's range.
-    pub(crate) overwrites: BTreeMap<Position, D>,
-    /// Root digest after applying the changeset.
-    pub(crate) root: D,
-    /// Size of the base MMR when this changeset was created.
-    pub(crate) base_size: Position,
-}
+pub type Changeset<D> = crate::merkle::batch::Changeset<Family, D>;
 
 impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>, S: State<D>>
     Batch<'a, D, P, S>
@@ -173,12 +161,12 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         self
     }
 
-    /// Add a pre-computed leaf digest. Returns the leaf's position.
-    pub fn add_leaf_digest(&mut self, digest: D) -> Position {
+    /// Add a pre-computed leaf digest. Returns the leaf's location.
+    pub fn add_leaf_digest(&mut self, digest: D) -> Location {
+        let loc = self.leaves();
         let nodes_needing_parents = nodes_needing_parents(PeakIterator::new(self.size()))
             .into_iter()
             .rev();
-        let leaf_pos = self.size();
         self.appended.push(digest);
 
         let mut height = 1;
@@ -189,15 +177,15 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             height += 1;
         }
 
-        leaf_pos
+        loc
     }
 
-    /// Hash `element` and add it as a leaf. Returns the leaf's position.
+    /// Hash `element` and add it as a leaf. Returns the leaf's location.
     pub fn add(
         &mut self,
         hasher: &mut impl Hasher<Family = Family, Digest = D>,
         element: &[u8],
-    ) -> Position {
+    ) -> Location {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -472,8 +460,8 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
 impl<
         'a,
         D: Digest,
-        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
-    > BatchChainInfo for MerkleizedBatch<'a, D, P>
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Family, Digest = D>,
+    > BatchChainInfo<Family> for MerkleizedBatch<'a, D, P>
 {
     type Digest = D;
 
@@ -531,7 +519,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
 impl<
         'a,
         D: Digest,
-        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Family, Digest = D>,
     > MerkleizedBatch<'a, D, P>
 {
     /// Flatten this batch chain into a single [`Changeset`] relative to the
@@ -563,9 +551,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr, mem::Mmr, read::Readable, StandardHasher as Standard,
-    };
+    use crate::mmr::{conformance::build_test_mmr, mem::Mmr, Readable, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 

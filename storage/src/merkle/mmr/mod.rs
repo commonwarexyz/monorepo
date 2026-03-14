@@ -69,13 +69,11 @@ pub mod batch;
 pub mod iterator;
 pub mod mem;
 pub mod proof;
-pub mod read;
 
 use crate::merkle;
-pub use crate::merkle::hasher;
+pub use crate::merkle::{hasher, Readable};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 pub use proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
-pub use read::Readable;
 use thiserror::Error;
 
 /// MMR-specific type alias for `merkle::proof::Proof`.

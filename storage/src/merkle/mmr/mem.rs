@@ -1,16 +1,12 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
 use crate::merkle::{
+    batch::BatchChainInfo,
     hasher::Hasher,
-    mmr::{
-        iterator::PeakIterator,
-        proof,
-        read::{BatchChainInfo, Readable},
-        Error, Family, Location, Position, Proof,
-    },
+    mmr::{iterator::PeakIterator, proof, Error, Family, Location, Position, Proof, Readable},
 };
 use alloc::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
 use commonware_cryptography::Digest;
@@ -19,50 +15,6 @@ use core::ops::Range;
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
-
-/// Sealed trait for MMR state types.
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid batch state types.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
-
-/// Marker type for a batch whose root digest has been computed.
-#[derive(Clone, Copy, Debug)]
-pub struct Clean<D: Digest> {
-    /// The root digest of the MMR after this batch has been applied.
-    pub root: D,
-}
-
-impl<D: Digest> private::Sealed for Clean<D> {}
-impl<D: Digest> State<D> for Clean<D> {}
-
-/// Marker type for an unmerkleized batch (root digest not computed).
-#[derive(Clone, Debug, Default)]
-pub struct Dirty {
-    /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
-    ///
-    /// This is a set of tuples of the form (node_pos, height).
-    dirty_nodes: BTreeSet<(Position, u32)>,
-}
-
-impl private::Sealed for Dirty {}
-impl<D: Digest> State<D> for Dirty {}
-
-impl Dirty {
-    /// Insert a dirty node. Returns true if newly inserted.
-    pub(crate) fn insert(&mut self, pos: Position, height: u32) -> bool {
-        self.dirty_nodes.insert((pos, height))
-    }
-
-    /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
-    pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
-        let mut v: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
-        v.sort_by_key(|a| a.1);
-        v
-    }
-}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -508,7 +460,7 @@ impl<D: Digest> Readable for Mmr<D> {
     }
 }
 
-impl<D: Digest> BatchChainInfo for Mmr<D> {
+impl<D: Digest> BatchChainInfo<Family> for Mmr<D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -568,7 +520,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
-            let mut leaves: Vec<Position> = Vec::new();
+            let mut leaves: Vec<Location> = Vec::new();
             for _ in 0..11 {
                 let changeset = {
                     let mut batch = mmr.new_batch();
@@ -584,11 +536,8 @@ mod tests {
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
-                vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18]
-                    .into_iter()
-                    .map(Position::new)
-                    .collect::<Vec<_>>(),
-                "mmr leaf positions not as expected"
+                (0..11).map(Location::new).collect::<Vec<_>>(),
+                "mmr leaf locations not as expected"
             );
             let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
             assert_eq!(
@@ -612,8 +561,9 @@ mod tests {
 
             // verify leaf digests
             for leaf in leaves.iter().by_ref() {
-                let digest = hasher.leaf_digest(*leaf, &element);
-                assert_eq!(mmr.get_node(*leaf).unwrap(), digest);
+                let pos = Position::try_from(*leaf).unwrap();
+                let digest = hasher.leaf_digest(pos, &element);
+                assert_eq!(mmr.get_node(pos).unwrap(), digest);
             }
 
             // verify height=1 node digests

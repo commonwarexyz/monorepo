@@ -10,11 +10,10 @@ use crate::{
         contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
+    merkle::batch::BatchChainInfo,
     mmr::{
-        batch,
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
+        StandardHasher,
     },
     Persistable,
 };
@@ -165,9 +164,9 @@ impl<
         'a,
         H: Hasher,
         P: Readable<Family = crate::mmr::Family, Digest = H::Digest, Error = crate::mmr::Error>
-            + BatchChainInfo<Digest = H::Digest>,
+            + BatchChainInfo<mmr::Family, Digest = H::Digest>,
         Item: Send + Sync,
-    > BatchChainInfo for MerkleizedBatch<'a, H, P, Item>
+    > BatchChainInfo<mmr::Family> for MerkleizedBatch<'a, H, P, Item>
 {
     type Digest = H::Digest;
     fn base_size(&self) -> Position {
@@ -215,7 +214,7 @@ impl<
 impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
     P: Readable<Family = crate::mmr::Family, Digest = H::Digest, Error = crate::mmr::Error>
-        + BatchChainInfo<Digest = H::Digest>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Item>,
 {
     /// Consume this batch, collecting the changes from its ancestors and itself into a

@@ -246,7 +246,9 @@ mod tests {
         let digest = [1u8; 32];
         let (changeset, loc_to_pos) = {
             let mut batch = mmr.new_batch();
-            let positions: Vec<_> = (0..1000).map(|_| batch.add(&mut hasher, &digest)).collect();
+            let positions: Vec<_> = (0..1000)
+                .map(|_| Position::try_from(batch.add(&mut hasher, &digest)).unwrap())
+                .collect();
             (batch.merkleize(&mut hasher).finalize(), positions)
         };
         mmr.apply(changeset).unwrap();

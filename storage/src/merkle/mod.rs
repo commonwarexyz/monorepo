@@ -5,6 +5,7 @@
 //! its own constants and conversion formulas, while the shared arithmetic, codec, and comparison
 //! logic lives here.
 
+pub mod batch;
 pub mod hasher;
 mod location;
 pub mod mmb;
