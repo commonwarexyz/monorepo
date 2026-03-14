@@ -237,8 +237,14 @@ mod tests {
 
     #[test]
     fn test_conformity() {
-        assert_eq!((0x0102u16..0x0304u16).encode(), &[0x01, 0x02, 0x03, 0x04][..]);
-        assert_eq!((0x0102u16..=0x0304u16).encode(), &[0x01, 0x02, 0x03, 0x04][..]);
+        assert_eq!(
+            (0x0102u16..0x0304u16).encode(),
+            &[0x01, 0x02, 0x03, 0x04][..]
+        );
+        assert_eq!(
+            (0x0102u16..=0x0304u16).encode(),
+            &[0x01, 0x02, 0x03, 0x04][..]
+        );
         assert_eq!((0x0102u16..).encode(), &[0x01, 0x02][..]);
         assert_eq!((..0x0304u16).encode(), &[0x03, 0x04][..]);
         assert_eq!((..=0x0304u16).encode(), &[0x03, 0x04][..]);
