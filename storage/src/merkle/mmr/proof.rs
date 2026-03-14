@@ -278,7 +278,7 @@ impl<D: Digest> Proof<Family, D> {
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
+    /// of elements, or returns a `ReconstructionError` if the input data is invalid.
     pub fn reconstruct_root<H, E>(
         &self,
         hasher: &mut H,

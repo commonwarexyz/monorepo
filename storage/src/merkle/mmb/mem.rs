@@ -366,8 +366,11 @@ impl<D: Digest> Mmb<D> {
     }
 }
 
-impl<D: Digest> super::batch::Readable for Mmb<D> {
+impl<D: Digest> crate::merkle::Readable for Mmb<D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -383,6 +386,26 @@ impl<D: Digest> super::batch::Readable for Mmb<D> {
 
     fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
+    }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<Family, D>, Error> {
+        self.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: Range<Location>,
+    ) -> Result<Proof<Family, D>, Error> {
+        self.range_proof(hasher, range)
     }
 }
 

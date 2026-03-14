@@ -58,8 +58,9 @@ use crate::{
     mmr::{
         iterator::{nodes_needing_parents, PathIterator, PeakIterator},
         mem::{Clean, Dirty, State},
+        proof,
         read::{BatchChainInfo, Readable},
-        Error, Family, Location, Position,
+        Error, Family, Location, Position, Proof,
     },
 };
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -72,7 +73,12 @@ cfg_if::cfg_if! {
 }
 
 /// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
+pub struct Batch<
+    'a,
+    D: Digest,
+    P: Readable<Family = Family, Digest = D, Error = Error>,
+    S: State<D> = Dirty,
+> {
     /// The parent MMR.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
@@ -105,7 +111,9 @@ pub struct Changeset<D: Digest> {
     pub(crate) base_size: Position,
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>, S: State<D>>
+    Batch<'a, D, P, S>
+{
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -137,7 +145,9 @@ impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    UnmerkleizedBatch<'a, D, P>
+{
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location {
         Location::try_from(self.size()).expect("invalid mmr size")
@@ -408,8 +418,13 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Readable
+    for MerkleizedBatch<'a, D, P>
+{
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -426,10 +441,39 @@ impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D,
     fn pruned_to_pos(&self) -> Position {
         self.parent.pruned_to_pos()
     }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
+    }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchChainInfo
-    for MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
+    > BatchChainInfo for MerkleizedBatch<'a, D, P>
 {
     type Digest = D;
 
@@ -448,7 +492,9 @@ impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchC
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    MerkleizedBatch<'a, D, P>
+{
     /// Access the parent MMR.
     #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
@@ -482,8 +528,11 @@ impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
-    MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Digest = D>,
+    > MerkleizedBatch<'a, D, P>
 {
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMR.

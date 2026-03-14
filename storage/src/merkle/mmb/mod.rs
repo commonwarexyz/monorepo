@@ -121,7 +121,8 @@ pub mod mem;
 pub mod proof;
 
 use crate::merkle;
-pub use batch::{Changeset, MerkleizedBatch, Readable, UnmerkleizedBatch};
+pub use crate::merkle::Readable;
+pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
