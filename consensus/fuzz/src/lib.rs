@@ -77,13 +77,6 @@ impl Configuration {
     pub const fn new(n: u32, faults: u32, correct: u32) -> Self {
         Self { n, faults, correct }
     }
-
-    /// Returns true if this configuration is valid:
-    /// number of faulty and correct nodes satisfy the protocol fault tolerance constraints.
-    /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
-    pub fn is_valid(&self) -> bool {
-        self.faults <= bounds::max_faults(self.n)
-    }
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
@@ -407,10 +400,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
-        let config = N4F1C3;
 
         // Spawn Byzantine nodes (Disrupters only)
-        for i in 0..config.faults as usize {
+        for i in 0..N4F1C3.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
@@ -418,7 +410,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Spawn honest validators
-        for i in (config.faults as usize)..(config.n as usize) {
+        for i in (N4F1C3.faults as usize)..(N4F1C3.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
@@ -438,7 +430,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             reporters.push(reporter);
         }
 
-        if input.partition == Partition::Connected && config.is_valid() {
+        if input.partition == Partition::Connected {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -451,8 +443,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             }
             join_all(finalizers).await;
 
-            let states = invariants::extract(reporters, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            let states = invariants::extract(reporters, N4F1C3.n as usize);
+            invariants::check::<P>(N4F1C3.n, states);
         }
     });
 }
@@ -481,10 +473,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
-        let config = N4F1C3;
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
-        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
+        for (idx, validator) in participants.iter().enumerate().take(N4F1C3.faults as usize) {
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
@@ -639,7 +630,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Spawn honest validators
-        for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
+        for (idx, validator) in participants.iter().enumerate().skip(N4F1C3.faults as usize) {
             let ctx = context.with_label(&format!("honest_{idx}"));
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
@@ -661,7 +652,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Wait for finalization or timeout
-        if input.partition == Partition::Connected && config.is_valid() {
+        if input.partition == Partition::Connected {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -674,8 +665,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             }
             join_all(finalizers).await;
 
-            let states = invariants::extract(reporters, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            let states = invariants::extract(reporters, N4F1C3.n as usize);
+            invariants::check::<P>(N4F1C3.n, states);
         }
     });
 }

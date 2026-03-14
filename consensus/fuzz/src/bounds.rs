@@ -122,22 +122,4 @@ mod tests {
         assert_eq!(max_faults(7), 2); // 3f+1 = 7, so f=2
         assert_eq!(max_faults(10), 3); // 3f+1 = 10, so f=3
     }
-
-    #[test]
-    fn test_can_finalize_logic() {
-        use crate::{Configuration, N4F1C3};
-
-        // N4F1C3: 4 nodes, 1 faulty - can finalize (1 <= 1)
-        assert!(N4F1C3.is_valid());
-
-        // Edge cases
-        let zero_faults = Configuration::new(4, 0, 4);
-        assert!(zero_faults.is_valid()); // 0 <= 1
-
-        let exact_max = Configuration::new(4, 1, 3);
-        assert!(exact_max.is_valid()); // 1 <= 1
-
-        let over_max = Configuration::new(4, 2, 2);
-        assert!(!over_max.is_valid()); // 2 > 1
-    }
 }
