@@ -479,7 +479,7 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
+    G: mmr::read::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
     S: mmr::storage::Storage<Digest = H::Digest>,
     const N: usize,
 >(
@@ -506,7 +506,7 @@ pub(super) async fn compute_db_root<
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
 pub(super) async fn compute_grafted_mmr_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
+    G: mmr::read::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
     S: mmr::storage::Storage<Digest = H::Digest>,
 >(
     hasher: &StandardHasher<H>,

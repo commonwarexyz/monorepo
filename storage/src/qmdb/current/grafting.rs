@@ -290,14 +290,25 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
-pub(super) struct Storage<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> {
+pub(super) struct Storage<
+    'a,
+    D: Digest,
+    G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+    S: StorageTrait<Digest = D>,
+> {
     grafted_mmr: &'a G,
     grafting_height: u32,
     ops_mmr: &'a S,
     _digest: PhantomData<D>,
 }
 
-impl<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> Storage<'a, D, G, S> {
+impl<
+        'a,
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<Digest = D>,
+    > Storage<'a, D, G, S>
+{
     /// Creates a new [Storage] instance.
     pub(super) const fn new(grafted_mmr: &'a G, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
@@ -309,8 +320,11 @@ impl<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> Storag
     }
 }
 
-impl<D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> StorageTrait
-    for Storage<'_, D, G, S>
+impl<
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<Digest = D>,
+    > StorageTrait for Storage<'_, D, G, S>
 {
     type Digest = D;
 
